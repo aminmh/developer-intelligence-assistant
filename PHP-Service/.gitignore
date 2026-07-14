@@ -1,0 +1,5 @@
+composer.lock
+/vendor
+/storage/framework
+/bootstrap/cache
+.env
