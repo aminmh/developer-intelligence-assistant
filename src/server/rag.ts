@@ -233,15 +233,101 @@ export function splitTextIntoChunks(text: string, chunkSize: number, chunkOverla
     }
 
     chunks.push(text.substring(startIndex, endIndex).trim());
-    startIndex = endIndex - chunkOverlap;
-    
-    // Hard guard against infinite loops
-    if (startIndex >= endIndex) {
-      startIndex = endIndex + 1;
-    }
+
+    if (endIndex >= text.length) break;
+
+    const nextStartIndex = endIndex - chunkOverlap;
+    // Hard guard against infinite loops: once endIndex is pinned at text.length
+    // on a preceding iteration this wouldn't apply (we already broke above),
+    // but nextStartIndex can still fail to advance past startIndex earlier in
+    // the document if chunkOverlap is large relative to the smart-split
+    // adjustment — fall back to endIndex (no overlap) to guarantee progress.
+    startIndex = nextStartIndex > startIndex ? nextStartIndex : endIndex;
   }
 
   return chunks.filter(c => c.length > 10); // ignore micro chunks
+}
+
+// Number of chunks embedded concurrently per batch (bounds embedding wall-clock
+// for huge documents without depending on an unverified provider batch API).
+const EMBED_BATCH_SIZE = 5;
+
+// Chunk, embed and index already-extracted plain text. Shared by both the
+// inline small-file upload path and the async large-file (TUS) path.
+async function chunkEmbedAndStore(fileId: string, name: string, text: string): Promise<{ chunkCount: number }> {
+  if (!text || text.trim().length === 0) {
+    throw new Error('Extracted file text is empty or invalid.');
+  }
+
+  // Chunk text
+  const chunks = splitTextIntoChunks(text, ragConfig.chunkSize, ragConfig.chunkOverlap);
+  if (chunks.length === 0) {
+    throw new Error('No content chunks could be generated from the file.');
+  }
+
+  const createdChunks: FileChunk[] = chunks.map((chunkText, i) => ({
+    id: `${fileId}_chunk_${i}`,
+    fileId,
+    fileName: name,
+    text: chunkText,
+    index: i,
+  }));
+  const createdVectors: Record<string, number[]> = {};
+
+  // For tracking first vector size (used to size the Qdrant collection)
+  let firstVectorSize = 0;
+
+  // Embed chunks in small concurrent batches instead of one at a time
+  for (let start = 0; start < createdChunks.length; start += EMBED_BATCH_SIZE) {
+    const batch = createdChunks.slice(start, start + EMBED_BATCH_SIZE);
+    const vectors = await Promise.all(batch.map(async (chunk, offset) => {
+      try {
+        return await getEmbedding(chunk.text);
+      } catch (error: any) {
+        throw new Error(`Embedding chunk ${start + offset + 1}/${createdChunks.length} failed: ${error.message}. Please verify your embedding model config or secrets.`);
+      }
+    }));
+
+    batch.forEach((chunk, offset) => {
+      if (start === 0 && offset === 0) firstVectorSize = vectors[offset].length;
+      createdVectors[chunk.id] = vectors[offset];
+    });
+  }
+
+  // If Qdrant is enabled, try uploading to Qdrant
+  const qClient = getQdrantClient();
+  if (qClient && firstVectorSize > 0) {
+    try {
+      await setupQdrantCollection(firstVectorSize);
+
+      // Prepare Qdrant payload
+      const points = createdChunks.map((chunk) => ({
+        id: iToUUID(chunk.id), // UUID format
+        vector: createdVectors[chunk.id],
+        payload: {
+          id: chunk.id,
+          fileId: chunk.fileId,
+          fileName: chunk.fileName,
+          text: chunk.text,
+          index: chunk.index,
+        },
+      }));
+
+      await qClient.upsert(QDRANT_COLLECTION, {
+        wait: true,
+        points,
+      });
+      console.log(`Successfully indexed ${points.length} chunks in Qdrant.`);
+    } catch (error: any) {
+      console.error('Failed to upload vectors to Qdrant, falling back to local memory storage:', error.message);
+    }
+  }
+
+  fileChunks.push(...createdChunks);
+  chunkVectors = { ...chunkVectors, ...createdVectors };
+  saveDatabase();
+
+  return { chunkCount: createdChunks.length };
 }
 
 // Exported controllers and service functions
@@ -263,7 +349,7 @@ export const RAGService = {
     return uploadedFiles;
   },
 
-  // Parse, chunk, embed and index file
+  // Parse, chunk, embed and index file (inline, small-file path)
   async uploadFile(name: string, type: string, size: number, contentBase64OrText: string): Promise<UploadedFile> {
     const fileId = `file_${Date.now()}_${Math.random().toString(36).substring(2, 9)}`;
     let text = '';
@@ -274,100 +360,71 @@ export const RAGService = {
       const parser = new PDFParse({ data: buffer });
       const parsed = await parser.getText();
       text = parsed.text;
+    } else if (type.toLowerCase() === 'zip' || name.toLowerCase().endsWith('.zip')) {
+      // ZIP is accepted but its contents are not extracted/parsed. Index a
+      // placeholder rather than treating the binary archive bytes as text,
+      // which would flood chunking/embedding with meaningless garbage.
+      text = `Uploaded ZIP archive: ${name} (binary content, not text-indexed).`;
     } else {
       // Markdown or standard Text - direct reading
       text = contentBase64OrText;
     }
 
-    if (!text || text.trim().length === 0) {
-      throw new Error('Extracted file text is empty or invalid.');
-    }
+    const { chunkCount } = await chunkEmbedAndStore(fileId, name, text);
 
-    // Chunk text
-    const chunks = splitTextIntoChunks(text, ragConfig.chunkSize, ragConfig.chunkOverlap);
-    if (chunks.length === 0) {
-      throw new Error('No content chunks could be generated from the file.');
-    }
-
-    const createdChunks: FileChunk[] = [];
-    const createdVectors: Record<string, number[]> = {};
-
-    // For tracking first vector size
-    let firstVectorSize = 0;
-
-    // Embed and index chunks
-    for (let i = 0; i < chunks.length; i++) {
-      const chunkText = chunks[i];
-      const chunkId = `${fileId}_chunk_${i}`;
-      
-      // Get embedding
-      let vector: number[];
-      try {
-        vector = await getEmbedding(chunkText);
-      } catch (error: any) {
-        throw new Error(`Embedding chunk ${i + 1}/${chunks.length} failed: ${error.message}. Please verify your embedding model config or secrets.`);
-      }
-
-      if (i === 0) firstVectorSize = vector.length;
-
-      const chunk: FileChunk = {
-        id: chunkId,
-        fileId,
-        fileName: name,
-        text: chunkText,
-        index: i,
-      };
-
-      createdChunks.push(chunk);
-      createdVectors[chunkId] = vector;
-    }
-
-    // If Qdrant is enabled, try uploading to Qdrant
-    const qClient = getQdrantClient();
-    let qdrantIndexed = false;
-    if (qClient && firstVectorSize > 0) {
-      try {
-        await setupQdrantCollection(firstVectorSize);
-        
-        // Prepare Qdrant payload
-        const points = createdChunks.map((chunk) => ({
-          id: iToUUID(chunk.id), // UUID format
-          vector: createdVectors[chunk.id],
-          payload: {
-            id: chunk.id,
-            fileId: chunk.fileId,
-            fileName: chunk.fileName,
-            text: chunk.text,
-            index: chunk.index,
-          },
-        }));
-
-        await qClient.upsert(QDRANT_COLLECTION, {
-          wait: true,
-          points,
-        });
-        qdrantIndexed = true;
-        console.log(`Successfully indexed ${points.length} chunks in Qdrant.`);
-      } catch (error: any) {
-        console.error('Failed to upload vectors to Qdrant, falling back to local memory storage:', error.message);
-      }
-    }
-
-    // Add to standard/backup database
     const uploadedFile: UploadedFile = {
       id: fileId,
       name,
       type,
       size,
-      chunkCount: chunks.length,
+      chunkCount,
       uploadedAt: new Date().toISOString(),
+      status: 'ready',
     };
 
     uploadedFiles.push(uploadedFile);
-    fileChunks.push(...createdChunks);
-    chunkVectors = { ...chunkVectors, ...createdVectors };
-
     saveDatabase();
+
+    return uploadedFile;
+  },
+
+  // Index text already extracted upstream (large-file TUS path). Responds
+  // immediately with a 'processing' record and indexes in the background,
+  // since a huge document's chunk/embed pipeline can take far longer than
+  // the caller (python-api's webhook forward) is willing to hold a connection open.
+  async indexExtractedText(name: string, type: string, size: number, text: string, uploadSessionId: string): Promise<UploadedFile> {
+    const existing = uploadedFiles.find((f) => f.uploadSessionId === uploadSessionId);
+    if (existing) {
+      return existing;
+    }
+
+    const fileId = `file_${Date.now()}_${Math.random().toString(36).substring(2, 9)}`;
+    const uploadedFile: UploadedFile = {
+      id: fileId,
+      name,
+      type,
+      size,
+      chunkCount: 0,
+      uploadedAt: new Date().toISOString(),
+      status: 'processing',
+      uploadSessionId,
+    };
+
+    uploadedFiles.push(uploadedFile);
+    saveDatabase();
+
+    chunkEmbedAndStore(fileId, name, text)
+      .then(({ chunkCount }) => {
+        uploadedFile.chunkCount = chunkCount;
+        uploadedFile.status = 'ready';
+        saveDatabase();
+      })
+      .catch((error: any) => {
+        console.error(`Background indexing failed for ${name}:`, error.message);
+        uploadedFile.status = 'failed';
+        uploadedFile.error = error.message;
+        saveDatabase();
+      });
 
     return uploadedFile;
   },

@@ -12,6 +12,7 @@ import { UploadedFile, SearchMatch } from '../types';
 const props = defineProps<{
   files: UploadedFile[];
   uploading: boolean;
+  uploadProgress: Record<string, number>;
   searchMatches: SearchMatch[];
   searchLoading: boolean;
 }>();
@@ -72,19 +73,19 @@ const onSearch = () => {
             <Upload class="w-4 h-4 text-indigo-400" />
             Upload Source Documents
           </h4>
-          <span class="text-[10px] text-slate-500">Accepted: PDF, MD, TXT, JS, TS, JSON</span>
+          <span class="text-[10px] text-slate-500">Accepted: PDF, ZIP, MD, TXT, JS, TS, JSON</span>
         </div>
 
-        <div 
+        <div
           @click="triggerUpload"
           class="border-2 border-dashed border-slate-800 rounded-xl p-8 text-center cursor-pointer hover:border-indigo-500/50 transition-all"
         >
-          <input 
-            id="file-upload-input" 
-            type="file" 
-            multiple 
-            accept=".pdf,.md,.txt,.js,.ts,.tsx,.json" 
-            class="hidden" 
+          <input
+            id="file-upload-input"
+            type="file"
+            multiple
+            accept=".pdf,.zip,.md,.txt,.js,.ts,.tsx,.json"
+            class="hidden"
             @change="handleFileUpload"
           />
           <FileText class="w-8 h-8 text-slate-600 mx-auto mb-3" />
@@ -95,6 +96,19 @@ const onSearch = () => {
         <div v-if="uploading" class="mt-4 flex items-center gap-3 p-3 bg-emerald-950/10 border border-emerald-500/20 rounded-xl text-xs text-emerald-300">
           <div class="w-4 h-4 border-2 border-emerald-400 border-t-transparent rounded-full animate-spin"></div>
           <p class="text-[10px] text-indigo-400 mt-0.5">We are generating context chunks based on your configured chunk size, computing high-dimensional vectors, and populating your vectorDB.</p>
+        </div>
+
+        <!-- Per-file resumable upload progress (large files, TUS path) -->
+        <div v-if="Object.keys(uploadProgress).length > 0" class="mt-4 space-y-2">
+          <div v-for="(progress, name) in uploadProgress" :key="name" class="p-3 bg-indigo-950/10 border border-indigo-500/20 rounded-xl">
+            <div class="flex items-center justify-between text-[10px] text-indigo-300 mb-1.5">
+              <span class="truncate font-mono">{{ name }}</span>
+              <span class="font-mono">{{ (progress * 100).toFixed(0) }}%</span>
+            </div>
+            <div class="h-1.5 bg-slate-800 rounded-full overflow-hidden">
+              <div class="h-full bg-indigo-500 rounded-full transition-all" :style="{ width: `${progress * 100}%` }"></div>
+            </div>
+          </div>
         </div>
       </div>
 
@@ -121,9 +135,25 @@ const onSearch = () => {
                 <p class="text-[10px] text-slate-500 font-mono">
                   {{ file.chunkCount }} chunk<span v-if="file.chunkCount !== 1">s</span> • {{ file.type.toUpperCase() }} • {{ (file.size / 1024).toFixed(1) }} KB
                 </p>
+                <p v-if="file.status === 'failed'" class="text-[10px] text-red-400 mt-0.5 truncate" :title="file.error">
+                  Failed: {{ file.error || 'Indexing failed.' }}
+                </p>
               </div>
+              <span
+                v-if="file.status === 'processing'"
+                class="shrink-0 text-[10px] font-mono px-2 py-0.5 rounded-full bg-amber-500/10 text-amber-400 border border-amber-500/20 flex items-center gap-1.5"
+              >
+                <span class="w-1.5 h-1.5 rounded-full bg-amber-400 animate-pulse"></span>
+                Processing…
+              </span>
+              <span
+                v-else-if="file.status === 'failed'"
+                class="shrink-0 text-[10px] font-mono px-2 py-0.5 rounded-full bg-red-500/10 text-red-400 border border-red-500/20"
+              >
+                Failed
+              </span>
             </div>
-            <button 
+            <button
               @click="confirmDelete(file)"
               class="p-2 rounded-lg text-slate-500 hover:text-red-400 hover:bg-red-500/10 transition-all shrink-0"
               title="Delete file"

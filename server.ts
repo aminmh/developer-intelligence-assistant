@@ -7,9 +7,10 @@ async function startServer() {
   const app = express();
   const PORT = parseInt(process.env.PORT || '3000', 10);
 
-  // Set large JSON limit for uploading larger documents (including base64 PDF strings)
-  app.use(express.json({ limit: '50mb' }));
-  app.use(express.urlencoded({ limit: '50mb', extended: true }));
+  // Set large JSON limit for uploading larger documents (including base64 PDF strings,
+  // and extracted plain text handed back by python-api's large-file TUS pipeline)
+  app.use(express.json({ limit: '100mb' }));
+  app.use(express.urlencoded({ limit: '100mb', extended: true }));
 
   // CORS - allow cross-origin requests from any frontend origin
   app.use((req, res, next) => {
@@ -66,6 +67,28 @@ async function startServer() {
       res.json({ success: true, file });
     } catch (error: any) {
       console.error('File upload error:', error);
+      res.status(500).json({ success: false, error: error.message });
+    }
+  });
+
+  // Internal callback: index text already extracted upstream (large-file TUS path).
+  // Authenticated via a shared secret, not by CORS/browser origin — this is called
+  // server-to-server by python-api after it downloads and extracts a tusd upload.
+  app.post('/api/internal/rag-index', async (req, res) => {
+    const secret = req.header('X-Internal-Secret');
+    if (!secret || secret !== process.env.RAG_CALLBACK_SECRET) {
+      return res.status(401).json({ success: false, error: 'Unauthorized' });
+    }
+    try {
+      const { name, type, size, text, uploadSessionId } = req.body;
+      if (!name || !type || typeof text !== 'string' || !uploadSessionId) {
+        return res.status(400).json({ success: false, error: 'Missing name, type, text, or uploadSessionId in payload.' });
+      }
+
+      const file = await RAGService.indexExtractedText(name, type, size || 0, text, uploadSessionId);
+      res.status(202).json({ success: true, file });
+    } catch (error: any) {
+      console.error('RAG index callback error:', error);
       res.status(500).json({ success: false, error: error.message });
     }
   });

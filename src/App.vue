@@ -11,10 +11,15 @@ import {
   AlertTriangle
 } from 'lucide-vue-next';
 import { RAGConfig, UploadedFile, SearchMatch } from './types';
+import { uploadViaTus } from './services/tusUpload';
 
 import RAGChat from './components/RAGChat.vue';
 import RAGFiles from './components/RAGFiles.vue';
 import RAGConfigComponent from './components/RAGConfig.vue';
+
+// Files at or above this size use the resumable TUS upload path instead of the
+// inline base64/JSON POST, so a dropped connection doesn't mean starting over.
+const UPLOAD_THRESHOLD_BYTES = Number(import.meta.env.VITE_TUS_THRESHOLD_BYTES ?? 10 * 1024 * 1024);
 
 const activeTab = ref<'chat' | 'files' | 'config'>('chat');
 
@@ -36,6 +41,8 @@ const config = ref<RAGConfig>({
 const files = ref<UploadedFile[]>([]);
 const loading = ref(false);
 const uploading = ref(false);
+// Per-file upload progress (0-1) for files going through the TUS path
+const uploadProgress = ref<Record<string, number>>({});
 const showSuccessToast = ref(false);
 const successMessage = ref('');
 const showErrorToast = ref(false);
@@ -129,6 +136,34 @@ const fetchFiles = async () => {
   }
 };
 
+// Poll the file list while any file is still being indexed in the background
+// (large-file TUS path), so "Processing..." flips to "Ready"/"Failed" without
+// a manual refresh. Bounded so a stuck backend doesn't poll forever.
+const pollWhileProcessing = async () => {
+  for (let attempt = 0; attempt < 60; attempt++) {
+    await new Promise((resolve) => setTimeout(resolve, 3000));
+    await fetchFiles();
+    if (!files.value.some((f) => f.status === 'processing')) return;
+  }
+};
+
+const uploadLargeFile = async (file: File) => {
+  try {
+    await uploadViaTus(file, (progress) => {
+      uploadProgress.value = { ...uploadProgress.value, [file.name]: progress.bytesUploaded / progress.bytesTotal };
+    });
+    triggerToast(`"${file.name}" uploaded — processing in the background.`);
+    await fetchFiles();
+    pollWhileProcessing();
+  } catch (err: any) {
+    console.error('TUS upload failed for:', file.name, err);
+    triggerToast(`Failed to upload ${file.name}: ${err.message}`, false);
+  } finally {
+    const { [file.name]: _removed, ...rest } = uploadProgress.value;
+    uploadProgress.value = rest;
+  }
+};
+
 const processFiles = async (fileList: FileList) => {
   uploading.value = true;
   let successCount = 0;
@@ -137,20 +172,31 @@ const processFiles = async (fileList: FileList) => {
   for (let i = 0; i < fileList.length; i++) {
     const file = fileList[i];
     const extension = file.name.split('.').pop()?.toLowerCase();
-    
-    if (!['pdf', 'md', 'txt', 'js', 'ts', 'tsx', 'json'].includes(extension || '')) {
-      triggerToast(`Unsupported file type: ${file.name}. Please upload PDF, MD, or text files.`, false);
+
+    if (!['pdf', 'md', 'txt', 'js', 'ts', 'tsx', 'json', 'zip'].includes(extension || '')) {
+      triggerToast(`Unsupported file type: ${file.name}. Please upload PDF, ZIP, MD, or text files.`, false);
       failCount++;
+      continue;
+    }
+
+    if (file.size >= UPLOAD_THRESHOLD_BYTES) {
+      // Large files: resumable direct-to-tusd upload, indexed asynchronously.
+      // Don't block the rest of the batch on this one file's upload.
+      uploadLargeFile(file);
       continue;
     }
 
     try {
       const reader = new FileReader();
       const isPdf = extension === 'pdf';
+      const isZip = extension === 'zip';
+      // ZIP is binary, same as PDF — read as base64 rather than text so the
+      // bytes aren't mangled by text-decoding.
+      const isBinary = isPdf || isZip;
 
       const fileContentPromise = new Promise<string>((resolve, reject) => {
         reader.onerror = () => reject(new Error('File reading error.'));
-        if (isPdf) {
+        if (isBinary) {
           reader.readAsDataURL(file);
           reader.onload = () => {
             const result = reader.result as string;
@@ -170,7 +216,7 @@ const processFiles = async (fileList: FileList) => {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           name: file.name,
-          type: isPdf ? 'pdf' : (extension === 'md' ? 'markdown' : 'text'),
+          type: isPdf ? 'pdf' : (isZip ? 'zip' : (extension === 'md' ? 'markdown' : 'text')),
           size: file.size,
           content,
         }),
@@ -310,9 +356,12 @@ const copyToClipboard = (text: string) => {
   triggerToast('Copied content to clipboard!');
 };
 
-onMounted(() => {
+onMounted(async () => {
   fetchConfig();
-  fetchFiles();
+  await fetchFiles();
+  if (files.value.some((f) => f.status === 'processing')) {
+    pollWhileProcessing();
+  }
 });
 </script>
 
@@ -413,6 +462,7 @@ onMounted(() => {
         v-else-if="activeTab === 'files'"
         :files="files"
         :uploading="uploading"
+        :uploadProgress="uploadProgress"
         :searchMatches="searchMatches"
         :searchLoading="searchLoading"
         @uploadFiles="processFiles"

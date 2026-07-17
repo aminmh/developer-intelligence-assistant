@@ -20,6 +20,9 @@ export interface UploadedFile {
   size: number;
   chunkCount: number;
   uploadedAt: string;
+  status: 'ready' | 'processing' | 'failed';
+  error?: string;
+  uploadSessionId?: string;
 }
 
 export interface FileChunk {

@@ -5,6 +5,8 @@ services:
       dockerfile: Dockerfile
       args:
         VITE_API_URL: ${VITE_API_URL:-}
+        VITE_UPLOAD_API_URL: ${VITE_UPLOAD_API_URL:-}
+        VITE_TUS_THRESHOLD_BYTES: ${VITE_TUS_THRESHOLD_BYTES:-}
     container_name: web
     env_file:
       - .env
@@ -13,6 +15,9 @@ services:
     volumes:
       - "./data:/app/data"
     restart: unless-stopped
+    networks:
+      - default
+      - devassistant_net
 
   web-dev:
     build:
@@ -30,3 +35,11 @@ services:
       - "/app/node_modules"
     profiles:
       - dev
+    networks:
+      - default
+      - devassistant_net
+
+networks:
+  default: {}
+  devassistant_net:
+    external: true

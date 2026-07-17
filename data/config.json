@@ -1,0 +1,14 @@
+{
+  "llmMode": "gemini",
+  "localLlmUrl": "http://localhost:11434",
+  "localLlmModel": "llama3",
+  "embeddingMode": "gemini",
+  "hfModel": "sentence-transformers/all-MiniLM-L6-v2",
+  "hfToken": "",
+  "chunkSize": 500,
+  "chunkOverlap": 50,
+  "qdrantUrl": "",
+  "qdrantApiKey": "",
+  "temperature": 0.7,
+  "topP": 0.9
+}

@@ -3,13 +3,15 @@ SHELL := /bin/bash
 COMPOSE ?= docker compose
 SERVICE ?= web
 DEV_SERVICE ?= web-dev
+NETWORK ?= devassistant_net
 
-.PHONY: help build up down stop restart logs ps \
+.PHONY: help network build up down stop restart logs ps \
         dev dev-build dev-down dev-logs dev-shell \
         shell exec lint rebuild clean prune
 
 help:
 	@echo "Available targets:"
+	@echo "  make network         - Create the shared devassistant_net Docker network (idempotent)"
 	@echo "  make build           - Build the production web image"
 	@echo "  make up              - Start the production web service in detached mode"
 	@echo "  make down            - Stop and remove the production web service"
@@ -29,10 +31,13 @@ help:
 	@echo "  make clean           - Remove compose stack and orphans"
 	@echo "  make prune           - Remove unused Docker resources"
 
+network:
+	docker network inspect $(NETWORK) >/dev/null 2>&1 || docker network create $(NETWORK)
+
 build:
 	$(COMPOSE) build $(SERVICE)
 
-up:
+up: network
 	$(COMPOSE) up -d $(SERVICE)
 
 down:
@@ -60,7 +65,7 @@ exec:
 dev-build:
 	$(COMPOSE) --profile dev build $(DEV_SERVICE)
 
-dev:
+dev: network
 	$(COMPOSE) --profile dev up -d $(DEV_SERVICE)
 
 dev-down:
@@ -75,7 +80,7 @@ dev-shell:
 lint:
 	$(COMPOSE) exec $(DEV_SERVICE) npm run lint
 
-rebuild:
+rebuild: network
 	$(COMPOSE) down
 	$(COMPOSE) build $(SERVICE)
 	$(COMPOSE) up -d $(SERVICE)
