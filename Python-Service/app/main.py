@@ -1,16 +1,21 @@
+import asyncio
 from contextlib import asynccontextmanager
 from typing import Annotated
 from fastapi import FastAPI, HTTPException, Query, Depends, Request, Header
+from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 import os
+import tempfile
 from datetime import datetime, timedelta, timezone
 from uuid import uuid4
 import jwt
 import json
 import httpx
+import boto3
+from pypdf import PdfReader
 from indexer import CodeIntelligenceIndex
 from settings import settings
-from upload import UploadSessionRequest, get_current_user, verify_hook, resolve_object_key
+from upload import UploadSessionRequest, RagUploadSessionRequest, get_current_user, verify_hook, resolve_object_key
 from models import (
     HealthResponse,
     RebuildResponse,
@@ -32,6 +37,12 @@ TUS_PUBLIC_URL = os.environ.get(
 )
 UPLOAD_TOKEN_SECRET = os.environ["UPLOAD_TOKEN_SECRET"]
 MAX_UPLOAD_SIZE = 5 * 1024 * 1024 * 1024  # 5 GiB
+
+# RAG document upload (large-file TUS path for the web app's knowledge base).
+# A separate, parallel pipeline from the ZIP/AST upload session above.
+RAG_ALLOWED_EXTENSIONS = {".pdf", ".zip", ".md", ".txt", ".js", ".ts", ".tsx", ".json"}
+MAX_RAG_UPLOAD_SIZE = 2 * 1024 * 1024 * 1024  # 2 GiB
+WEB_ORIGIN = os.getenv("WEB_ORIGIN", "http://localhost:3000")
 
 
 @asynccontextmanager
@@ -76,6 +87,15 @@ app = FastAPI(
     lifespan=lifespan,
     docs_url="/docs",
     redoc_url="/redoc",
+)
+
+# Allows the browser to call the RAG upload-session endpoint directly (the
+# actual file bytes go straight to tusd, not through this API).
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=[WEB_ORIGIN],
+    allow_methods=["POST", "OPTIONS"],
+    allow_headers=["Content-Type"],
 )
 
 
@@ -254,6 +274,59 @@ async def create_upload_session(
 
 
 @app.post(
+    "/api/rag/upload-sessions",
+    tags=["Upload & TUS"],
+    summary="Create RAG Document Upload Session",
+    description=(
+        "Creates a resumable upload session for a RAG knowledge-base document "
+        "(PDF/MD/TXT/JS/TS/TSX/JSON). Returns a signed JWT token that the client "
+        "uses with the TUS resumable upload protocol. Unlike the ZIP upload-session "
+        "endpoint above, this is for the web app's document-indexing pipeline, not "
+        "AST/code-graph analysis. The token expires after 60 minutes, since large "
+        "resumable uploads can take longer than the ZIP flow's 30-minute window."
+    ),
+    response_model=UploadSessionResponse,
+    responses={
+        400: {"description": "Unsupported file type for RAG upload"},
+        413: {"description": "File is too large (max 2 GiB)"},
+    },
+)
+async def create_rag_upload_session(
+    request: RagUploadSessionRequest,
+    user=Depends(get_current_user),
+):
+    ext = os.path.splitext(request.filename.lower())[1]
+    if ext not in RAG_ALLOWED_EXTENSIONS:
+        raise HTTPException(400, "Unsupported file type for RAG upload")
+
+    if request.size > MAX_RAG_UPLOAD_SIZE:
+        raise HTTPException(413, "File is too large")
+
+    upload_session_id = str(uuid4())
+    expires_at = datetime.now(timezone.utc) + timedelta(minutes=60)
+
+    token = jwt.encode(
+        payload={
+            "sub": user["id"],
+            "upload_session_id": upload_session_id,
+            "filename": request.filename,
+            "maximum_size": request.size,
+            "upload_kind": "rag-document",
+            "exp": expires_at,
+        },
+        key=UPLOAD_TOKEN_SECRET,
+        algorithm="HS256",
+    )
+
+    return UploadSessionResponse(
+        upload_session_id=upload_session_id,
+        tus_endpoint=TUS_PUBLIC_URL,
+        upload_token=token,
+        expires_at=expires_at.isoformat(),
+    )
+
+
+@app.post(
     "/internal/tusd/hooks",
     tags=["Upload & TUS"],
     summary="TUSD Webhook Handler",
@@ -274,8 +347,6 @@ async def tusd_hook(
     x_hook_signature: str | None = Header(default=None),
 ):
     body = await request.body()
-    verify_hook(body, x_hook_signature)
-
     event = json.loads(body)
 
     if event.get("Type") != "post-finish":
@@ -283,6 +354,15 @@ async def tusd_hook(
 
     upload = event["Event"]["Upload"]
     metadata = upload.get("MetaData", {})
+
+    # RAG documents (web app's large-file upload path) are a separate pipeline
+    # from the ZIP/AST one below. tusd cannot sign its own hook deliveries (no
+    # HMAC secret flag exists), so this branch authenticates via the session
+    # JWT carried in the upload metadata instead of verify_hook's HMAC check.
+    if metadata.get("upload_kind") == "rag-document":
+        return await handle_rag_upload(upload, metadata)
+
+    verify_hook(body, x_hook_signature)
 
     upload_session_id = metadata.get("upload_session_id")
     upload_id = upload["ID"]
@@ -327,3 +407,111 @@ async def tusd_hook(
         forwarded_to_php=True,
         php_status=response.status_code,
     )
+
+
+async def handle_rag_upload(upload: dict, metadata: dict) -> TUSHookResponse:
+    # Auth: verify the session JWT (unforgeable without UPLOAD_TOKEN_SECRET).
+    # This is the real trust boundary for this branch, since tusd has no
+    # pre-create hook configured to reject unauthorized uploads before they land
+    # in MinIO — only a valid, unexpired, session-matching token gets indexed.
+    token = metadata.get("upload_token")
+    if not token:
+        raise HTTPException(401, "Missing upload token")
+
+    try:
+        claims = jwt.decode(token, UPLOAD_TOKEN_SECRET, algorithms=["HS256"])
+    except jwt.PyJWTError:
+        raise HTTPException(401, "Invalid or expired upload token")
+
+    if claims.get("upload_kind") != "rag-document":
+        raise HTTPException(401, "Token not valid for RAG upload")
+    if claims.get("upload_session_id") != metadata.get("upload_session_id"):
+        raise HTTPException(401, "Upload session mismatch")
+
+    # Authoritative bucket/key come from tusd itself (Storage), not from
+    # client-supplied metadata, which could otherwise be spoofed.
+    storage = upload.get("Storage") or {}
+    bucket = storage.get("Bucket")
+    object_key = storage.get("Key")
+    if not bucket or not object_key:
+        raise HTTPException(400, "Missing upload storage information")
+
+    filename = claims["filename"]
+    ext = os.path.splitext(filename.lower())[1]
+
+    if ext == ".zip":
+        # ZIP is accepted but its contents are not extracted/parsed, so there's
+        # no need to download the (possibly huge) archive at all -- index a
+        # placeholder instead, same as the small-file path in rag.ts.
+        text = f"Uploaded ZIP archive: {filename} (binary content, not text-indexed)."
+        file_type = "zip"
+    else:
+        # boto3 and pypdf are both synchronous/blocking; run them off the event
+        # loop so a huge download/parse doesn't stall other requests (health
+        # checks, concurrent hook deliveries) for the duration.
+        tmp_path = await asyncio.to_thread(_download_to_tempfile, bucket, object_key)
+        try:
+            if ext == ".pdf":
+                text = await asyncio.to_thread(_extract_pdf_text, tmp_path)
+                file_type = "pdf"
+            else:
+                with open(tmp_path, "r", encoding="utf-8", errors="replace") as f:
+                    text = f.read()
+                file_type = "markdown" if ext == ".md" else "text"
+        finally:
+            os.unlink(tmp_path)
+
+    node_callback_url = os.environ["NODE_RAG_CALLBACK_URL"]
+    rag_callback_secret = os.environ["RAG_CALLBACK_SECRET"]
+
+    async with httpx.AsyncClient(timeout=60.0) as client:
+        response = await client.post(
+            node_callback_url,
+            headers={
+                "X-Internal-Secret": rag_callback_secret,
+                "Content-Type": "application/json",
+            },
+            json={
+                "name": filename,
+                "type": file_type,
+                "size": upload.get("Size", 0),
+                "text": text,
+                "uploadSessionId": metadata.get("upload_session_id"),
+            },
+        )
+
+    response.raise_for_status()
+
+    return TUSHookResponse(
+        ok=True,
+        forwarded_to_node=True,
+        node_status=response.status_code,
+    )
+
+
+def _download_to_tempfile(bucket: str, key: str) -> str:
+    s3 = boto3.client(
+        "s3",
+        endpoint_url=os.environ["S3_ENDPOINT"],
+        aws_access_key_id=os.environ["AWS_ACCESS_KEY_ID"],
+        aws_secret_access_key=os.environ["AWS_SECRET_ACCESS_KEY"],
+        region_name=os.getenv("AWS_REGION", "us-east-1"),
+    )
+    # download_fileobj streams the object in parts rather than buffering the
+    # whole thing in memory, and writing straight to disk means we never hold
+    # a second full in-heap copy of a potentially huge file's raw bytes.
+    fd, tmp_path = tempfile.mkstemp()
+    with os.fdopen(fd, "wb") as tmp:
+        s3.download_fileobj(bucket, key, tmp)
+    return tmp_path
+
+
+def _extract_pdf_text(path: str) -> str:
+    # PdfReader accepts a file path directly, so parsing reads/seeks against
+    # the on-disk file rather than requiring a second in-memory copy. Page
+    # objects are extracted and discarded one at a time rather than all at once.
+    reader = PdfReader(path)
+    pages = []
+    for page in reader.pages:
+        pages.append(page.extract_text() or "")
+    return "\n".join(pages)

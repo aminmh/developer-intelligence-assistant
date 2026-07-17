@@ -2,18 +2,32 @@ services:
   python-api:
     build: ./Python-Service
     container_name: python_api
+    mem_limit: 1g
     environment:
       TUS_PUBLIC_URL: http://localhost:1080/files/
       UPLOAD_TOKEN_SECRET: ${UPLOAD_TOKEN_SECRET}
       TUSD_HOOK_SECRET: ${TUSD_HOOK_SECRET}
+      S3_ENDPOINT: http://minio:9000
+      AWS_ACCESS_KEY_ID: ${MINIO_ROOT_USER}
+      AWS_SECRET_ACCESS_KEY: ${MINIO_ROOT_PASSWORD}
+      AWS_REGION: us-east-1
+      NODE_RAG_CALLBACK_URL: ${NODE_RAG_CALLBACK_URL:-http://web:3000/api/internal/rag-index}
+      RAG_CALLBACK_SECRET: ${RAG_CALLBACK_SECRET}
+      WEB_ORIGIN: ${WEB_ORIGIN:-http://localhost:3000}
     ports:
       - 9002:9002
     volumes:
       - "./Python-Service/app/:/app"
     depends_on:
-      - tusd
-      - minio
-      - qdrant
+      tusd:
+        condition: service_started
+      minio:
+        condition: service_healthy
+      qdrant:
+        condition: service_started
+    networks:
+      - default
+      - devassistant_net
 
   php-ast:
     build: ./PHP-Service
@@ -26,27 +40,47 @@ services:
       S3_ACCESS_KEY: ${MINIO_ROOT_USER}
       S3_SECRET_KEY: ${MINIO_ROOT_PASSWORD}
     depends_on:
-      - minio
+      minio:
+        condition: service_healthy
 
+  # tusd config note: -hooks-enabled-events is intentionally set to post-finish
+  # only. There is no pre-create hook validating the upload session's JWT
+  # before bytes are accepted (see api/Python-Service/app/main.py's
+  # handle_rag_upload for the rationale) -- that's a deferred hardening item,
+  # not an oversight.
   tusd:
-    image: tusproject/tusd:latest
+    image: tusproject/tusd:v2.10.0
+    mem_limit: 512m
     ports:
       - "1080:1080"
+    command:
+      - -host=0.0.0.0
+      - -port=1080
+      - -base-path=/files/
+      - -s3-bucket=tus-uploads
+      - -s3-endpoint=http://minio:9000
+      - -max-size=2147483648
+      - -hooks-http=http://python-api:9002/internal/tusd/hooks
+      - -hooks-enabled-events=post-finish
+      - -hooks-http-forward-headers=Authorization
+      - -cors-allow-origin=${WEB_ORIGIN:-http://localhost:3000}
     environment:
       AWS_ACCESS_KEY_ID: ${MINIO_ROOT_USER}
       AWS_SECRET_ACCESS_KEY: ${MINIO_ROOT_PASSWORD}
       AWS_REGION: us-east-1
     depends_on:
-      - minio
-    # Configure:
-    # - /files as the tus base path
-    # - MinIO/S3 as the storage backend
-    # - Python's internal endpoint as a post-finish hook
-    # Pin the image version and use flags supported by that version.
+      minio:
+        condition: service_healthy
+      minio-init:
+        condition: service_completed_successfully
+    networks:
+      - default
+      - devassistant_net
 
   minio:
     image: minio/minio:latest
     command: server /data --console-address ":9001"
+    mem_limit: 1g
     environment:
       MINIO_ROOT_USER: ${MINIO_ROOT_USER}
       MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD}
@@ -55,10 +89,43 @@ services:
     ports:
       - "9000:9000"
       - "9001:9001"
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9000/minio/health/live"]
+      interval: 2s
+      timeout: 3s
+      retries: 15
+      start_period: 5s
+    networks:
+      - default
+      - devassistant_net
+
+  # One-shot: creates the tus-uploads bucket tusd's S3 store writes to. No
+  # bucket exists by default, and tusd itself does not create one on startup.
+  # Waits for minio's healthcheck (not just "container started") before
+  # running, so the "connection refused" race during minio's own startup
+  # doesn't show up as noisy (though harmless/self-retrying) error output.
+  minio-init:
+    image: minio/mc:latest
+    depends_on:
+      minio:
+        condition: service_healthy
+    entrypoint: >
+      /bin/sh -c "
+      until (mc alias set local http://minio:9000 $$MINIO_ROOT_USER $$MINIO_ROOT_PASSWORD >/dev/null 2>&1) do sleep 1; done;
+      mc alias set local http://minio:9000 $$MINIO_ROOT_USER $$MINIO_ROOT_PASSWORD;
+      mc mb -p local/tus-uploads || true;
+      exit 0"
+    environment:
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD}
+    networks:
+      - default
+      - devassistant_net
 
   qdrant:
     image: qdrant/qdrant:latest
     container_name: qdrant
+    mem_limit: 1g
     volumes:
       - "./qdrant-data/:/qdrant/storage"
     ports:
@@ -67,4 +134,9 @@ services:
 
 volumes:
   minio-data:
+
+networks:
+  default: {}
+  devassistant_net:
+    external: true
 

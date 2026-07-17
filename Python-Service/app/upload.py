@@ -6,6 +6,11 @@ class UploadSessionRequest(BaseModel):
     size: int = Field(gt=0, description="File size in bytes. Must not exceed 5 GiB (5,368,709,120 bytes).")
 
 
+class RagUploadSessionRequest(BaseModel):
+    filename: str = Field(min_length=1, max_length=255, description="Name of the RAG document to upload (pdf/md/txt/js/ts/tsx/json).")
+    size: int = Field(gt=0, description="File size in bytes. Must not exceed 2 GiB (2,147,483,648 bytes).")
+
+
 def get_current_user():
     # Replace with your authentication implementation.
     return {"id": "user-123"}

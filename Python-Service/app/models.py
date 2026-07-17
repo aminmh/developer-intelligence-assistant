@@ -107,3 +107,5 @@ class TUSHookResponse(BaseModel):
     ok: bool = Field(description="Indicates whether the hook was processed successfully.")
     forwarded_to_php: Optional[bool] = Field(None, description="Whether the job was forwarded to the PHP AST analysis service.")
     php_status: Optional[int] = Field(None, description="HTTP status code returned by the PHP service.")
+    forwarded_to_node: Optional[bool] = Field(None, description="Whether extracted text was forwarded to the web app's RAG indexing callback.")
+    node_status: Optional[int] = Field(None, description="HTTP status code returned by the web app's callback.")

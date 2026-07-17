@@ -3,14 +3,16 @@ SHELL := /bin/bash
 COMPOSE ?= docker compose
 PYTHON_SERVICE ?= python-api
 PHP_SERVICE ?= php-ast
+NETWORK ?= devassistant_net
 
-.PHONY: help build up down stop restart logs ps \
+.PHONY: help network build up down stop restart logs ps \
         python-shell php-shell python-exec php-exec \
-        minio-logs qdrant-logs tusd-logs python-logs php-logs \
+        minio-logs qdrant-logs tusd-logs python-logs php-logs minio-bucket \
         rebuild clean prune
 
 help:
 	@echo "Available targets:"
+	@echo "  make network         - Create the shared devassistant_net Docker network (idempotent)"
 	@echo "  make build           - Build all services"
 	@echo "  make up              - Start all services in detached mode"
 	@echo "  make down            - Stop and remove all services"
@@ -28,13 +30,17 @@ help:
 	@echo "  make tusd-logs       - Follow tusd logs"
 	@echo "  make minio-logs      - Follow minio logs"
 	@echo "  make qdrant-logs     - Follow qdrant logs"
+	@echo "  make minio-bucket    - Re-run the tus-uploads bucket creation"
 	@echo "  make clean           - Remove compose stack and orphans"
 	@echo "  make prune           - Remove unused Docker resources"
+
+network:
+	docker network inspect $(NETWORK) >/dev/null 2>&1 || docker network create $(NETWORK)
 
 build:
 	$(COMPOSE) build
 
-up:
+up: network
 	$(COMPOSE) up -d
 
 down:
@@ -52,7 +58,7 @@ logs:
 ps:
 	$(COMPOSE) ps
 
-rebuild:
+rebuild: network
 	$(COMPOSE) down
 	$(COMPOSE) build
 	$(COMPOSE) up -d
@@ -85,6 +91,9 @@ minio-logs:
 
 qdrant-logs:
 	$(COMPOSE) logs -f qdrant
+
+minio-bucket:
+	$(COMPOSE) run --rm minio-init
 
 clean:
 	$(COMPOSE) down --remove-orphans
