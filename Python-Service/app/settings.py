@@ -9,7 +9,7 @@ class Settings(BaseModel):
     qdrant_url: str = os.getenv("QDRANT_URL", "http://qdrant:6333")
     qdrant_collection: str = os.getenv("QDRANT_COLLECTION", "code_symbols")
 
-    embedding_backend: str = os.getenv("EMBEDDING_BACKEND", "huggingface")
+    embedding_backend: str = os.getenv("EMBEDDING_BACKEND", "ollama")
     embedding_model: str = os.getenv(
         "EMBEDDING_MODEL",
         "sentence-transformers/all-MiniLM-L6-v2",

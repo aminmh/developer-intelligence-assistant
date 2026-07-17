@@ -2,8 +2,8 @@ from pydantic import BaseModel, Field
 
 
 class UploadSessionRequest(BaseModel):
-    filename: str = Field(min_length=1, max_length=255)
-    size: int = Field(gt=0)
+    filename: str = Field(min_length=1, max_length=255, description="Name of the file to upload. Must end with .zip.")
+    size: int = Field(gt=0, description="File size in bytes. Must not exceed 5 GiB (5,368,709,120 bytes).")
 
 
 def get_current_user():

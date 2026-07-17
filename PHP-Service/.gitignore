@@ -1,5 +1,7 @@
 composer.lock
 /vendor
 /storage/framework
+/storage/api-docs
 /bootstrap/cache
 .env
+docker.log

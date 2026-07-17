@@ -2,9 +2,7 @@ fastapi==0.116.1
 uvicorn[standard]==0.35.0
 pydantic==2.11.7
 llama-index==0.12.52
-llama-index-embeddings-huggingface==0.5.1
-llama-index-vector-stores-qdrant==0.4.8
-qdrant-client==1.14.2
 llama-index-embeddings-ollama==0.5.0
-jwt
-
+llama-index-vector-stores-qdrant==0.4.1
+qdrant-client==1.14.2
+PyJWT==2.10.1

@@ -1,18 +1,25 @@
 services:
   python-api:
-    build: "./PHP-Service/"
+    build: ./Python-Service
+    container_name: python_api
     environment:
       TUS_PUBLIC_URL: http://localhost:1080/files/
       UPLOAD_TOKEN_SECRET: ${UPLOAD_TOKEN_SECRET}
       TUSD_HOOK_SECRET: ${TUSD_HOOK_SECRET}
+    ports:
+      - 9002:9002
     volumes:
       - "./Python-Service/app/:/app"
     depends_on:
       - tusd
       - minio
+      - qdrant
 
   php-ast:
-    build: "/PHP-Service/"
+    build: ./PHP-Service
+    container_name: php-ast
+    volumes:
+      - "./PHP-Service/:/app"
     environment:
       S3_ENDPOINT: http://minio:9000
       S3_REGION: us-east-1
@@ -48,6 +55,15 @@ services:
     ports:
       - "9000:9000"
       - "9001:9001"
+
+  qdrant:
+    image: qdrant/qdrant:latest
+    container_name: qdrant
+    volumes:
+      - "./qdrant-data/:/qdrant/storage"
+    ports:
+      - "6333:6333"
+      - "6334:6334"
 
 volumes:
   minio-data:

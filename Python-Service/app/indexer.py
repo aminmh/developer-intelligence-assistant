@@ -2,13 +2,12 @@ import json
 from typing import Any, Dict, List, Optional, Tuple
 
 from llama_index.core import Document, Settings, VectorStoreIndex
-from llama_index.core.schema import TextNode
 from llama_index.vector_stores.qdrant import QdrantVectorStore
 from qdrant_client import QdrantClient
 
-from .graph_store import InMemoryCodeGraph
-from .models import EdgeModel, ParameterModel, SymbolModel
-from .settings import settings
+from graph_store import InMemoryCodeGraph
+from models import EdgeModel, ParameterModel, SymbolModel
+from settings import settings
 
 
 def build_symbol_id(chunk: Dict[str, Any]) -> str:
@@ -150,7 +149,9 @@ def symbol_to_document(symbol: SymbolModel) -> Document:
         "return_type": symbol.return_type,
     }
 
-    return Document(text=text, metadata=metadata)
+    doc = Document(text=text)
+    doc.metadata = metadata
+    return doc
 
 
 class CodeIntelligenceIndex:
@@ -169,12 +170,6 @@ class CodeIntelligenceIndex:
             Settings.embed_model = OllamaEmbedding(
                 model_name=settings.ollama_embedding_model,
                 base_url=settings.ollama_base_url,
-            )
-        else:
-            from llama_index.embeddings.huggingface import HuggingFaceEmbedding
-
-            Settings.embed_model = HuggingFaceEmbedding(
-                model_name=settings.embedding_model
             )
 
     def rebuild(self, report_path: str) -> None:
