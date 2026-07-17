@@ -1,0 +1,474 @@
+<script setup lang="ts">
+import { ref, onMounted } from 'vue';
+import { 
+  FileText, 
+  Settings, 
+  Terminal, 
+  Sparkles, 
+  BookOpen, 
+  X,
+  CheckCircle,
+  AlertTriangle
+} from 'lucide-vue-next';
+import { RAGConfig, UploadedFile, SearchMatch } from './types';
+
+import RAGChat from './components/RAGChat.vue';
+import RAGFiles from './components/RAGFiles.vue';
+import RAGConfigComponent from './components/RAGConfig.vue';
+
+const activeTab = ref<'chat' | 'files' | 'config'>('chat');
+
+const config = ref<RAGConfig>({
+  llmMode: 'gemini',
+  localLlmUrl: 'http://localhost:11434',
+  localLlmModel: 'llama3',
+  embeddingMode: 'gemini',
+  hfModel: 'sentence-transformers/all-MiniLM-L6-v2',
+  hfToken: '',
+  chunkSize: 500,
+  chunkOverlap: 50,
+  qdrantUrl: '',
+  qdrantApiKey: '',
+  temperature: 0.7,
+  topP: 0.9,
+});
+
+const files = ref<UploadedFile[]>([]);
+const loading = ref(false);
+const uploading = ref(false);
+const showSuccessToast = ref(false);
+const successMessage = ref('');
+const showErrorToast = ref(false);
+const errorMessage = ref('');
+
+const searchMatches = ref<SearchMatch[]>([]);
+const searchLoading = ref(false);
+
+interface Message {
+  id: string;
+  role: 'user' | 'assistant';
+  content: string;
+  timestamp: string;
+  matches?: SearchMatch[];
+  llmUsed?: string;
+  durationMs?: number;
+}
+
+const messages = ref<Message[]>([
+  {
+    id: 'welcome',
+    role: 'assistant',
+    content: `👋 **Welcome to the Developer Assistant RAG System!**
+
+This application runs with an integrated Node/TS sandbox backend. Upload documents, generate embeddings, and query your knowledge base using semantic search.
+
+Configure your LLM and embedding settings under the **Connection & Settings** tab.`,
+    timestamp: new Date().toLocaleTimeString(),
+  }
+]);
+
+const triggerToast = (msg: string, isSuccess = true) => {
+  if (isSuccess) {
+    successMessage.value = msg;
+    showSuccessToast.value = true;
+    setTimeout(() => { showSuccessToast.value = false; }, 3000);
+  } else {
+    errorMessage.value = msg;
+    showErrorToast.value = true;
+    setTimeout(() => { showErrorToast.value = false; }, 4000);
+  }
+};
+
+const apiBaseUrl = import.meta.env.VITE_API_URL || '';
+
+const makeRequest = async (path: string, options: RequestInit = {}) => {
+  const base = apiBaseUrl.replace(/\/+$/, '');
+  const url = base ? `${base}${path}` : path;
+  return fetch(url, options);
+};
+
+const fetchConfig = async () => {
+  try {
+    const res = await makeRequest('/api/config');
+    const data = await res.json();
+    if (data.success || data.config) {
+      config.value = data.config;
+    }
+  } catch (err: any) {
+    console.error('Failed to load configurations:', err);
+  }
+};
+
+const saveConfig = async () => {
+  try {
+    const res = await makeRequest('/api/config', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(config.value),
+    });
+    const data = await res.json();
+    if (data.success) {
+      triggerToast('Configurations applied and saved successfully!');
+    } else {
+      triggerToast(data.error || 'Failed to save configuration', false);
+    }
+  } catch (err: any) {
+    triggerToast(`Error: ${err.message}`, false);
+  }
+};
+
+const fetchFiles = async () => {
+  try {
+    const res = await makeRequest('/api/files');
+    const data = await res.json();
+    if (data.success || data.files) {
+      files.value = data.files || [];
+    }
+  } catch (err: any) {
+    console.error('Failed to load files:', err);
+  }
+};
+
+const processFiles = async (fileList: FileList) => {
+  uploading.value = true;
+  let successCount = 0;
+  let failCount = 0;
+
+  for (let i = 0; i < fileList.length; i++) {
+    const file = fileList[i];
+    const extension = file.name.split('.').pop()?.toLowerCase();
+    
+    if (!['pdf', 'md', 'txt', 'js', 'ts', 'tsx', 'json'].includes(extension || '')) {
+      triggerToast(`Unsupported file type: ${file.name}. Please upload PDF, MD, or text files.`, false);
+      failCount++;
+      continue;
+    }
+
+    try {
+      const reader = new FileReader();
+      const isPdf = extension === 'pdf';
+
+      const fileContentPromise = new Promise<string>((resolve, reject) => {
+        reader.onerror = () => reject(new Error('File reading error.'));
+        if (isPdf) {
+          reader.readAsDataURL(file);
+          reader.onload = () => {
+            const result = reader.result as string;
+            const base64 = result.split(',')[1];
+            resolve(base64);
+          };
+        } else {
+          reader.readAsText(file);
+          reader.onload = () => resolve(reader.result as string);
+        }
+      });
+
+      const content = await fileContentPromise;
+
+      const response = await makeRequest('/api/upload', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          name: file.name,
+          type: isPdf ? 'pdf' : (extension === 'md' ? 'markdown' : 'text'),
+          size: file.size,
+          content,
+        }),
+      });
+
+      const resultData = await response.json();
+      if (resultData.success || resultData.file) {
+        successCount++;
+      } else {
+        console.error('Upload failed for:', file.name, resultData.error);
+        triggerToast(`Failed to parse ${file.name}: ${resultData.error}`, false);
+        failCount++;
+      }
+    } catch (err: any) {
+      console.error('Error processing file:', file.name, err);
+      triggerToast(`Error reading ${file.name}: ${err.message}`, false);
+      failCount++;
+    }
+  }
+
+  if (successCount > 0) {
+    triggerToast(`Successfully processed and chunked ${successCount} file(s)!`);
+    await fetchFiles();
+  }
+  uploading.value = false;
+};
+
+const deleteFile = async (id: string, name: string) => {
+  if (!confirm(`Are you sure you want to delete "${name}"?`)) return;
+  try {
+    const res = await makeRequest(`/api/files/${id}`, { method: 'DELETE' });
+    const data = await res.json();
+    if (data.success || data.message) {
+      triggerToast(`File "${name}" deleted.`);
+      await fetchFiles();
+    } else {
+      triggerToast(data.error || 'Failed to delete file', false);
+    }
+  } catch (err: any) {
+    triggerToast(`Error: ${err.message}`, false);
+  }
+};
+
+const sendMessage = async (text: string) => {
+  if (!text.trim() || loading.value) return;
+
+  const userMessageId = `msg_${Date.now()}`;
+  messages.value.push({
+    id: userMessageId,
+    role: 'user',
+    content: text,
+    timestamp: new Date().toLocaleTimeString(),
+  });
+
+  loading.value = true;
+
+  const scrollToBottom = () => {
+    setTimeout(() => {
+      const el = document.getElementById('chat-scroll-container');
+      if (el) el.scrollTop = el.scrollHeight;
+    }, 50);
+  };
+  scrollToBottom();
+
+  try {
+    const res = await makeRequest('/api/query', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ query: text, limit: 4 }),
+    });
+
+    const data = await res.json();
+    if (data.success || data.answer) {
+      messages.value.push({
+        id: `assistant_${Date.now()}`,
+        role: 'assistant',
+        content: data.answer,
+        timestamp: new Date().toLocaleTimeString(),
+        matches: data.matches,
+        llmUsed: data.llmUsed || 'Gemini 3.5',
+        durationMs: data.durationMs,
+      });
+    } else {
+      messages.value.push({
+        id: `assistant_${Date.now()}`,
+        role: 'assistant',
+        content: `❌ **Error formulating answer from Backend:** ${data.error || 'Unknown error occurred.'}
+
+Please make sure your backend is running correctly and CORS is enabled.`,
+        timestamp: new Date().toLocaleTimeString(),
+      });
+    }
+  } catch (err: any) {
+    messages.value.push({
+      id: `assistant_${Date.now()}`,
+      role: 'assistant',
+      content: `❌ **Connection failure:** Failed to contact the backend service.
+
+Details: ${err.message}`,
+      timestamp: new Date().toLocaleTimeString(),
+    });
+  } finally {
+    loading.value = false;
+    scrollToBottom();
+  }
+};
+
+const performSearchOnly = async (query: string) => {
+  if (!query.trim() || searchLoading.value) return;
+  searchLoading.value = true;
+  searchMatches.value = [];
+
+  try {
+    const res = await makeRequest('/api/retrieve', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ query: query, limit: 6 }),
+    });
+    const data = await res.json();
+    if (data.success || data.matches) {
+      searchMatches.value = data.matches || [];
+      if (searchMatches.value.length === 0) {
+        triggerToast('No semantic matches found. Try uploading more documents!', false);
+      }
+    } else {
+      triggerToast(data.error || 'Failed to retrieve semantic matches', false);
+    }
+  } catch (err: any) {
+    triggerToast(`Error: ${err.message}`, false);
+  } finally {
+    searchLoading.value = false;
+  }
+};
+
+const copyToClipboard = (text: string) => {
+  navigator.clipboard.writeText(text);
+  triggerToast('Copied content to clipboard!');
+};
+
+onMounted(() => {
+  fetchConfig();
+  fetchFiles();
+});
+</script>
+
+<template>
+  <div class="flex h-screen w-screen bg-[#070a13] text-slate-100 overflow-hidden font-sans">
+    
+    <!-- Sidebar navigation & Quick Config -->
+    <aside class="w-80 border-r border-slate-800 bg-[#0c101f] flex flex-col shrink-0 select-none">
+      <div class="p-5 border-b border-slate-800 flex items-center gap-3">
+        <div class="p-2 rounded-lg bg-indigo-600/20 text-indigo-400 border border-indigo-500/30">
+          <Sparkles class="w-6 h-6 animate-pulse" />
+        </div>
+        <div>
+          <h1 class="text-base font-bold tracking-tight text-white leading-tight text-left">DevAssistant RAG</h1>
+          <span class="text-[10px] text-slate-400 font-mono block text-left mt-0.5">Node/TS Sandbox Backend</span>
+        </div>
+      </div>
+
+      <!-- Quick stats/status dashboard -->
+      <div class="px-5 py-4 bg-[#11162e] border-b border-slate-800">
+        <div class="flex items-center justify-between text-xs">
+          <span class="text-slate-400">Indexed Files</span>
+          <span class="font-semibold text-slate-300 font-mono">{{ files.length }} document(s)</span>
+        </div>
+      </div>
+
+      <!-- Sidebar Tabs -->
+      <nav class="flex-1 p-4 space-y-1 overflow-y-auto">
+        <button 
+          @click="activeTab = 'chat'" 
+          class="w-full flex items-center gap-3 px-4 py-3 rounded-xl text-sm font-medium transition-all"
+          :class="activeTab === 'chat' ? 'bg-indigo-600 text-white shadow-md shadow-indigo-600/20' : 'text-slate-400 hover:text-white hover:bg-slate-800/50'"
+        >
+          <Terminal class="w-4 h-4" />
+          <span>Interactive Chat</span>
+        </button>
+
+        <button 
+          @click="activeTab = 'files'" 
+          class="w-full flex items-center gap-3 px-4 py-3 rounded-xl text-sm font-medium transition-all"
+          :class="activeTab === 'files' ? 'bg-indigo-600 text-white shadow-md shadow-indigo-600/20' : 'text-slate-400 hover:text-white hover:bg-slate-800/50'"
+        >
+          <FileText class="w-4 h-4" />
+          <span>Knowledge Base (Files)</span>
+          <span v-if="files.length > 0" class="ml-auto bg-slate-900/60 text-slate-300 text-[10px] px-2 py-0.5 rounded-full font-mono">{{ files.length }}</span>
+        </button>
+
+        <button 
+          @click="activeTab = 'config'" 
+          class="w-full flex items-center gap-3 px-4 py-3 rounded-xl text-sm font-medium transition-all"
+          :class="activeTab === 'config' ? 'bg-indigo-600 text-white shadow-md shadow-indigo-600/20' : 'text-slate-400 hover:text-white hover:bg-slate-800/50'"
+        >
+          <Settings class="w-4 h-4" />
+          <span>Connection & Settings</span>
+        </button>
+      </nav>
+
+      <!-- Footer developer banner -->
+      <div class="p-4 border-t border-slate-800 text-[10px] text-slate-500 font-mono text-center">
+        <span>Dev RAG Front-End Client</span>
+      </div>
+    </aside>
+
+    <!-- Main Content Panel -->
+    <main class="flex-1 flex flex-col min-w-0 bg-[#090c17] relative">
+      
+      <!-- Top navbar -->
+      <header class="h-16 border-b border-slate-800 px-6 flex items-center justify-between select-none bg-[#0c101f]/40 backdrop-blur">
+        <div class="flex items-center gap-2">
+          <BookOpen class="w-4 h-4 text-indigo-400" />
+          <h2 class="text-sm font-semibold text-white">
+            <span v-if="activeTab === 'chat'">Developer Playground</span>
+            <span v-else-if="activeTab === 'files'">Document Chunker & Vector Indexer</span>
+            <span v-else-if="activeTab === 'config'">RAG Pipeline Configurations</span>
+          </h2>
+        </div>
+        
+        <!-- Status indicator -->
+        <div class="flex items-center gap-4">
+          <div class="flex items-center gap-2 text-xs text-slate-400 bg-slate-900 px-3 py-1.5 rounded-lg border border-slate-800">
+            <span class="w-2 h-2 rounded-full bg-emerald-500 animate-pulse"></span>
+            <span>RAG System:</span>
+            <span class="font-mono text-slate-200 uppercase">Sandbox Mode</span>
+          </div>
+        </div>
+      </header>
+
+      <!-- View components rendering -->
+      <RAGChat
+        v-if="activeTab === 'chat'"
+        :messages="messages"
+        :loading="loading"
+        :filesCount="files.length"
+        @sendMessage="sendMessage"
+      />
+
+      <RAGFiles
+        v-else-if="activeTab === 'files'"
+        :files="files"
+        :uploading="uploading"
+        :searchMatches="searchMatches"
+        :searchLoading="searchLoading"
+        @uploadFiles="processFiles"
+        @deleteFile="deleteFile"
+        @performSearchOnly="performSearchOnly"
+      />
+
+      <RAGConfigComponent
+        v-else-if="activeTab === 'config'"
+        :config="config"
+        @saveConfig="saveConfig"
+      />
+
+    </main>
+
+    <!-- Success Toast Notification -->
+    <Transition
+      enter-active-class="transform ease-out duration-300 transition"
+      enter-from-class="translate-y-2 opacity-0 sm:translate-y-0 sm:translate-x-2"
+      enter-to-class="translate-y-0 opacity-100 sm:translate-x-0"
+      leave-active-class="transition ease-in duration-200"
+      leave-from-class="opacity-100"
+      leave-to-class="opacity-0"
+    >
+      <div v-if="showSuccessToast" class="fixed bottom-6 right-6 z-50 max-w-sm w-full bg-slate-900 border border-emerald-500/30 rounded-2xl shadow-xl shadow-slate-950/40 p-4 pointer-events-auto flex items-start gap-3">
+        <CheckCircle class="w-5 h-5 text-emerald-400 shrink-0" />
+        <div class="flex-1 text-left">
+          <p class="text-xs font-semibold text-white">Action Completed</p>
+          <p class="text-[11px] text-slate-400 mt-1 leading-normal">{{ successMessage }}</p>
+        </div>
+        <button @click="showSuccessToast = false" class="text-slate-500 hover:text-slate-300">
+          <X class="w-4 h-4" />
+        </button>
+      </div>
+    </Transition>
+
+    <!-- Error Toast Notification -->
+    <Transition
+      enter-active-class="transform ease-out duration-300 transition"
+      enter-from-class="translate-y-2 opacity-0 sm:translate-y-0 sm:translate-x-2"
+      enter-to-class="translate-y-0 opacity-100 sm:translate-x-0"
+      leave-active-class="transition ease-in duration-200"
+      leave-from-class="opacity-100"
+      leave-to-class="opacity-0"
+    >
+      <div v-if="showErrorToast" class="fixed bottom-6 right-6 z-50 max-w-sm w-full bg-slate-900 border border-rose-500/30 rounded-2xl shadow-xl shadow-slate-950/40 p-4 pointer-events-auto flex items-start gap-3">
+        <AlertTriangle class="w-5 h-5 text-rose-400 shrink-0" />
+        <div class="flex-1 text-left">
+          <p class="text-xs font-semibold text-white">Pipeline Error</p>
+          <p class="text-[11px] text-slate-400 mt-1 leading-normal">{{ errorMessage }}</p>
+        </div>
+        <button @click="showErrorToast = false" class="text-slate-500 hover:text-slate-300">
+          <X class="w-4 h-4" />
+        </button>
+      </div>
+    </Transition>
+
+  </div>
+</template>

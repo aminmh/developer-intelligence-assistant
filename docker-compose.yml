@@ -1,0 +1,32 @@
+services:
+  web:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      args:
+        VITE_API_URL: ${VITE_API_URL:-}
+    container_name: web
+    env_file:
+      - .env
+    ports:
+      - "3000:3000"
+    volumes:
+      - "./data:/app/data"
+    restart: unless-stopped
+
+  web-dev:
+    build:
+      context: .
+      dockerfile: Dockerfile.dev
+    container_name: web-dev
+    env_file:
+      - .env
+    environment:
+      NODE_ENV: development
+    ports:
+      - "3000:3000"
+    volumes:
+      - ".:/app"
+      - "/app/node_modules"
+    profiles:
+      - dev
