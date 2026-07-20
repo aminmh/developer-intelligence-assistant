@@ -7,20 +7,11 @@ services:
       TUS_PUBLIC_URL: http://localhost:1080/files/
       UPLOAD_TOKEN_SECRET: ${UPLOAD_TOKEN_SECRET}
       TUSD_HOOK_SECRET: ${TUSD_HOOK_SECRET}
-      S3_ENDPOINT: http://minio:9000
-      AWS_ACCESS_KEY_ID: ${MINIO_ROOT_USER}
-      AWS_SECRET_ACCESS_KEY: ${MINIO_ROOT_PASSWORD}
-      AWS_REGION: us-east-1
-      NODE_RAG_CALLBACK_URL: ${NODE_RAG_CALLBACK_URL:-http://web:3000/api/internal/rag-index}
-      RAG_CALLBACK_SECRET: ${RAG_CALLBACK_SECRET}
-      WEB_ORIGIN: ${WEB_ORIGIN:-http://localhost:3000}
     ports:
       - 9002:9002
     volumes:
       - "./Python-Service/app/:/app"
     depends_on:
-      tusd:
-        condition: service_started
       minio:
         condition: service_healthy
       qdrant:
@@ -29,25 +20,46 @@ services:
       - default
       - devassistant_net
 
+  # Handles the RAG document upload pipeline (tusd webhook -> MinIO download ->
+  # text extraction -> callback into web's Node server) via RagUploadController,
+  # plus the pre-existing (separate, unrelated) ZIP/AST analysis feature.
   php-ast:
     build: ./PHP-Service
     container_name: php-ast
+    mem_limit: 1g
+    ports:
+      - "9003:9003"
     volumes:
       - "./PHP-Service/:/app"
     environment:
-      S3_ENDPOINT: http://minio:9000
-      S3_REGION: us-east-1
-      S3_ACCESS_KEY: ${MINIO_ROOT_USER}
-      S3_SECRET_KEY: ${MINIO_ROOT_PASSWORD}
+      APP_KEY: base64:ArrJMd60BBk+X3TNL9Rtu0wmykL6wYuD7HvwboaO2kc=
+      APP_DEBUG: "true"
+      CACHE_STORE: file
+      SESSION_DRIVER: file
+      DB_CONNECTION: sqlite
+      AWS_ACCESS_KEY_ID: ${MINIO_ROOT_USER}
+      AWS_SECRET_ACCESS_KEY: ${MINIO_ROOT_PASSWORD}
+      AWS_DEFAULT_REGION: us-east-1
+      AWS_ENDPOINT: http://minio:9000
+      AWS_USE_PATH_STYLE_ENDPOINT: "true"
+      AWS_BUCKET: projects
+      AWS_TUS_BUCKET: tus-uploads
+      UPLOAD_TOKEN_SECRET: ${UPLOAD_TOKEN_SECRET}
+      RAG_CALLBACK_SECRET: ${RAG_CALLBACK_SECRET}
+      NODE_RAG_CALLBACK_URL: ${NODE_RAG_CALLBACK_URL:-http://web:3000/api/internal/rag-index}
+      WEB_ORIGIN: ${WEB_ORIGIN:-http://localhost:3000}
+      TUS_PUBLIC_URL: http://localhost:1080/files/
     depends_on:
       minio:
         condition: service_healthy
+    networks:
+      - default
+      - devassistant_net
 
   # tusd config note: -hooks-enabled-events is intentionally set to post-finish
   # only. There is no pre-create hook validating the upload session's JWT
-  # before bytes are accepted (see api/Python-Service/app/main.py's
-  # handle_rag_upload for the rationale) -- that's a deferred hardening item,
-  # not an oversight.
+  # before bytes are accepted (see PHP-Service's RagUploadController for the
+  # rationale) -- that's a deferred hardening item, not an oversight.
   tusd:
     image: tusproject/tusd:v2.10.0
     mem_limit: 512m
@@ -60,7 +72,7 @@ services:
       - -s3-bucket=tus-uploads
       - -s3-endpoint=http://minio:9000
       - -max-size=2147483648
-      - -hooks-http=http://python-api:9002/internal/tusd/hooks
+      - -hooks-http=http://php-ast:9003/api/internal/tusd/hooks
       - -hooks-enabled-events=post-finish
       - -hooks-http-forward-headers=Authorization
       - -cors-allow-origin=${WEB_ORIGIN:-http://localhost:3000}
@@ -73,6 +85,8 @@ services:
         condition: service_healthy
       minio-init:
         condition: service_completed_successfully
+      php-ast:
+        condition: service_started
     networks:
       - default
       - devassistant_net

@@ -94,18 +94,3 @@ class CalleesResponse(BaseModel):
     source: str = Field(description="The source symbol in class_name::method_name format.")
     count: int = Field(description="Number of callees found.")
     items: List[CalleeItem] = Field(description="List of callee symbols.")
-
-
-class UploadSessionResponse(BaseModel):
-    upload_session_id: str = Field(description="Unique identifier for the upload session.")
-    tus_endpoint: str = Field(description="TUS server endpoint URL where the client should upload the file.")
-    upload_token: str = Field(description="Signed JWT token for authenticating the upload session.")
-    expires_at: str = Field(description="ISO 8601 timestamp indicating when the token expires.")
-
-
-class TUSHookResponse(BaseModel):
-    ok: bool = Field(description="Indicates whether the hook was processed successfully.")
-    forwarded_to_php: Optional[bool] = Field(None, description="Whether the job was forwarded to the PHP AST analysis service.")
-    php_status: Optional[int] = Field(None, description="HTTP status code returned by the PHP service.")
-    forwarded_to_node: Optional[bool] = Field(None, description="Whether extracted text was forwarded to the web app's RAG indexing callback.")
-    node_status: Optional[int] = Field(None, description="HTTP status code returned by the web app's callback.")

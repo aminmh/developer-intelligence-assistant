@@ -60,6 +60,22 @@ return [
             'report' => false,
         ],
 
+        // Separate bucket used by the RAG document upload pipeline (tusd's S3
+        // store target) -- distinct from the 'projects' bucket used by the
+        // ZIP/AST feature above, same MinIO credentials/endpoint.
+        'tus_uploads' => [
+            'driver' => 's3',
+            'key' => env('AWS_ACCESS_KEY_ID'),
+            'secret' => env('AWS_SECRET_ACCESS_KEY'),
+            'region' => env('AWS_DEFAULT_REGION'),
+            'bucket' => env('AWS_TUS_BUCKET', 'tus-uploads'),
+            'url' => env('AWS_URL'),
+            'endpoint' => env('AWS_ENDPOINT'),
+            'use_path_style_endpoint' => env('AWS_USE_PATH_STYLE_ENDPOINT', false),
+            'throw' => false,
+            'report' => false,
+        ],
+
     ],
 
     /*
