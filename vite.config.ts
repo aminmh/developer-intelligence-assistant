@@ -22,7 +22,7 @@ export default defineConfig(() => {
         // tusd itself still needs its own CORS config, since the browser
         // uploads directly to it (not proxied) for true resumability.
         '/upload-api': {
-          target: 'http://localhost:9002',
+          target: 'http://localhost:9003',
           changeOrigin: true,
           rewrite: (path) => path.replace(/^\/upload-api/, ''),
         },

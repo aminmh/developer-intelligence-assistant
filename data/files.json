@@ -1,1 +1,13 @@
-[]
+[
+  {
+    "id": "file_1784371844540_zo65oj6",
+    "name": "storage-test.zip",
+    "type": "zip",
+    "size": 193,
+    "chunkCount": 0,
+    "uploadedAt": "2026-07-18T10:50:44.540Z",
+    "status": "failed",
+    "uploadSessionId": "75d8d00d-f95e-4fdc-9b5c-fbb064248586",
+    "error": "Embedding chunk 1/1 failed: {\"error\":{\"code\":400,\"message\":\"API key not valid. Please pass a valid API key.\",\"status\":\"INVALID_ARGUMENT\",\"details\":[{\"@type\":\"type.googleapis.com/google.rpc.ErrorInfo\",\"reason\":\"API_KEY_INVALID\",\"domain\":\"googleapis.com\",\"metadata\":{\"service\":\"generativelanguage.googleapis.com\"}},{\"@type\":\"type.googleapis.com/google.rpc.LocalizedMessage\",\"locale\":\"en-US\",\"message\":\"API key not valid. Please pass a valid API key.\"}]}}. Please verify your embedding model config or secrets."
+  }
+]

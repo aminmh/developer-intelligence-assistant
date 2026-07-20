@@ -55,15 +55,17 @@ async function startServer() {
     }
   });
 
-  // Upload PDF, Markdown, Text files
+  // Upload a file for indexing. The client sends raw base64 bytes only —
+  // type detection, validation, and extraction strategy are the backend's
+  // responsibility (see RAGService.uploadFile).
   app.post('/api/upload', async (req, res) => {
     try {
-      const { name, type, size, content } = req.body;
-      if (!name || !type || content === undefined) {
-        return res.status(400).json({ success: false, error: 'Missing name, type, or content in payload.' });
+      const { name, size, content } = req.body;
+      if (!name || content === undefined) {
+        return res.status(400).json({ success: false, error: 'Missing name or content in payload.' });
       }
 
-      const file = await RAGService.uploadFile(name, type, size || 0, content);
+      const file = await RAGService.uploadFile(name, size || 0, content);
       res.json({ success: true, file });
     } catch (error: any) {
       console.error('File upload error:', error);

@@ -248,6 +248,18 @@ export function splitTextIntoChunks(text: string, chunkSize: number, chunkOverla
   return chunks.filter(c => c.length > 10); // ignore micro chunks
 }
 
+// Accepted upload extensions and their display type label. The backend is the
+// single source of truth for this (the frontend no longer validates or maps
+// file types itself — it just uploads bytes).
+const SUPPORTED_EXTENSIONS = ['.pdf', '.zip', '.md', '.txt', '.js', '.ts', '.tsx', '.json'];
+
+function labelForExtension(ext: string): string {
+  if (ext === '.pdf') return 'pdf';
+  if (ext === '.zip') return 'zip';
+  if (ext === '.md') return 'markdown';
+  return 'text';
+}
+
 // Number of chunks embedded concurrently per batch (bounds embedding wall-clock
 // for huge documents without depending on an unverified provider batch API).
 const EMBED_BATCH_SIZE = 5;
@@ -349,25 +361,31 @@ export const RAGService = {
     return uploadedFiles;
   },
 
-  // Parse, chunk, embed and index file (inline, small-file path)
-  async uploadFile(name: string, type: string, size: number, contentBase64OrText: string): Promise<UploadedFile> {
-    const fileId = `file_${Date.now()}_${Math.random().toString(36).substring(2, 9)}`;
-    let text = '';
+  // Parse, chunk, embed and index file (inline, small-file path). The client
+  // sends raw base64 bytes only — type detection, validation, and extraction
+  // strategy are entirely the backend's responsibility.
+  async uploadFile(name: string, size: number, contentBase64: string): Promise<UploadedFile> {
+    const ext = path.extname(name).toLowerCase();
+    if (!SUPPORTED_EXTENSIONS.includes(ext)) {
+      throw new Error(`Unsupported file type "${ext || name}". Accepted: ${SUPPORTED_EXTENSIONS.join(', ')}`);
+    }
 
-    // Extract text depending on file type
-    if (type.toLowerCase() === 'pdf' || name.toLowerCase().endsWith('.pdf')) {
-      const buffer = Buffer.from(contentBase64OrText, 'base64');
+    const fileId = `file_${Date.now()}_${Math.random().toString(36).substring(2, 9)}`;
+    const buffer = Buffer.from(contentBase64, 'base64');
+    const type = labelForExtension(ext);
+
+    let text = '';
+    if (ext === '.pdf') {
       const parser = new PDFParse({ data: buffer });
       const parsed = await parser.getText();
       text = parsed.text;
-    } else if (type.toLowerCase() === 'zip' || name.toLowerCase().endsWith('.zip')) {
+    } else if (ext === '.zip') {
       // ZIP is accepted but its contents are not extracted/parsed. Index a
       // placeholder rather than treating the binary archive bytes as text,
       // which would flood chunking/embedding with meaningless garbage.
       text = `Uploaded ZIP archive: ${name} (binary content, not text-indexed).`;
     } else {
-      // Markdown or standard Text - direct reading
-      text = contentBase64OrText;
+      text = buffer.toString('utf-8');
     }
 
     const { chunkCount } = await chunkEmbedAndStore(fileId, name, text);

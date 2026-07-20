@@ -1,8 +1,8 @@
 import * as tus from 'tus-js-client';
 
-// Base URL of python-api, which mints RAG upload sessions and receives tusd's
+// Base URL of php-ast, which mints RAG upload sessions and receives tusd's
 // post-finish webhook. Defaults to the host-published dev port.
-const UPLOAD_API_URL = (import.meta.env.VITE_UPLOAD_API_URL || 'http://localhost:9002').replace(/\/+$/, '');
+const UPLOAD_API_URL = (import.meta.env.VITE_UPLOAD_API_URL || 'http://localhost:9003').replace(/\/+$/, '');
 
 export interface TusUploadProgress {
   bytesUploaded: number;

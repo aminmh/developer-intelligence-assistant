@@ -171,13 +171,6 @@ const processFiles = async (fileList: FileList) => {
 
   for (let i = 0; i < fileList.length; i++) {
     const file = fileList[i];
-    const extension = file.name.split('.').pop()?.toLowerCase();
-
-    if (!['pdf', 'md', 'txt', 'js', 'ts', 'tsx', 'json', 'zip'].includes(extension || '')) {
-      triggerToast(`Unsupported file type: ${file.name}. Please upload PDF, ZIP, MD, or text files.`, false);
-      failCount++;
-      continue;
-    }
 
     if (file.size >= UPLOAD_THRESHOLD_BYTES) {
       // Large files: resumable direct-to-tusd upload, indexed asynchronously.
@@ -187,36 +180,21 @@ const processFiles = async (fileList: FileList) => {
     }
 
     try {
-      const reader = new FileReader();
-      const isPdf = extension === 'pdf';
-      const isZip = extension === 'zip';
-      // ZIP is binary, same as PDF — read as base64 rather than text so the
-      // bytes aren't mangled by text-decoding.
-      const isBinary = isPdf || isZip;
-
-      const fileContentPromise = new Promise<string>((resolve, reject) => {
+      // Always read as base64 — binary-safe for any file type. The backend
+      // decides what's supported and how to extract it; the client just
+      // ships bytes.
+      const content = await new Promise<string>((resolve, reject) => {
+        const reader = new FileReader();
         reader.onerror = () => reject(new Error('File reading error.'));
-        if (isBinary) {
-          reader.readAsDataURL(file);
-          reader.onload = () => {
-            const result = reader.result as string;
-            const base64 = result.split(',')[1];
-            resolve(base64);
-          };
-        } else {
-          reader.readAsText(file);
-          reader.onload = () => resolve(reader.result as string);
-        }
+        reader.onload = () => resolve((reader.result as string).split(',')[1]);
+        reader.readAsDataURL(file);
       });
-
-      const content = await fileContentPromise;
 
       const response = await makeRequest('/api/upload', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           name: file.name,
-          type: isPdf ? 'pdf' : (isZip ? 'zip' : (extension === 'md' ? 'markdown' : 'text')),
           size: file.size,
           content,
         }),
