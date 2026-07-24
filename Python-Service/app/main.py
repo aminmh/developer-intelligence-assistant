@@ -1,6 +1,7 @@
 from contextlib import asynccontextmanager
 from typing import Annotated
-from fastapi import FastAPI, HTTPException, Query
+from fastapi import FastAPI, HTTPException, Header, Query
+from fastapi.responses import StreamingResponse
 from indexer import CodeIntelligenceIndex
 from settings import settings
 from models import (
@@ -9,8 +10,15 @@ from models import (
     SearchResponse,
     SymbolLookupResponse,
     CallersResponse,
-    CalleesResponse
+    CalleesResponse,
+    DownloadJobResponse,
 )
+import jwt as pyjwt
+import uuid
+import os
+import io
+from datetime import datetime, timezone, timedelta
+from pathlib import Path
 
 
 service = CodeIntelligenceIndex()
@@ -181,4 +189,94 @@ def callees(class_name: str, method_name: str):
         source=f"{class_name}::{method_name}",
         count=len(rows),
         items=rows,
+    )
+
+
+@app.post(
+    "/download-jobs",
+    tags=["Upload & TUS"],
+    summary="Create Download Job",
+    description=(
+        "Stores parsed embeddable text received from the PHP service and returns "
+        "a signed JWT download token. The client uses this token to download the "
+        "result via GET /download/{token}."
+    ),
+    response_model=DownloadJobResponse,
+    responses={401: {"description": "Missing or invalid internal secret"}},
+)
+def create_download_job(
+    body: dict,
+    x_internal_secret: Annotated[str | None, Header(alias="X-Internal-Secret")] = None,
+):
+    if x_internal_secret != settings.internal_secret:
+        raise HTTPException(status_code=401, detail="Unauthorized")
+
+    filename = body.get("filename")
+    text = body.get("text")
+    if not filename or not isinstance(text, str):
+        raise HTTPException(status_code=400, detail="Missing filename or text")
+
+    download_id = str(uuid.uuid4())
+    download_dir = Path(settings.download_dir)
+    download_dir.mkdir(parents=True, exist_ok=True)
+    file_path = download_dir / f"{download_id}.txt"
+    file_path.write_text(text, encoding="utf-8")
+
+    expires_at = datetime.now(timezone.utc) + timedelta(hours=24)
+
+    token = pyjwt.encode({
+        "download_id": download_id,
+        "filename": filename,
+        "exp": expires_at,
+    }, settings.download_token_secret, algorithm="HS256")
+
+    return {
+        "download_token": token,
+        "download_url": f"http://localhost:9002/download/{token}",
+        "expires_at": expires_at.isoformat(),
+    }
+
+
+@app.get(
+    "/download/{token}",
+    tags=["Upload & TUS"],
+    summary="Download Parsed Result",
+    description=(
+        "Validates the JWT download token and returns the parsed embeddable text "
+        "file as a streaming plain-text response."
+    ),
+    responses={
+        200: {"description": "Streaming text file"},
+        401: {"description": "Invalid or expired token"},
+        404: {"description": "File not found"},
+    },
+)
+def download_result(token: str):
+    try:
+        claims = pyjwt.decode(
+            token, settings.download_token_secret, algorithms=["HS256"]
+        )
+    except pyjwt.ExpiredSignatureError:
+        raise HTTPException(status_code=401, detail="Download token has expired")
+    except pyjwt.InvalidTokenError:
+        raise HTTPException(status_code=401, detail="Invalid download token")
+
+    download_id = claims.get("download_id")
+    filename = claims.get("filename", "result.txt")
+    file_path = Path(settings.download_dir) / f"{download_id}.txt"
+
+    if not file_path.is_file():
+        raise HTTPException(status_code=404, detail="File not found or expired")
+
+    def iterfile():
+        with open(file_path, "rb") as f:
+            yield from f
+
+    return StreamingResponse(
+        iterfile(),
+        media_type="text/plain; charset=utf-8",
+        headers={
+            "Content-Disposition": f'attachment; filename="{filename}"',
+            "Cache-Control": "no-cache",
+        },
     )

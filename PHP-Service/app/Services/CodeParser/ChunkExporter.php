@@ -128,17 +128,52 @@ final class ChunkExporter
      */
     public function toTextFile(array $chunks, string $absolutePath): void
     {
-        $parts = [];
+        $tmpPath = $absolutePath . '.tmp.' . uniqid('', true);
 
+        try {
+            $stream = fopen($tmpPath, 'w');
+            if (!$stream) {
+                throw new \RuntimeException("Could not open temp file for writing: {$tmpPath}");
+            }
+
+            $this->toTextStream($chunks, $stream);
+            fclose($stream);
+
+            if (!rename($tmpPath, $absolutePath)) {
+                throw new \RuntimeException("Could not move temp file to destination: {$absolutePath}");
+            }
+        } catch (\Throwable $e) {
+            if (isset($stream) && is_resource($stream)) {
+                fclose($stream);
+            }
+            if (file_exists($tmpPath)) {
+                @unlink($tmpPath);
+            }
+            throw $e;
+        }
+    }
+
+    /**
+     * Write chunks as embeddable text to an open stream resource.
+     *
+     * Same format as toTextFile() but writes incrementally via fwrite(),
+     * suitable for streaming HTTP responses or stdout.
+     *
+     * @param CodeChunk[] $chunks
+     * @param resource    $stream  Open writable stream handle
+     */
+    public function toTextStream(array $chunks, $stream): void
+    {
         // File-level header
-        $parts[] = implode("\n", [
+        fwrite($stream, implode("\n", [
             'Autopatch — embeddable text export',
             'Generated: ' . now()->toIso8601String(),
             'Total chunks: ' . count($chunks),
             'Format: toEmbeddableText() — optimised for LLM context windows',
             str_repeat('=', 64),
             '',
-        ]);
+            '',
+        ]));
 
         $total = count($chunks);
 
@@ -149,22 +184,31 @@ final class ChunkExporter
                 : "{$chunk->name}()";
             $location = "{$chunk->file}:{$chunk->startLine}";
 
-            // ── Chunk header ──────────────────────────────────────────────
-            $parts[] = str_repeat('=', 64);
-            $parts[] = "[{$position}/{$total}] {$label}  •  {$location}";
-            $parts[] = str_repeat('=', 64);
-
-            // ── Embeddable text body ──────────────────────────────────────
-            // toEmbeddableText() returns: docblock + structured header + code.
-            // This is exactly what the embedding model and the LLM should see.
-            $parts[] = $chunk->toEmbeddableText();
-
-            // ── Separator between chunks ──────────────────────────────────
-            $parts[] = '';
-            $parts[] = '';
+            fwrite($stream, str_repeat('=', 64) . "\n");
+            fwrite($stream, "[{$position}/{$total}] {$label}  •  {$location}\n");
+            fwrite($stream, str_repeat('=', 64) . "\n");
+            fwrite($stream, $chunk->toEmbeddableText() . "\n");
+            fwrite($stream, "\n\n");
         }
+    }
 
-        $this->writeFile($absolutePath, implode("\n", $parts));
+    /**
+     * Render chunks as embeddable text and return as a single string.
+     *
+     * Uses php://temp internally to avoid holding the full output in a
+     * constantly growing string buffer while building.
+     *
+     * @param CodeChunk[] $chunks
+     */
+    public function toTextString(array $chunks): string
+    {
+        $stream = fopen('php://temp', 'r+');
+        $this->toTextStream($chunks, $stream);
+        rewind($stream);
+        $text = stream_get_contents($stream);
+        fclose($stream);
+
+        return $text;
     }
 
     /**

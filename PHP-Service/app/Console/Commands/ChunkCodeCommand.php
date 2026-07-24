@@ -60,6 +60,7 @@ class ChunkCodeCommand extends Command
         {--output=table     : Console output format: table | json | summary | none}
         {--batch=20         : Number of chunks per vector DB upsert batch}
         {--no-index         : Skip vector DB indexing (export or display only)}
+        {--stream           : Stream text output to stdout (implies --export-format=text --no-index)}
     ';
 
     protected $description = 'Parse PHP source files into AST chunks, index them, and/or export to JSON/YAML/text';
@@ -111,9 +112,17 @@ class ChunkCodeCommand extends Command
         $batchSize   = max(1, (int) $this->option('batch'));
         $exportPath  = $this->option('export-path');
         $consoleOut  = $this->option('output') ?? 'table';
+        $stream      = (bool) $this->option('stream');
 
-        // Infer export format from file extension, allow override via --export-format
-        $exportFormat = $this->resolveExportFormat($exportPath);
+        // --stream implies text format and no indexing
+        if ($stream) {
+            $noIndex      = true;
+            $exportFormat = 'text';
+            $consoleOut   = 'none';
+        } else {
+            // Infer export format from file extension, allow override via --export-format
+            $exportFormat = $this->resolveExportFormat($exportPath);
+        }
 
         // ── Show scan plan ─────────────────────────────────────────────────────
         $this->renderScanPlan($paths, $isDryRun, $noIndex, $batchSize, $exportPath, $exportFormat);
@@ -125,11 +134,26 @@ class ChunkCodeCommand extends Command
             $chunks    = $this->scanPath($chunker, $absolutePath, $label);
             $allChunks = array_merge($allChunks, $chunks);
         }
-
         if (empty($allChunks)) {
             $this->newLine();
             $this->components->warn('No chunks produced. Check that the paths contain .php files.');
+
             return self::EXIT_NOTHING_TO_SCAN;
+        }
+
+        // ── Stream to stdout ────────────────────────────────────────────────────
+        if ($stream) {
+            $handle = fopen('php://stdout', 'w');
+            if (!$handle) {
+                $this->components->error('Could not open stdout for streaming.');
+
+                return self::EXIT_EXPORT_FAILED;
+            }
+
+            $exporter->toTextStream($allChunks, $handle);
+            fclose($handle);
+
+            return self::EXIT_OK;
         }
 
         // ── Export to file ─────────────────────────────────────────────────────

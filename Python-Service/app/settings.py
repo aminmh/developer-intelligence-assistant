@@ -21,6 +21,10 @@ class Settings(BaseModel):
         "nomic-embed-text",
     )
 
+    download_dir: str = os.getenv("DOWNLOAD_DIR", "/app/downloads")
+    download_token_secret: str = os.getenv("DOWNLOAD_TOKEN_SECRET", "change-me")
+    internal_secret: str = os.getenv("RAG_CALLBACK_SECRET", "change-me")
+
 
 settings = Settings()
 

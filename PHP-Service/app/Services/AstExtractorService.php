@@ -46,7 +46,7 @@ class AstExtractorService
         }
     }
 
-    protected function extractSafely(string $zipPath, string $dest): void
+    public function extractSafely(string $zipPath, string $dest): void
     {
         $zip = new ZipArchive();
         if ($zip->open($zipPath) !== true) {

@@ -94,3 +94,9 @@ class CalleesResponse(BaseModel):
     source: str = Field(description="The source symbol in class_name::method_name format.")
     count: int = Field(description="Number of callees found.")
     items: List[CalleeItem] = Field(description="List of callee symbols.")
+
+
+class DownloadJobResponse(BaseModel):
+    download_token: str = Field(description="JWT token for downloading the parsed result.")
+    download_url: str = Field(description="Full URL to download the result file.")
+    expires_at: str = Field(description="ISO 8601 expiration timestamp of the download token.")
