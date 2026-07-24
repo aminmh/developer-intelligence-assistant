@@ -14,10 +14,6 @@ export default defineConfig(() => {
     server: {
       port: 3000,
       proxy: {
-        '/api': {
-          target: 'http://localhost:8000',
-          changeOrigin: true,
-        },
         // Dev convenience: sidesteps CORS for RAG upload-session creation.
         // tusd itself still needs its own CORS config, since the browser
         // uploads directly to it (not proxied) for true resumability.

@@ -1,7 +1,19 @@
 import express from 'express';
 import path from 'path';
 import { createServer as createViteServer } from 'vite';
+import dotenv from 'dotenv';
 import { RAGService } from './src/server/rag';
+import { UploadedFile } from './src/types';
+
+dotenv.config();
+
+function labelForExtension(filename: string): string {
+  const ext = path.extname(filename).toLowerCase();
+  if (ext === '.pdf') return 'pdf';
+  if (ext === '.zip') return 'zip';
+  if (ext === '.md') return 'markdown';
+  return 'text';
+}
 
 async function startServer() {
   const app = express();
@@ -45,10 +57,37 @@ async function startServer() {
     }
   });
 
-  // Get uploaded files list
-  app.get('/api/files', (req, res) => {
+  // Get uploaded files list (local + PHP-service MinIO files merged)
+  app.get('/api/files', async (req, res) => {
     try {
-      const files = RAGService.getFiles();
+      const files: UploadedFile[] = [...RAGService.getFiles()];
+      const seen = new Set(files.map(f => f.uploadSessionId).filter(Boolean));
+
+      // Fetch files from PHP service (TUS uploads stored in MinIO/rag-uploads)
+      const phpUrl = process.env.PHP_SERVICE_URL || 'http://127.0.0.1:9003';      
+      try {
+        const phpRes = await fetch(`${phpUrl}/api/rag/files`);        
+        if (phpRes.ok) {
+          const data = await phpRes.json() as { files?: any[] };
+          for (const f of data.files ?? []) {
+            if (f.upload_session_id && seen.has(f.upload_session_id)) continue;
+            seen.add(f.upload_session_id);
+            files.push({
+              id: f.upload_session_id ?? f.filename,
+              name: f.filename,
+              type: labelForExtension(f.filename),
+              size: f.size ?? 0,
+              chunkCount: 0,
+              uploadedAt: f.last_modified ?? new Date().toISOString(),
+              status: 'ready',
+              uploadSessionId: f.upload_session_id ?? undefined,
+            });
+          }
+        }
+      } catch (err: any) {
+        console.error('[files] PHP service unreachable, using local files only:', err.message);
+      }
+
       res.json({ success: true, files });
     } catch (error: any) {
       res.status(500).json({ success: false, error: error.message });
@@ -94,17 +133,41 @@ async function startServer() {
       res.status(500).json({ success: false, error: error.message });
     }
   });
-
   // Delete file
   app.delete('/api/files/:id', async (req, res) => {
     try {
       const fileId = req.params.id;
-      const deleted = await RAGService.deleteFile(fileId);
-      if (deleted) {
-        res.json({ success: true, message: 'File deleted successfully.' });
-      } else {
-        res.status(404).json({ success: false, error: 'File not found.' });
+
+      // Capture filename + session before deletion so we can forward to PHP
+      const files = RAGService.getFiles();
+      const file = files.find(f => f.id === fileId);
+      const fileName = file?.name ?? req.body?.filename ?? null;
+      const uploadSessionId = file?.uploadSessionId ?? null;
+
+      const deleted = file ? await RAGService.deleteFile(fileId) : true;
+
+      // Also delete from PHP service (MinIO-backed rag-uploads storage)
+      if (fileName) {
+        const phpUrl = process.env.PHP_SERVICE_URL || 'http://127.0.0.1:9003';
+        try {
+          await fetch(`${phpUrl}/api/rag/files`, {
+            method: 'DELETE',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              filename: fileName,
+              upload_session_id: uploadSessionId ?? fileId,
+            }),
+          });
+        } catch {
+          console.error('[files] Failed to delete from PHP service');
+        }
       }
+
+      if (!deleted) {
+        return res.status(404).json({ success: false, error: 'File not found.' });
+      }
+
+      res.json({ success: true, message: 'File deleted successfully.' });
     } catch (error: any) {
       res.status(500).json({ success: false, error: error.message });
     }

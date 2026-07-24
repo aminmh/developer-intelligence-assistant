@@ -10,6 +10,8 @@ services:
     container_name: web
     env_file:
       - .env
+    environment:
+      PHP_SERVICE_URL: http://php-ast:9003
     ports:
       - "3000:3000"
     volumes:
@@ -28,6 +30,7 @@ services:
       - .env
     environment:
       NODE_ENV: development
+      PHP_SERVICE_URL: http://php-ast:9003
     ports:
       - "3000:3000"
     volumes:

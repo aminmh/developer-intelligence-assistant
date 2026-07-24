@@ -8,6 +8,7 @@ import {
   Search 
 } from 'lucide-vue-next';
 import { UploadedFile, SearchMatch } from '../types';
+import ConfirmModal from './ConfirmModal.vue';
 
 const props = defineProps<{
   files: UploadedFile[];
@@ -25,6 +26,8 @@ const emit = defineEmits<{
 
 const dragOver = ref(false);
 const searchInput = ref('');
+const showDeleteConfirm = ref(false);
+const selectedFile = ref<UploadedFile | null>(null);
 
 const handleFileUpload = (event: Event) => {
   const target = event.target as HTMLInputElement;
@@ -46,7 +49,21 @@ const triggerUpload = () => {
 };
 
 const confirmDelete = (file: UploadedFile) => {
-  emit('deleteFile', file.id, file.name);
+  selectedFile.value = file;
+  showDeleteConfirm.value = true;
+};
+
+const handleDeleteConfirm = () => {
+  if (selectedFile.value) {
+    emit('deleteFile', selectedFile.value.id, selectedFile.value.name);
+  }
+  showDeleteConfirm.value = false;
+  selectedFile.value = null;
+};
+
+const handleDeleteCancel = () => {
+  showDeleteConfirm.value = false;
+  selectedFile.value = null;
 };
 
 const onSearch = () => {
@@ -213,5 +230,13 @@ const onSearch = () => {
         </div>
       </div>
     </div>
+
+    <ConfirmModal
+      :show="showDeleteConfirm"
+      title="Delete File"
+      :message="`Are you sure you want to delete ${selectedFile?.name ?? ''}? This action cannot be undone.`"
+      @confirm="handleDeleteConfirm"
+      @cancel="handleDeleteCancel"
+    />
   </div>
 </template>

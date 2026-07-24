@@ -2,7 +2,9 @@ export interface RAGConfig {
   llmMode: 'gemini' | 'local';
   localLlmUrl: string;
   localLlmModel: string;
-  embeddingMode: 'gemini' | 'huggingface';
+  embeddingMode: 'gemini' | 'huggingface' | 'ollama';
+  ollamaUrl: string;
+  ollamaModel: string;
   hfModel: string;
   hfToken: string;
   chunkSize: number;

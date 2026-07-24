@@ -23,7 +23,9 @@ let ragConfig: RAGConfig = {
   llmMode: 'gemini',
   localLlmUrl: 'http://localhost:11434',
   localLlmModel: 'llama3',
-  embeddingMode: 'gemini',
+  embeddingMode: 'ollama',
+  ollamaUrl: 'http://localhost:11434',
+  ollamaModel: 'nomic-embed-text',
   hfModel: 'sentence-transformers/all-MiniLM-L6-v2',
   hfToken: '',
   chunkSize: 500,
@@ -143,8 +145,33 @@ async function getEmbedding(text: string): Promise<number[]> {
     } else {
       throw new Error('Failed to extract embedding values from Gemini API response');
     }
-  } else {
-    // HuggingFace embedding API
+  }
+
+  if (ragConfig.embeddingMode === 'ollama') {
+    const response = await fetch(`${ragConfig.ollamaUrl}/api/embeddings`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        model: ragConfig.ollamaModel,
+        prompt: text,
+      }),
+    });
+
+    if (!response.ok) {
+      const errText = await response.text();
+      throw new Error(`Ollama Embedding failed (Status ${response.status}): ${errText || response.statusText}. Is Ollama running at ${ragConfig.ollamaUrl}?`);
+    }
+
+    const result = await response.json();
+    if (result.embedding && Array.isArray(result.embedding)) {
+      return result.embedding;
+    }
+
+    throw new Error('Ollama Embedding did not return a valid embedding vector');
+  }
+
+  // HuggingFace embedding API
+  if (ragConfig.embeddingMode === 'huggingface') {
     const url = `https://api-inference.huggingface.co/pipeline/feature-extraction/${ragConfig.hfModel}`;
     const headers: Record<string, string> = {
       'Content-Type': 'application/json',
@@ -177,6 +204,8 @@ async function getEmbedding(text: string): Promise<number[]> {
     }
     throw new Error('HuggingFace Embedding did not return a valid nested numeric vector');
   }
+
+  throw new Error(`Unsupported embedding mode: ${ragConfig.embeddingMode}`);
 }
 
 // Qdrant integration helpers

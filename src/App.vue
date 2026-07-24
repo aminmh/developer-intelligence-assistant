@@ -25,6 +25,8 @@ const activeTab = ref<'chat' | 'files' | 'config'>('chat');
 
 const config = ref<RAGConfig>({
   llmMode: 'gemini',
+  ollamaModel: 'gemma3-4b',
+  ollamaUrl: 'http://localhost:11434',
   localLlmUrl: 'http://localhost:11434',
   localLlmModel: 'llama3',
   embeddingMode: 'gemini',
@@ -223,9 +225,12 @@ const processFiles = async (fileList: FileList) => {
 };
 
 const deleteFile = async (id: string, name: string) => {
-  if (!confirm(`Are you sure you want to delete "${name}"?`)) return;
   try {
-    const res = await makeRequest(`/api/files/${id}`, { method: 'DELETE' });
+    const res = await makeRequest(`/api/files/${id}`, {
+      method: 'DELETE',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ filename: name }),
+    });
     const data = await res.json();
     if (data.success || data.message) {
       triggerToast(`File "${name}" deleted.`);
