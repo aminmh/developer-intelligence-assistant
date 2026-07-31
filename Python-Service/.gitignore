@@ -2,3 +2,4 @@ __pycache__
 report.json
 logs/
 downloads/
+tmp

@@ -5,6 +5,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 from indexer import CodeIntelligenceIndex
 from settings import settings
+from router import classify as semantic_classify
 from models import (
     HealthResponse,
     RebuildResponse,
@@ -504,3 +505,20 @@ def indexing_status(download_id: str):
     if not status_path.is_file():
         return {"status": "unknown", "total": 0, "indexed": 0}
     return json.loads(status_path.read_text())
+
+
+@app.post(
+    "/classify",
+    tags=["Code Intelligence"],
+    summary="Classify User Prompt",
+    description=(
+        "Uses Semantic Router with Ollama embeddings to classify a user prompt "
+        "into one of six categories: code_explain, code_refactor, debug, search, "
+        "knowledge, or chat. Returns the route name and confidence score."
+    ),
+)
+def classify_prompt(body: dict):
+    prompt = body.get("prompt", "")
+    if not prompt or not isinstance(prompt, str):
+        raise HTTPException(status_code=400, detail="Missing or invalid prompt")
+    return semantic_classify(prompt)
