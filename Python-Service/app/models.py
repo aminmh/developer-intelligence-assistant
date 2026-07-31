@@ -97,6 +97,28 @@ class CalleesResponse(BaseModel):
 
 
 class DownloadJobResponse(BaseModel):
+    download_id: str = Field(description="Unique job identifier for status polling.")
     download_token: str = Field(description="JWT token for downloading the parsed result.")
     download_url: str = Field(description="Full URL to download the result file.")
     expires_at: str = Field(description="ISO 8601 expiration timestamp of the download token.")
+    collection_name: Optional[str] = Field(None, description="Qdrant collection name if chunks were indexed.")
+    chunk_count: Optional[int] = Field(None, description="Number of chunks indexed into the vector DB.")
+
+
+class CodeChunkModel(BaseModel):
+    type: str = Field(description="Chunk type: function, method, closure.")
+    name: str = Field(description="Function or method name.")
+    class_: Optional[str] = Field(None, alias="class", description="Fully-qualified class name.")
+    file: Optional[str] = Field(None, description="Source file path.")
+    start_line: Optional[int] = Field(None, description="Start line in source.")
+    end_line: Optional[int] = Field(None, description="End line in source.")
+    modifiers: Optional[List[str]] = Field(None, description="Visibility/static modifiers.")
+    parameters: Optional[List[dict]] = Field(None, description="Function parameter list.")
+    return_type: Optional[str] = Field(None, description="Return type hint.")
+    code: str = Field(default="", description="Source code of the symbol.")
+    docblock: Optional[str] = Field(None, description="PHPDoc / docblock string.")
+    calls: Optional[Dict[str, Any]] = Field(None, description="Call graph data.")
+    has_docblock: Optional[bool] = Field(None, description="Whether docblock exists.")
+
+    class Config:
+        populate_by_name = True

@@ -127,6 +127,15 @@ return [
             'path' => storage_path('logs/laravel.log'),
         ],
 
+        // Parse & Index pipeline — dedicated log file for tracing the
+        // ZIP extraction → code chunking → Python indexing flow.
+        'parse_index' => [
+            'driver' => 'single',
+            'path' => storage_path('logs/parse-index.log'),
+            'level' => 'debug',
+            'replace_placeholders' => true,
+        ],
+
     ],
 
 ];
