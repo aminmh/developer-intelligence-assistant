@@ -25,11 +25,11 @@ const activeTab = ref<'chat' | 'files' | 'config'>('chat');
 
 const config = ref<RAGConfig>({
   llmMode: 'gemini',
-  ollamaModel: 'gemma3-4b',
-  ollamaUrl: 'http://localhost:11434',
   localLlmUrl: 'http://localhost:11434',
   localLlmModel: 'llama3',
-  embeddingMode: 'gemini',
+  embeddingMode: 'ollama',
+  ollamaUrl: 'http://localhost:11434',
+  ollamaModel: 'BGE-M3',
   hfModel: 'sentence-transformers/all-MiniLM-L6-v2',
   hfToken: '',
   chunkSize: 500,
@@ -52,6 +52,9 @@ const errorMessage = ref('');
 
 const searchMatches = ref<SearchMatch[]>([]);
 const searchLoading = ref(false);
+const parsingFileId = ref<string | null>(null);
+const indexingProgress = ref({ total: 0, indexed: 0, status: '' });
+const indexedFileIds = ref<Set<string>>(new Set());
 
 interface Message {
   id: string;
@@ -240,6 +243,68 @@ const deleteFile = async (id: string, name: string) => {
     }
   } catch (err: any) {
     triggerToast(`Error: ${err.message}`, false);
+  }
+};
+
+const parseFile = async (id: string, name: string) => {
+  parsingFileId.value = id;
+  indexingProgress.value = { total: 0, indexed: 0, status: '' };
+  triggerToast(`Parsing "${name}" — extracting PHP code...`, true);
+  try {
+    const phpUrl = import.meta.env.VITE_UPLOAD_API_URL || 'http://localhost:9003';
+    const res = await fetch(`${phpUrl}/api/rag/parse-code`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ filename: name }),
+    });
+    const data = await res.json();
+    if (data.already_indexed) {
+      triggerToast(`Already indexed — collection "${data.collection_name}" exists in Qdrant.`, true);
+      indexedFileIds.value = new Set(indexedFileIds.value).add(id);
+      parsingFileId.value = null;
+      return;
+    }
+
+    if (!data.download_token) {
+      triggerToast(data.error || 'Parse failed.', false);
+      parsingFileId.value = null;
+      return;
+    }
+
+    // Poll Python indexing progress
+    const downloadId = data.download_id;
+    const pythonUrl = 'http://localhost:9002';
+    const poll = setInterval(async () => {
+      try {
+        const sRes = await fetch(`${pythonUrl}/download-jobs/${downloadId}/status`);
+        const s = await sRes.json();
+        indexingProgress.value = s;
+        if (s.status === 'done') {
+          clearInterval(poll);
+          triggerToast(`Code indexed — ${s.indexed}/${s.total} chunks in collection ${s.collection_name || ''}`, true);
+          indexedFileIds.value = new Set(indexedFileIds.value).add(id);
+          await fetchFiles();
+          parsingFileId.value = null;
+          indexingProgress.value = { total: 0, indexed: 0, status: '' };
+        }
+      } catch {
+        // Python unreachable — keep polling until timeout
+      }
+    }, 800);
+
+    // Safety: stop polling after 5 minutes
+    setTimeout(() => {
+      clearInterval(poll);
+      if (parsingFileId.value) {
+        triggerToast('Indexing timed out — check Python service.', false);
+        parsingFileId.value = null;
+        indexingProgress.value = { total: 0, indexed: 0, status: '' };
+      }
+    }, 300_000);
+
+  } catch (err: any) {
+    triggerToast(`Parse error: ${err.message}`, false);
+    parsingFileId.value = null;
   }
 };
 
@@ -448,9 +513,13 @@ onMounted(async () => {
         :uploadProgress="uploadProgress"
         :searchMatches="searchMatches"
         :searchLoading="searchLoading"
+        :parsingFileId="parsingFileId"
+        :indexingProgress="indexingProgress"
+        :indexedFileIds="indexedFileIds"
         @uploadFiles="processFiles"
         @deleteFile="deleteFile"
         @performSearchOnly="performSearchOnly"
+        @parseFile="parseFile"
       />
 
       <RAGConfigComponent

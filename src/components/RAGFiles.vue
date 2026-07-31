@@ -5,7 +5,10 @@ import {
   Upload, 
   Trash2, 
   FileCode, 
-  Search 
+  Search,
+  Cpu,
+  Download,
+  CheckCircle2,
 } from 'lucide-vue-next';
 import { UploadedFile, SearchMatch } from '../types';
 import ConfirmModal from './ConfirmModal.vue';
@@ -16,18 +19,23 @@ const props = defineProps<{
   uploadProgress: Record<string, number>;
   searchMatches: SearchMatch[];
   searchLoading: boolean;
+  parsingFileId: string | null;
+  indexingProgress: { total: number; indexed: number; status: string };
+  indexedFileIds: Set<string>;
 }>();
 
 const emit = defineEmits<{
   (e: 'uploadFiles', files: FileList): void;
   (e: 'deleteFile', id: string, name: string): void;
   (e: 'performSearchOnly', query: string): void;
+  (e: 'parseFile', id: string, name: string): void;
 }>();
 
 const dragOver = ref(false);
 const searchInput = ref('');
 const showDeleteConfirm = ref(false);
 const selectedFile = ref<UploadedFile | null>(null);
+const activeFileId = ref<string | null>(null);
 
 const handleFileUpload = (event: Event) => {
   const target = event.target as HTMLInputElement;
@@ -64,6 +72,22 @@ const handleDeleteConfirm = () => {
 const handleDeleteCancel = () => {
   showDeleteConfirm.value = false;
   selectedFile.value = null;
+};
+
+const toggleFileOptions = (file: UploadedFile, event: MouseEvent) => {
+  // Don't toggle on delete button clicks (handled by stop propagation)
+  const target = event.target as HTMLElement;
+  if (target.closest('button')) return;
+
+  activeFileId.value = activeFileId.value === file.id ? null : file.id;
+};
+
+const handleParseFile = () => {
+  const file = props.files.find(f => f.id === activeFileId.value);
+  if (file) {
+    emit('parseFile', file.id, file.name);
+    activeFileId.value = null;
+  }
 };
 
 const onSearch = () => {
@@ -144,39 +168,107 @@ const onSearch = () => {
 
         <!-- Table/List of files -->
         <div v-else class="divide-y divide-slate-800">
-          <div v-for="file in files" :key="file.id" class="px-6 py-4 flex items-center justify-between hover:bg-slate-900/20 transition-all text-left">
-            <div class="flex items-center gap-3 min-w-0">
-              <FileText class="w-5 h-5 text-indigo-400 shrink-0" />
-              <div class="min-w-0">
-                <p class="text-sm font-medium text-slate-200 truncate">{{ file.name }}</p>
-                <p class="text-[10px] text-slate-500 font-mono">
-                  {{ file.chunkCount }} chunk<span v-if="file.chunkCount !== 1">s</span> • {{ file.type.toUpperCase() }} • {{ (file.size / 1024).toFixed(1) }} KB
-                </p>
-                <p v-if="file.status === 'failed'" class="text-[10px] text-red-400 mt-0.5 truncate" :title="file.error">
-                  Failed: {{ file.error || 'Indexing failed.' }}
-                </p>
-              </div>
-              <span
-                v-if="file.status === 'processing'"
-                class="shrink-0 text-[10px] font-mono px-2 py-0.5 rounded-full bg-amber-500/10 text-amber-400 border border-amber-500/20 flex items-center gap-1.5"
-              >
-                <span class="w-1.5 h-1.5 rounded-full bg-amber-400 animate-pulse"></span>
-                Processing…
-              </span>
-              <span
-                v-else-if="file.status === 'failed'"
-                class="shrink-0 text-[10px] font-mono px-2 py-0.5 rounded-full bg-red-500/10 text-red-400 border border-red-500/20"
-              >
-                Failed
-              </span>
-            </div>
-            <button
-              @click="confirmDelete(file)"
-              class="p-2 rounded-lg text-slate-500 hover:text-red-400 hover:bg-red-500/10 transition-all shrink-0"
-              title="Delete file"
+          <div
+            v-for="file in files"
+            :key="file.id"
+            class="cursor-pointer"
+          >
+            <div
+              class="px-6 py-4 flex items-center justify-between transition-all text-left"
+              :class="activeFileId === file.id ? 'bg-indigo-500/10 border-l-2 border-indigo-500' : 'hover:bg-slate-900/20 border-l-2 border-transparent'"
+              @click="toggleFileOptions(file, $event)"
             >
-              <Trash2 class="w-4 h-4" />
-            </button>
+              <div class="flex items-center gap-3 min-w-0">
+                <FileText class="w-5 h-5 text-indigo-400 shrink-0" />
+                <div class="min-w-0">
+                  <p class="text-sm font-medium text-slate-200 truncate">{{ file.name }}</p>
+                  <p class="text-[10px] text-slate-500 font-mono">
+                    {{ file.chunkCount }} chunk<span v-if="file.chunkCount !== 1">s</span> • {{ file.type.toUpperCase() }} • {{ (file.size / 1024).toFixed(1) }} KB
+                  </p>
+                  <p v-if="file.status === 'failed'" class="text-[10px] text-red-400 mt-0.5 truncate" :title="file.error">
+                    Failed: {{ file.error || 'Indexing failed.' }}
+                  </p>
+                </div>
+                <span
+                  v-if="file.status === 'processing'"
+                  class="shrink-0 text-[10px] font-mono px-2 py-0.5 rounded-full bg-amber-500/10 text-amber-400 border border-amber-500/20 flex items-center gap-1.5"
+                >
+                  <span class="w-1.5 h-1.5 rounded-full bg-amber-400 animate-pulse"></span>
+                  Processing…
+                </span>
+                <span
+                  v-else-if="file.status === 'failed'"
+                  class="shrink-0 text-[10px] font-mono px-2 py-0.5 rounded-full bg-red-500/10 text-red-400 border border-red-500/20"
+                >
+                  Failed
+                </span>
+                <span
+                  v-if="parsingFileId === file.id"
+                  class="shrink-0 text-[10px] font-mono px-2 py-0.5 rounded-full bg-indigo-500/10 text-indigo-400 border border-indigo-500/20 flex items-center gap-1.5"
+                >
+                  <span class="w-1.5 h-1.5 rounded-full bg-indigo-400 animate-pulse"></span>
+                  Indexing…
+                </span>
+              </div>
+              <button
+                @click.stop="confirmDelete(file)"
+                class="p-2 rounded-lg text-slate-500 hover:text-red-400 hover:bg-red-500/10 transition-all shrink-0"
+                title="Delete file"
+              >
+                <Trash2 class="w-4 h-4" />
+              </button>
+            </div>
+
+            <!-- Options panel for selected file -->
+            <div
+              v-if="activeFileId === file.id"
+              class="px-6 pb-4 pt-1 border-l-2 border-indigo-500/30 bg-indigo-500/5"
+            >
+              <p class="text-[10px] text-slate-500 mb-2 font-mono">
+                {{ file.type === 'zip' ? 'PHP project archive — parse & index for code intelligence' : 'No code actions available for this file type' }}
+              </p>
+              <span
+                v-if="indexedFileIds.has(file.id) && parsingFileId !== file.id"
+                class="inline-flex items-center gap-1.5 text-[10px] font-mono px-2 py-1 rounded-full bg-emerald-500/10 text-emerald-400 border border-emerald-500/20"
+              >
+                <CheckCircle2 class="w-3 h-3" />
+                Indexed in Qdrant
+              </span>
+              <button
+                v-else-if="file.type === 'zip' && parsingFileId !== file.id"
+                @click="handleParseFile"
+                class="flex items-center gap-1.5 px-3 py-1.5 text-[11px] font-semibold text-white bg-indigo-600 hover:bg-indigo-500 rounded-lg transition-colors shadow-sm shadow-indigo-600/20"
+              >
+                <Cpu class="w-3.5 h-3.5" />
+                Parse & Index Code
+              </button>
+              <div
+                v-if="parsingFileId === file.id && indexingProgress.total > 0"
+                class="space-y-2"
+              >
+                <div class="flex items-center justify-between text-[10px]">
+                  <span class="text-indigo-400 font-mono">
+                    {{ indexingProgress.status === 'upserting' ? 'Saving to Qdrant...' : `Embedding chunks: ${indexingProgress.indexed}/${indexingProgress.total}` }}
+                  </span>
+                  <span class="text-indigo-400 tabular-nums">
+                    {{ ((indexingProgress.indexed / indexingProgress.total) * 100).toFixed(0) }}%
+                  </span>
+                </div>
+                <div class="h-1.5 bg-slate-800 rounded-full overflow-hidden">
+                  <div
+                    class="h-full bg-indigo-500 rounded-full transition-all duration-300"
+                    :style="{ width: `${(indexingProgress.indexed / indexingProgress.total) * 100}%` }"
+                  ></div>
+                </div>
+              </div>
+              <div
+                v-else-if="parsingFileId === file.id"
+                class="flex items-center gap-2 text-[11px] text-indigo-400"
+              >
+                <div class="w-3.5 h-3.5 border-2 border-indigo-400 border-t-transparent rounded-full animate-spin"></div>
+                Extracting PHP code...
+              </div>
+            </div>
           </div>
         </div>
       </div>

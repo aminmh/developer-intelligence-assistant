@@ -17,7 +17,7 @@ interface RagUploadSession {
 }
 
 async function createRagUploadSession(file: File): Promise<RagUploadSession> {
-  const res = await fetch(`${UPLOAD_API_URL}/api/rag/upload-sessions`, {
+  const res = await fetch(`${UPLOAD_API_URL}/api/rag/upload`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ filename: file.name, size: file.size }),

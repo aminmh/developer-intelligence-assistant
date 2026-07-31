@@ -29,7 +29,7 @@ const updateField = <K extends keyof RAGConfig>(key: K, value: RAGConfig[K]) => 
           <Sliders class="w-5 h-5 text-indigo-400" />
           RAG Pipeline Configuration
         </h3>
-        <p class="text-xs text-slate-400 mt-1">Configure your local or cloud LLMs, define HuggingFace embedding indices, and align Qdrant VectorDB connection details.</p>
+        <p class="text-xs text-slate-400 mt-1">Configure your local or cloud LLMs and adjust Qdrant VectorDB connection details.</p>
       </div>
 
       <div class="grid grid-cols-1 md:grid-cols-2 gap-6">
@@ -96,63 +96,6 @@ const updateField = <K extends keyof RAGConfig>(key: K, value: RAGConfig[K]) => 
 
               <div v-else class="p-3 bg-[#11162d] border border-slate-800 rounded-xl text-xs text-indigo-300 font-mono leading-relaxed">
                 🌟 Running **Gemini 3.5 Flash** for rapid reasoning and responses. Ensure your **GEMINI_API_KEY** is configured.
-              </div>
-            </div>
-          </div>
-
-          <!-- Card 2: HuggingFace Embeddings Pipeline Config -->
-          <div class="bg-slate-900/30 border border-slate-800 rounded-2xl p-6 space-y-4">
-            <h4 class="text-xs font-bold text-slate-200 uppercase tracking-wider flex items-center gap-2 border-b border-slate-800 pb-3">
-              <Database class="w-4 h-4 text-indigo-400" />
-              Embeddings Pipeline Settings
-            </h4>
-
-            <div class="space-y-4">
-              <div class="space-y-1.5">
-                <label class="text-xs text-slate-400 font-medium">Embedding Computation Engine</label>
-                <div class="grid grid-cols-2 gap-2">
-                  <button 
-                    type="button" 
-                    @click="updateField('embeddingMode', 'gemini')"
-                    class="px-3 py-2 rounded-xl border text-xs font-semibold transition-all flex items-center justify-center"
-                    :class="config.embeddingMode === 'gemini' ? 'border-indigo-500 bg-indigo-500/10 text-white' : 'border-slate-800 bg-[#0c101f] text-slate-400 hover:text-slate-300'"
-                  >
-                    Gemini API (Cloud)
-                  </button>
-                  <button 
-                    type="button" 
-                    @click="updateField('embeddingMode', 'huggingface')"
-                    class="px-3 py-2 rounded-xl border text-xs font-semibold transition-all flex items-center justify-center"
-                    :class="config.embeddingMode === 'huggingface' ? 'border-emerald-500 bg-emerald-500/10 text-white' : 'border-slate-800 bg-[#0c101f] text-slate-400 hover:text-slate-300'"
-                  >
-                    HuggingFace Inference
-                  </button>
-                </div>
-              </div>
-
-              <div v-if="config.embeddingMode === 'huggingface'" class="space-y-3 pt-1">
-                <div class="space-y-1.5">
-                  <label class="text-xs text-slate-400 font-mono">HF Model Tag</label>
-                  <input 
-                    :value="config.hfModel" 
-                    @input="updateField('hfModel', ($event.target as HTMLInputElement).value)"
-                    type="text" 
-                    class="w-full bg-[#11162d] border border-slate-800 rounded-xl px-4 py-2.5 text-xs font-mono focus:outline-none focus:border-emerald-500 text-slate-200"
-                  />
-                </div>
-                <div class="space-y-1.5">
-                  <div class="flex items-center justify-between">
-                    <label class="text-xs text-slate-400 font-mono">HuggingFace API Token</label>
-                    <span class="text-[9px] text-slate-500">Optional</span>
-                  </div>
-                  <input 
-                    :value="config.hfToken" 
-                    @input="updateField('hfToken', ($event.target as HTMLInputElement).value)"
-                    type="password" 
-                    class="w-full bg-[#11162d] border border-slate-800 rounded-xl px-4 py-2.5 text-xs font-mono focus:outline-none focus:border-emerald-500 text-slate-200"
-                    placeholder="hf_..."
-                  />
-                </div>
               </div>
             </div>
           </div>

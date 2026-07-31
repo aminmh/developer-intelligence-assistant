@@ -94,9 +94,7 @@ async function startServer() {
     }
   });
 
-  // Upload a file for indexing. The client sends raw base64 bytes only —
-  // type detection, validation, and extraction strategy are the backend's
-  // responsibility (see RAGService.uploadFile).
+  // Upload a file for indexing — forwards to PHP service for storage + extraction
   app.post('/api/upload', async (req, res) => {
     try {
       const { name, size, content } = req.body;
@@ -104,7 +102,30 @@ async function startServer() {
         return res.status(400).json({ success: false, error: 'Missing name or content in payload.' });
       }
 
-      const file = await RAGService.uploadFile(name, size || 0, content);
+      // Forward to PHP service for storage and text extraction
+      const phpUrl = process.env.PHP_SERVICE_URL || 'http://127.0.0.1:9003';
+      const phpRes = await fetch(`${phpUrl}/api/rag/upload`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ filename: name, content, size: size || 0 }),
+      });
+
+      if (!phpRes.ok) {
+        const phpErr = await phpRes.json().catch(() => ({ error: phpRes.statusText }));
+        return res.status(phpRes.status).json({ success: false, error: phpErr.error || 'Upload to PHP service failed.' });
+      }
+
+      const phpData = await phpRes.json();
+
+      // Index extracted text locally
+      const file = await RAGService.uploadExtractedText(
+        phpData.filename,
+        phpData.type,
+        phpData.size ?? size ?? 0,
+        phpData.text,
+        phpData.upload_session_id,
+      );
+
       res.json({ success: true, file });
     } catch (error: any) {
       console.error('File upload error:', error);

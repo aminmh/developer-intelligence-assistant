@@ -1,9 +1,8 @@
 import { GoogleGenAI } from '@google/genai';
 import { QdrantClient } from '@qdrant/js-client-rest';
-// @ts-ignore
-import { PDFParse } from 'pdf-parse';
 import * as fs from 'fs';
 import * as path from 'path';
+import 'dotenv/config';
 import { RAGConfig, UploadedFile, FileChunk, SearchMatch, QueryResponse } from '../types';
 
 // In-memory/File-based storage path
@@ -24,8 +23,8 @@ let ragConfig: RAGConfig = {
   localLlmUrl: 'http://localhost:11434',
   localLlmModel: 'llama3',
   embeddingMode: 'ollama',
-  ollamaUrl: 'http://localhost:11434',
-  ollamaModel: 'nomic-embed-text',
+  ollamaUrl: process.env.OLLAMA_URL || 'http://localhost:11434',
+  ollamaModel: process.env.OLLAMA_MODEL || 'BGE-M3',
   hfModel: 'sentence-transformers/all-MiniLM-L6-v2',
   hfToken: '',
   chunkSize: 500,
@@ -277,18 +276,6 @@ export function splitTextIntoChunks(text: string, chunkSize: number, chunkOverla
   return chunks.filter(c => c.length > 10); // ignore micro chunks
 }
 
-// Accepted upload extensions and their display type label. The backend is the
-// single source of truth for this (the frontend no longer validates or maps
-// file types itself — it just uploads bytes).
-const SUPPORTED_EXTENSIONS = ['.pdf', '.zip', '.md', '.txt', '.js', '.ts', '.tsx', '.json'];
-
-function labelForExtension(ext: string): string {
-  if (ext === '.pdf') return 'pdf';
-  if (ext === '.zip') return 'zip';
-  if (ext === '.md') return 'markdown';
-  return 'text';
-}
-
 // Number of chunks embedded concurrently per batch (bounds embedding wall-clock
 // for huge documents without depending on an unverified provider batch API).
 const EMBED_BATCH_SIZE = 5;
@@ -390,32 +377,15 @@ export const RAGService = {
     return uploadedFiles;
   },
 
-  // Parse, chunk, embed and index file (inline, small-file path). The client
-  // sends raw base64 bytes only — type detection, validation, and extraction
-  // strategy are entirely the backend's responsibility.
-  async uploadFile(name: string, size: number, contentBase64: string): Promise<UploadedFile> {
-    const ext = path.extname(name).toLowerCase();
-    if (!SUPPORTED_EXTENSIONS.includes(ext)) {
-      throw new Error(`Unsupported file type "${ext || name}". Accepted: ${SUPPORTED_EXTENSIONS.join(', ')}`);
+  // Index pre-extracted text (from PHP service upload). Replaces the old
+  // uploadFile which decoded base64 and parsed PDF locally — now the PHP
+  // service handles storage and extraction, the web just indexes.
+  async uploadExtractedText(name: string, type: string, size: number, text: string, uploadSessionId?: string): Promise<UploadedFile> {
+    if (!text || text.trim().length === 0) {
+      throw new Error('Extracted file text is empty or invalid.');
     }
 
     const fileId = `file_${Date.now()}_${Math.random().toString(36).substring(2, 9)}`;
-    const buffer = Buffer.from(contentBase64, 'base64');
-    const type = labelForExtension(ext);
-
-    let text = '';
-    if (ext === '.pdf') {
-      const parser = new PDFParse({ data: buffer });
-      const parsed = await parser.getText();
-      text = parsed.text;
-    } else if (ext === '.zip') {
-      // ZIP is accepted but its contents are not extracted/parsed. Index a
-      // placeholder rather than treating the binary archive bytes as text,
-      // which would flood chunking/embedding with meaningless garbage.
-      text = `Uploaded ZIP archive: ${name} (binary content, not text-indexed).`;
-    } else {
-      text = buffer.toString('utf-8');
-    }
 
     const { chunkCount } = await chunkEmbedAndStore(fileId, name, text);
 
@@ -427,6 +397,7 @@ export const RAGService = {
       chunkCount,
       uploadedAt: new Date().toISOString(),
       status: 'ready',
+      uploadSessionId,
     };
 
     uploadedFiles.push(uploadedFile);
