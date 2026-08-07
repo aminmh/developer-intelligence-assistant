@@ -1,11 +1,36 @@
 import express from 'express';
 import path from 'path';
+import * as fs from 'fs';
 import { createServer as createViteServer } from 'vite';
 import dotenv from 'dotenv';
 import { RAGService } from './src/server/rag';
 import { UploadedFile } from './src/types';
 
 dotenv.config();
+
+// Cache LLM answers for orchestration jobs to avoid re-generating on re-poll
+const answerCache = new Map<string, any>();
+
+const PROMPT_LOG_PATH = path.join(process.cwd(), 'data', 'llm-prompts.log');
+
+function logPrompt(userQuery: string, finalPrompt: string) {
+  try {
+    const dir = path.dirname(PROMPT_LOG_PATH);
+    if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
+    const entry = [
+      `[${new Date().toISOString()}]`,
+      `USER_QUERY: ${userQuery}`,
+      `FINAL_PROMPT:`,
+      finalPrompt,
+      '',
+      '-'.repeat(120),
+      '',
+    ].join('\n');
+    fs.appendFileSync(PROMPT_LOG_PATH, entry);
+  } catch {
+    // Log file is best-effort
+  }
+}
 
 function labelForExtension(filename: string): string {
   const ext = path.extname(filename).toLowerCase();
@@ -117,6 +142,23 @@ async function startServer() {
 
       const phpData = await phpRes.json();
 
+      // ZIP files: store only, no indexing — on-demand via orchestrator in chat
+      if (path.extname(name).toLowerCase() === '.zip') {
+        return res.json({
+          success: true,
+          file: {
+            id: phpData.upload_session_id,
+            name,
+            type: 'zip',
+            size: size || phpData.size || 0,
+            chunkCount: 0,
+            uploadedAt: new Date().toISOString(),
+            status: 'ready',
+            uploadSessionId: phpData.upload_session_id,
+          },
+        });
+      }
+
       // Index extracted text locally
       const file = await RAGService.uploadExtractedText(
         phpData.filename,
@@ -194,18 +236,236 @@ async function startServer() {
     }
   });
 
+  // Re-index a stored file via Python service (Qdrant storage)
+  app.post('/api/reindex', async (req, res) => {
+    try {
+      const { filename, uploadSessionId, fileId } = req.body;
+      if (!filename) {
+        return res.status(400).json({ success: false, error: 'Missing filename.' });
+      }
+
+      // Remove old local entry to avoid duplicates
+      if (fileId) {
+        await RAGService.deleteFile(fileId);
+      }
+
+      const phpUrl = process.env.PHP_SERVICE_URL || 'http://127.0.0.1:9003';
+
+      // Extract text from PHP/MinIO
+      const phpRes = await fetch(`${phpUrl}/api/rag/extract`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ filename, upload_session_id: uploadSessionId || undefined }),
+      });
+      if (!phpRes.ok) {
+        const err = await phpRes.json().catch(() => ({ error: 'Extraction failed' }));
+        return res.status(phpRes.status).json({ success: false, error: err.error });
+      }
+
+      const phpData = await phpRes.json();
+
+      // Send to Python for Qdrant indexing (chunks + embed + store)
+      const pythonUrl = process.env.PYTHON_API_URL || 'http://localhost:9002';
+      const pyRes = await fetch(`${pythonUrl}/download-jobs`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'X-Internal-Secret': process.env.RAG_CALLBACK_SECRET || '',
+        },
+        body: JSON.stringify({
+          filename: (phpData.filename || filename).replace(/\.[^/.]+$/, '') + '.txt',
+          text: phpData.text,
+        }),
+      });
+      if (!pyRes.ok) {
+        const err = await pyRes.json().catch(() => ({ error: 'Python indexing failed' }));
+        return res.status(pyRes.status).json({ success: false, error: err.error });
+      }
+
+      const pyData = await pyRes.json();
+
+      // Track locally (no local embedding — everything in Qdrant via Python)
+      const file = await RAGService.addTrackedFile(
+        phpData.filename || filename,
+        phpData.type,
+        0,
+        pyData.chunk_count || 0,
+        phpData.upload_session_id,
+      );
+
+      res.json({ success: true, file });
+    } catch (error: any) {
+      console.error('Reindex error:', error);
+      res.status(500).json({ success: false, error: error.message });
+    }
+  });
+
   // Query RAG system (Semantic retrieval + LLM prompt generation)
   app.post('/api/query', async (req, res) => {
     try {
-      const { query, limit } = req.body;
+      const { query, limit, filename } = req.body;
       if (!query || query.trim() === '') {
         return res.status(400).json({ success: false, error: 'Query parameter is required.' });
       }
 
-      const response = await RAGService.query(query, limit || 4);
-      res.json({ success: true, ...response });
+      const pythonUrl = process.env.PYTHON_API_URL || 'http://localhost:9002';
+      let classification = { route: 'chat', confidence: 0 };
+
+      // Classify if filename attached
+      if (filename) {
+        try {
+          const cRes = await fetch(`${pythonUrl}/classify`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ prompt: query }),
+          });
+          if (cRes.ok) classification = await cRes.json();
+        } catch {
+          // Classification unavailable — fall through
+        }
+
+        // Start orchestration — return job_id immediately for frontend polling
+        try {
+          const oRes = await fetch(`${pythonUrl}/orchestrate`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ route: classification.route, filename, prompt: query }),
+          });
+          if (oRes.ok) {
+            const { job_id } = await oRes.json();
+            return res.json({
+              success: true,
+              phase: 'orchestrating',
+              job_id,
+              classification,
+            });
+          }
+        } catch {
+          // Orchestration unavailable — fall through to direct RAG
+        }
+      }
+
+      // No attachment — simple RAG across all Qdrant collections
+      let toolPrompt = query;
+      try {
+        const sRes = await fetch(`${pythonUrl}/search-all`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ query, limit: 10 }),
+        });
+        if (sRes.ok) {
+          const { results } = await sRes.json();
+          if (results && results.length > 0) {
+            const codeContext = results.map((r: any, i: number) =>
+              `[${i + 1}] ${r.collection} | ${r.payload?.name || r.payload?.class || 'symbol'} (${(r.score * 100).toFixed(0)}%)\n${r.payload?.code || ''}`
+            ).join('\n\n');
+            toolPrompt = `${query}\n\nRetrieved code context from indexed projects:\n${codeContext}`;
+          }
+        }
+      } catch {
+        // Search-all unavailable — use raw query
+      }
+
+      logPrompt(query, toolPrompt);
+      const response = await RAGService.query(toolPrompt, limit || 4);
+      res.json({ success: true, ...response, classification });
     } catch (error: any) {
       console.error('Query execution error:', error);
+      res.status(500).json({ success: false, error: error.message });
+    }
+  });
+
+  // Poll orchestration status + get final LLM answer
+  app.post('/api/query/result', async (req, res) => {
+    try {
+      const { job_id, user_query } = req.body;
+      if (!job_id) {
+        return res.status(400).json({ success: false, error: 'Missing job_id.' });
+      }
+
+      const pythonUrl = process.env.PYTHON_API_URL || 'http://localhost:9002';
+
+      // Check orchestration status
+      const sRes = await fetch(`${pythonUrl}/orchestrate/${job_id}/status`);
+      if (!sRes.ok) {
+        return res.json({ phase: 'orchestrating', job_id, status: 'pending' });
+      }
+
+      const status = await sRes.json();
+      const isDone = status.status === 'done';
+
+      // Return steps for frontend progress
+      const result: any = {
+        phase: isDone ? 'done' : 'orchestrating',
+        job_id,
+        status: status.status,
+        steps: status.steps || [],
+      };
+
+      if (isDone) {
+        // Dedupe: only generate answer once per job
+        if (answerCache.has(job_id)) {
+          const cached = answerCache.get(job_id);
+          // Also return steps so frontend can show progress
+          return res.json({ success: true, phase: 'done', job_id, steps: status.steps || [], ...cached });
+        }
+
+        // Build prompt: user query + tool output + search context
+        const actualQuery = user_query || status.route || 'explain';
+        const targetCollection = (status as any).collection_name || null;
+        const toolOutput = (status as any).tool_output || null;
+        let prompt = actualQuery;
+
+        // Prepend MCP tool output if available
+        if (toolOutput && typeof toolOutput === 'string' && toolOutput.trim()) {
+          prompt = `Project structure:\n\n\`\`\`\n${toolOutput}\n\`\`\`\n\nUser question: ${actualQuery}`;
+        }
+
+        // Append search results from Qdrant (if collection exists)
+        if (targetCollection) {
+          try {
+            const sRes = await fetch(`${pythonUrl}/search-all`, {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({ query: actualQuery, limit: 10, collection: targetCollection }),
+            });
+            if (sRes.ok) {
+              const { results } = await sRes.json();
+              if (results && results.length > 0) {
+                const codeContext = results.map((r: any, i: number) =>
+                  `[${i + 1}] ${r.collection} | ${r.payload?.name || r.payload?.class || 'symbol'} (score: ${(r.score * 100).toFixed(0)}%)\n\`\`\`\n${r.payload?.code || ''}\n\`\`\``
+                ).join('\n\n');
+                prompt += `\n\nRelevant code from indexed projects:\n\n${codeContext}`;
+              }
+            }
+          } catch {
+            // Search failed — use raw query
+          }
+        }
+
+        // Cache BEFORE LLM call to prevent concurrent duplicates
+        answerCache.set(job_id, { answer: '', pending: true });
+
+        logPrompt(actualQuery, prompt);
+        const llmResponse = await RAGService.query(prompt, 4);
+        result.answer = llmResponse.answer;
+        result.matches = llmResponse.matches;
+        result.llmUsed = llmResponse.llmUsed;
+        result.durationMs = llmResponse.durationMs;
+
+        // Update cache with real answer
+        answerCache.set(job_id, {
+          answer: result.answer,
+          matches: result.matches,
+          llmUsed: result.llmUsed,
+          durationMs: result.durationMs,
+          steps: result.steps,
+          status: result.status,
+        });
+      }
+
+      res.json({ success: true, ...result });
+    } catch (error: any) {
       res.status(500).json({ success: false, error: error.message });
     }
   });

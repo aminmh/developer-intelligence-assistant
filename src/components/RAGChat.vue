@@ -6,28 +6,37 @@ import {
   Database, 
   Info, 
   ChevronDown, 
-  ChevronUp 
+  ChevronUp,
+  Paperclip,
+  X,
 } from 'lucide-vue-next';
 import { SearchMatch } from '../types';
+import PipelineProgress from './PipelineProgress.vue';
+import type { PipelineStep } from './PipelineProgress.vue';
 
 interface Message {
   id: string;
-  role: 'user' | 'assistant';
+  role: 'user' | 'assistant' | 'orchestration';
   content: string;
   timestamp: string;
   matches?: SearchMatch[];
   llmUsed?: string;
   durationMs?: number;
+  orchestration?: any;
 }
 
 const props = defineProps<{
   messages: Message[];
   loading: boolean;
   filesCount: number;
+  activeFileName: string | null;
+  orchestrationSteps: PipelineStep[];
 }>();
 
 const emit = defineEmits<{
   (e: 'sendMessage', text: string): void;
+  (e: 'attachZip', file: File): void;
+  (e: 'clearAttach'): void;
 }>();
 
 const chatInput = ref('');
@@ -49,6 +58,15 @@ const onSubmit = () => {
   if (chatInput.value.trim() && !props.loading) {
     emit('sendMessage', chatInput.value.trim());
     chatInput.value = '';
+    scrollToBottom();
+  }
+};
+
+const onAttachZip = (event: Event) => {
+  const target = event.target as HTMLInputElement;
+  if (target.files && target.files.length > 0) {
+    emit('attachZip', target.files[0]);
+    target.value = '';
   }
 };
 
@@ -91,6 +109,19 @@ const toggleMatchExpansion = (id: string) => {
               </span>
               <span v-if="msg.durationMs">{{ msg.durationMs }}ms</span>
             </div>
+
+            <!-- Orchestration info -->
+            <div v-if="msg.orchestration" class="mt-3 pt-3 border-t border-slate-800 text-left">
+              <div class="text-[10px] text-emerald-400 font-mono flex items-center gap-1 mb-1">
+                <Database class="w-3 h-3" />
+                Orchestration — {{ msg.orchestration.route || 'tools' }}
+              </div>
+              <div v-for="(out, tool) in msg.orchestration.outputs" :key="tool"
+                class="text-[10px] text-slate-500 font-mono mt-1">
+                <span class="text-slate-400">{{ tool }}:</span>
+                <span v-if="out && out.exit_code !== undefined"> exit {{ out.exit_code }}</span>
+              </div>
+            </div>
           </div>
 
           <!-- Expand matches toggle -->
@@ -132,12 +163,26 @@ const toggleMatchExpansion = (id: string) => {
         </div>
       </div>
 
-      <!-- Loader while computing answer -->
-      <div v-if="loading" class="flex flex-col items-start max-w-4xl mx-auto">
+      <!-- Pipeline progress (orchestration with steps) -->
+      <div
+        v-if="loading && orchestrationSteps.length > 0"
+        class="flex flex-col items-start max-w-4xl mx-auto"
+      >
+        <PipelineProgress
+          :fileName="activeFileName || 'project'"
+          :steps="orchestrationSteps"
+        />
+      </div>
+
+      <!-- Loader while computing answer (simple RAG) -->
+      <div
+        v-else-if="loading"
+        class="flex flex-col items-start max-w-4xl mx-auto"
+      >
         <div class="rounded-2xl p-5 bg-slate-900/60 text-slate-300 border border-slate-800 rounded-tl-none max-w-3xl">
           <div class="flex items-center gap-3 font-mono text-xs text-indigo-400">
             <div class="w-2.5 h-2.5 rounded-full bg-indigo-500 animate-ping"></div>
-            <span>RAG Pipeline running: Querying nearest vectors and synthesizing response...</span>
+            <span>Thinking...</span>
           </div>
         </div>
       </div>
@@ -153,25 +198,41 @@ const toggleMatchExpansion = (id: string) => {
           <span>Your active knowledge base has no document references indexed yet. Upload reference material under the **Files** tab first!</span>
         </div>
 
+        <!-- Active project file -->
+        <div v-if="activeFileName" class="mb-3 text-left">
+          <span class="text-[10px] font-mono px-2 py-1 rounded-full bg-emerald-500/10 text-emerald-400 border border-emerald-500/20 inline-flex items-center gap-1">
+            <Database class="w-3 h-3" />
+            Project: {{ activeFileName }}
+            <button @click="emit('clearAttach')" class="ml-1 text-emerald-500 hover:text-emerald-300">
+              <X class="w-3 h-3" />
+            </button>
+          </span>
+        </div>
+
         <!-- Input area -->
         <form @submit.prevent="onSubmit" class="relative">
-          <input 
-            v-model="chatInput" 
-            type="text" 
-            placeholder="Ask me about APIs, code snippets, or configurations of your indexed files..." 
+          <input
+            v-model="chatInput"
+            type="text"
+            :placeholder="activeFileName ? 'Ask about your project code...' : 'Ask me about APIs, code snippets, or configurations of your indexed files...'"
             class="w-full bg-[#11162d] border border-slate-800 rounded-xl py-4 pl-5 pr-14 text-sm focus:outline-none focus:border-indigo-500 focus:ring-1 focus:ring-indigo-500 transition-all font-mono placeholder-slate-500 text-slate-100"
             :disabled="loading"
           />
-          <button 
-            type="submit" 
+          <button
+            type="submit"
             class="absolute right-3.5 top-3.5 p-1.5 rounded-lg bg-indigo-600 hover:bg-indigo-700 text-white transition-all disabled:opacity-50 disabled:cursor-not-allowed"
             :disabled="!chatInput.trim() || loading"
           >
             <Send class="w-4 h-4" />
           </button>
         </form>
-        <div class="mt-2 text-[10px] text-slate-500 text-center font-mono">
-          <span>Press Enter to query.</span>
+        <div class="mt-2 flex items-center justify-between text-[10px] text-slate-500">
+          <label class="cursor-pointer hover:text-indigo-400 transition-colors flex items-center gap-1">
+            <input type="file" accept=".zip" hidden @change="onAttachZip" />
+            <Paperclip class="w-3.5 h-3.5" />
+            <span class="font-mono">Attach project (.zip)</span>
+          </label>
+          <span class="font-mono">Press Enter to send.</span>
         </div>
       </div>
     </div>

@@ -406,6 +406,28 @@ export const RAGService = {
     return uploadedFile;
   },
 
+  // Track a file that was indexed externally (Python Qdrant) — no local
+  // chunking/embedding, just adds to the tracking array so it appears in /api/files.
+  async addTrackedFile(name: string, type: string, size: number, chunkCount: number, uploadSessionId?: string): Promise<UploadedFile> {
+    const fileId = `file_${Date.now()}_${Math.random().toString(36).substring(2, 9)}`;
+
+    const uploadedFile: UploadedFile = {
+      id: fileId,
+      name,
+      type,
+      size: size || 0,
+      chunkCount: chunkCount || 0,
+      uploadedAt: new Date().toISOString(),
+      status: 'ready',
+      uploadSessionId,
+    };
+
+    uploadedFiles.push(uploadedFile);
+    saveDatabase();
+
+    return uploadedFile;
+  },
+
   // Index text already extracted upstream (large-file TUS path). Responds
   // immediately with a 'processing' record and indexes in the background,
   // since a huge document's chunk/embed pipeline can take far longer than

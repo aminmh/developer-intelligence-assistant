@@ -13,6 +13,7 @@ services:
     environment:
       PHP_SERVICE_URL: http://php-ast:9003
       OLLAMA_URL: http://host.docker.internal:11434
+      PYTHON_API_URL: http://python-api:9002
     ports:
       - "3000:3000"
     volumes:
@@ -33,6 +34,7 @@ services:
       NODE_ENV: development
       PHP_SERVICE_URL: http://php-ast:9003
       OLLAMA_URL: http://host.docker.internal:11434
+      PYTHON_API_URL: http://python-api:9002
     ports:
       - "3000:3000"
     volumes:

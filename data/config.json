@@ -1,7 +1,7 @@
 {
-  "llmMode": "gemini",
-  "localLlmUrl": "http://localhost:11434",
-  "localLlmModel": "llama3",
+  "llmMode": "local",
+  "localLlmUrl": "http://host.docker.internal:11434",
+  "localLlmModel": "gemma3-4b",
   "embeddingMode": "ollama",
   "ollamaUrl": "http://host.docker.internal:11434",
   "ollamaModel": "BGE-M3",
@@ -11,6 +11,6 @@
   "chunkOverlap": 50,
   "qdrantUrl": "",
   "qdrantApiKey": "",
-  "temperature": 0.7,
+  "temperature": 0.2,
   "topP": 0.9
 }

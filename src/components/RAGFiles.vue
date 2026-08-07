@@ -7,7 +7,6 @@ import {
   FileCode, 
   Search,
   Cpu,
-  Download,
   CheckCircle2,
 } from 'lucide-vue-next';
 import { UploadedFile, SearchMatch } from '../types';
@@ -28,7 +27,7 @@ const emit = defineEmits<{
   (e: 'uploadFiles', files: FileList): void;
   (e: 'deleteFile', id: string, name: string): void;
   (e: 'performSearchOnly', query: string): void;
-  (e: 'parseFile', id: string, name: string): void;
+  (e: 'indexFile', id: string, name: string): void;
 }>();
 
 const dragOver = ref(false);
@@ -82,11 +81,10 @@ const toggleFileOptions = (file: UploadedFile, event: MouseEvent) => {
   activeFileId.value = activeFileId.value === file.id ? null : file.id;
 };
 
-const handleParseFile = () => {
+const handleIndexFile = () => {
   const file = props.files.find(f => f.id === activeFileId.value);
   if (file) {
-    emit('parseFile', file.id, file.name);
-    activeFileId.value = null;
+    emit('indexFile', file.id, file.name);
   }
 };
 
@@ -114,7 +112,7 @@ const onSearch = () => {
             <Upload class="w-4 h-4 text-indigo-400" />
             Upload Source Documents
           </h4>
-          <span class="text-[10px] text-slate-500">Accepted: PDF, ZIP, MD, TXT, JS, TS, JSON</span>
+          <span class="text-[10px] text-slate-500">Accepted: PDF, MD, TXT, JS, TS, JSON</span>
         </div>
 
         <div
@@ -125,7 +123,7 @@ const onSearch = () => {
             id="file-upload-input"
             type="file"
             multiple
-            accept=".pdf,.zip,.md,.txt,.js,.ts,.tsx,.json"
+            accept=".pdf,.md,.txt,.js,.ts,.tsx,.json"
             class="hidden"
             @change="handleFileUpload"
           />
@@ -225,22 +223,22 @@ const onSearch = () => {
               class="px-6 pb-4 pt-1 border-l-2 border-indigo-500/30 bg-indigo-500/5"
             >
               <p class="text-[10px] text-slate-500 mb-2 font-mono">
-                {{ file.type === 'zip' ? 'PHP project archive — parse & index for code intelligence' : 'No code actions available for this file type' }}
+                {{ file.type === 'zip' ? 'PHP project archive — index to enable code search' : file.chunkCount > 0 ? 'Indexed — ' + file.chunkCount + ' chunks' : 'Not yet indexed — click Index to process' }}
               </p>
               <span
-                v-if="indexedFileIds.has(file.id) && parsingFileId !== file.id"
+                v-if="indexedFileIds.has(file.id) && file.chunkCount > 0 && parsingFileId !== file.id"
                 class="inline-flex items-center gap-1.5 text-[10px] font-mono px-2 py-1 rounded-full bg-emerald-500/10 text-emerald-400 border border-emerald-500/20"
               >
                 <CheckCircle2 class="w-3 h-3" />
                 Indexed in Qdrant
               </span>
               <button
-                v-else-if="file.type === 'zip' && parsingFileId !== file.id"
-                @click="handleParseFile"
+                v-else-if="parsingFileId !== file.id"
+                @click="handleIndexFile"
                 class="flex items-center gap-1.5 px-3 py-1.5 text-[11px] font-semibold text-white bg-indigo-600 hover:bg-indigo-500 rounded-lg transition-colors shadow-sm shadow-indigo-600/20"
               >
                 <Cpu class="w-3.5 h-3.5" />
-                Parse & Index Code
+                {{ file.chunkCount > 0 ? 'Re-index' : 'Index' }}
               </button>
               <div
                 v-if="parsingFileId === file.id && indexingProgress.total > 0"

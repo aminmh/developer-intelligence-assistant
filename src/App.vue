@@ -55,15 +55,19 @@ const searchLoading = ref(false);
 const parsingFileId = ref<string | null>(null);
 const indexingProgress = ref({ total: 0, indexed: 0, status: '' });
 const indexedFileIds = ref<Set<string>>(new Set());
+const activeFileName = ref<string | null>(null);
+const orchestrationSteps = ref<any[]>([]);
+let pollIntervalId: ReturnType<typeof setInterval> | null = null;
 
 interface Message {
   id: string;
-  role: 'user' | 'assistant';
+  role: 'user' | 'assistant' | 'orchestration';
   content: string;
   timestamp: string;
   matches?: SearchMatch[];
   llmUsed?: string;
   durationMs?: number;
+  orchestration?: any;
 }
 
 const messages = ref<Message[]>([
@@ -248,6 +252,7 @@ const deleteFile = async (id: string, name: string) => {
 
 const parseFile = async (id: string, name: string) => {
   parsingFileId.value = id;
+  activeFileName.value = name;
   indexingProgress.value = { total: 0, indexed: 0, status: '' };
   triggerToast(`Parsing "${name}" — extracting PHP code...`, true);
   try {
@@ -308,6 +313,73 @@ const parseFile = async (id: string, name: string) => {
   }
 };
 
+const indexFile = async (id: string, name: string) => {
+  const file = files.value.find(f => f.id === id);
+  const isZip = file?.type === 'zip';
+
+  if (isZip) {
+    // ZIP: full parse-code pipeline
+    await parseFile(id, name);
+    return;
+  }
+
+  // Non-ZIP: re-index stored file
+  parsingFileId.value = id;
+  indexingProgress.value = { total: 1, indexed: 0, status: '' };
+  triggerToast(`Indexing "${name}"...`, true);
+  try {
+    const res = await makeRequest('/api/reindex', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ filename: name, uploadSessionId: file?.uploadSessionId, fileId: id }),
+    });
+    const data = await res.json();
+    if (data.success) {
+      indexingProgress.value = { total: 1, indexed: 1, status: 'done' };
+      triggerToast(`"${name}" indexed — ${data.file?.chunkCount || 0} chunks.`, true);
+      await fetchFiles();
+    } else {
+      triggerToast(data.error || 'Indexing failed.', false);
+    }
+  } catch (err: any) {
+    triggerToast(`Index error: ${err.message}`, false);
+  } finally {
+    parsingFileId.value = null;
+    indexingProgress.value = { total: 0, indexed: 0, status: '' };
+  }
+};
+
+const attachZip = async (file: File) => {
+  try {
+    const base64 = await new Promise<string>((resolve, reject) => {
+      const reader = new FileReader();
+      reader.onload = () => resolve((reader.result as string).split(',')[1]);
+      reader.onerror = reject;
+      reader.readAsDataURL(file);
+    });
+
+    const res = await makeRequest('/api/upload', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ name: file.name, size: file.size, content: base64 }),
+    });
+    const data = await res.json();
+    if (data.success) {
+      activeFileName.value = file.name;
+      triggerToast(`Project "${file.name}" attached — will be indexed on first query.`, true);
+      await fetchFiles();
+    } else {
+      triggerToast(data.error || 'Failed to attach project.', false);
+    }
+  } catch (err: any) {
+    triggerToast(`Attach error: ${err.message}`, false);
+  }
+};
+
+const clearAttach = () => {
+  activeFileName.value = null;
+};
+
 const sendMessage = async (text: string) => {
   if (!text.trim() || loading.value) return;
 
@@ -320,6 +392,8 @@ const sendMessage = async (text: string) => {
   });
 
   loading.value = true;
+  orchestrationSteps.value = [];
+  if (pollIntervalId) { clearInterval(pollIntervalId); pollIntervalId = null; }
 
   const scrollToBottom = () => {
     setTimeout(() => {
@@ -333,10 +407,76 @@ const sendMessage = async (text: string) => {
     const res = await makeRequest('/api/query', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ query: text, limit: 4 }),
+      body: JSON.stringify({
+        query: text,
+        limit: 4,
+        filename: activeFileName.value || undefined,
+      }),
     });
 
     const data = await res.json();
+
+    // Phase 1: Orchestration started — poll for progress
+    if (data.phase === 'orchestrating' && data.job_id) {
+      const jobId = data.job_id;
+
+      // Clear any previous poll interval
+      if (pollIntervalId) clearInterval(pollIntervalId);
+
+      pollIntervalId = setInterval(async () => {
+        try {
+          const rRes = await makeRequest('/api/query/result', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ job_id: jobId, user_query: text }),
+          });
+
+          const rData = await rRes.json();
+
+          // Update step progress
+          if (rData.steps && rData.steps.length > 0) {
+            orchestrationSteps.value = rData.steps;
+          }
+
+          // Done — show answer
+          if (rData.phase === 'done' && rData.answer) {
+            clearInterval(pollIntervalId!);
+            pollIntervalId = null;
+            messages.value.push({
+              id: `assistant_${Date.now()}`,
+              role: 'assistant',
+              content: rData.answer,
+              timestamp: new Date().toLocaleTimeString(),
+              matches: rData.matches,
+              llmUsed: rData.llmUsed || 'Gemini 3.5',
+              durationMs: rData.durationMs,
+              orchestration: rData,
+            });
+            loading.value = false;
+            orchestrationSteps.value = [];
+            scrollToBottom();
+          }
+        } catch {
+          // Polling error — keep trying
+        }
+      }, 1000);
+
+      // Safety timeout after 5 minutes
+      setTimeout(() => {
+        if (pollIntervalId) {
+          clearInterval(pollIntervalId);
+          pollIntervalId = null;
+        }
+        if (loading.value) {
+          loading.value = false;
+          orchestrationSteps.value = [];
+          triggerToast('Processing timed out.', false);
+        }
+      }, 300000);
+      return;
+    }
+
+    // No orchestration — direct answer
     if (data.success || data.answer) {
       messages.value.push({
         id: `assistant_${Date.now()}`,
@@ -351,9 +491,7 @@ const sendMessage = async (text: string) => {
       messages.value.push({
         id: `assistant_${Date.now()}`,
         role: 'assistant',
-        content: `❌ **Error formulating answer from Backend:** ${data.error || 'Unknown error occurred.'}
-
-Please make sure your backend is running correctly and CORS is enabled.`,
+        content: `❌ **Error:** ${data.error || 'Unknown error occurred.'}`,
         timestamp: new Date().toLocaleTimeString(),
       });
     }
@@ -503,7 +641,11 @@ onMounted(async () => {
         :messages="messages"
         :loading="loading"
         :filesCount="files.length"
+        :activeFileName="activeFileName"
+        :orchestrationSteps="orchestrationSteps"
         @sendMessage="sendMessage"
+        @attachZip="attachZip"
+        @clearAttach="clearAttach"
       />
 
       <RAGFiles
@@ -519,7 +661,7 @@ onMounted(async () => {
         @uploadFiles="processFiles"
         @deleteFile="deleteFile"
         @performSearchOnly="performSearchOnly"
-        @parseFile="parseFile"
+        @indexFile="indexFile"
       />
 
       <RAGConfigComponent
