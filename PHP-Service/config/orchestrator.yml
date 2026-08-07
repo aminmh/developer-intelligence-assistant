@@ -1,0 +1,61 @@
+mcp_servers:
+  laravel:
+    transport: streamable_http
+    url: ${LARAVEL_MCP_URL:-http://php-ast:9003/mcp}
+    timeout_seconds: 300
+
+defaults:
+  min_confidence: 0.35
+  workspace_root: /workspace/project
+  max_tool_timeout_seconds: 300
+  status_poll_interval_ms: 1000
+
+tools:
+  chunk_code:
+    server: laravel
+    args:
+      export_format: json
+      no_index: true
+
+  export_structure:
+    server: laravel
+    args:
+      depth: 4
+      include_hidden: false
+
+routes:
+  code_explain:
+    tool: chunk_code
+    override_args:
+      export_format: json
+      no_index: false
+    prompt_template: explain
+
+  code_refactor:
+    tool: chunk_code
+    override_args:
+      export_format: text
+      no_index: false
+    prompt_template: refactor
+
+  debug:
+    tool: chunk_code
+    override_args:
+      export_format: json
+      no_index: false
+    prompt_template: debug
+
+  search:
+    tool: null
+    prompt_template: search
+
+  chat:
+    tool: null
+    prompt_template: chat
+
+  knowledge:
+    tool: export_structure
+    override_args:
+      depth: 4
+      include_hidden: false
+    prompt_template: explain

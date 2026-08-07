@@ -237,6 +237,80 @@ class RagUploadController extends Controller
     }
 
     #[OA\Post(
+        path: '/api/rag/extract',
+        summary: 'Extract text from stored file',
+        description: 'Finds an uploaded file in MinIO, extracts text, and returns it for re-indexing.',
+        tags: ['RAG Upload'],
+        requestBody: new OA\RequestBody(
+            required: true,
+            content: new OA\JsonContent(
+                required: ['filename'],
+                properties: [
+                    new OA\Property(property: 'filename', type: 'string', description: 'Stored filename'),
+                    new OA\Property(property: 'upload_session_id', type: 'string', description: 'Optional session ID'),
+                ],
+            ),
+        ),
+        responses: [
+            new OA\Response(response: 200, description: 'Text extracted'),
+            new OA\Response(response: 404, description: 'File not found'),
+        ],
+    )]
+    public function extractFile(Request $request, RagUploadExtractorService $extractor): JsonResponse
+    {
+        $filename = $request->input('filename');
+        $uploadSessionId = $request->input('upload_session_id');
+
+        if (!$filename) {
+            return response()->json(['error' => 'Missing filename.'], 400);
+        }
+
+        $disk = Storage::disk('tus_uploads');
+        $baseDir = 'rag-uploads';
+        $matches = [];
+
+        if ($disk->exists($baseDir)) {
+            foreach ($disk->directories($baseDir) as $sessionDir) {
+                $sid = basename($sessionDir);
+                $candidatePath = "{$sessionDir}/{$filename}";
+                if ($disk->exists($candidatePath)) {
+                    $matches[] = ['path' => $candidatePath, 'session_id' => $sid];
+                }
+            }
+        }
+
+        if (empty($matches)) {
+            return response()->json(['error' => "File not found: {$filename}"], 404);
+        }
+
+        if ($uploadSessionId) {
+            $match = collect($matches)->first(fn($m) => $m['session_id'] === $uploadSessionId);
+            if (!$match) {
+                return response()->json(['error' => "File not found for session: {$uploadSessionId}"], 404);
+            }
+        } else {
+            $match = $matches[0];
+        }
+
+        $s3Path = $match['path'];
+        $sid = $match['session_id'];
+
+        $content = $disk->get($s3Path);
+        try {
+            $extracted = $extractor->storeAndExtract($content, $filename, $sid);
+
+            return response()->json([
+                'filename' => $filename,
+                'type' => $extracted['type'],
+                'text' => $extracted['text'],
+                'upload_session_id' => $sid,
+            ]);
+        } catch (Throwable $e) {
+            return response()->json(['error' => 'Extraction failed: ' . $e->getMessage()], 500);
+        }
+    }
+
+    #[OA\Post(
         path: '/api/rag/parse-code',
         summary: 'Parse PHP code from uploaded ZIP',
         description: 'Finds an uploaded ZIP file in rag-uploads, extracts it, parses PHP code, '

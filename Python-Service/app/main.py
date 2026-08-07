@@ -6,6 +6,7 @@ from fastapi.responses import StreamingResponse
 from indexer import CodeIntelligenceIndex
 from settings import settings
 from router import classify as semantic_classify
+from orchestrator import orchestrator
 from models import (
     HealthResponse,
     RebuildResponse,
@@ -28,6 +29,7 @@ from datetime import datetime, timezone, timedelta
 from pathlib import Path
 from qdrant_client import QdrantClient
 from qdrant_client.models import Distance, VectorParams, PointStruct
+from jinja2 import Template
 
 
 def sanitize_collection_name(filename: str) -> str:
@@ -180,7 +182,11 @@ service = CodeIntelligenceIndex()
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    service.rebuild(settings.report_path)
+    try:
+        if Path(settings.report_path).is_file():
+            service.rebuild(settings.report_path)
+    except Exception:
+        pass  # First startup or empty report — skip rebuild
     yield
 
 
@@ -443,6 +449,43 @@ def create_download_job(
                 )
                 thread.start()
 
+    # No structured code chunks — treat raw text, split & index
+    elif text and isinstance(text, str) and len(text.strip()) > 0:
+        collection_name = sanitize_collection_name(filename)
+        paragraphs = [p.strip() for p in text.split('\n\n') if p.strip()]
+        if not paragraphs:
+            paragraphs = [text.strip()]
+
+        text_chunks = [{
+            "type": "document",
+            "name": f"chunk_{i}",
+            "code": p,
+            "file": filename,
+        } for i, p in enumerate(paragraphs)]
+
+        response["collection_name"] = collection_name
+        response["chunk_count"] = len(text_chunks)
+
+        try:
+            qdrant = QdrantClient(url=settings.qdrant_url)
+            existing = qdrant.get_collections().collections
+            already = any(c.name == collection_name for c in existing)
+        except Exception:
+            already = False
+
+        if already:
+            dl_logger.info("Collection already indexed — skipping: %s", collection_name)
+            response["already_indexed"] = True
+        else:
+            dl_logger.info("Indexing text file: collection=%s paragraphs=%s",
+                           collection_name, len(text_chunks))
+            thread = threading.Thread(
+                target=index_chunks_background,
+                args=(download_id, filename, text_chunks, collection_name),
+                daemon=True,
+            )
+            thread.start()
+
     dl_logger.info("Download job created: id=%s filename=%s collection=%s",
                    download_id, filename, response.get("collection_name", "none"))
 
@@ -522,3 +565,148 @@ def classify_prompt(body: dict):
     if not prompt or not isinstance(prompt, str):
         raise HTTPException(status_code=400, detail="Missing or invalid prompt")
     return semantic_classify(prompt)
+
+
+@app.post(
+    "/orchestrate",
+    tags=["Code Intelligence"],
+    summary="Start Orchestration Job",
+    description=(
+        "Launches an async orchestration job that parses code, runs configured "
+        "tools, and collects outputs. Returns a job_id for polling status."
+    ),
+)
+def start_orchestration(body: dict):
+    route = body.get("route", "chat")
+    filename = body.get("filename", "")
+    prompt = body.get("prompt", "")
+    if not filename or not prompt:
+        raise HTTPException(status_code=400, detail="Missing filename or prompt")
+
+    job_id = str(uuid.uuid4())
+    orchestrator.start_job(job_id, route, filename, prompt)
+    return {"job_id": job_id}
+
+
+@app.get(
+    "/orchestrate/{job_id}/status",
+    tags=["Code Intelligence"],
+    summary="Orchestration Job Status",
+    description="Returns the current status and step progress of an orchestration job.",
+)
+def orchestration_status(job_id: str):
+    job = orchestrator.get_job(job_id)
+    if job is None:
+        return {"status": "unknown", "step": 0, "total_steps": 0}
+    return job
+
+
+@app.get(
+    "/templates/{name}",
+    tags=["Code Intelligence"],
+    summary="Fetch Prompt Template",
+    description="Returns a Jinja2 prompt template by name.",
+)
+def get_template(name: str):
+    content = orchestrator.get_template(name)
+    if not content:
+        raise HTTPException(status_code=404, detail=f"Template '{name}' not found")
+    return {"template": content}
+
+
+@app.post(
+    "/templates/{name}/render",
+    tags=["Code Intelligence"],
+    summary="Render Prompt Template",
+    description="Renders a Jinja2 template with tool outputs and user query.",
+)
+def render_template(name: str, body: dict):
+    content = orchestrator.get_template(name)
+    if not content:
+        raise HTTPException(status_code=404, detail=f"Template '{name}' not found")
+
+    outputs = body.get("outputs", {})
+    user_query = body.get("user_query", "")
+
+    # Flatten tool outputs so {{ phpstan }} works as {{ phpstan.stdout }}
+    context = {"user_query": user_query}
+    for key, val in outputs.items():
+        if isinstance(val, dict):
+            context[key] = val.get("stdout", str(val))
+        else:
+            context[key] = str(val) if val else ""
+    # Also add ast_chunks from parse-code output
+    if "parsing" in outputs:
+        context["ast_chunks"] = str(outputs["parsing"])
+
+    try:
+        template = Template(content)
+        rendered = template.render(**context)
+        return {"rendered": rendered}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Template render failed: {e}")
+
+
+@app.post(
+    "/search-all",
+    tags=["Code Intelligence"],
+    summary="Search Across All Indexed Collections",
+    description=(
+        "Embeds the query via Ollama and searches all Qdrant collections that "
+        "were created by parse-code indexing. Returns ranked results merged "
+        "from all project collections with metadata."
+    ),
+)
+def search_all(body: dict):
+    query = body.get("query", "")
+    limit = body.get("limit", 10)
+    filter_collection = body.get("collection")
+    if not query:
+        raise HTTPException(status_code=400, detail="Missing query")
+
+    try:
+        query_vec = embed_text(query)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Embedding failed: {e}")
+
+    try:
+        qdrant = QdrantClient(url=settings.qdrant_url)
+        collections = qdrant.get_collections().collections
+    except Exception:
+        return {"results": [], "searched_collections": []}
+
+    all_results = []
+    searched = []
+
+    for col in collections:
+        col_name = col.name
+        # Skip system/internal collections
+        if col_name in ("code_symbols", "developer_assistant_rag"):
+            continue
+        # Filter by specific collection if requested
+        if filter_collection and col_name != filter_collection:
+            continue
+        searched.append(col_name)
+        try:
+            hits = qdrant.search(
+                collection_name=col_name,
+                query_vector=query_vec,
+                limit=min(5, limit),
+            )
+            for h in hits:
+                # Attach collection name to payload for reference
+                if h.payload:
+                    h.payload["collection"] = col_name
+                all_results.append({
+                    "collection": col_name,
+                    "score": h.score,
+                    "payload": h.payload,
+                })
+        except Exception:
+            pass
+
+    all_results.sort(key=lambda x: x["score"], reverse=True)
+    return {
+        "results": all_results[:limit],
+        "searched_collections": searched,
+    }

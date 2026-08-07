@@ -103,6 +103,7 @@ class DownloadJobResponse(BaseModel):
     expires_at: str = Field(description="ISO 8601 expiration timestamp of the download token.")
     collection_name: Optional[str] = Field(None, description="Qdrant collection name if chunks were indexed.")
     chunk_count: Optional[int] = Field(None, description="Number of chunks indexed into the vector DB.")
+    already_indexed: Optional[bool] = Field(False, description="True if collection already existed — no re-indexing needed.")
 
 
 class CodeChunkModel(BaseModel):
