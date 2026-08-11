@@ -2,12 +2,19 @@ import json
 from typing import Any, Dict, List, Optional, Tuple
 
 from llama_index.core import Document, Settings, VectorStoreIndex
+from llama_index.embeddings.ollama import OllamaEmbedding
 from llama_index.vector_stores.qdrant import QdrantVectorStore
 from qdrant_client import QdrantClient
 
 from graph_store import InMemoryCodeGraph
 from models import EdgeModel, ParameterModel, SymbolModel
 from settings import settings
+
+# Always use Ollama for embeddings
+Settings.embed_model = OllamaEmbedding(
+    model_name=settings.ollama_embedding_model,
+    base_url=settings.ollama_base_url,
+)
 
 
 def build_symbol_id(chunk: Dict[str, Any]) -> str:
@@ -312,4 +319,102 @@ class CodeIntelligenceIndex:
                 }
             )
         return rows
+
+    def get_retriever(self, collection_name: str, top_k: int = 10):
+        """Create a LlamaIndex retriever for any Qdrant collection."""
+        from llama_index.vector_stores.qdrant import QdrantVectorStore
+        from qdrant_client import QdrantClient
+
+        qdrant_client = QdrantClient(url=settings.qdrant_url)
+        vector_store = QdrantVectorStore(
+            client=qdrant_client,
+            collection_name=collection_name,
+        )
+        index = VectorStoreIndex.from_vector_store(
+            vector_store,
+            embed_model=Settings.embed_model,
+        )
+        retriever = index.as_retriever(
+            similarity_top_k=top_k,
+            embed_model=Settings.embed_model,
+        )
+        return retriever
+
+    def ingest_chunks(self, chunks: List[dict], collection_name: str) -> dict:
+        """Ingest a list of chunk dicts into a named Qdrant collection synchronously."""
+        from llama_index.vector_stores.qdrant import QdrantVectorStore
+        from qdrant_client import QdrantClient
+
+        documents = []
+        for c in chunks:
+            if not isinstance(c, dict):
+                continue
+            # Build embeddable text — same pattern as CodeChunk.toEmbeddableText()
+            parts = []
+            if c.get("docblock"):
+                parts.append(str(c["docblock"]))
+            if c.get("class"):
+                parts.append(f"Class: {c['class']}")
+            if c.get("name"):
+                sig_parts = [str(c["name"])]
+                params = c.get("parameters", [])
+                if params:
+                    param_strs = []
+                    for p in params:
+                        p_name = p.get("name", "") if isinstance(p, dict) else str(p)
+                        p_type = p.get("type", "") if isinstance(p, dict) else ""
+                        param_strs.append(f"{p_type} ${p_name}" if p_type else f"${p_name}")
+                    sig_parts.append("(" + ", ".join(param_strs) + ")")
+                if c.get("return_type"):
+                    sig_parts.append(": " + str(c["return_type"]))
+                parts.append("Signature: " + "".join(sig_parts))
+
+            code = c.get("code", "")
+            if code:
+                parts.append(code)
+
+            node_text = "\n".join(parts) if parts else (str(c.get("name", "")) or "unnamed")
+            if not node_text.strip():
+                continue
+
+            metadata = {
+                "type": c.get("type", ""),
+                "name": c.get("name", ""),
+                "class": c.get("class", ""),
+                "file": c.get("file", ""),
+                "start_line": c.get("start_line", 0),
+                "end_line": c.get("end_line", 0),
+                "code": code,
+                "collection": collection_name,
+            }
+
+            documents.append(Document(text=node_text, metadata=metadata))
+
+        if not documents:
+            return {"indexed": 0, "total": 0, "collection_name": collection_name}
+
+        qdrant_client = QdrantClient(url=settings.qdrant_url)
+        vector_store = QdrantVectorStore(
+            client=qdrant_client,
+            collection_name=collection_name,
+        )
+
+        # Recreate collection to avoid stale data
+        try:
+            qdrant_client.delete_collection(collection_name)
+        except Exception:
+            pass
+
+        index = VectorStoreIndex.from_documents(
+            documents,
+            vector_store=vector_store,
+            embed_model=Settings.embed_model,
+            show_progress=False,
+        )
+
+        return {
+            "indexed": len(documents),
+            "total": len(chunks),
+            "collection_name": collection_name,
+        }
 

@@ -22,6 +22,11 @@ tools:
     args:
       depth: 4
       include_hidden: false
+    post_process:
+      - action: wrap_code_block
+        args: { language: text, prepend: "Project structure:\n" }
+      - action: truncate
+        args: { max_bytes: 8000 }
 
 routes:
   code_explain:
@@ -29,6 +34,8 @@ routes:
     override_args:
       export_format: json
       no_index: false
+    post_process:
+      - action: llamaindex_ingest
     prompt_template: explain
 
   code_refactor:
@@ -36,6 +43,8 @@ routes:
     override_args:
       export_format: text
       no_index: false
+    post_process:
+      - action: llamaindex_ingest
     prompt_template: refactor
 
   debug:
@@ -43,6 +52,8 @@ routes:
     override_args:
       export_format: json
       no_index: false
+    post_process:
+      - action: llamaindex_ingest
     prompt_template: debug
 
   search:
@@ -58,4 +69,9 @@ routes:
     override_args:
       depth: 4
       include_hidden: false
+    post_process:
+      - action: wrap_code_block
+        args: { language: text, prepend: "Project structure:\n" }
+      - action: truncate
+        args: { max_bytes: 8000 }
     prompt_template: explain

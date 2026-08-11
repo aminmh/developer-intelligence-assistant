@@ -664,46 +664,59 @@ def search_all(body: dict):
     if not query:
         raise HTTPException(status_code=400, detail="Missing query")
 
-    try:
-        query_vec = embed_text(query)
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Embedding failed: {e}")
-
+    # Get list of collections to search
     try:
         qdrant = QdrantClient(url=settings.qdrant_url)
         collections = qdrant.get_collections().collections
     except Exception:
         return {"results": [], "searched_collections": []}
 
+    target_collections = []
+    for col in collections:
+        if col.name in ("code_symbols", "developer_assistant_rag"):
+            continue
+        if filter_collection and col.name != filter_collection:
+            continue
+        target_collections.append(col.name)
+
     all_results = []
     searched = []
 
-    for col in collections:
-        col_name = col.name
-        # Skip system/internal collections
-        if col_name in ("code_symbols", "developer_assistant_rag"):
-            continue
-        # Filter by specific collection if requested
-        if filter_collection and col_name != filter_collection:
-            continue
+    for col_name in target_collections:
         searched.append(col_name)
         try:
-            hits = qdrant.search(
-                collection_name=col_name,
-                query_vector=query_vec,
-                limit=min(5, limit),
-            )
-            for h in hits:
-                # Attach collection name to payload for reference
-                if h.payload:
-                    h.payload["collection"] = col_name
+            # LlamaIndex-powered retrieval
+            retriever = service.get_retriever(col_name, top_k=min(5, limit))
+            nodes = retriever.retrieve(query)
+
+            for node in nodes:
+                metadata = node.metadata or {}
+                score = getattr(node, "score", 0.0)
+                metadata["collection"] = col_name
                 all_results.append({
                     "collection": col_name,
-                    "score": h.score,
-                    "payload": h.payload,
+                    "score": score if score else 0.0,
+                    "payload": metadata,
                 })
         except Exception:
-            pass
+            # Fallback to manual Qdrant search if LlamaIndex fails
+            try:
+                query_vec = embed_text(query)
+                hits = qdrant.search(
+                    collection_name=col_name,
+                    query_vector=query_vec,
+                    limit=min(5, limit),
+                )
+                for h in hits:
+                    if h.payload:
+                        h.payload["collection"] = col_name
+                    all_results.append({
+                        "collection": col_name,
+                        "score": h.score,
+                        "payload": h.payload,
+                    })
+            except Exception:
+                pass
 
     all_results.sort(key=lambda x: x["score"], reverse=True)
     return {

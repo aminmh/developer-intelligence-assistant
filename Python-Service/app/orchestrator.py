@@ -1,334 +1,840 @@
-"""Orchestrator — tool execution with user-facing step monitoring.
+"""Hybrid orchestration with LlamaIndex routing.
 
-Coordinates PHP parse-code, Python embedding, and MCP tool calls
-with step-by-step progress tracking via status files.
+This module keeps the existing job lifecycle, status persistence, MCP transport,
+and post-processing pipeline, but adds a LlamaIndex-backed routing and synthesis
+layer so orchestration can evolve without rewriting the runtime again.
 """
 
+from __future__ import annotations
+
 import json
+import os
 import threading
 import time
-import urllib.error
-import urllib.request
+import urllib.parse
+from dataclasses import dataclass
 from pathlib import Path
-from datetime import datetime, timezone
+from typing import Any, Callable
 
+import requests
 import yaml
-
 from settings import settings
+
+try:
+    from llama_index.core import Settings
+    Settings.llm = None  # No local LLM — server.ts handles final LLM call
+except Exception:  # pragma: no cover
+    Settings = None  # type: ignore[assignment]
+
+try:
+    from llama_index.core.prompts import PromptTemplate
+except Exception:  # pragma: no cover
+    PromptTemplate = None  # type: ignore[assignment]
+
+
+DEFAULT_STATUS_DIR = Path(os.environ.get("DOWNLOAD_DIR", "/tmp/orchestrator"))
+DEFAULT_MCP_URL = os.environ.get("MCP_URL", "http://php-ast:9003/mcp")
+DEFAULT_PYTHON_API_URL = os.environ.get("PYTHON_API_URL", "http://python-api:9002")
+DEFAULT_INTERNAL_SECRET = os.environ.get("INTERNAL_SECRET", "")
+
+
+@dataclass
+class JobContext:
+    job_id: str
+    route_name: str
+    filename: str
+    prompt: str
+    route: dict[str, Any]
+    php_base_url: str
 
 
 class Orchestrator:
     def __init__(self, config_path: str):
-        with open(config_path) as f:
-            self.config = yaml.safe_load(f)
-        self._jobs: dict[str, dict] = {}
+        self.config_path = Path(config_path)
+        self.config = self._load_config(self.config_path)
+        self._jobs: dict[str, dict[str, Any]] = {}
         self._lock = threading.Lock()
-        self._status_dir = Path(settings.download_dir)
+        self._status_dir = Path(self._status_dir_from_config())
+        self._status_dir.mkdir(parents=True, exist_ok=True)
+        self._action_handlers: dict[str, Callable[..., Any]] = {
+            "extract_json": self._act_extract_json,
+            "send_to_qdrant": self._act_send_to_qdrant,
+            "poll_embedding": self._act_poll_embedding,
+            "wrap_code_block": self._act_wrap_code_block,
+            "truncate": self._act_truncate,
+            "llamaindex_route": self._act_llamaindex_route,
+            "llamaindex_summarize": self._act_llamaindex_summarize,
+            "llamaindex_ingest": self._act_llamaindex_ingest,
+        }
 
-    def get_route(self, route_name: str) -> dict | None:
-        return self.config.get("routes", {}).get(route_name)
+    def _status_dir_from_config(self) -> str:
+        return (
+            self.config.get("status_dir")
+            or self.config.get("download_dir")
+            or str(DEFAULT_STATUS_DIR)
+        )
 
-    def get_template(self, name: str) -> str:
-        p = Path(__file__).parent / "config" / "templates" / f"{name}.md"
-        return p.read_text(encoding="utf-8") if p.is_file() else ""
+    def _load_config(self, path: Path) -> dict[str, Any]:
+        if not path.exists():
+            return {}
+        with path.open("r", encoding="utf-8") as handle:
+            data = yaml.safe_load(handle) or {}
+        return data if isinstance(data, dict) else {}
 
-    def start_job(self, job_id, route_name, filename, prompt,
-                  php_base_url="http://php-ast:9003"):
-        route = self.get_route(route_name) or {"tool": None, "prompt_template": "chat"}
-        tool_name = route.get("tool")
-        template_name = route.get("prompt_template", "chat")
+    def _resolve_env(self, value: Any) -> Any:
+        if not isinstance(value, str):
+            return value
+        if value.startswith("${") and value.endswith("}"):
+            return os.environ.get(value[2:-1], "")
+        return value
 
+    def get_route(self, route_name: str) -> dict[str, Any] | None:
+        routes = self.config.get("routes", {})
+        route = routes.get(route_name)
+        return route if isinstance(route, dict) else None
+
+    def start_job(
+        self,
+        job_id: str,
+        route_name: str,
+        filename: str,
+        prompt: str,
+        php_base_url: str = "http://php-ast:9003",
+    ) -> None:
+        route = self.get_route(route_name) or {"tool": "auto", "prompt_template": "chat"}
         steps = self._build_steps(route)
+        job = {
+            "job_id": job_id,
+            "route_name": route_name,
+            "filename": filename,
+            "prompt": prompt,
+            "route": route,
+            "status": "starting",
+            "steps": steps,
+            "started_at": time.time(),
+            "updated_at": time.time(),
+            "php_base_url": php_base_url,
+        }
         with self._lock:
-            self._jobs[job_id] = {
-                "status": "starting", "route": route_name,
-                "template_name": template_name, "steps": steps,
-                "current_step": 0, "outputs": {}, "error": None,
-                "started_at": datetime.now(timezone.utc).isoformat(),
-            }
-        threading.Thread(target=self._run_job, args=(job_id, route, filename, prompt, php_base_url), daemon=True).start()
+            self._jobs[job_id] = job
+        self._write_status(job_id)
+        thread = threading.Thread(
+            target=self._run_job,
+            args=(JobContext(job_id, route_name, filename, prompt, route, php_base_url),),
+            daemon=True,
+        )
+        thread.start()
 
-    def get_job(self, job_id):
+    def get_job(self, job_id: str) -> dict[str, Any] | None:
         with self._lock:
             return self._jobs.get(job_id)
 
-    def _build_steps(self, route):
+    def _build_steps(self, route: dict[str, Any]) -> list[dict[str, Any]]:
+        steps: list[dict[str, Any]] = [
+            {"key": "extracting", "label": "Extracting project files", "status": "pending"},
+        ]
         tool_name = route.get("tool")
-        steps = []
-        # Every route starts with extraction
-        steps.append({"id": "extracting", "label": "Extracting project files",
-                      "status": "pending", "detail": None, "progress": None})
-        if tool_name:
-            steps.append({"id": "tool", "label": self._tool_label(tool_name),
-                          "status": "pending", "detail": None, "progress": None})
-        # chunk_code also needs embedding
-        if tool_name == "chunk_code":
-            steps.append({"id": "embedding", "label": "Embedding into Qdrant",
-                          "status": "pending", "detail": None, "progress": None})
-        # All routes end with generation
-        steps.append({"id": "generating", "label": "Answering with LLM",
-                      "status": "pending", "detail": None, "progress": None})
+        if tool_name in (None, "", "auto") or route.get("llamaindex", True):
+            steps.append({"key": "routing", "label": "Routing with LlamaIndex", "status": "pending"})
+        if tool_name not in (None, "", "auto"):
+            steps.append({"key": "tool", "label": f"Running {tool_name}", "status": "pending"})
+        elif route.get("llamaindex", True):
+            steps.append({"key": "tool", "label": "Running selected tool", "status": "pending"})
+        for action in route.get("post_process", []) or []:
+            action_name = action.get("action") if isinstance(action, dict) else str(action)
+            steps.append({"key": f"post_{action_name}", "label": action_name.replace("_", " ").title(), "status": "pending"})
+        steps.append({"key": "generating", "label": "Synthesizing answer", "status": "pending"})
         return steps
 
-    def _tool_label(self, tool_name):
-        labels = {
-            "chunk_code": "PHP code chunking",
-            "export_structure": "Project structure export",
-        }
-        return labels.get(tool_name, tool_name or "tool")
-
-    def _run_job(self, job_id, route, filename, prompt, php_base_url):
+    def _run_job(self, ctx: JobContext) -> None:
         try:
-            steps = self._build_steps(route)
-            tool_name = route.get("tool")
-            template_name = route.get("prompt_template", "chat")
-            collection_name = None
+            self._update_step(ctx.job_id, "extracting", "running")
+            ws = self._call(
+                f"{ctx.php_base_url.rstrip('/')}/api/workspace/prepare",
+                method="POST",
+                json_body={"filename": ctx.filename},
+            ) or {}
+            file_count = ws.get("file_count") if isinstance(ws, dict) else None
+            self._update_step(ctx.job_id, "extracting", "done", file_count=file_count if file_count is not None else "Skipped")
 
-            # Step 1: Extract workspace
-            self._update_step(job_id, steps, "extracting", "running")
-            ws = _call(php_base_url + "/api/workspace/prepare",
-                       {"filename": filename})
-            if ws and ws.get("workspace_id"):
-                self._update_step(job_id, steps, "extracting", "done",
-                                  detail=f"{ws.get('file_count', 0)} files")
-            else:
-                self._update_step(job_id, steps, "extracting", "done",
-                                  detail="Skipped (non-ZIP or stored)")
-
-            # Step 2: Run configured tool via MCP (if any)
-            tool_output = None
+            tool_name = self._select_tool(ctx)
+            tool_result: dict[str, Any] | None = None
             if tool_name:
-                self._update_step(job_id, steps, "tool", "running",
-                                  progress={"current": 0, "total": 0, "percent": 0})
+                self._update_step(ctx.job_id, "tool", "running")
+                tool_result = self._call_mcp_tool(tool_name, ctx.filename, ctx.prompt)
+                if not tool_result or tool_result.get("success") is False:
+                    error_message = None if not tool_result else tool_result.get("error")
+                    raise RuntimeError(error_message or f"MCP tool failed: {tool_name}")
+                self._update_step(ctx.job_id, "tool", "done")
 
-                mcp_result = self._call_mcp_tool(tool_name, filename, prompt)
+            raw_output = self._extract_tool_output(tool_result) if tool_result else ctx.prompt
+            post_process_result, collection_name = self._run_post_process_pipeline(
+                ctx,
+                raw_output,
+                tool_name=tool_name,
+                tool_result=tool_result,
+            )
+            synthesized_output = self._synthesize_with_llamaindex(
+                ctx=ctx,
+                tool_name=tool_name,
+                tool_result=tool_result,
+                post_process_result=post_process_result,
+            )
+            final_output = synthesized_output or post_process_result or raw_output
 
-                if mcp_result and mcp_result.get("success"):
-                    tool_output = mcp_result.get("stdout") or mcp_result.get("result")
-                    self._update_step(job_id, steps, "tool", "done",
-                                      detail=f"Tool {tool_name} completed")
-                    if tool_name == "chunk_code":
-                        collection_name = mcp_result.get("collection_name")
-                elif mcp_result and mcp_result.get("error"):
-                    self._update_step(job_id, steps, "tool", "error",
-                                      detail=mcp_result["error"])
-                    return
-                else:
-                    # Fallback: REST
-                    rest_result = _call(php_base_url + "/api/tools/execute",
-                                        {"filename": filename, "tool_names": [tool_name]})
-                    if rest_result and rest_result.get("results"):
-                        for r in rest_result["results"]:
-                            if r.get("tool") == tool_name:
-                                if r.get("exit_code") != 0:
-                                    self._update_step(job_id, steps, "tool", "error",
-                                                      detail=r.get("stderr", "Tool failed"))
-                                    return
-                                tool_output = r.get("stdout")
-                                if tool_name == "chunk_code":
-                                    try:
-                                        d = json.loads(tool_output)
-                                        collection_name = d.get("collection_name")
-                                    except Exception: pass
-                                break
-                    if not tool_output:
-                        self._update_step(job_id, steps, "tool", "done",
-                                          detail="No output")
+            self._update_step(ctx.job_id, "generating", "running")
+            self._update_step(ctx.job_id, "generating", "done")
+            self._save_outputs(
+                ctx.job_id,
+                output=final_output,
+                tool_name=tool_name,
+                collection_name=collection_name,
+                tool_result=tool_result,
+                tool_output=post_process_result,
+            )
+        except Exception as exc:
+            self._save_error(ctx.job_id, str(exc))
 
-            # Step 3: Embedding (chunk_code only)
-            if tool_name == "chunk_code":
-                self._update_step(job_id, steps, "embedding", "done",
-                                  detail="Indexed in Qdrant" if collection_name else "No collection")
+    def _select_tool(self, ctx: JobContext) -> str | None:
+        route_tool = ctx.route.get("tool")
+        if route_tool and route_tool != "auto":
+            return str(route_tool)
+        if not ctx.route.get("llamaindex", True):
+            return None
+        tool_names = list((self.config.get("tools") or {}).keys())
+        if not tool_names:
+            return None
+        routed = self._llamaindex_route(ctx.prompt, ctx.filename, ctx.route, tool_names)
+        if routed in tool_names:
+            return routed
+        return tool_names[0]
 
-            # Step 4: Done
-            self._update_step(job_id, steps, "generating", "running")
-            self._update_step(job_id, steps, "generating", "done",
-                              detail="Ready")
-            self._save_outputs(job_id, steps, template_name, collection_name, prompt, tool_output)
+    def _llamaindex_route(
+        self,
+        prompt: str,
+        filename: str,
+        route: dict[str, Any],
+        tool_names: list[str],
+    ) -> str | None:
+        descriptions = []
+        for tool_name in tool_names:
+            tool_config = (self.config.get("tools") or {}).get(tool_name, {})
+            descriptions.append(f"- {tool_name}: {tool_config.get('description', tool_name)}")
+
+        template_text = (
+            "You are a routing assistant. Pick exactly one tool name from the allowed list.\n"
+            "Return only JSON like {\"tool_name\": \"...\"}.\n\n"
+            f"Filename: {filename}\n\n"
+            f"Prompt: {prompt}\n\n"
+            f"Route: {json.dumps(route, ensure_ascii=False)}\n\n"
+            "Allowed tools:\n\n"
+            f"{chr(10).join(descriptions)}"
+        )
+
+        parsed = self._llamaindex_complete_json(template_text)
+        if isinstance(parsed, dict):
+            tool_name = parsed.get("tool_name") or parsed.get("tool")
+            if isinstance(tool_name, str) and tool_name in tool_names:
+                return tool_name
+        return None
+
+    def _llamaindex_summarize(
+        self,
+        prompt: str,
+        filename: str,
+        tool_name: str | None,
+        tool_result: dict[str, Any] | None,
+        post_process_result: Any,
+    ) -> str | None:
+        if not prompt:
+            return None
+        context = {
+            "filename": filename,
+            "tool_name": tool_name,
+            "tool_result": tool_result,
+            "post_process_result": post_process_result,
+        }
+        template_text = (
+            "You are answering a developer query from tool output."
+
+            "Write a concise final answer using the provided context."
+
+            "If the context already contains a direct answer, preserve it."
+
+            f"User prompt: {prompt}"
+
+            f"Context: {json.dumps(context, ensure_ascii=False, default=str)}"
+        )
+        result = self._llamaindex_complete_text(template_text)
+        return result.strip() if isinstance(result, str) and result.strip() else None
+
+    def _synthesize_with_llamaindex(
+        self,
+        ctx: JobContext,
+        tool_name: str | None,
+        tool_result: dict[str, Any] | None,
+        post_process_result: Any,
+    ) -> str | None:
+        return self._llamaindex_summarize(
+            prompt=ctx.prompt,
+            filename=ctx.filename,
+            tool_name=tool_name,
+            tool_result=tool_result,
+            post_process_result=post_process_result,
+        )
+
+    def _llamaindex_complete_text(self, prompt_text: str) -> str:
+        llm = getattr(Settings, "llm", None) if Settings is not None else None
+        if llm is None:
+            return ""
+        if PromptTemplate is not None:
+            prompt = PromptTemplate(prompt_text)
+            formatted = prompt.format()
+        else:
+            formatted = prompt_text
+        try:
+            if hasattr(llm, "complete"):
+                response = llm.complete(formatted)
+                return getattr(response, "text", str(response))
+            if hasattr(llm, "predict"):
+                response = llm.predict(formatted)
+                return getattr(response, "text", str(response))
+        except Exception:
+            return ""
+        return ""
+
+    def _llamaindex_complete_json(self, prompt_text: str) -> dict[str, Any] | None:
+        text = self._llamaindex_complete_text(prompt_text)
+        if not text:
+            return None
+        try:
+            return json.loads(text)
+        except Exception:
+            start = text.find("{")
+            end = text.rfind("}")
+            if start >= 0 and end > start:
+                try:
+                    return json.loads(text[start : end + 1])
+                except Exception:
+                    return None
+        return None
+
+    def _run_post_process_pipeline(
+        self,
+        ctx: JobContext,
+        result: Any,
+        tool_name: str | None,
+        tool_result: dict[str, Any] | None,
+    ) -> tuple[Any, str | None]:
+        collection_name = None
+        for action in ctx.route.get("post_process", []) or []:
+            if isinstance(action, str):
+                action_name = action
+                action_args = {}
+            else:
+                action_name = action.get("action")
+                action_args = action.get("args", {}) or {}
+            self._update_step(ctx.job_id, f"post_{action_name}", "running")
+            handler = self._action_handlers.get(action_name)
+            if handler is None:
+                self._update_step(ctx.job_id, f"post_{action_name}", "done")
+                continue
+            result = handler(result, action_args, tool_name=tool_name, job_id=ctx.job_id, php_base_url=ctx.php_base_url)
+            if isinstance(result, dict) and result.get("collection_name"):
+                collection_name = result.get("collection_name")
+            self._update_step(ctx.job_id, f"post_{action_name}", "done")
+        return result, collection_name
+
+    def _act_extract_json(
+        self,
+        result: Any,
+        args: dict[str, Any],
+        tool_name: str | None,
+        job_id: str,
+        php_base_url: str,
+    ) -> Any:
+        if isinstance(result, (dict, list)):
+            return result
+        if not isinstance(result, str):
+            return result
+        stripped = result.strip()
+        try:
+            return json.loads(stripped)
+        except Exception:
+            pass
+        start = stripped.find("[")
+        end = stripped.rfind("]")
+        if start >= 0 and end > start:
+            try:
+                return json.loads(stripped[start : end + 1])
+            except Exception:
+                return result
+        return result
+
+    def _act_send_to_qdrant(
+        self,
+        result: Any,
+        args: dict[str, Any],
+        tool_name: str | None,
+        job_id: str,
+        php_base_url: str,
+    ) -> dict[str, Any]:
+        chunks = []
+        if isinstance(result, dict):
+            chunks = result.get("chunks") or result.get("chunk") or []
+        elif isinstance(result, list):
+            chunks = result
+        else:
+            chunks = [{"text": str(result)}]
+
+        request_body = {
+            "job_id": job_id,
+            "tool_name": tool_name,
+            "chunks": chunks,
+            "filename": args.get("filename"),
+            "text": self._chunks_to_text(chunks),
+        }
+        response = self._call(
+            f"{DEFAULT_PYTHON_API_URL.rstrip('/')}/download-jobs",
+            method="POST",
+            json_body=request_body,
+            headers={"X-Internal-Secret": self._internal_secret()},
+        ) or {}
+        return {
+            "collection_name": response.get("collection_name") or args.get("collection_name"),
+            "chunk_count": response.get("chunk_count") or len(chunks),
+            "download_id": response.get("download_id"),
+            "raw_chunks": chunks,
+        }
+
+    def _act_poll_embedding(
+        self,
+        result: Any,
+        args: dict[str, Any],
+        tool_name: str | None,
+        job_id: str,
+        php_base_url: str,
+    ) -> dict[str, Any]:
+        download_id = args.get("download_id")
+        if not download_id and isinstance(result, dict):
+            download_id = result.get("download_id")
+        if not download_id:
+            return {"success": False, "error": "download_id is required"}
+        max_wait = int(args.get("max_wait", 300))
+        interval = float(args.get("interval", 2.0))
+        started_at = time.time()
+        while time.time() - started_at < max_wait:
+            status = self._call(
+                f"{DEFAULT_PYTHON_API_URL.rstrip('/')}/download-jobs/{urllib.parse.quote(str(download_id))}/status",
+                method="GET",
+                headers={"X-Internal-Secret": self._internal_secret()},
+            ) or {}
+            if status.get("status") in {"done", "unknown"}:
+                return {
+                    "indexed": status.get("indexed"),
+                    "total": status.get("total"),
+                    "collection_name": status.get("collection_name"),
+                    "download_id": download_id,
+                }
+            if status.get("status") == "error":
+                return {"success": False, "error": status.get("error") or "Embedding failed", "download_id": download_id}
+            time.sleep(interval)
+        return {"success": False, "error": "Embedding polling timed out", "download_id": download_id}
+
+    def _act_wrap_code_block(
+        self,
+        result: Any,
+        args: dict[str, Any],
+        tool_name: str | None,
+        job_id: str,
+        php_base_url: str,
+    ) -> str:
+        language = args.get("language", "text")
+        prefix = args.get("prefix", "")
+        text = result if isinstance(result, str) else json.dumps(result, ensure_ascii=False, default=str)
+        return f"{prefix}```{language} {text}```"
+
+    def _act_truncate(
+        self,
+        result: Any,
+        args: dict[str, Any],
+        tool_name: str | None,
+        job_id: str,
+        php_base_url: str,
+    ) -> str:
+        max_bytes = int(args.get("max_bytes", 8000))
+        text = result if isinstance(result, str) else json.dumps(result, ensure_ascii=False, default=str)
+        encoded = text.encode("utf-8")
+        if len(encoded) <= max_bytes:
+            return text
+        truncated = encoded[:max_bytes]
+        cut = truncated.rfind(b" ")
+        if cut > 0:
+            truncated = truncated[:cut]
+        output = truncated.decode("utf-8", errors="ignore")
+        percent = round((len(truncated) / max(len(encoded), 1)) * 100, 2)
+        return f"{output} [truncated to {percent}% of {len(encoded)} bytes]"
+
+    def _act_llamaindex_ingest(
+        self,
+        result: Any,
+        args: dict[str, Any],
+        tool_name: str | None,
+        job_id: str,
+        php_base_url: str,
+    ) -> Any:
+        """Ingest chunks into Qdrant via LlamaIndex IngestionPipeline."""
+        from llama_index.core import Document
+        from llama_index.core.ingestion import IngestionPipeline
+        from llama_index.embeddings.ollama import OllamaEmbedding
+        from llama_index.vector_stores.qdrant import QdrantVectorStore
+        from qdrant_client import QdrantClient
+
+        # Unwrap MCP tool response dict if needed
+        if isinstance(result, dict) and "stdout" in result:
+            result = result["stdout"]
+
+        # Extract JSON from Artisan output if needed
+        if isinstance(result, str):
+            import re
+            try:
+                result = json.loads(result)
+            except json.JSONDecodeError:
+                for m in re.finditer(r'\[\s*\n\s*\{', result):
+                    idx = m.start()
+                    depth = 0; end = -1
+                    for i in range(idx, len(result)):
+                        if result[i] == '[': depth += 1
+                        elif result[i] == ']':
+                            depth -= 1
+                            if depth == 0: end = i; break
+                    if end > idx:
+                        try: result = json.loads(result[idx:end + 1]); break
+                        except json.JSONDecodeError: pass
+
+        if not isinstance(result, list) or len(result) == 0:
+            return {"error": "No chunk list to ingest"}
+
+        collection_name = args.get("collection_name") or "chunk_code_output"
+
+        # Build LlamaIndex Documents from code chunks
+        documents = []
+        for c in result:
+            parts = []
+            if c.get("docblock"): parts.append(str(c["docblock"]))
+            if c.get("class"): parts.append(f"Class: {c['class']}")
+            if c.get("name"):
+                sig = [str(c["name"])]
+                params = c.get("parameters", [])
+                if params:
+                    p_strs = [(f"{p['type']} ${p['name']}" if p.get("type") else f"${p['name']}")
+                              for p in params if isinstance(p, dict) and p.get("name")]
+                    if p_strs: sig.append("(" + ", ".join(p_strs) + ")")
+                if c.get("return_type"):
+                    sig.append(": " + str(c["return_type"]))
+                parts.append("Signature: " + "".join(sig))
+            if c.get("code"):
+                code = str(c["code"])
+                # Keep code short for embedding — Ollama BGE-M3 has ~8K token limit
+                max_code = 2000
+                if len(code) > max_code:
+                    code = code[:max_code] + "\n..."
+                parts.append(code)
+            text = "\n".join(parts) if parts else (c.get("name") or "unnamed")
+            if len(text) > 4000:
+                text = text[:4000] + "\n..."
+
+            if not text.strip():
+                continue
+
+            documents.append(Document(
+                text=text,
+                metadata={
+                    "type": c.get("type", ""), "name": c.get("name", ""),
+                    "class": c.get("class", ""), "file": c.get("file", ""),
+                    "start_line": c.get("start_line", 0),
+                    "code": c.get("code", ""), "collection": collection_name,
+                },
+            ))
+
+        if not documents:
+            return {"error": "No embeddable documents"}
+
+        # Set up Qdrant vector store
+        embed_model = OllamaEmbedding(
+            model_name=settings.ollama_embedding_model,
+            base_url=settings.ollama_base_url,
+        )
+        qdrant_client = QdrantClient(url=settings.qdrant_url)
+        try:
+            qdrant_client.delete_collection(collection_name)
+        except Exception:
+            pass
+        vector_store = QdrantVectorStore(
+            client=qdrant_client, collection_name=collection_name,
+        )
+
+        # Run ingestion pipeline synchronously
+        pipeline = IngestionPipeline(
+            transformations=[embed_model],
+            vector_store=vector_store,
+        )
+        try:
+            pipeline.run(documents=documents, show_progress=False)
         except Exception as e:
-            self._save_error(job_id, str(e))
+            return {"error": f"Ingestion failed: {str(e)[:200]}",
+                    "collection_name": collection_name,
+                    "ingested": 0, "chunk_count": len(documents)}
 
-    def _update_step(self, job_id, steps, step_id, status, detail=None,
-                     progress=None):
-        for s in steps:
-            if s["id"] == step_id:
-                s["status"] = status
-                s["detail"] = detail
-                if progress is not None:
-                    s["progress"] = progress
-                break
-        # Sync to in-memory job dict
-        with self._lock:
-            if job_id in self._jobs:
-                self._jobs[job_id]["steps"] = steps
-                self._jobs[job_id]["status"] = "running"
-        self._write_status(job_id, steps)
+        return {"collection_name": collection_name,
+                "ingested": len(documents), "chunk_count": len(documents)}
 
-    def _write_status(self, job_id, steps):
-        try:
-            self._status_dir.mkdir(parents=True, exist_ok=True)
-            p = self._status_dir / f"{job_id}.orchestrator.json"
-            all_done = all(s["status"] == "done" for s in steps)
-            with self._lock:
-                j = self._jobs.get(job_id, {})
-            payload = {
-                "status": "done" if all_done else "running",
-                "route": j.get("route", ""),
-                "template_name": j.get("template_name", "chat"),
-                "collection_name": j.get("collection_name"),
-                "tool_output": j.get("tool_output"),
-                "prompt": j.get("prompt"),
-                "started_at": j.get("started_at"),
-                "steps": steps,
-                "current_step": sum(1 for s in steps if s["status"] == "done"),
-                "total_steps": len(steps),
-                "outputs": j.get("outputs", {}),
-                "error": j.get("error"),
-            }
-            p.write_text(json.dumps(payload))
-        except Exception:
-            pass
+    def _act_llamaindex_route(
+        self,
+        result: Any,
+        args: dict[str, Any],
+        tool_name: str | None,
+        job_id: str,
+        php_base_url: str,
+    ) -> Any:
+        prompt = args.get("prompt") or ""
+        text = result if isinstance(result, str) else json.dumps(result, ensure_ascii=False, default=str)
+        return self._llamaindex_summarize(
+            prompt=prompt or text,
+            filename=args.get("filename", ""),
+            tool_name=tool_name,
+            tool_result={"stdout": text},
+            post_process_result=result,
+        ) or result
 
-    def _save_outputs(self, job_id, steps, template_name, collection_name=None, prompt="", tool_output=None):
-        with self._lock:
-            if job_id in self._jobs:
-                self._jobs[job_id]["outputs"]["done"] = {"template_name": template_name}
-                if collection_name:
-                    self._jobs[job_id]["collection_name"] = collection_name
-                if prompt:
-                    self._jobs[job_id]["prompt"] = prompt
-                if tool_output:
-                    self._jobs[job_id]["tool_output"] = tool_output
-                self._jobs[job_id]["status"] = "done"
-        self._write_status(job_id, steps)
+    def _act_llamaindex_summarize(
+        self,
+        result: Any,
+        args: dict[str, Any],
+        tool_name: str | None,
+        job_id: str,
+        php_base_url: str,
+    ) -> Any:
+        prompt = args.get("prompt") or ""
+        text = result if isinstance(result, str) else json.dumps(result, ensure_ascii=False, default=str)
+        return self._llamaindex_summarize(
+            prompt=prompt or text,
+            filename=args.get("filename", ""),
+            tool_name=tool_name,
+            tool_result={"stdout": text},
+            post_process_result=result,
+        ) or result
 
-    def _save_error(self, job_id, error_msg):
-        with self._lock:
-            if job_id in self._jobs:
-                self._jobs[job_id]["status"] = "error"
-                self._jobs[job_id]["error"] = error_msg
-        try:
-            self._status_dir.mkdir(parents=True, exist_ok=True)
-            (self._status_dir / f"{job_id}.orchestrator.json").write_text(
-                json.dumps({"status": "error", "error": error_msg}))
-        except Exception:
-            pass
+    def _extract_tool_output(self, tool_result: dict[str, Any] | None) -> Any:
+        if not tool_result:
+            return ""
+        if "stdout" in tool_result:
+            return tool_result["stdout"]
+        if "result" in tool_result:
+            return tool_result["result"]
+        return tool_result
 
+    def _chunks_to_text(self, chunks: list[Any]) -> str:
+        lines: list[str] = []
+        for chunk in chunks:
+            if isinstance(chunk, dict):
+                lines.append(str(chunk.get("code") or chunk.get("text") or chunk.get("name") or chunk))
+            else:
+                lines.append(str(chunk))
+        return "".join(lines)
 
-    # ── MCP client ──────────────────────────────────────────────────────────
+    def _internal_secret(self) -> str:
+        return str(self.config.get("internal_secret") or DEFAULT_INTERNAL_SECRET)
 
-    def _get_mcp_schema(self, tool_name: str, session_id: str, mcp_url: str) -> set:
-        """Query MCP tools/list to get accepted parameter names for a tool."""
-        try:
-            list_body = json.dumps({
-                "jsonrpc": "2.0", "method": "tools/list", "id": "list-1",
-            }).encode("utf-8")
-            list_req = urllib.request.Request(
-                mcp_url, data=list_body,
-                headers={"Content-Type": "application/json",
-                         "Accept": "application/json",
-                         "Mcp-Session-Id": session_id},
-                method="POST")
-            with urllib.request.urlopen(list_req, timeout=15) as resp:
-                data = json.load(resp)
-            tools = data.get("result", {}).get("tools", [])
-            for t in tools:
-                if t.get("name") == tool_name:
-                    return set(t.get("inputSchema", {}).get("properties", {}).keys())
-        except Exception:
-            pass
+    def _get_mcp_schema(self, tool_name: str, session_id: str, mcp_url: str) -> set[str]:
+        response = self._call(
+            mcp_url,
+            method="POST",
+            headers={"Mcp-Session-Id": session_id, "Accept": "application/json"},
+            json_body={"jsonrpc": "2.0", "id": 1, "method": "tools/list"},
+        )
+        tools = ((response or {}).get("result") or {}).get("tools", [])
+        for tool in tools:
+            if tool.get("name") != tool_name:
+                continue
+            schema = tool.get("inputSchema") or {}
+            properties = schema.get("properties") or {}
+            return set(properties.keys())
         return set()
 
-    def _call_mcp_tool(self, tool_name: str, filename: str, prompt: str = "") -> dict | None:
-        """Call MCP tool via JSON-RPC 2.0. Returns {success, ...} or None."""
-        mcp_url = self._get_mcp_url()
+    def _call_mcp_tool(self, tool_name: str, filename: str, prompt: str = "") -> dict[str, Any] | None:
         try:
-            # Phase 1: Initialize
-            init_body = json.dumps({
-                "jsonrpc": "2.0", "method": "initialize",
-                "params": {"protocolVersion": "2024-11-05",
-                           "capabilities": {"tools": {"listChanged": False}},
-                           "clientInfo": {"name": "orchestrator", "version": "1.0"}},
-                "id": "init-1",
-            }).encode("utf-8")
-            init_req = urllib.request.Request(mcp_url, data=init_body,
-                                              headers={"Content-Type": "application/json", "Accept": "application/json"}, method="POST")
-            with urllib.request.urlopen(init_req, timeout=30) as resp:
-                session_id = resp.headers.get("Mcp-Session-Id", "")
-
+            mcp_url = self._get_mcp_url()
+            init = self._call(
+                mcp_url,
+                method="POST",
+                headers={"Accept": "application/json"},
+                json_body={
+                    "jsonrpc": "2.0",
+                    "id": 1,
+                    "method": "initialize",
+                    "params": {"protocolVersion": "2024-11-05", "clientInfo": {"name": "orchestrator", "version": "1.0"}},
+                },
+            )
+            headers = init.get("headers", {}) if isinstance(init, dict) else {}
+            session_id = headers.get("Mcp-Session-Id") if isinstance(headers, dict) else None
             if not session_id:
-                return None
-
-            # Phase 2: Send initialized notification
-            notif_body = json.dumps({"jsonrpc": "2.0", "method": "notifications/initialized"}).encode("utf-8")
-            notif_req = urllib.request.Request(mcp_url, data=notif_body,
-                                               headers={"Content-Type": "application/json", "Accept": "application/json", "Mcp-Session-Id": session_id}, method="POST")
-            try: urllib.request.urlopen(notif_req, timeout=10)
-            except Exception: pass
-
-            # Phase 2.5: Get tool schema to filter args
+                raise RuntimeError("MCP session ID missing")
+            self._call(
+                mcp_url,
+                method="POST",
+                headers={"Mcp-Session-Id": session_id, "Accept": "application/json"},
+                json_body={"jsonrpc": "2.0", "method": "notifications/initialized"},
+            )
             accepted = self._get_mcp_schema(tool_name, session_id, mcp_url)
-
-            # Phase 3: Call tool — only pass accepted params
-            base_args = dict(self.config.get("tools", {}).get(tool_name, {}).get("args", {}))
-            arguments = {}
-            # filename + prompt: pass only if tool accepts them
-            for key, val in [("filename", filename), ("prompt", prompt)]:
-                if key in accepted: arguments[key] = val
-            # Config args: pass only if accepted
-            for k, v in base_args.items():
-                if k in accepted: arguments[k] = v
-
-            call_body = json.dumps({
-                "jsonrpc": "2.0", "method": "tools/call",
-                "params": {"name": tool_name, "arguments": arguments},
-                "id": "call-1",
-            }).encode("utf-8")
-            call_req = urllib.request.Request(mcp_url, data=call_body,
-                                              headers={"Content-Type": "application/json", "Accept": "application/json", "Mcp-Session-Id": session_id}, method="POST")
-            with urllib.request.urlopen(call_req, timeout=300) as resp:
-                rpc_resp = json.load(resp)
-
-            result = rpc_resp.get("result", {})
-            content_items = result.get("content", [])
-            for item in content_items:
-                if item.get("type") == "text":
-                    try: return json.loads(item["text"])
-                    except (json.JSONDecodeError, KeyError):
-                        return {"success": True, "stdout": item.get("text", "")}
-
-            if "error" in rpc_resp:
-                return {"success": False, "error": rpc_resp["error"].get("message", "MCP error")}
+            tool_config = (self.config.get("tools") or {}).get(tool_name, {})
+            args = {"filename": filename, "prompt": prompt}
+            for key, value in (tool_config.get("args") or {}).items():
+                args[key] = self._resolve_env(value)
+            params = {key: value for key, value in args.items() if key in accepted or not accepted}
+            response = self._call(
+                mcp_url,
+                method="POST",
+                headers={"Mcp-Session-Id": session_id, "Accept": "application/json"},
+                json_body={
+                    "jsonrpc": "2.0",
+                    "id": 2,
+                    "method": "tools/call",
+                    "params": {"name": tool_name, "arguments": params},
+                },
+            )
+            if not isinstance(response, dict):
+                return None
+            if response.get("error"):
+                return {"success": False, "error": response["error"]}
+            result = response.get("result") or {}
+            content = result.get("content") or []
+            if content:
+                first = content[0]
+                if isinstance(first, dict) and first.get("type") == "text":
+                    text = first.get("text", "")
+                    try:
+                        parsed = json.loads(text)
+                        return {"success": True, "result": parsed}
+                    except Exception:
+                        return {"success": True, "stdout": text}
             return {"success": True, "result": result}
         except Exception:
             return None
 
     def _get_mcp_url(self) -> str:
-        servers = self.config.get("mcp_servers", {})
-        laravel = servers.get("laravel", {})
-        url = laravel.get("url", "http://php-ast:9003/mcp")
         import os
+        servers = self.config.get("mcp_servers", {}) or {}
+        laravel = servers.get("laravel", {}) if isinstance(servers, dict) else {}
+        url = str(laravel.get("url") or DEFAULT_MCP_URL)
         if url.startswith("${") and url.endswith("}"):
-            url = os.getenv(url[2:-1], "http://php-ast:9003/mcp")
+            import re
+            match = re.match(r'\$\{(\w+):-([^}]+)\}', url)
+            if match:
+                env_var, default = match.groups()
+                url = os.getenv(env_var) or default
         return url
 
-
-def _call(url, body=None, timeout=300):
-    try:
-        data = json.dumps(body).encode() if body else None
-        headers = {"Content-Type": "application/json"} if body else {}
-        req = urllib.request.Request(url, data=data, headers=headers,
-                                     method="POST" if body else "GET")
-        with urllib.request.urlopen(req, timeout=timeout) as r:
-            return json.load(r) if 200 <= r.status < 300 else None
-    except urllib.error.HTTPError as e:
-        # Parse error body for diagnostic info
+    def _call(
+        self,
+        url: str,
+        method: str = "GET",
+        json_body: dict[str, Any] | None = None,
+        headers: dict[str, str] | None = None,
+    ) -> dict[str, Any] | None:
         try:
-            return json.load(e)
+            request_headers = headers.copy() if headers else {}
+            if json_body is not None:
+                request_headers.setdefault("Content-Type", "application/json")
+            response = requests.request(
+                method=method.upper(),
+                url=url,
+                json=json_body,
+                headers=request_headers,
+                timeout=120,
+            )
+            if response.status_code >= 400:
+                try:
+                    return response.json()
+                except Exception:
+                    return {"error": response.text, "status_code": response.status_code}
+            if not response.text.strip():
+                return {}
+            try:
+                payload = response.json()
+            except Exception:
+                return {"text": response.text, "status_code": response.status_code}
+            if isinstance(payload, dict):
+                payload.setdefault("headers", dict(response.headers))
+            return payload if isinstance(payload, dict) else {"result": payload}
         except Exception:
             return None
-    except Exception:
-        return None
+
+    def _update_step(self, job_id: str, key: str, status: str, **extra: Any) -> None:
+        with self._lock:
+            job = self._jobs.get(job_id)
+            if not job:
+                return
+            for step in job.get("steps", []):
+                if step.get("key") == key:
+                    step["status"] = status
+                    step.update(extra)
+                    break
+            job["updated_at"] = time.time()
+        self._write_status(job_id)
+
+    def _write_status(self, job_id: str) -> None:
+        with self._lock:
+            job = self._jobs.get(job_id)
+            if not job:
+                return
+            status_path = self._status_dir / f"{job_id}.orchestrator.json"
+            payload = {
+                "job_id": job_id,
+                "status": job.get("status"),
+                "route_name": job.get("route_name"),
+                "filename": job.get("filename"),
+                "prompt": job.get("prompt"),
+                "route": job.get("route"),
+                "started_at": job.get("started_at"),
+                "updated_at": job.get("updated_at"),
+                "steps": job.get("steps", []),
+                "output": job.get("output"),
+                "tool_name": job.get("tool_name"),
+                "collection_name": job.get("collection_name"),
+                "error": job.get("error"),
+            }
+        status_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+
+    def _save_outputs(
+        self,
+        job_id: str,
+        output: Any,
+        tool_name: str | None = None,
+        collection_name: str | None = None,
+        tool_result: dict[str, Any] | None = None,
+        tool_output: Any = None,
+    ) -> None:
+        with self._lock:
+            job = self._jobs.get(job_id)
+            if not job:
+                return
+            job["status"] = "done"
+            job["tool_name"] = tool_name
+            job["collection_name"] = collection_name
+            job["tool_result"] = tool_result
+            job["tool_output"] = tool_output
+            job["output"] = output
+            job["updated_at"] = time.time()
+        self._write_status(job_id)
+
+    def _save_error(self, job_id: str, error: str) -> None:
+        with self._lock:
+            job = self._jobs.setdefault(job_id, {"steps": []})
+            job["status"] = "error"
+            job["error"] = error
+            job["updated_at"] = time.time()
+        self._write_status(job_id)
 
 
 _config_path = Path(__file__).parent / "config" / "orchestrator.yml"

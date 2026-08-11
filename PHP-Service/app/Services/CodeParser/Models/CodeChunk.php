@@ -44,15 +44,13 @@ final readonly class CodeChunk
             'end_line'       => $this->endLine,
             'parameters'     => $this->parameters,
             'return_type'    => $this->returnType,
-            // Full keyed map: { "App\\Services\\Foo": ["bar", "baz"] }
             'calls'          => $this->calls,
-            // Flat list of every method name — for Qdrant keyword filtering
             'called_methods' => $this->flatCallNames(),
-            // Flat list of every resolved receiver FQCN — for dependency queries
             'called_classes' => $this->flatCallClasses(),
             'modifiers'      => $this->modifiers,
             'has_docblock'   => $this->docblock !== null,
             'docblock'       => $this->docblock,
+            'code'           => $this->code,
         ];
     }
 
