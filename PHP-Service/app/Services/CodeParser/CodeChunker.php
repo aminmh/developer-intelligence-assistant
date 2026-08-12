@@ -47,14 +47,14 @@ final readonly class CodeChunker
      *
      * @return CodeChunk[]
      */
-    public function chunkFile(string $absolutePath, string $relativePath = ''): array
+    public function chunkFile(string $absolutePath, string $relativePath = '', array $typeMap = []): array
     {
         $source = file_get_contents($absolutePath);
         if ($source === false) {
             throw new \RuntimeException("Cannot read file: $absolutePath");
         }
 
-        return $this->chunkSource($source, $relativePath ?: $absolutePath);
+        return $this->chunkSource($source, $relativePath ?: $absolutePath, $typeMap);
     }
 
     /**
@@ -62,7 +62,7 @@ final readonly class CodeChunker
      *
      * @return CodeChunk[]
      */
-    public function chunkSource(string $source, string $filePath = ''): array
+    public function chunkSource(string $source, string $filePath = '', array $typeMap = []): array
     {
         try {
             $ast = $this->parser->parse($source);
@@ -71,7 +71,7 @@ final readonly class CodeChunker
             return [];
         }
 
-        $collector = new \App\Services\CodeParser\Models\ChunkCollector($source, $filePath, $this->printer);
+        $collector = new \App\Services\CodeParser\Models\ChunkCollector($source, $filePath, $this->printer, $typeMap);
         $traverser = new NodeTraverser();
         $traverser->addVisitor(new NameResolver());
         $traverser->addVisitor($collector);
@@ -85,7 +85,7 @@ final readonly class CodeChunker
      *
      * @return \Generator<CodeChunk>
      */
-    public function chunkDirectory(string $rootPath): \Generator
+    public function chunkDirectory(string $rootPath, array $typeMap = []): \Generator
     {
         $iterator = new \RecursiveIteratorIterator(
             new \RecursiveDirectoryIterator($rootPath, \FilesystemIterator::SKIP_DOTS)
@@ -97,7 +97,7 @@ final readonly class CodeChunker
             $abs = $file->getPathname();
             $relative = ltrim(str_replace($rootPath, '', $abs), DIRECTORY_SEPARATOR);
 
-            foreach ($this->chunkFile($abs, $relative) as $chunk) {
+            foreach ($this->chunkFile($abs, $relative, $typeMap) as $chunk) {
                 yield $chunk;
             }
         }

@@ -30,6 +30,19 @@ final class ChunkCodeTool
         }
 
         try {
+            // Run WorkspaceTypeScanner to resolve Eloquent magic properties + @property annotations
+            $typeMapFile = null;
+            try {
+                $scanner = new \App\Services\CodeParser\WorkspaceTypeScanner();
+                $typeMap = $scanner->scan($resolvedPath);
+                if (!empty($typeMap)) {
+                    $typeMapFile = tempnam(sys_get_temp_dir(), 'type_map_');
+                    file_put_contents($typeMapFile, json_encode($typeMap));
+                }
+            } catch (\Throwable $e) {
+                Log::channel('parse_index')->warning('Type scanner failed: ' . $e->getMessage());
+            }
+
             // Run code:parse Artisan command
             $args = ['--path' => $resolvedPath];
             if ($project) $args['--project'] = true;
@@ -38,6 +51,7 @@ final class ChunkCodeTool
             if ($dry_run) $args['--dry-run'] = true;
             if ($batch) $args['--batch'] = $batch;
             $args['--output'] = 'json';
+            if ($typeMapFile) $args['--type-map-file'] = $typeMapFile;
 
             $exitCode = Artisan::call('code:parse', $args);
             $output = Artisan::output();
@@ -64,9 +78,12 @@ final class ChunkCodeTool
             return ['success' => false, 'status' => 'failed',
                     'error' => $e->getMessage()];
         } finally {
-            // Cleanup temp extraction if we downloaded from MinIO
+            // Cleanup temp extraction + type map file
             if (isset($this->tempExtractPath) && File::exists($this->tempExtractPath)) {
                 File::deleteDirectory($this->tempExtractPath);
+            }
+            if (isset($typeMapFile) && $typeMapFile && file_exists($typeMapFile)) {
+                @unlink($typeMapFile);
             }
         }
     }
@@ -77,7 +94,7 @@ final class ChunkCodeTool
     {
         // 1. Pre-extracted workspace
         if ($workspace_id) {
-            $wsPath = '/workspace/project/' . $workspace_id;
+            $wsPath = Storage::disk('workspace')->path('/project/' . $workspace_id);
             return File::exists($wsPath) ? ($path ? "{$wsPath}/{$path}" : $wsPath) : null;
         }
 

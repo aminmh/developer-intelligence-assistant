@@ -76,6 +76,13 @@ return [
             'report' => false,
         ],
 
+        'workspace' => [
+            'driver' => 'local',
+            'root' => storage_path('app/workspace'),
+            'throw' => true,
+            'serve' => true,
+        ]
+
     ],
 
     /*

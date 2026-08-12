@@ -16,7 +16,7 @@ final class ExportStructureTool
         ?string $path = null,
         int $depth = 4,
         bool $include_hidden = false,
-    ): array {
+    ): string|array {
         $args = [
             '--output' => storage_path('app/rag/project-structure.md'),
             '--depth' => $depth,
@@ -61,12 +61,7 @@ final class ExportStructureTool
                     . "\nFull output: " . $outputPath;
             }
 
-            return [
-                'success' => true,
-                'exit_code' => 0,
-                'stdout' => $content,
-                'depth' => $depth,
-            ];
+            return $content;
         } catch (Throwable $e) {
             return [
                 'success' => false,

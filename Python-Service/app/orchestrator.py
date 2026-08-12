@@ -551,8 +551,19 @@ class Orchestrator:
                 text=text,
                 metadata={
                     "type": c.get("type", ""), "name": c.get("name", ""),
-                    "class": c.get("class", ""), "file": c.get("file", ""),
+                    "class": c.get("class", ""),
+                    "class_fqn": c.get("class_fqn", ""),
+                    "namespace": c.get("namespace", ""),
+                    "file": c.get("file", ""),
                     "start_line": c.get("start_line", 0),
+                    "end_line": c.get("end_line", 0),
+                    "modifiers": c.get("modifiers", []),
+                    "parameters": c.get("parameters", []),
+                    "return_type": c.get("return_type", ""),
+                    "calls": c.get("calls", []),
+                    "callers": c.get("callers", []),
+                    "has_docblock": c.get("has_docblock", False),
+                    "docblock": c.get("docblock", ""),
                     "code": c.get("code", ""), "collection": collection_name,
                 },
             ))
@@ -574,13 +585,15 @@ class Orchestrator:
             client=qdrant_client, collection_name=collection_name,
         )
 
-        # Run ingestion pipeline synchronously
+        # Run ingestion pipeline — one doc at a time to avoid Ollama batch limits
         pipeline = IngestionPipeline(
             transformations=[embed_model],
             vector_store=vector_store,
         )
         try:
-            pipeline.run(documents=documents, show_progress=False)
+            # Embed + store one at a time — avoids Ollama batch context overflow
+            for doc in documents:
+                pipeline.run(documents=[doc], show_progress=False)
         except Exception as e:
             return {"error": f"Ingestion failed: {str(e)[:200]}",
                     "collection_name": collection_name,

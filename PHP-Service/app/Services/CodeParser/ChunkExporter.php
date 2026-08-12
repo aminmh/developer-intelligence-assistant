@@ -274,7 +274,7 @@ final class ChunkExporter
             'return_type' => $chunk->returnType,
 
             // Relationships
-            'calls'       => $chunk->calls,
+            'calls'       => $chunk->flattenCalls(),
 
             // Documentation
             'has_docblock' => $chunk->docblock !== null,

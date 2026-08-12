@@ -18,7 +18,7 @@ final class ExportProjectStructureCommand extends Command
         {--depth=4 : Maximum directory depth}
         {--include-hidden : Include hidden files and directories}
         {--storage-filename= : Download ZIP from MinIO (tus-uploads) by filename before scanning}
-        {--workspace-id= : Use pre-extracted workspace at /workspace/project/{id}}';
+        {--workspace-id= : Use pre-extracted workspace at /{configured workspace disk}/project/id}';
 
     protected $description = 'Export a RAG-friendly Markdown project directory structure using tree';
 
@@ -99,7 +99,7 @@ final class ExportProjectStructureCommand extends Command
     {
         // 1. Pre-extracted workspace (fastest)
         if ($workspaceId = $this->option('workspace-id')) {
-            $wsPath = '/workspace/project/' . $workspaceId;
+            $wsPath = Storage::disk('workspace')->path('/project/' . $workspaceId);
             if (!is_dir($wsPath)) {
                 $this->error("Workspace not found: {$wsPath}");
                 return null;

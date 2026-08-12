@@ -61,6 +61,7 @@ class ChunkCodeCommand extends Command
         {--batch=20         : Number of chunks per vector DB upsert batch}
         {--no-index         : Skip vector DB indexing (export or display only)}
         {--stream           : Stream text output to stdout (implies --export-format=text --no-index)}
+        {--type-map-file=   : JSON file from WorkspaceTypeScanner for call resolution}
     ';
 
     protected $description = 'Parse PHP source files into AST chunks, index them, and/or export to JSON/YAML/text';
@@ -76,6 +77,7 @@ class ChunkCodeCommand extends Command
     private int   $totalFiles   = 0;
     private int   $skippedFiles = 0;
     private array $errors       = [];
+    private array $typeMap      = [];
 
     public function handle(
         CodeChunker   $chunker,
@@ -122,6 +124,12 @@ class ChunkCodeCommand extends Command
         } else {
             // Infer export format from file extension, allow override via --export-format
             $exportFormat = $this->resolveExportFormat($exportPath);
+        }
+
+        // Load external type map from WorkspaceTypeScanner
+        $typeMapFile = $this->option('type-map-file');
+        if ($typeMapFile && file_exists($typeMapFile)) {
+            $this->typeMap = json_decode(file_get_contents($typeMapFile), true) ?: [];
         }
 
         // ── Show scan plan ─────────────────────────────────────────────────────
@@ -242,7 +250,7 @@ class ChunkCodeCommand extends Command
             'json'        => 'json',
             'yaml', 'yml' => 'yaml',
             'txt'         => 'text',
-            default       => null,
+            default       => 'json',
         };
     }
 
@@ -373,7 +381,7 @@ class ChunkCodeCommand extends Command
         $relative = $relative ?: ltrim(str_replace(base_path(), '', $absolute), DIRECTORY_SEPARATOR);
 
         try {
-            $chunks = $chunker->chunkFile($absolute, $relative);
+            $chunks = $chunker->chunkFile($absolute, $relative, $this->typeMap);
             $this->totalFiles++;
             $this->totalChunks += count($chunks);
             return $chunks;

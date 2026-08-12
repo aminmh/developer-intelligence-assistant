@@ -45,7 +45,7 @@ class WorkspaceController extends Controller
         $tmpZip = tempnam(sys_get_temp_dir(), 'ws_zip_');
         file_put_contents($tmpZip, $disk->get($zipS3Path));
 
-        $extractPath = '/workspace/project/' . $workspaceId;
+        $extractPath = Storage::disk('workspace')->path('/project/'.$workspaceId);
         File::makeDirectory($extractPath, 0755, true, true);
 
         $zip = new \ZipArchive();
@@ -87,7 +87,7 @@ class WorkspaceController extends Controller
     // Cleans up an extracted workspace directory.
     public function destroy(string $workspaceId): JsonResponse
     {
-        $path = '/workspace/project/' . $workspaceId;
+        $path = Storage::disk('workspace')->path('/project/' . $workspaceId);
 
         if (File::exists($path)) {
             File::deleteDirectory($path);

@@ -36,23 +36,38 @@ final class ChunkCollector extends NodeVisitorAbstract
     private ?string $currentNamespace = null;
 
     /**
-     * Constructor property-injection map for the current class.
-     * Built when we enter a class node, reset when we leave.
+     * Property type map for the current class.
+     * Built when entering a class, cleared when leaving.
      *
-     * Maps variable name (without $) → FQCN
-     * e.g. "paymentService" => "App\\Services\\PaymentService"
+     * Maps property name → FQCN
+     * e.g. "age" → "App\\Models\\SkiSchool\\Age"
+     *
+     * Sources: typed property declarations, @var docblock annotations
      *
      * @var array<string, string>
      */
-    private array $constructorTypes = [];
+    private array $propertyTypes = [];
 
     public array $chunks = [];
+
+    /**
+     * External type map from WorkspaceTypeScanner.
+     * Keys are FQCNs, values are {properties: {name→FQCN}, methods: {name→returnType}}.
+     *
+     * @var array<string, array{properties: array<string,string>, methods: array<string,string|null>}>
+     */
+    private array $externalTypeMap = [];
+
+    private array $constructorTypes = [];
 
     public function __construct(
         private readonly string        $sourceCode,
         private readonly string        $filePath,
         private readonly PrettyPrinter $printer,
-    ) {}
+        array                          $typeMap = [],
+    ) {
+        $this->externalTypeMap = $typeMap;
+    }
 
     // ─── Node enter / leave ────────────────────────────────────────────────────
 
@@ -87,10 +102,19 @@ final class ChunkCollector extends NodeVisitorAbstract
             $className = $node->name?->toString() ?? '(anonymous)';
             $this->classStack[] = $className;
 
-            // Extract typed constructor parameters for this class so that
-            // $this->foo type hints can be resolved inside every method body.
             if ($node instanceof Class_) {
                 $this->constructorTypes = $this->extractConstructorTypes($node);
+                $this->propertyTypes   = $this->extractPropertyTypes($node);
+
+                // Merge external type map for this class (scanned before parsing)
+                $fqcn = $this->currentNamespace
+                    ? $this->currentNamespace . '\\' . $className
+                    : $className;
+                if (isset($this->externalTypeMap[$fqcn]['properties'])) {
+                    foreach ($this->externalTypeMap[$fqcn]['properties'] as $propName => $propFqcn) {
+                        $this->propertyTypes[$propName] = $propFqcn;
+                    }
+                }
             }
         }
     }
@@ -100,6 +124,7 @@ final class ChunkCollector extends NodeVisitorAbstract
         if ($node instanceof Class_ || $node instanceof Interface_ || $node instanceof Trait_) {
             array_pop($this->classStack);
             $this->constructorTypes = [];
+            $this->propertyTypes   = [];
             return;
         }
 
@@ -116,6 +141,14 @@ final class ChunkCollector extends NodeVisitorAbstract
         $type      = $node instanceof ClassMethod ? 'method' : 'function';
         $name      = $node->name->toString();
 
+        // Compute fully-qualified class name from namespace + class
+        $classFqn = null;
+        if ($className && $this->currentNamespace) {
+            $classFqn = $this->currentNamespace . '\\' . $className;
+        } elseif ($className) {
+            $classFqn = $className;
+        }
+
         $start = $node->getStartLine();
         $end   = $node->getEndLine();
         $lines = explode("\n", $this->sourceCode);
@@ -126,6 +159,8 @@ final class ChunkCollector extends NodeVisitorAbstract
             type:        $type,
             name:        $name,
             className:   $className,
+            classFqn:    $classFqn,
+            namespace:   $this->currentNamespace,
             file:        $this->filePath,
             startLine:   $start,
             endLine:     $end,
@@ -174,6 +209,72 @@ final class ChunkCollector extends NodeVisitorAbstract
         }
 
         return $map;
+    }
+
+    /**
+     * Walk the class's property declarations and extract type hints
+     * from both typed properties (PHP 7.4+) and @var docblock annotations.
+     *
+     * @return array<string, string>  propertyName → FQCN
+     */
+    private function extractPropertyTypes(Class_ $class): array
+    {
+        $map = [];
+
+        foreach ($class->stmts as $stmt) {
+            // Typed property: public ?Age $age;
+            if ($stmt instanceof Node\Stmt\Property) {
+                $type = $stmt->type ?? null;
+                if ($type === null) {
+                    // Check @var docblock for type
+                    $docComment = $stmt->getDocComment();
+                    if ($docComment !== null) {
+                        $type = $this->extractDocblockVarType($docComment->getText());
+                    }
+                }
+                if ($type !== null) {
+                    $fqcn = $this->resolveType($type);
+                    if ($fqcn !== null) {
+                        foreach ($stmt->props as $prop) {
+                            $map[$prop->name->toString()] = $fqcn;
+                        }
+                    }
+                }
+            }
+
+            // Promoted constructor property: __construct(private Age $age)
+            if ($stmt instanceof ClassMethod && $stmt->name->toString() === '__construct') {
+                foreach ($stmt->params as $param) {
+                    if (!($param->flags & (Class_::MODIFIER_PUBLIC | Class_::MODIFIER_PROTECTED | Class_::MODIFIER_PRIVATE))) {
+                        continue;
+                    }
+                    if (!$param->type) continue;
+                    if (!($param->var instanceof Node\Expr\Variable)) continue;
+
+                    $fqcn = $this->resolveType($param->type);
+                    if ($fqcn !== null) {
+                        $map[$param->var->name] = $fqcn;
+                    }
+                }
+            }
+        }
+
+        return $map;
+    }
+
+    /**
+     * Extract a type from a @var docblock annotation.
+     * @return Node\Name|Node\NullableType|null
+     */
+    private function extractDocblockVarType(string $docblock): ?Node
+    {
+        if (preg_match('/@var\s+(\?)?(\w+(?:\\\\\w+)*(?:\[\])?)/', $docblock, $matches)) {
+            $nullable = $matches[1] === '?';
+            $typeName = $matches[2];
+            $type = new Node\Name($typeName);
+            return $nullable ? new Node\NullableType($type) : $type;
+        }
+        return null;
     }
 
     // ─── Call extraction ───────────────────────────────────────────────────────
@@ -228,17 +329,41 @@ final class ChunkCollector extends NodeVisitorAbstract
 
         $traverser = new NodeTraverser();
         $traverser->addVisitor(
-            new class($calls, $localVarTypes, $currentFqcn, $this->useMap) extends NodeVisitorAbstract
+            new class($calls, $localVarTypes, $currentFqcn, $this->useMap, $this->propertyTypes) extends NodeVisitorAbstract
             {
                 public function __construct(
                     private array  &$calls,
                     private array  $varTypes,     // varName → FQCN
                     private ?string $currentFqcn,
                     private array  $useMap,        // alias → FQCN
+                    private array  $propertyTypes, // propName → FQCN
                 ) {}
 
                 public function enterNode(Node $node): void
                 {
+                    // ── Track $var = $this->prop assignments for type flow ───
+                    if (
+                        $node instanceof Node\Expr\Assign
+                        && $node->var instanceof Node\Expr\Variable
+                        && is_string($node->var->name)
+                        && $node->expr instanceof Node\Expr\PropertyFetch
+                    ) {
+                        $varName = $node->var->name;
+                        $propFetch = $node->expr;
+
+                        // $this->property
+                        if (
+                            $propFetch->var instanceof Node\Expr\Variable
+                            && $propFetch->var->name === 'this'
+                            && $propFetch->name instanceof Node\Identifier
+                        ) {
+                            $propName = $propFetch->name->toString();
+                            if (isset($this->propertyTypes[$propName])) {
+                                $this->varTypes[$varName] = $this->propertyTypes[$propName];
+                            }
+                        }
+                    }
+
                     // ── Free function calls: helper() ───────────────────────
                     if (
                         $node instanceof Node\Expr\FuncCall

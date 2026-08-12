@@ -9,6 +9,8 @@ final readonly class CodeChunk
         public string  $type,          // 'function' | 'method' | 'closure'
         public string  $name,          // function or method name
         public ?string $className,     // null for free functions
+        public ?string $classFqn = null,   // full PSR-4 FQN (namespace + class)
+        public ?string $namespace = null,  // file namespace
         public string  $file,          // relative path
         public int     $startLine,
         public int     $endLine,
@@ -39,19 +41,34 @@ final readonly class CodeChunk
             'type'           => $this->type,
             'name'           => $this->name,
             'class'          => $this->className,
+            'class_fqn'      => $this->classFqn,
+            'namespace'      => $this->namespace,
             'file'           => $this->file,
             'start_line'     => $this->startLine,
             'end_line'       => $this->endLine,
+            'modifiers'      => $this->modifiers,
             'parameters'     => $this->parameters,
             'return_type'    => $this->returnType,
-            'calls'          => $this->calls,
-            'called_methods' => $this->flatCallNames(),
-            'called_classes' => $this->flatCallClasses(),
-            'modifiers'      => $this->modifiers,
+            'calls'          => $this->flattenCalls(),  // flattened: ["FQN::method", ...]
+            'callers'        => [],                      // filled by graph pass later
             'has_docblock'   => $this->docblock !== null,
             'docblock'       => $this->docblock,
             'code'           => $this->code,
         ];
+    }
+
+    /**
+     * Flatten calls map { FQCN => [methods] } → ["FQCN::method", ...]
+     */
+    public function flattenCalls(): array
+    {
+        $flat = [];
+        foreach ($this->calls as $owner => $methods) {
+            foreach ($methods as $method) {
+                $flat[] = "{$owner}::{$method}";
+            }
+        }
+        return $flat;
     }
 
     /** Text that will be embedded — code + structured header for richer semantics */
