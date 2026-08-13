@@ -8,6 +8,14 @@ from settings import settings
 from router import classify as semantic_classify
 from orchestrator import orchestrator
 from exception_logger import get_exception_logger, install_exception_hooks
+from settings_store import (
+    RAG_CONFIG_DEFAULTS,
+    SECRET_KEYS,
+    MASKED_VALUE,
+    build_config,
+    mask_config,
+    settings_store,
+)
 from models import (
     HealthResponse,
     RebuildResponse,
@@ -584,6 +592,68 @@ def classify_prompt(body: dict):
     if not prompt or not isinstance(prompt, str):
         raise HTTPException(status_code=400, detail="Missing or invalid prompt")
     return semantic_classify(prompt)
+
+
+def _coerce_setting(key: str, value):
+    default = RAG_CONFIG_DEFAULTS.get(key)
+    if isinstance(default, int) and not isinstance(value, bool):
+        try:
+            return int(value)
+        except (TypeError, ValueError):
+            return default
+    if isinstance(default, float):
+        try:
+            return float(value)
+        except (TypeError, ValueError):
+            return default
+    if isinstance(default, bool):
+        return bool(value)
+    if value is None:
+        return default
+    return value
+
+
+@app.get(
+    "/settings",
+    tags=["Code Intelligence"],
+    summary="Get UI Settings",
+    description=(
+        "Returns the full RAG configuration merged over defaults. Secret fields "
+        "are masked unless the internal secret is provided via X-Internal-Secret."
+    ),
+)
+def get_settings(
+    x_internal_secret: Annotated[str | None, Header(alias="X-Internal-Secret")] = None,
+):
+    config = build_config(settings_store)
+    if x_internal_secret != settings.internal_secret:
+        config = mask_config(config)
+    return {"success": True, "config": config}
+
+
+@app.put(
+    "/settings",
+    tags=["Code Intelligence"],
+    summary="Update UI Settings",
+    description=(
+        "Upserts the provided RAG configuration fields. Secret fields are "
+        "write-only and only overwritten when a non-empty value is supplied. "
+        "Changes take effect on the next action without a restart."
+    ),
+)
+def update_settings(body: dict):
+    incoming = body.get("config", body) if isinstance(body, dict) else {}
+    updates = {}
+    for key in RAG_CONFIG_DEFAULTS:
+        if key not in incoming:
+            continue
+        value = incoming[key]
+        if key in SECRET_KEYS and value in (None, "", MASKED_VALUE):
+            continue
+        updates[key] = _coerce_setting(key, value)
+
+    settings_store.set_many(updates)
+    return {"success": True, "config": mask_config(build_config(settings_store))}
 
 
 @app.post(

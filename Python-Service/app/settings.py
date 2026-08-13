@@ -1,6 +1,8 @@
 from pydantic import BaseModel
 import os
 
+from settings_store import settings_store
+
 
 class Settings(BaseModel):
     app_name: str = "code-intelligence-service"
@@ -8,6 +10,7 @@ class Settings(BaseModel):
 
     qdrant_url: str = os.getenv("QDRANT_URL", "http://qdrant:6333")
     qdrant_collection: str = os.getenv("QDRANT_COLLECTION", "code_symbols")
+    qdrant_api_key: str = os.getenv("QDRANT_API_KEY", "")
 
     neo4j_url: str = os.getenv("NEO4J_URL", "bolt://neo4j:7687")
     neo4j_user: str = os.getenv("NEO4J_USER", "neo4j")
@@ -32,5 +35,34 @@ class Settings(BaseModel):
     log_dir: str = os.getenv("LOG_DIR", "/app/logs")
 
 
-settings = Settings()
+class RuntimeSettings:
+    """Dynamic settings overlay.
 
+    UI-editable values are read from the SQLite store at access time; everything
+    else falls back to the environment-derived defaults. Consumers keep using
+    `settings.<attr>` unchanged, and updated values take effect immediately.
+    """
+
+    _DYNAMIC = {
+        "ollama_base_url": "ollamaUrl",
+        "ollama_embedding_model": "ollamaModel",
+        "qdrant_url": "qdrantUrl",
+        "qdrant_api_key": "qdrantApiKey",
+    }
+
+    def __init__(self) -> None:
+        self._env = Settings()
+
+    def __getattr__(self, name: str):
+        store_key = self._DYNAMIC.get(name)
+        if store_key:
+            value = settings_store.get(store_key)
+            if value not in (None, ""):
+                return value
+        return getattr(self._env, name)
+
+    def revision(self) -> int:
+        return settings_store.revision
+
+
+settings = RuntimeSettings()

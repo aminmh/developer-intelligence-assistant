@@ -24,6 +24,7 @@ from qdrant_client import QdrantClient
 from qdrant_client.models import Distance, PointStruct, VectorParams
 
 from settings import settings
+from settings_store import settings_store
 from exception_logger import get_exception_logger
 
 # Heavy raw attributes kept out of LLM-visible metadata (token bloat), but still
@@ -186,6 +187,7 @@ class CodePropertyGraph:
         self._graph_store: Any = None
         self._graph_store_failed = False
         self._qdrant: Optional[QdrantClient] = None
+        self._qdrant_revision = -1
 
     # --- connection helpers -------------------------------------------------
 
@@ -212,8 +214,13 @@ class CodePropertyGraph:
         return self._graph_store
 
     def _get_qdrant(self) -> QdrantClient:
-        if self._qdrant is None:
-            self._qdrant = QdrantClient(url=settings.qdrant_url)
+        revision = settings_store.revision
+        if self._qdrant is None or self._qdrant_revision != revision:
+            kwargs = {"url": settings.qdrant_url}
+            if settings.qdrant_api_key:
+                kwargs["api_key"] = settings.qdrant_api_key
+            self._qdrant = QdrantClient(**kwargs)
+            self._qdrant_revision = revision
         return self._qdrant
 
     def _get_embed_model(self) -> OllamaEmbedding:
