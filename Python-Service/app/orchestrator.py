@@ -19,6 +19,7 @@ from typing import Any, Callable
 import requests
 import yaml
 from settings import settings
+from exception_logger import get_exception_logger
 
 try:
     from llama_index.core import Settings
@@ -194,6 +195,13 @@ class Orchestrator:
             )
         except Exception as exc:
             self._save_error(ctx.job_id, str(exc))
+            get_exception_logger().error(
+                "Orchestration job %s failed (route=%s): %s",
+                ctx.job_id,
+                ctx.route_name,
+                exc,
+                exc_info=exc,
+            )
 
     def _select_tool(self, ctx: JobContext) -> str | None:
         route_tool = ctx.route.get("tool")
@@ -483,13 +491,7 @@ class Orchestrator:
         job_id: str,
         php_base_url: str,
     ) -> Any:
-        """Ingest chunks into Qdrant via LlamaIndex IngestionPipeline."""
-        from llama_index.core import Document
-        from llama_index.core.ingestion import IngestionPipeline
-        from llama_index.embeddings.ollama import OllamaEmbedding
-        from llama_index.vector_stores.qdrant import QdrantVectorStore
-        from qdrant_client import QdrantClient
-
+        """Ingest chunks into Neo4j property graph + Qdrant vectors."""
         # Unwrap MCP tool response dict if needed
         if isinstance(result, dict) and "stdout" in result:
             result = result["stdout"]
@@ -517,90 +519,9 @@ class Orchestrator:
 
         collection_name = args.get("collection_name") or "chunk_code_output"
 
-        # Build LlamaIndex Documents from code chunks
-        documents = []
-        for c in result:
-            parts = []
-            if c.get("docblock"): parts.append(str(c["docblock"]))
-            if c.get("class"): parts.append(f"Class: {c['class']}")
-            if c.get("name"):
-                sig = [str(c["name"])]
-                params = c.get("parameters", [])
-                if params:
-                    p_strs = [(f"{p['type']} ${p['name']}" if p.get("type") else f"${p['name']}")
-                              for p in params if isinstance(p, dict) and p.get("name")]
-                    if p_strs: sig.append("(" + ", ".join(p_strs) + ")")
-                if c.get("return_type"):
-                    sig.append(": " + str(c["return_type"]))
-                parts.append("Signature: " + "".join(sig))
-            if c.get("code"):
-                code = str(c["code"])
-                # Keep code short for embedding — Ollama BGE-M3 has ~8K token limit
-                max_code = 2000
-                if len(code) > max_code:
-                    code = code[:max_code] + "\n..."
-                parts.append(code)
-            text = "\n".join(parts) if parts else (c.get("name") or "unnamed")
-            if len(text) > 4000:
-                text = text[:4000] + "\n..."
+        from llamaindex_layer import CodePropertyGraph
 
-            if not text.strip():
-                continue
-
-            documents.append(Document(
-                text=text,
-                metadata={
-                    "type": c.get("type", ""), "name": c.get("name", ""),
-                    "class": c.get("class", ""),
-                    "class_fqn": c.get("class_fqn", ""),
-                    "namespace": c.get("namespace", ""),
-                    "file": c.get("file", ""),
-                    "start_line": c.get("start_line", 0),
-                    "end_line": c.get("end_line", 0),
-                    "modifiers": c.get("modifiers", []),
-                    "parameters": c.get("parameters", []),
-                    "return_type": c.get("return_type", ""),
-                    "calls": c.get("calls", []),
-                    "callers": c.get("callers", []),
-                    "has_docblock": c.get("has_docblock", False),
-                    "docblock": c.get("docblock", ""),
-                    "code": c.get("code", ""), "collection": collection_name,
-                },
-            ))
-
-        if not documents:
-            return {"error": "No embeddable documents"}
-
-        # Set up Qdrant vector store
-        embed_model = OllamaEmbedding(
-            model_name=settings.ollama_embedding_model,
-            base_url=settings.ollama_base_url,
-        )
-        qdrant_client = QdrantClient(url=settings.qdrant_url)
-        try:
-            qdrant_client.delete_collection(collection_name)
-        except Exception:
-            pass
-        vector_store = QdrantVectorStore(
-            client=qdrant_client, collection_name=collection_name,
-        )
-
-        # Run ingestion pipeline — one doc at a time to avoid Ollama batch limits
-        pipeline = IngestionPipeline(
-            transformations=[embed_model],
-            vector_store=vector_store,
-        )
-        try:
-            # Embed + store one at a time — avoids Ollama batch context overflow
-            for doc in documents:
-                pipeline.run(documents=[doc], show_progress=False)
-        except Exception as e:
-            return {"error": f"Ingestion failed: {str(e)[:200]}",
-                    "collection_name": collection_name,
-                    "ingested": 0, "chunk_count": len(documents)}
-
-        return {"collection_name": collection_name,
-                "ingested": len(documents), "chunk_count": len(documents)}
+        return CodePropertyGraph().ingest(result, collection_name)
 
     def _act_llamaindex_route(
         self,
@@ -732,7 +653,10 @@ class Orchestrator:
                     except Exception:
                         return {"success": True, "stdout": text}
             return {"success": True, "result": result}
-        except Exception:
+        except Exception as exc:
+            get_exception_logger().error(
+                "MCP tool call '%s' failed: %s", tool_name, exc
+            )
             return None
 
     def _get_mcp_url(self) -> str:
@@ -780,7 +704,10 @@ class Orchestrator:
             if isinstance(payload, dict):
                 payload.setdefault("headers", dict(response.headers))
             return payload if isinstance(payload, dict) else {"result": payload}
-        except Exception:
+        except Exception as exc:
+            get_exception_logger().error(
+                "HTTP request failed: %s %s: %s", method.upper(), url, exc
+            )
             return None
 
     def _update_step(self, job_id: str, key: str, status: str, **extra: Any) -> None:
