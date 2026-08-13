@@ -10,7 +10,9 @@ const STORE_DIR = path.join(process.cwd(), 'data');
 const FILES_PATH = path.join(STORE_DIR, 'files.json');
 const CHUNKS_PATH = path.join(STORE_DIR, 'chunks.json');
 const VECTORS_PATH = path.join(STORE_DIR, 'vectors.json');
-const CONFIG_PATH = path.join(STORE_DIR, 'config.json');
+
+// Secret fields are write-only: masked on read, only overwritten on non-empty write.
+const SECRET_CONFIG_KEYS = ['qdrantApiKey', 'hfToken'] as const;
 
 // Ensure directory exists
 if (!fs.existsSync(STORE_DIR)) {
@@ -44,9 +46,6 @@ let chunkVectors: Record<string, number[]> = {};
 // Load persistence database
 function loadDatabase() {
   try {
-    if (fs.existsSync(CONFIG_PATH)) {
-      ragConfig = JSON.parse(fs.readFileSync(CONFIG_PATH, 'utf-8'));
-    }
     if (fs.existsSync(FILES_PATH)) {
       uploadedFiles = JSON.parse(fs.readFileSync(FILES_PATH, 'utf-8'));
     }
@@ -64,7 +63,6 @@ function loadDatabase() {
 // Save persistence database
 function saveDatabase() {
   try {
-    fs.writeFileSync(CONFIG_PATH, JSON.stringify(ragConfig, null, 2), 'utf-8');
     fs.writeFileSync(FILES_PATH, JSON.stringify(uploadedFiles, null, 2), 'utf-8');
     fs.writeFileSync(CHUNKS_PATH, JSON.stringify(fileChunks, null, 2), 'utf-8');
     fs.writeFileSync(VECTORS_PATH, JSON.stringify(chunkVectors, null, 2), 'utf-8');
@@ -365,11 +363,29 @@ export const RAGService = {
     return ragConfig;
   },
 
-  // Save configurations
-  updateConfig(newConfig: Partial<RAGConfig>): RAGConfig {
-    ragConfig = { ...ragConfig, ...newConfig };
-    saveDatabase();
+  // Replace the in-memory config wholesale (seed from Python service).
+  setConfigLocal(config: RAGConfig): RAGConfig {
+    ragConfig = config;
     return ragConfig;
+  },
+
+  // Merge a partial config, preserving existing secret values when the incoming
+  // value is empty/masked.
+  applyConfig(newConfig: Partial<RAGConfig>): RAGConfig {
+    const merged: RAGConfig = { ...ragConfig, ...newConfig };
+    for (const key of SECRET_CONFIG_KEYS) {
+      if (!newConfig[key]) {
+        merged[key] = ragConfig[key];
+      }
+    }
+    ragConfig = merged;
+    return ragConfig;
+  },
+
+  // Save configurations (kept for backward compat; disk persistence removed —
+  // the Python service is now the source of truth).
+  updateConfig(newConfig: Partial<RAGConfig>): RAGConfig {
+    return this.applyConfig(newConfig);
   },
 
   // Get uploaded files list

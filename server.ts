@@ -8,6 +8,19 @@ import { UploadedFile } from './src/types';
 
 dotenv.config();
 
+const PYTHON_API_URL = process.env.PYTHON_API_URL || 'http://localhost:9002';
+const INTERNAL_SECRET = process.env.RAG_CALLBACK_SECRET || '';
+
+// Secret fields masked before returning config to the browser (write-only).
+const MASKED_SECRET_KEYS = ['qdrantApiKey', 'hfToken'];
+function maskConfig(config: Record<string, any>) {
+  const masked = { ...config };
+  for (const key of MASKED_SECRET_KEYS) {
+    if (masked[key]) masked[key] = '';
+  }
+  return masked;
+}
+
 // Cache LLM answers for orchestration jobs to avoid re-generating on re-poll
 const answerCache = new Map<string, any>();
 
@@ -62,22 +75,44 @@ async function startServer() {
 
   // API ROUTES (Must go FIRST)
   
-  // Get current configurations
-  app.get('/api/config', (req, res) => {
+  // Get current configurations (Python service is the source of truth)
+  app.get('/api/config', async (req, res) => {
     try {
-      const config = RAGService.getConfig();
-      res.json({ success: true, config });
+      const pyRes = await fetch(`${PYTHON_API_URL}/settings`, {
+        headers: { 'X-Internal-Secret': INTERNAL_SECRET },
+      });
+      if (!pyRes.ok) {
+        return res.status(pyRes.status).json({ success: false, error: 'Failed to load settings from Python service.' });
+      }
+      const data = await pyRes.json();
+      const config = data.config ?? {};
+      // Seed real (unmasked) values into the local RAG service, then mask for UI.
+      RAGService.setConfigLocal(config);
+      res.json({ success: true, config: maskConfig(config) });
     } catch (error: any) {
+      console.error('Failed to load configurations from Python:', error.message);
       res.status(500).json({ success: false, error: error.message });
     }
   });
 
-  // Save configurations
-  app.post('/api/config', (req, res) => {
+  // Save configurations (proxies to Python service)
+  app.post('/api/config', async (req, res) => {
     try {
-      const updated = RAGService.updateConfig(req.body);
-      res.json({ success: true, config: updated });
+      const pyRes = await fetch(`${PYTHON_API_URL}/settings`, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(req.body),
+      });
+      if (!pyRes.ok) {
+        const err = await pyRes.json().catch(() => ({ error: 'Failed to save settings.' }));
+        return res.status(pyRes.status).json({ success: false, error: err.error || 'Failed to save settings.' });
+      }
+      const data = await pyRes.json();
+      // Merge what was sent into the local mirror (preserving existing secrets).
+      RAGService.applyConfig(req.body);
+      res.json({ success: true, config: data.config ?? maskConfig(RAGService.getConfig()) });
     } catch (error: any) {
+      console.error('Failed to save configurations via Python:', error.message);
       res.status(500).json({ success: false, error: error.message });
     }
   });
