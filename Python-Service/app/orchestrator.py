@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import threading
 import time
 import urllib.parse
@@ -39,6 +40,14 @@ DEFAULT_PYTHON_API_URL = os.environ.get("PYTHON_API_URL", "http://python-api:900
 DEFAULT_INTERNAL_SECRET = os.environ.get("INTERNAL_SECRET", "")
 
 
+def project_collection_name(filename: str) -> str:
+    """Per-project Qdrant collection name, e.g. 'Archive.zip' -> 'chunk_code_Archive'."""
+    stem = Path(filename).stem
+    name = re.sub(r"[^a-zA-Z0-9_]", "_", stem)
+    name = re.sub(r"_+", "_", name).strip("_")
+    return f"chunk_code_{name or 'unnamed'}"
+
+
 @dataclass
 class JobContext:
     job_id: str
@@ -47,6 +56,7 @@ class JobContext:
     prompt: str
     route: dict[str, Any]
     php_base_url: str
+    skip_index: bool = False
 
 
 class Orchestrator:
@@ -101,6 +111,7 @@ class Orchestrator:
         filename: str,
         prompt: str,
         php_base_url: str = "http://php-ast:9003",
+        skip_index: bool = False,
     ) -> None:
         route = self.get_route(route_name) or {"tool": "auto", "prompt_template": "chat"}
         steps = self._build_steps(route)
@@ -115,13 +126,14 @@ class Orchestrator:
             "started_at": time.time(),
             "updated_at": time.time(),
             "php_base_url": php_base_url,
+            "skip_index": skip_index,
         }
         with self._lock:
             self._jobs[job_id] = job
         self._write_status(job_id)
         thread = threading.Thread(
             target=self._run_job,
-            args=(JobContext(job_id, route_name, filename, prompt, route, php_base_url),),
+            args=(JobContext(job_id, route_name, filename, prompt, route, php_base_url, skip_index),),
             daemon=True,
         )
         thread.start()
@@ -515,7 +527,19 @@ class Orchestrator:
         if not isinstance(result, list) or len(result) == 0:
             return {"error": "No chunk list to ingest"}
 
-        collection_name = args.get("collection_name") or "chunk_code_output"
+        job = self.get_job(job_id) or {}
+        collection_name = args.get("collection_name") or project_collection_name(job.get("filename", ""))
+
+        # Session-scoped dedup: if this project was already indexed, skip the
+        # (expensive) re-embedding. Still return the collection name so retrieval
+        # can search the existing vectors.
+        if job.get("skip_index"):
+            return {
+                "collection_name": collection_name,
+                "already_indexed": True,
+                "ingested": 0,
+                "chunk_count": len(result),
+            }
 
         from llamaindex_layer import CodePropertyGraph
 

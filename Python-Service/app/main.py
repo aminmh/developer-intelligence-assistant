@@ -689,11 +689,12 @@ def start_orchestration(body: dict):
     route = body.get("route", "chat")
     filename = body.get("filename", "")
     prompt = body.get("prompt", "")
+    skip_index = bool(body.get("skip_index", False))
     if not filename or not prompt:
         raise HTTPException(status_code=400, detail="Missing filename or prompt")
 
     job_id = str(uuid.uuid4())
-    orchestrator.start_job(job_id, route, filename, prompt)
+    orchestrator.start_job(job_id, route, filename, prompt, skip_index=skip_index)
     return {"job_id": job_id}
 
 
