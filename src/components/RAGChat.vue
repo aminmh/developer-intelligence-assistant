@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ref, onMounted } from 'vue';
+import { ref, computed, onMounted } from 'vue';
 import { 
   Send, 
   Cpu, 
@@ -12,6 +12,7 @@ import {
 } from 'lucide-vue-next';
 import { SearchMatch } from '../types';
 import PipelineProgress from './PipelineProgress.vue';
+import ChatLoading from './ChatLoading.vue';
 import type { PipelineStep } from './PipelineProgress.vue';
 
 interface Message {
@@ -23,6 +24,8 @@ interface Message {
   llmUsed?: string;
   durationMs?: number;
   orchestration?: any;
+  query?: string;
+  routeName?: string;
 }
 
 const props = defineProps<{
@@ -31,15 +34,44 @@ const props = defineProps<{
   filesCount: number;
   activeFileName: string | null;
   orchestrationSteps: PipelineStep[];
+  generatingAnswer: boolean;
 }>();
 
 const emit = defineEmits<{
   (e: 'sendMessage', text: string): void;
   (e: 'attachZip', file: File): void;
   (e: 'clearAttach'): void;
+  (e: 'feedback', query: string, route: string): void;
 }>();
 
+const ROUTES = ['code_explain', 'code_refactor', 'debug', 'search', 'knowledge', 'chat'];
+
 const chatInput = ref('');
+
+// Feedback UI state: which message's route picker is open / already submitted
+const feedbackOpenId = ref<string | null>(null);
+const feedbackDoneId = ref<string | null>(null);
+
+const toggleFeedback = (id: string) => {
+  feedbackOpenId.value = feedbackOpenId.value === id ? null : id;
+};
+
+const onFeedback = (query: string | undefined, route: string, id: string) => {
+  if (!query) return;
+  emit('feedback', query, route);
+  feedbackOpenId.value = null;
+  feedbackDoneId.value = id;
+};
+
+// Steps shown during loading: orchestration steps + a trailing "Generating answer"
+// step while the web server runs the final LLM call.
+const displaySteps = computed<PipelineStep[]>(() => {
+  const steps = [...props.orchestrationSteps];
+  if (props.generatingAnswer && !steps.some((s) => s.id === 'generating_answer')) {
+    steps.push({ id: 'generating_answer', label: 'Generating answer', status: 'running' });
+  }
+  return steps;
+});
 
 const messagesContainer = ref<HTMLElement | null>(null);
 
@@ -122,6 +154,35 @@ const toggleMatchExpansion = (id: string) => {
                 <span v-if="out && out.exit_code !== undefined"> exit {{ out.exit_code }}</span>
               </div>
             </div>
+
+            <!-- Routing feedback -->
+            <div v-if="msg.role === 'assistant' && msg.routeName && msg.query" class="mt-3 pt-3 border-t border-slate-800 text-left">
+              <div class="flex items-center gap-2 flex-wrap">
+                <span class="text-[10px] text-slate-500 font-mono">
+                  Routed as <span class="text-indigo-400 font-semibold">{{ msg.routeName }}</span>
+                </span>
+                <button
+                  @click="toggleFeedback(msg.id)"
+                  class="text-[10px] text-slate-400 hover:text-indigo-300 underline underline-offset-2 font-mono transition-colors"
+                >
+                  wrong route?
+                </button>
+                <span v-if="feedbackDoneId === msg.id" class="text-[10px] text-emerald-400 font-mono">Feedback saved ✓</span>
+              </div>
+              <div v-if="feedbackOpenId === msg.id" class="mt-2 flex flex-wrap gap-1.5">
+                <button
+                  v-for="r in ROUTES"
+                  :key="r"
+                  @click="onFeedback(msg.query, r, msg.id)"
+                  class="px-2.5 py-1 rounded-lg border text-[10px] font-mono transition-all"
+                  :class="r === msg.routeName
+                    ? 'border-indigo-500 bg-indigo-500/10 text-indigo-300'
+                    : 'border-slate-800 bg-[#11162d] text-slate-400 hover:text-white hover:border-indigo-500'"
+                >
+                  {{ r }}
+                </button>
+              </div>
+            </div>
           </div>
 
           <!-- Expand matches toggle -->
@@ -165,12 +226,12 @@ const toggleMatchExpansion = (id: string) => {
 
       <!-- Pipeline progress (orchestration with steps) -->
       <div
-        v-if="loading && orchestrationSteps.length > 0"
+        v-if="loading && displaySteps.length > 0"
         class="flex flex-col items-start max-w-4xl mx-auto"
       >
         <PipelineProgress
           :fileName="activeFileName || 'project'"
-          :steps="orchestrationSteps"
+          :steps="displaySteps"
         />
       </div>
 
@@ -179,12 +240,7 @@ const toggleMatchExpansion = (id: string) => {
         v-else-if="loading"
         class="flex flex-col items-start max-w-4xl mx-auto"
       >
-        <div class="rounded-2xl p-5 bg-slate-900/60 text-slate-300 border border-slate-800 rounded-tl-none max-w-3xl">
-          <div class="flex items-center gap-3 font-mono text-xs text-indigo-400">
-            <div class="w-2.5 h-2.5 rounded-full bg-indigo-500 animate-ping"></div>
-            <span>Thinking...</span>
-          </div>
-        </div>
+        <ChatLoading :label="generatingAnswer ? 'Generating answer' : 'Thinking'" />
       </div>
     </div>
 

@@ -16,6 +16,7 @@ import { uploadViaTus } from './services/tusUpload';
 import RAGChat from './components/RAGChat.vue';
 import RAGFiles from './components/RAGFiles.vue';
 import RAGConfigComponent from './components/RAGConfig.vue';
+import type { PipelineStep } from './components/PipelineProgress.vue';
 
 // Files at or above this size use the resumable TUS upload path instead of the
 // inline base64/JSON POST, so a dropped connection doesn't mean starting over.
@@ -56,8 +57,13 @@ const parsingFileId = ref<string | null>(null);
 const indexingProgress = ref({ total: 0, indexed: 0, status: '' });
 const indexedFileIds = ref<Set<string>>(new Set());
 const activeFileName = ref<string | null>(null);
-const orchestrationSteps = ref<any[]>([]);
-let pollIntervalId: ReturnType<typeof setInterval> | null = null;
+const orchestrationSteps = ref<PipelineStep[]>([]);
+const generatingAnswer = ref(false);
+let pollTimerId: ReturnType<typeof setTimeout> | null = null;
+
+// Minimum time the loading state stays on screen so it doesn't flash away.
+const MIN_LOADING_MS = 1800;
+let loadingStartedAt = 0;
 
 interface Message {
   id: string;
@@ -68,7 +74,11 @@ interface Message {
   llmUsed?: string;
   durationMs?: number;
   orchestration?: any;
+  query?: string;
+  routeName?: string;
 }
+
+const ROUTES = ['code_explain', 'code_refactor', 'debug', 'search', 'knowledge', 'chat'];
 
 const messages = ref<Message[]>([
   {
@@ -102,6 +112,22 @@ const makeRequest = async (path: string, options: RequestInit = {}) => {
   const url = base ? `${base}${path}` : path;
   return fetch(url, options);
 };
+
+const mapSteps = (raw: any[]): PipelineStep[] =>
+  raw.map((s: any) => {
+    let detail: string | null = s.detail ?? null;
+    if (s.file_count != null && typeof s.file_count === 'number') {
+      detail = `${s.file_count} files`;
+    } else if (s.file_count) {
+      detail = String(s.file_count);
+    }
+    return {
+      id: s.key || s.id,
+      label: s.label || '',
+      status: s.status || 'pending',
+      detail,
+    };
+  });
 
 const fetchConfig = async () => {
   try {
@@ -392,8 +418,10 @@ const sendMessage = async (text: string) => {
   });
 
   loading.value = true;
+  loadingStartedAt = Date.now();
   orchestrationSteps.value = [];
-  if (pollIntervalId) { clearInterval(pollIntervalId); pollIntervalId = null; }
+  generatingAnswer.value = false;
+  if (pollTimerId) { clearTimeout(pollTimerId); pollTimerId = null; }
 
   const scrollToBottom = () => {
     setTimeout(() => {
@@ -402,6 +430,12 @@ const sendMessage = async (text: string) => {
     }, 50);
   };
   scrollToBottom();
+
+  // Keep the loading state visible for at least MIN_LOADING_MS.
+  const ensureMinLoading = async () => {
+    const remaining = MIN_LOADING_MS - (Date.now() - loadingStartedAt);
+    if (remaining > 0) await new Promise((r) => setTimeout(r, remaining));
+  };
 
   try {
     const res = await makeRequest('/api/query', {
@@ -420,10 +454,13 @@ const sendMessage = async (text: string) => {
     if (data.phase === 'orchestrating' && data.job_id) {
       const jobId = data.job_id;
 
-      // Clear any previous poll interval
-      if (pollIntervalId) clearInterval(pollIntervalId);
+      // Clear any previous poll timer
+      if (pollTimerId) { clearTimeout(pollTimerId); pollTimerId = null; }
 
-      pollIntervalId = setInterval(async () => {
+      let stopped = false;
+
+      const poll = async () => {
+        if (stopped) return;
         try {
           const rRes = await makeRequest('/api/query/result', {
             method: 'POST',
@@ -435,13 +472,13 @@ const sendMessage = async (text: string) => {
 
           // Update step progress
           if (rData.steps && rData.steps.length > 0) {
-            orchestrationSteps.value = rData.steps;
+            orchestrationSteps.value = mapSteps(rData.steps);
           }
 
           // Done — show answer
           if (rData.phase === 'done' && rData.answer) {
-            clearInterval(pollIntervalId!);
-            pollIntervalId = null;
+            stopped = true;
+            await ensureMinLoading();
             messages.value.push({
               id: `assistant_${Date.now()}`,
               role: 'assistant',
@@ -451,33 +488,42 @@ const sendMessage = async (text: string) => {
               llmUsed: rData.llmUsed || 'Gemini 3.5',
               durationMs: rData.durationMs,
               orchestration: rData,
+              query: text,
+              routeName: rData.route_name || null,
             });
             loading.value = false;
             orchestrationSteps.value = [];
+            generatingAnswer.value = false;
             scrollToBottom();
+            return;
+          } else if (rData.phase === 'done' && !rData.answer) {
+            // Orchestration finished — web server is generating the final answer.
+            generatingAnswer.value = true;
           }
         } catch {
           // Polling error — keep trying
         }
-      }, 1000);
+        if (!stopped) {
+          pollTimerId = setTimeout(poll, 1000);
+        }
+      };
+
+      pollTimerId = setTimeout(poll, 1000);
 
       // Safety timeout after 5 minutes
       setTimeout(() => {
-        if (pollIntervalId) {
-          clearInterval(pollIntervalId);
-          pollIntervalId = null;
-        }
+        stopped = true;
+        if (pollTimerId) { clearTimeout(pollTimerId); pollTimerId = null; }
         if (loading.value) {
           loading.value = false;
           orchestrationSteps.value = [];
+          generatingAnswer.value = false;
           triggerToast('Processing timed out.', false);
         }
       }, 300000);
-      return;
-    }
-
-    // No orchestration — direct answer
-    if (data.success || data.answer) {
+    } else if (data.success || data.answer) {
+      // No orchestration — direct answer
+      await ensureMinLoading();
       messages.value.push({
         id: `assistant_${Date.now()}`,
         role: 'assistant',
@@ -486,7 +532,9 @@ const sendMessage = async (text: string) => {
         matches: data.matches,
         llmUsed: data.llmUsed || 'Gemini 3.5',
         durationMs: data.durationMs,
+        query: text,
       });
+      loading.value = false;
     } else {
       messages.value.push({
         id: `assistant_${Date.now()}`,
@@ -494,6 +542,7 @@ const sendMessage = async (text: string) => {
         content: `❌ **Error:** ${data.error || 'Unknown error occurred.'}`,
         timestamp: new Date().toLocaleTimeString(),
       });
+      loading.value = false;
     }
   } catch (err: any) {
     messages.value.push({
@@ -504,8 +553,8 @@ const sendMessage = async (text: string) => {
 Details: ${err.message}`,
       timestamp: new Date().toLocaleTimeString(),
     });
-  } finally {
     loading.value = false;
+  } finally {
     scrollToBottom();
   }
 };
@@ -540,6 +589,24 @@ const performSearchOnly = async (query: string) => {
 const copyToClipboard = (text: string) => {
   navigator.clipboard.writeText(text);
   triggerToast('Copied content to clipboard!');
+};
+
+const submitFeedback = async (query: string, route: string) => {
+  try {
+    const res = await makeRequest('/api/feedback', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ query, route }),
+    });
+    const data = await res.json();
+    if (data.success) {
+      triggerToast('Feedback saved — routing will improve.');
+    } else {
+      triggerToast(data.error || 'Feedback failed.', false);
+    }
+  } catch (err: any) {
+    triggerToast(`Error: ${err.message}`, false);
+  }
 };
 
 onMounted(async () => {
@@ -643,9 +710,11 @@ onMounted(async () => {
         :filesCount="files.length"
         :activeFileName="activeFileName"
         :orchestrationSteps="orchestrationSteps"
+        :generatingAnswer="generatingAnswer"
         @sendMessage="sendMessage"
         @attachZip="attachZip"
         @clearAttach="clearAttach"
+        @feedback="submitFeedback"
       />
 
       <RAGFiles

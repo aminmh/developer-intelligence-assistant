@@ -435,6 +435,8 @@ async function startServer() {
         job_id,
         status: status.status,
         steps: status.steps || [],
+        route_name: status.route_name || null,
+        collection_name: status.collection_name || null,
       };
 
       if (isDone) {
@@ -496,6 +498,8 @@ async function startServer() {
           durationMs: result.durationMs,
           steps: result.steps,
           status: result.status,
+          route_name: result.route_name,
+          collection_name: result.collection_name,
         });
       }
 
@@ -516,6 +520,25 @@ async function startServer() {
       const matches = await RAGService.retrieve(query, limit || 4);
       res.json({ success: true, matches });
     } catch (error: any) {
+      res.status(500).json({ success: false, error: error.message });
+    }
+  });
+
+  // Submit routing feedback (proxies to Python service)
+  app.post('/api/feedback', async (req, res) => {
+    try {
+      const pyRes = await fetch(`${PYTHON_API_URL}/feedback`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(req.body),
+      });
+      const data = await pyRes.json();
+      if (!pyRes.ok) {
+        return res.status(pyRes.status).json({ success: false, error: data.detail || data.error || 'Feedback failed.' });
+      }
+      res.json(data);
+    } catch (error: any) {
+      console.error('Feedback submission error:', error.message);
       res.status(500).json({ success: false, error: error.message });
     }
   });
