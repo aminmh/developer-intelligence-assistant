@@ -144,7 +144,6 @@ class Orchestrator:
         for action in route.get("post_process", []) or []:
             action_name = action.get("action") if isinstance(action, dict) else str(action)
             steps.append({"key": f"post_{action_name}", "label": action_name.replace("_", " ").title(), "status": "pending"})
-        steps.append({"key": "generating", "label": "Synthesizing answer", "status": "pending"})
         return steps
 
     def _run_job(self, ctx: JobContext) -> None:
@@ -159,6 +158,7 @@ class Orchestrator:
             self._update_step(ctx.job_id, "extracting", "done", file_count=file_count if file_count is not None else "Skipped")
 
             tool_name = self._select_tool(ctx)
+            self._update_step(ctx.job_id, "routing", "done")
             tool_result: dict[str, Any] | None = None
             if tool_name:
                 self._update_step(ctx.job_id, "tool", "running")
@@ -183,8 +183,6 @@ class Orchestrator:
             )
             final_output = synthesized_output or post_process_result or raw_output
 
-            self._update_step(ctx.job_id, "generating", "running")
-            self._update_step(ctx.job_id, "generating", "done")
             self._save_outputs(
                 ctx.job_id,
                 output=final_output,

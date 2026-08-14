@@ -185,7 +185,6 @@ final class ExportProjectStructureCommand extends Command
 
 ## Metadata
 
-- **Project path:** `{$projectPath}`
 - **Generated at:** `{$timestamp}`
 - **Maximum depth:** `{$maxDepth}`
 - **Excluded patterns:** {$excluded}

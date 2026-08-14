@@ -21,10 +21,11 @@ from typing import Any, Dict, Optional
 RAG_CONFIG_DEFAULTS: Dict[str, Any] = {
     "llmMode": "gemini",
     "localLlmUrl": "http://localhost:11434",
-    "localLlmModel": "llama3",
+    "localLlmModel": "gemma3-4b",
     "embeddingMode": "ollama",
     "ollamaUrl": "http://localhost:11434",
     "ollamaModel": "BGE-M3",
+    "ollamaLlmModel": "gemma3-4b",
     "hfModel": "sentence-transformers/all-MiniLM-L6-v2",
     "hfToken": "",
     "chunkSize": 500,

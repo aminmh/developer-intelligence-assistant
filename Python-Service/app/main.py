@@ -6,6 +6,7 @@ from fastapi.responses import JSONResponse, StreamingResponse
 from indexer import CodeIntelligenceIndex
 from settings import settings
 from router import classify as semantic_classify
+from router import submit_feedback as router_submit_feedback
 from orchestrator import orchestrator
 from exception_logger import get_exception_logger, install_exception_hooks
 from settings_store import (
@@ -592,6 +593,25 @@ def classify_prompt(body: dict):
     if not prompt or not isinstance(prompt, str):
         raise HTTPException(status_code=400, detail="Missing or invalid prompt")
     return semantic_classify(prompt)
+
+
+@app.post(
+    "/feedback",
+    tags=["Code Intelligence"],
+    summary="Submit Routing Feedback",
+    description=(
+        "Stores a user correction for a query so future identical queries are "
+        "routed to the corrected route. The query is embedded and upserted into "
+        "the route_feedback Qdrant collection."
+    ),
+)
+def submit_feedback(body: dict):
+    query = body.get("query", "")
+    correct_route = body.get("route") or body.get("correct_route", "")
+    result = router_submit_feedback(query, correct_route)
+    if not result.get("success"):
+        raise HTTPException(status_code=400, detail=result.get("error", "Failed to submit feedback"))
+    return result
 
 
 def _coerce_setting(key: str, value):

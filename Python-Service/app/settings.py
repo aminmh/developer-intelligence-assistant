@@ -28,6 +28,7 @@ class Settings(BaseModel):
         "OLLAMA_EMBED_MODEL",
         "nomic-embed-text",
     )
+    ollama_llm_model: str = os.getenv("OLLAMA_LLM_MODEL", "llama3")
 
     download_dir: str = os.getenv("DOWNLOAD_DIR", "/app/downloads")
     download_token_secret: str = os.getenv("DOWNLOAD_TOKEN_SECRET", "change-me")
@@ -46,6 +47,7 @@ class RuntimeSettings:
     _DYNAMIC = {
         "ollama_base_url": "ollamaUrl",
         "ollama_embedding_model": "ollamaModel",
+        "ollama_llm_model": "ollamaLlmModel",
         "qdrant_url": "qdrantUrl",
         "qdrant_api_key": "qdrantApiKey",
     }
