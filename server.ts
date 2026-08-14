@@ -24,6 +24,10 @@ function maskConfig(config: Record<string, any>) {
 // Cache LLM answers for orchestration jobs to avoid re-generating on re-poll
 const answerCache = new Map<string, any>();
 
+// Session-scoped set of project filenames already indexed (so re-queries skip
+// the expensive re-embedding step). Reset on server restart.
+const indexedProjects = new Set<string>();
+
 const PROMPT_LOG_PATH = path.join(process.cwd(), 'data', 'llm-prompts.log');
 
 function logPrompt(userQuery: string, finalPrompt: string) {
@@ -364,7 +368,12 @@ async function startServer() {
           const oRes = await fetch(`${pythonUrl}/orchestrate`, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ route: classification.route, filename, prompt: query }),
+            body: JSON.stringify({
+              route: classification.route,
+              filename,
+              prompt: query,
+              skip_index: indexedProjects.has(filename),
+            }),
           });
           if (oRes.ok) {
             const { job_id } = await oRes.json();
@@ -428,6 +437,12 @@ async function startServer() {
 
       const status = await sRes.json();
       const isDone = status.status === 'done';
+
+      // Once a project's orchestration completes, remember it so subsequent
+      // queries in this session skip re-indexing.
+      if (isDone && status.filename) {
+        indexedProjects.add(status.filename);
+      }
 
       // Return steps for frontend progress
       const result: any = {
