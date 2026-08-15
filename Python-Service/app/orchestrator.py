@@ -112,6 +112,7 @@ class Orchestrator:
         prompt: str,
         php_base_url: str = "http://php-ast:9003",
         skip_index: bool = False,
+        entities: dict[str, Any] | None = None,
     ) -> None:
         route = self.get_route(route_name) or {"tool": "auto", "prompt_template": "chat"}
         steps = self._build_steps(route)
@@ -127,6 +128,7 @@ class Orchestrator:
             "updated_at": time.time(),
             "php_base_url": php_base_url,
             "skip_index": skip_index,
+            "entities": entities or {},
         }
         with self._lock:
             self._jobs[job_id] = job
@@ -764,6 +766,7 @@ class Orchestrator:
                 "output": job.get("output"),
                 "tool_name": job.get("tool_name"),
                 "collection_name": job.get("collection_name"),
+                "entities": job.get("entities"),
                 "error": job.get("error"),
             }
         status_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")

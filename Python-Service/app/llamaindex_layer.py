@@ -21,7 +21,15 @@ from typing import Any, Dict, List, Optional
 
 from llama_index.embeddings.ollama import OllamaEmbedding
 from qdrant_client import QdrantClient
-from qdrant_client.models import Distance, PointStruct, VectorParams
+from qdrant_client.models import (
+    Distance,
+    FieldCondition,
+    Filter,
+    MatchText,
+    MatchValue,
+    PointStruct,
+    VectorParams,
+)
 
 from settings import settings
 from settings_store import settings_store
@@ -178,6 +186,23 @@ def _payload(chunk: Dict[str, Any], collection_name: str) -> Dict[str, Any]:
             "collection": collection_name,
         }
     )
+
+
+def _build_query_filter(
+    class_name: Optional[str] = None,
+    file: Optional[str] = None,
+) -> Optional[Filter]:
+    """Build a Qdrant metadata filter from extracted intent entities."""
+    conditions = []
+    if class_name:
+        conditions.append(
+            FieldCondition(key="class", match=MatchValue(value=class_name))
+        )
+    if file:
+        conditions.append(FieldCondition(key="file", match=MatchText(text=file)))
+    if not conditions:
+        return None
+    return Filter(must=conditions)
 
 
 class CodePropertyGraph:
@@ -391,11 +416,31 @@ class CodePropertyGraph:
 
     # --- retrieval ----------------------------------------------------------
 
+    @staticmethod
+    def _search(
+        qdrant: QdrantClient,
+        col_name: str,
+        query_vec: List[float],
+        limit: int,
+        query_filter: Optional[Filter],
+    ) -> list:
+        try:
+            return qdrant.search(
+                collection_name=col_name,
+                query_vector=query_vec,
+                limit=min(5, max(1, limit)),
+                query_filter=query_filter,
+            )
+        except Exception:
+            return []
+
     def hybrid_retrieve(
         self,
         query: str,
         collection_name: Optional[str] = None,
         limit: int = 10,
+        class_name: Optional[str] = None,
+        file: Optional[str] = None,
     ) -> Dict[str, Any]:
         """Hybrid vector + graph retrieval with graceful vector-only fallback."""
         qdrant = self._get_qdrant()
@@ -421,20 +466,19 @@ class CodePropertyGraph:
         except Exception:
             return {"results": [], "searched_collections": target_collections}
 
+        # Optional metadata filter (from extracted intent entities).
+        query_filter = _build_query_filter(class_name=class_name, file=file)
+
         store = self._get_graph_store()
 
         all_results: List[Dict[str, Any]] = []
         seen_ids: set[str] = set()
 
         for col_name in target_collections:
-            try:
-                hits = qdrant.search(
-                    collection_name=col_name,
-                    query_vector=query_vec,
-                    limit=min(5, max(1, limit)),
-                )
-            except Exception:
-                continue
+            hits = self._search(qdrant, col_name, query_vec, limit, query_filter)
+            if not hits and query_filter is not None:
+                # Filtered search found nothing — fall back to unfiltered.
+                hits = self._search(qdrant, col_name, query_vec, limit, None)
 
             vector_ids = []
             for h in hits:

@@ -7,6 +7,7 @@ from indexer import CodeIntelligenceIndex
 from settings import settings
 from router import classify as semantic_classify
 from router import submit_feedback as router_submit_feedback
+from intent import extract_intent
 from orchestrator import orchestrator
 from exception_logger import get_exception_logger, install_exception_hooks
 from settings_store import (
@@ -596,6 +597,23 @@ def classify_prompt(body: dict):
 
 
 @app.post(
+    "/extract",
+    tags=["Code Intelligence"],
+    summary="Extract Intent & Entities",
+    description=(
+        "Extracts structured intent and entities (target file, class, method, "
+        "action type, error code, framework, constraints) from a user prompt via "
+        "a structured-output LLM. Degrades to a neutral intent on failure."
+    ),
+)
+def extract_prompt(body: dict):
+    prompt = body.get("prompt", "")
+    if not prompt or not isinstance(prompt, str):
+        raise HTTPException(status_code=400, detail="Missing or invalid prompt")
+    return extract_intent(prompt).model_dump()
+
+
+@app.post(
     "/feedback",
     tags=["Code Intelligence"],
     summary="Submit Routing Feedback",
@@ -690,11 +708,14 @@ def start_orchestration(body: dict):
     filename = body.get("filename", "")
     prompt = body.get("prompt", "")
     skip_index = bool(body.get("skip_index", False))
+    entities = body.get("entities") or {}
     if not filename or not prompt:
         raise HTTPException(status_code=400, detail="Missing filename or prompt")
 
     job_id = str(uuid.uuid4())
-    orchestrator.start_job(job_id, route, filename, prompt, skip_index=skip_index)
+    orchestrator.start_job(
+        job_id, route, filename, prompt, skip_index=skip_index, entities=entities
+    )
     return {"job_id": job_id}
 
 
@@ -772,6 +793,8 @@ def search_all(body: dict):
     query = body.get("query", "")
     limit = body.get("limit", 10)
     filter_collection = body.get("collection")
+    class_name = body.get("class_name")
+    file = body.get("file")
     if not query:
         raise HTTPException(status_code=400, detail="Missing query")
 
@@ -781,4 +804,6 @@ def search_all(body: dict):
         query=query,
         collection_name=filter_collection,
         limit=limit,
+        class_name=class_name,
+        file=file,
     )

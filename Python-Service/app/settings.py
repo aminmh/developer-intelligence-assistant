@@ -28,7 +28,7 @@ class Settings(BaseModel):
         "OLLAMA_EMBED_MODEL",
         "nomic-embed-text",
     )
-    ollama_llm_model: str = os.getenv("OLLAMA_LLM_MODEL", "llama3")
+    ollama_llm_model: str = os.getenv("OLLAMA_LLM_MODEL", "gemma3-4b")
 
     download_dir: str = os.getenv("DOWNLOAD_DIR", "/app/downloads")
     download_token_secret: str = os.getenv("DOWNLOAD_TOKEN_SECRET", "change-me")
