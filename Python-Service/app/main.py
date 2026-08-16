@@ -614,6 +614,86 @@ def extract_prompt(body: dict):
 
 
 @app.post(
+    "/answer",
+    tags=["Code Intelligence"],
+    summary="Generate Answer",
+    description=(
+        "Retrieves relevant code context from Qdrant/Neo4j and generates a final "
+        "LLM answer using the configured local chat model. Accepts optional "
+        "metadata filters (class_name/file) and extracted entities."
+    ),
+)
+def answer_prompt(body: dict):
+    query = body.get("query", "")
+    if not query or not isinstance(query, str):
+        raise HTTPException(status_code=400, detail="Missing or invalid query")
+
+    collection = body.get("collection")
+    class_name = body.get("class_name")
+    file = body.get("file")
+    entities = body.get("entities") or {}
+    temperature = body.get("temperature")
+    top_p = body.get("top_p")
+    extra_context = body.get("extra_context")
+
+    from llamaindex_layer import CodePropertyGraph
+    from answer import generate_answer
+
+    # When an explicit tool context is provided (e.g. the project structure from
+    # the `knowledge` route), use it as the grounding context instead of searching
+    # Qdrant for code chunks.
+    if extra_context and isinstance(extra_context, str) and extra_context.strip():
+        results = []
+        contexts = []
+    else:
+        result = CodePropertyGraph().hybrid_retrieve(
+            query=query,
+            collection_name=collection,
+            limit=10,
+            class_name=class_name,
+            file=file,
+        )
+        results = result.get("results", []) or []
+        contexts = [(r.get("payload") or {}) for r in results]
+
+    gen = generate_answer(
+        query,
+        contexts=contexts,
+        entities=entities,
+        temperature=temperature,
+        top_p=top_p,
+        extra_context=extra_context if isinstance(extra_context, str) else None,
+    )
+
+    matches = []
+    for i, r in enumerate(results):
+        p = r.get("payload") or {}
+        name = f"{p.get('class') or ''}::{p.get('name') or ''}".strip(":")
+        if not name.strip():
+            name = p.get("file") or "symbol"
+        matches.append(
+            {
+                "chunk": {
+                    "id": p.get("node_id") or f"c{i}",
+                    "fileId": p.get("file") or "",
+                    "fileName": name,
+                    "text": p.get("code") or "",
+                    "index": i,
+                },
+                "score": r.get("score", 0.0),
+            }
+        )
+
+    return {
+        "success": True,
+        "answer": gen["answer"],
+        "matches": matches,
+        "llmUsed": f"Local LLM ({gen['model']})",
+        "durationMs": gen["duration_ms"],
+    }
+
+
+@app.post(
     "/feedback",
     tags=["Code Intelligence"],
     summary="Submit Routing Feedback",

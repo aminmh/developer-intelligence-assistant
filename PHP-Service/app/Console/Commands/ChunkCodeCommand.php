@@ -362,7 +362,7 @@ class ChunkCodeCommand extends Command
         $chunks = [];
 
         foreach ($phpFiles as $file) {
-            $relative = ltrim(str_replace(base_path(), '', $file), DIRECTORY_SEPARATOR);
+            $relative = ltrim(str_replace($absolutePath, '', $file), DIRECTORY_SEPARATOR);
             $bar->setMessage($relative);
             $chunks = array_merge($chunks, $this->chunkSingleFile($chunker, $file, $relative));
             $bar->advance();
@@ -378,7 +378,7 @@ class ChunkCodeCommand extends Command
     /** @return CodeChunk[] */
     private function chunkSingleFile(CodeChunker $chunker, string $absolute, string $relative = ''): array
     {
-        $relative = $relative ?: ltrim(str_replace(base_path(), '', $absolute), DIRECTORY_SEPARATOR);
+        $relative = $relative ?: basename($absolute);
 
         try {
             $chunks = $chunker->chunkFile($absolute, $relative, $this->typeMap);

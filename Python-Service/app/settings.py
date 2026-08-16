@@ -30,6 +30,9 @@ class Settings(BaseModel):
     )
     ollama_llm_model: str = os.getenv("OLLAMA_LLM_MODEL", "gemma3-4b")
 
+    temperature: float = float(os.getenv("LLM_TEMPERATURE", "0.7"))
+    top_p: float = float(os.getenv("LLM_TOP_P", "0.9"))
+
     download_dir: str = os.getenv("DOWNLOAD_DIR", "/app/downloads")
     download_token_secret: str = os.getenv("DOWNLOAD_TOKEN_SECRET", "change-me")
     internal_secret: str = os.getenv("RAG_CALLBACK_SECRET", "change-me")
@@ -50,6 +53,8 @@ class RuntimeSettings:
         "ollama_llm_model": "ollamaLlmModel",
         "qdrant_url": "qdrantUrl",
         "qdrant_api_key": "qdrantApiKey",
+        "temperature": "temperature",
+        "top_p": "topP",
     }
 
     def __init__(self) -> None:

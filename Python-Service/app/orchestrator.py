@@ -470,7 +470,7 @@ class Orchestrator:
         php_base_url: str,
     ) -> str:
         language = args.get("language", "text")
-        prefix = args.get("prefix", "")
+        prefix = args.get("prefix") or args.get("prepend") or ""
         text = result if isinstance(result, str) else json.dumps(result, ensure_ascii=False, default=str)
         return f"{prefix}```{language} {text}```"
 
