@@ -5,19 +5,16 @@ import {
   Upload, 
   Trash2, 
   FileCode, 
-  Search,
   Cpu,
   CheckCircle2,
 } from 'lucide-vue-next';
-import { UploadedFile, SearchMatch } from '../types';
+import { UploadedFile } from '../types';
 import ConfirmModal from './ConfirmModal.vue';
 
 const props = defineProps<{
   files: UploadedFile[];
   uploading: boolean;
   uploadProgress: Record<string, number>;
-  searchMatches: SearchMatch[];
-  searchLoading: boolean;
   parsingFileId: string | null;
   indexingProgress: { total: number; indexed: number; status: string };
   indexedFileIds: Set<string>;
@@ -26,12 +23,10 @@ const props = defineProps<{
 const emit = defineEmits<{
   (e: 'uploadFiles', files: FileList): void;
   (e: 'deleteFile', id: string, name: string): void;
-  (e: 'performSearchOnly', query: string): void;
   (e: 'indexFile', id: string, name: string): void;
 }>();
 
 const dragOver = ref(false);
-const searchInput = ref('');
 const showDeleteConfirm = ref(false);
 const selectedFile = ref<UploadedFile | null>(null);
 const activeFileId = ref<string | null>(null);
@@ -85,12 +80,6 @@ const handleIndexFile = () => {
   const file = props.files.find(f => f.id === activeFileId.value);
   if (file) {
     emit('indexFile', file.id, file.name);
-  }
-};
-
-const onSearch = () => {
-  if (searchInput.value.trim()) {
-    emit('performSearchOnly', searchInput.value.trim());
   }
 };
 </script>
@@ -267,55 +256,6 @@ const onSearch = () => {
                 Extracting PHP code...
               </div>
             </div>
-          </div>
-        </div>
-      </div>
-
-      <!-- Semantic Search Only Card -->
-      <div class="bg-slate-900/30 border border-slate-800 rounded-2xl p-6 space-y-4">
-        <h4 class="text-xs font-bold tracking-wider uppercase text-slate-400 flex items-center gap-2">
-          <Search class="w-4 h-4 text-indigo-400" />
-          Semantic Search (No LLM)
-        </h4>
-        <p class="text-[10px] text-slate-500 -mt-2">Run a retrieval-only search against your indexed file embeddings and preview matching context chunks.</p>
-
-        <div class="flex gap-3">
-          <input 
-            v-model="searchInput"
-            type="text"
-            placeholder="Search query string..."
-            class="flex-1 bg-[#11162d] border border-slate-800 rounded-xl px-4 py-2.5 text-xs font-mono focus:outline-none focus:border-indigo-500 text-slate-200"
-            @keyup.enter="onSearch"
-          />
-          <button 
-            @click="onSearch"
-            :disabled="searchLoading || !searchInput.trim()"
-            class="px-5 py-2.5 bg-indigo-600 hover:bg-indigo-700 text-white rounded-xl text-xs font-semibold transition-all disabled:opacity-50 disabled:cursor-not-allowed flex items-center gap-1.5"
-          >
-            <Search class="w-3.5 h-3.5" />
-            {{ searchLoading ? 'Searching...' : 'Search' }}
-          </button>
-        </div>
-
-        <!-- Search Results -->
-        <div v-if="searchMatches.length > 0" class="space-y-3 pt-2">
-          <div 
-            v-for="(match, i) in searchMatches" 
-            :key="i"
-            class="bg-[#11162d] border border-slate-800 rounded-xl p-4"
-          >
-            <div class="flex items-center justify-between text-[10px] font-mono text-slate-400 mb-2">
-              <span class="flex items-center gap-1">
-                <FileText class="w-3 h-3" />
-                {{ match.chunk.fileName }} • Chunk #{{ match.chunk.index }}
-              </span>
-              <span class="bg-indigo-600/20 text-indigo-400 px-2 py-0.5 rounded-full">
-                Score: {{ (match.score * 100).toFixed(0) }}%
-              </span>
-            </div>
-            <p class="text-[11px] text-slate-300 leading-relaxed font-mono">
-              {{ match.chunk.text }}
-            </p>
           </div>
         </div>
       </div>

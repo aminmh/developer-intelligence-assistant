@@ -28,27 +28,6 @@ const answerCache = new Map<string, any>();
 // the expensive re-embedding step). Reset on server restart.
 const indexedProjects = new Set<string>();
 
-const PROMPT_LOG_PATH = path.join(process.cwd(), 'data', 'llm-prompts.log');
-
-function logPrompt(userQuery: string, finalPrompt: string) {
-  try {
-    const dir = path.dirname(PROMPT_LOG_PATH);
-    if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
-    const entry = [
-      `[${new Date().toISOString()}]`,
-      `USER_QUERY: ${userQuery}`,
-      `FINAL_PROMPT:`,
-      finalPrompt,
-      '',
-      '-'.repeat(120),
-      '',
-    ].join('\n');
-    fs.appendFileSync(PROMPT_LOG_PATH, entry);
-  } catch {
-    // Log file is best-effort
-  }
-}
-
 function labelForExtension(filename: string): string {
   const ext = path.extname(filename).toLowerCase();
   if (ext === '.pdf') return 'pdf';
@@ -342,7 +321,7 @@ async function startServer() {
   // Query RAG system (Semantic retrieval + LLM prompt generation)
   app.post('/api/query', async (req, res) => {
     try {
-      const { query, limit, filename } = req.body;
+      const { query, filename } = req.body;
       if (!query || query.trim() === '') {
         return res.status(400).json({ success: false, error: 'Query parameter is required.' });
       }
@@ -363,6 +342,19 @@ async function startServer() {
           // Classification unavailable — fall through
         }
 
+        // Extract intent & entities for downstream filtering/prompt enrichment
+        let entities: any = {};
+        try {
+          const eRes = await fetch(`${pythonUrl}/extract`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ prompt: query }),
+          });
+          if (eRes.ok) entities = await eRes.json();
+        } catch {
+          // Extraction unavailable — proceed without entities
+        }
+
         // Start orchestration — return job_id immediately for frontend polling
         try {
           const oRes = await fetch(`${pythonUrl}/orchestrate`, {
@@ -373,6 +365,7 @@ async function startServer() {
               filename,
               prompt: query,
               skip_index: indexedProjects.has(filename),
+              entities,
             }),
           });
           if (oRes.ok) {
@@ -389,30 +382,21 @@ async function startServer() {
         }
       }
 
-      // No attachment — simple RAG across all Qdrant collections
-      let toolPrompt = query;
+      // No attachment — generate answer directly from Python (retrieval + LLM)
       try {
-        const sRes = await fetch(`${pythonUrl}/search-all`, {
+        const aRes = await fetch(`${pythonUrl}/answer`, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ query, limit: 10 }),
+          body: JSON.stringify({ query }),
         });
-        if (sRes.ok) {
-          const { results } = await sRes.json();
-          if (results && results.length > 0) {
-            const codeContext = results.map((r: any, i: number) =>
-              `[${i + 1}] ${r.collection} | ${r.payload?.name || r.payload?.class || 'symbol'} (${(r.score * 100).toFixed(0)}%)\n${r.payload?.code || ''}`
-            ).join('\n\n');
-            toolPrompt = `${query}\n\nRetrieved code context from indexed projects:\n${codeContext}`;
-          }
+        if (aRes.ok) {
+          const answer = await aRes.json();
+          return res.json({ success: true, ...answer, classification });
         }
       } catch {
-        // Search-all unavailable — use raw query
+        // Python answer unavailable — fall through to error
       }
-
-      logPrompt(query, toolPrompt);
-      const response = await RAGService.query(toolPrompt, limit || 4);
-      res.json({ success: true, ...response, classification });
+      return res.status(502).json({ success: false, error: 'Answer generation failed.' });
     } catch (error: any) {
       console.error('Query execution error:', error);
       res.status(500).json({ success: false, error: error.message });
@@ -462,48 +446,38 @@ async function startServer() {
           return res.json({ success: true, phase: 'done', job_id, steps: status.steps || [], ...cached });
         }
 
-        // Build prompt: user query + tool output + search context
+        // Build answer in Python: retrieval (code) + LLM generation
         const actualQuery = user_query || status.route || 'explain';
         const targetCollection = (status as any).collection_name || null;
+        const entities = (status as any).entities || {};
         const toolOutput = (status as any).tool_output || null;
-        let prompt = actualQuery;
+        const extraContext = typeof toolOutput === 'string' && toolOutput.trim()
+          ? toolOutput
+          : undefined;
 
-        // Prepend MCP tool output if available
-        if (toolOutput && typeof toolOutput === 'string' && toolOutput.trim()) {
-          prompt = `Project structure:\n\n\`\`\`\n${toolOutput}\n\`\`\`\n\nUser question: ${actualQuery}`;
-        }
-
-        // Append search results from Qdrant (if collection exists)
-        if (targetCollection) {
-          try {
-            const sRes = await fetch(`${pythonUrl}/search-all`, {
-              method: 'POST',
-              headers: { 'Content-Type': 'application/json' },
-              body: JSON.stringify({ query: actualQuery, limit: 10, collection: targetCollection }),
-            });
-            if (sRes.ok) {
-              const { results } = await sRes.json();
-              if (results && results.length > 0) {
-                const codeContext = results.map((r: any, i: number) =>
-                  `[${i + 1}] ${r.collection} | ${r.payload?.name || r.payload?.class || 'symbol'} (score: ${(r.score * 100).toFixed(0)}%)\n\`\`\`\n${r.payload?.code || ''}\n\`\`\``
-                ).join('\n\n');
-                prompt += `\n\nRelevant code from indexed projects:\n\n${codeContext}`;
-              }
-            }
-          } catch {
-            // Search failed — use raw query
-          }
-        }
-
-        // Cache BEFORE LLM call to prevent concurrent duplicates
+        // Cache BEFORE answer call to prevent concurrent duplicates
         answerCache.set(job_id, { answer: '', pending: true });
 
-        logPrompt(actualQuery, prompt);
-        const llmResponse = await RAGService.query(prompt, 4);
-        result.answer = llmResponse.answer;
-        result.matches = llmResponse.matches;
-        result.llmUsed = llmResponse.llmUsed;
-        result.durationMs = llmResponse.durationMs;
+        const aRes = await fetch(`${pythonUrl}/answer`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            query: actualQuery,
+            collection: targetCollection || undefined,
+            class_name: entities.class_name || undefined,
+            file: entities.target_file || undefined,
+            entities,
+            extra_context: extraContext,
+          }),
+        });
+        if (!aRes.ok) {
+          throw new Error(`Answer generation failed (${aRes.status})`);
+        }
+        const answer = await aRes.json();
+        result.answer = answer.answer;
+        result.matches = answer.matches;
+        result.llmUsed = answer.llmUsed;
+        result.durationMs = answer.durationMs;
 
         // Update cache with real answer
         answerCache.set(job_id, {
@@ -519,21 +493,6 @@ async function startServer() {
       }
 
       res.json({ success: true, ...result });
-    } catch (error: any) {
-      res.status(500).json({ success: false, error: error.message });
-    }
-  });
-
-  // Retrieve matching chunks only (Semantic search only)
-  app.post('/api/retrieve', async (req, res) => {
-    try {
-      const { query, limit } = req.body;
-      if (!query || query.trim() === '') {
-        return res.status(400).json({ success: false, error: 'Query parameter is required.' });
-      }
-
-      const matches = await RAGService.retrieve(query, limit || 4);
-      res.json({ success: true, matches });
     } catch (error: any) {
       res.status(500).json({ success: false, error: error.message });
     }

@@ -8,9 +8,10 @@ import {
   ChevronDown, 
   ChevronUp,
   Paperclip,
+  FolderOpen,
   X,
 } from 'lucide-vue-next';
-import { SearchMatch } from '../types';
+import { SearchMatch, UploadedFile } from '../types';
 import PipelineProgress from './PipelineProgress.vue';
 import ChatLoading from './ChatLoading.vue';
 import type { PipelineStep } from './PipelineProgress.vue';
@@ -32,6 +33,7 @@ const props = defineProps<{
   messages: Message[];
   loading: boolean;
   filesCount: number;
+  files: UploadedFile[];
   activeFileName: string | null;
   orchestrationSteps: PipelineStep[];
   generatingAnswer: boolean;
@@ -40,6 +42,7 @@ const props = defineProps<{
 const emit = defineEmits<{
   (e: 'sendMessage', text: string): void;
   (e: 'attachZip', file: File): void;
+  (e: 'selectAttachment', fileName: string): void;
   (e: 'clearAttach'): void;
   (e: 'feedback', query: string, route: string): void;
 }>();
@@ -99,6 +102,13 @@ const onAttachZip = (event: Event) => {
   if (target.files && target.files.length > 0) {
     emit('attachZip', target.files[0]);
     target.value = '';
+  }
+};
+
+const onSelectFile = (event: Event) => {
+  const value = (event.target as HTMLSelectElement).value;
+  if (value) {
+    emit('selectAttachment', value);
   }
 };
 
@@ -282,13 +292,27 @@ const toggleMatchExpansion = (id: string) => {
             <Send class="w-4 h-4" />
           </button>
         </form>
-        <div class="mt-2 flex items-center justify-between text-[10px] text-slate-500">
-          <label class="cursor-pointer hover:text-indigo-400 transition-colors flex items-center gap-1">
-            <input type="file" accept=".zip" hidden @change="onAttachZip" />
-            <Paperclip class="w-3.5 h-3.5" />
-            <span class="font-mono">Attach project (.zip)</span>
-          </label>
-          <span class="font-mono">Press Enter to send.</span>
+        <div class="mt-2 flex items-center justify-between gap-3 text-[10px] text-slate-500">
+          <div class="flex items-center gap-3 flex-wrap">
+            <label class="cursor-pointer hover:text-indigo-400 transition-colors flex items-center gap-1">
+              <input type="file" accept=".zip" hidden @change="onAttachZip" />
+              <Paperclip class="w-3.5 h-3.5" />
+              <span class="font-mono">Attach .zip</span>
+            </label>
+            <div class="flex items-center gap-1.5">
+              <FolderOpen class="w-3.5 h-3.5 text-slate-500" />
+              <select
+                :value="activeFileName || ''"
+                @change="onSelectFile"
+                :disabled="files.length === 0"
+                class="bg-[#11162d] border border-slate-800 rounded-lg px-2 py-1 text-[10px] font-mono text-slate-300 focus:outline-none focus:border-indigo-500 disabled:opacity-50 max-w-[200px]"
+              >
+                <option value="" disabled>Choose from knowledge base…</option>
+                <option v-for="f in files" :key="f.id" :value="f.name">{{ f.name }}</option>
+              </select>
+            </div>
+          </div>
+          <span class="font-mono shrink-0">Press Enter to send.</span>
         </div>
       </div>
     </div>

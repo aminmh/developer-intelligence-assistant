@@ -51,8 +51,6 @@ const successMessage = ref('');
 const showErrorToast = ref(false);
 const errorMessage = ref('');
 
-const searchMatches = ref<SearchMatch[]>([]);
-const searchLoading = ref(false);
 const parsingFileId = ref<string | null>(null);
 const indexingProgress = ref({ total: 0, indexed: 0, status: '' });
 const indexedFileIds = ref<Set<string>>(new Set());
@@ -406,6 +404,10 @@ const clearAttach = () => {
   activeFileName.value = null;
 };
 
+const selectAttachment = (fileName: string) => {
+  activeFileName.value = fileName;
+};
+
 const sendMessage = async (text: string) => {
   if (!text.trim() || loading.value) return;
 
@@ -559,33 +561,6 @@ Details: ${err.message}`,
   }
 };
 
-const performSearchOnly = async (query: string) => {
-  if (!query.trim() || searchLoading.value) return;
-  searchLoading.value = true;
-  searchMatches.value = [];
-
-  try {
-    const res = await makeRequest('/api/retrieve', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ query: query, limit: 6 }),
-    });
-    const data = await res.json();
-    if (data.success || data.matches) {
-      searchMatches.value = data.matches || [];
-      if (searchMatches.value.length === 0) {
-        triggerToast('No semantic matches found. Try uploading more documents!', false);
-      }
-    } else {
-      triggerToast(data.error || 'Failed to retrieve semantic matches', false);
-    }
-  } catch (err: any) {
-    triggerToast(`Error: ${err.message}`, false);
-  } finally {
-    searchLoading.value = false;
-  }
-};
-
 const copyToClipboard = (text: string) => {
   navigator.clipboard.writeText(text);
   triggerToast('Copied content to clipboard!');
@@ -708,11 +683,13 @@ onMounted(async () => {
         :messages="messages"
         :loading="loading"
         :filesCount="files.length"
+        :files="files"
         :activeFileName="activeFileName"
         :orchestrationSteps="orchestrationSteps"
         :generatingAnswer="generatingAnswer"
         @sendMessage="sendMessage"
         @attachZip="attachZip"
+        @selectAttachment="selectAttachment"
         @clearAttach="clearAttach"
         @feedback="submitFeedback"
       />
@@ -722,14 +699,11 @@ onMounted(async () => {
         :files="files"
         :uploading="uploading"
         :uploadProgress="uploadProgress"
-        :searchMatches="searchMatches"
-        :searchLoading="searchLoading"
         :parsingFileId="parsingFileId"
         :indexingProgress="indexingProgress"
         :indexedFileIds="indexedFileIds"
         @uploadFiles="processFiles"
         @deleteFile="deleteFile"
-        @performSearchOnly="performSearchOnly"
         @indexFile="indexFile"
       />
 
