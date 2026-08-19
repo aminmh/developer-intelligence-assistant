@@ -1,9 +1,13 @@
 <script setup lang="ts">
+import { ref, computed, onMounted } from 'vue';
 import { 
   Sliders, 
-  CpuIcon, 
+  Cpu, 
   Database,
-  SlidersHorizontal
+  SlidersHorizontal,
+  RefreshCw,
+  Server,
+  Scissors,
 } from 'lucide-vue-next';
 import { RAGConfig } from '../types';
 
@@ -18,6 +22,44 @@ const emit = defineEmits<{
 const updateField = <K extends keyof RAGConfig>(key: K, value: RAGConfig[K]) => {
   props.config[key] = value;
 };
+
+const ollamaModels = ref<string[]>([]);
+const loadingModels = ref(false);
+
+const fetchModels = async () => {
+  loadingModels.value = true;
+  try {
+    const res = await fetch('/api/ollama/models');
+    const data = await res.json();
+    if (data.success) {
+      ollamaModels.value = data.models || [];
+    }
+  } catch {
+    // leave the list empty; the current value is still shown as a fallback option
+  } finally {
+    loadingModels.value = false;
+  }
+};
+
+// Ensure the currently-selected value is always present in the dropdown,
+// even if it wasn't returned by /api/ollama/models.
+const llmModelOptions = computed(() => {
+  const list = [...ollamaModels.value];
+  if (props.config.ollamaLlmModel && !list.includes(props.config.ollamaLlmModel)) {
+    list.unshift(props.config.ollamaLlmModel);
+  }
+  return list;
+});
+
+const embedModelOptions = computed(() => {
+  const list = [...ollamaModels.value];
+  if (props.config.ollamaEmbedModel && !list.includes(props.config.ollamaEmbedModel)) {
+    list.unshift(props.config.ollamaEmbedModel);
+  }
+  return list;
+});
+
+onMounted(fetchModels);
 </script>
 
 <template>
@@ -29,93 +71,91 @@ const updateField = <K extends keyof RAGConfig>(key: K, value: RAGConfig[K]) => 
           <Sliders class="w-5 h-5 text-indigo-400" />
           RAG Pipeline Configuration
         </h3>
-        <p class="text-xs text-slate-400 mt-1">Configure your local or cloud LLMs and adjust Qdrant VectorDB connection details.</p>
+        <p class="text-xs text-slate-400 mt-1">Configure Ollama models and Qdrant connection details.</p>
       </div>
 
       <div class="grid grid-cols-1 md:grid-cols-2 gap-6">
         
-        <!-- Column 1: Model Selections -->
+        <!-- Column 1: Ollama connection + models -->
         <div class="space-y-6">
-          
-          <!-- Card 1: Large Language Model Configuration -->
+
+          <!-- Ollama connection -->
           <div class="bg-slate-900/30 border border-slate-800 rounded-2xl p-6 space-y-4">
             <h4 class="text-xs font-bold text-slate-200 uppercase tracking-wider flex items-center gap-2 border-b border-slate-800 pb-3">
-              <CpuIcon class="w-4 h-4 text-indigo-400" />
-              Large Language Model (LLM)
+              <Server class="w-4 h-4 text-indigo-400" />
+              Ollama Server
             </h4>
 
-            <div class="space-y-4">
-              <!-- Mode Select -->
+            <div class="space-y-1.5">
+              <label class="text-xs text-slate-400 font-mono">Base URL</label>
+              <input 
+                :value="config.ollamaBaseUrl" 
+                @input="updateField('ollamaBaseUrl', ($event.target as HTMLInputElement).value)"
+                type="text" 
+                class="w-full bg-[#11162d] border border-slate-800 rounded-xl px-4 py-2.5 text-xs font-mono focus:outline-none focus:border-emerald-500 text-slate-200"
+                placeholder="e.g. http://host.docker.internal:11434"
+              />
+            </div>
+          </div>
+
+          <!-- Model selection -->
+          <div class="bg-slate-900/30 border border-slate-800 rounded-2xl p-6 space-y-4">
+            <h4 class="text-xs font-bold text-slate-200 uppercase tracking-wider flex items-center justify-between gap-2 border-b border-slate-800 pb-3">
+              <span class="flex items-center gap-2">
+                <Cpu class="w-4 h-4 text-indigo-400" />
+                Models
+              </span>
+              <button
+                type="button"
+                @click="fetchModels"
+                class="text-[10px] text-slate-400 hover:text-indigo-300 flex items-center gap-1 font-mono"
+              >
+                <RefreshCw class="w-3 h-3" :class="loadingModels ? 'animate-spin' : ''" />
+                refresh
+              </button>
+            </h4>
+
+            <div class="space-y-3">
               <div class="space-y-1.5">
-                <label class="text-xs text-slate-400 font-medium">Model Connection Mode</label>
-                <div class="grid grid-cols-2 gap-2">
-                  <button 
-                    type="button" 
-                    @click="updateField('llmMode', 'gemini')"
-                    class="px-4 py-2.5 rounded-xl border text-xs font-semibold transition-all flex flex-col items-center justify-center gap-1"
-                    :class="config.llmMode === 'gemini' ? 'border-indigo-500 bg-indigo-500/10 text-white' : 'border-slate-800 bg-[#0c101f] text-slate-400 hover:text-slate-300'"
-                  >
-                    <span class="text-xs">Gemini (Cloud)</span>
-                    <span class="text-[9px] text-slate-500 font-normal">Active out-of-the-box</span>
-                  </button>
-                  <button 
-                    type="button" 
-                    @click="updateField('llmMode', 'local')"
-                    class="px-4 py-2.5 rounded-xl border text-xs font-semibold transition-all flex flex-col items-center justify-center gap-1"
-                    :class="config.llmMode === 'local' ? 'border-emerald-500 bg-emerald-500/10 text-white' : 'border-slate-800 bg-[#0c101f] text-slate-400 hover:text-slate-300'"
-                  >
-                    <span class="text-xs">Ollama (Local)</span>
-                    <span class="text-[9px] text-slate-500 font-normal">Requires local model URL</span>
-                  </button>
-                </div>
+                <label class="text-xs text-slate-400 font-mono">LLM (Chat) Model</label>
+                <select
+                  :value="config.ollamaLlmModel"
+                  @change="updateField('ollamaLlmModel', ($event.target as HTMLSelectElement).value)"
+                  class="w-full bg-[#11162d] border border-slate-800 rounded-xl px-4 py-2.5 text-xs font-mono focus:outline-none focus:border-emerald-500 text-slate-200"
+                >
+                  <option v-for="m in llmModelOptions" :key="m" :value="m">{{ m }}</option>
+                </select>
               </div>
 
-              <!-- Local LLM Configurations -->
-              <div v-if="config.llmMode === 'local'" class="space-y-3 pt-2">
-                <div class="space-y-1.5">
-                  <label class="text-xs text-slate-400 font-mono">Local LLM Host URL</label>
-                  <input 
-                    :value="config.localLlmUrl" 
-                    @input="updateField('localLlmUrl', ($event.target as HTMLInputElement).value)"
-                    type="text" 
-                    class="w-full bg-[#11162d] border border-slate-800 rounded-xl px-4 py-2.5 text-xs font-mono focus:outline-none focus:border-emerald-500 text-slate-200"
-                    placeholder="e.g. http://localhost:11434"
-                  />
-                </div>
-                <div class="space-y-1.5">
-                  <label class="text-xs text-slate-400 font-mono">Local Model Name</label>
-                  <input 
-                    :value="config.localLlmModel" 
-                    @input="updateField('localLlmModel', ($event.target as HTMLInputElement).value)"
-                    type="text" 
-                    class="w-full bg-[#11162d] border border-slate-800 rounded-xl px-4 py-2.5 text-xs font-mono focus:outline-none focus:border-emerald-500 text-slate-200"
-                    placeholder="e.g. llama3, mistral, codegemma"
-                  />
-                </div>
-              </div>
-
-              <div v-else class="p-3 bg-[#11162d] border border-slate-800 rounded-xl text-xs text-indigo-300 font-mono leading-relaxed">
-                🌟 Running **Gemini 3.5 Flash** for rapid reasoning and responses. Ensure your **GEMINI_API_KEY** is configured.
+              <div class="space-y-1.5">
+                <label class="text-xs text-slate-400 font-mono">Embedding Model</label>
+                <select
+                  :value="config.ollamaEmbedModel"
+                  @change="updateField('ollamaEmbedModel', ($event.target as HTMLSelectElement).value)"
+                  class="w-full bg-[#11162d] border border-slate-800 rounded-xl px-4 py-2.5 text-xs font-mono focus:outline-none focus:border-emerald-500 text-slate-200"
+                >
+                  <option v-for="m in embedModelOptions" :key="m" :value="m">{{ m }}</option>
+                </select>
               </div>
             </div>
           </div>
         </div>
 
-        <!-- Column 2: Chunking & Vector DB Params -->
+        <!-- Column 2: chunking + Qdrant + sampling params -->
         <div class="space-y-6">
-          
-          <!-- Card 3: Chunking Specifications -->
+
+          <!-- Document chunking -->
           <div class="bg-slate-900/30 border border-slate-800 rounded-2xl p-6 space-y-5">
             <h4 class="text-xs font-bold text-slate-200 uppercase tracking-wider flex items-center gap-2 border-b border-slate-800 pb-3">
-              <SlidersHorizontal class="w-4 h-4 text-indigo-400" />
-              Document Chunking Specifications
+              <Scissors class="w-4 h-4 text-indigo-400" />
+              Document Chunking
             </h4>
 
             <div class="space-y-4">
               <!-- Chunk Size -->
               <div class="space-y-2">
                 <div class="flex items-center justify-between text-xs">
-                  <span class="text-slate-400">Chunk Size (Characters)</span>
+                  <span class="text-slate-400">Chunk Size (characters)</span>
                   <span class="font-mono text-indigo-400 bg-indigo-500/10 px-2 py-0.5 rounded font-bold">{{ config.chunkSize }}</span>
                 </div>
                 <input 
@@ -127,7 +167,6 @@ const updateField = <K extends keyof RAGConfig>(key: K, value: RAGConfig[K]) => 
                   @input="updateField('chunkSize', parseInt(($event.target as HTMLInputElement).value))"
                   class="w-full h-1 bg-slate-800 rounded-lg appearance-none cursor-pointer accent-indigo-500" 
                 />
-                <p class="text-[10px] text-slate-500 leading-normal">Defines the maximum size of each semantic segment sliced during text processing.</p>
               </div>
 
               <!-- Chunk Overlap -->
@@ -145,12 +184,11 @@ const updateField = <K extends keyof RAGConfig>(key: K, value: RAGConfig[K]) => 
                   @input="updateField('chunkOverlap', parseInt(($event.target as HTMLInputElement).value))"
                   class="w-full h-1 bg-slate-800 rounded-lg appearance-none cursor-pointer accent-indigo-500" 
                 />
-                <p class="text-[10px] text-slate-500 leading-normal">Maintains continuity and prevents loss of context at chunk borders by overlapping sequential tokens.</p>
               </div>
             </div>
           </div>
 
-          <!-- Card 4: Qdrant Vector DB specifications -->
+          <!-- Qdrant -->
           <div class="bg-slate-900/30 border border-slate-800 rounded-2xl p-6 space-y-4">
             <h4 class="text-xs font-bold text-slate-200 uppercase tracking-wider flex items-center gap-2 border-b border-slate-800 pb-3">
               <Database class="w-4 h-4 text-indigo-400" />
@@ -160,7 +198,7 @@ const updateField = <K extends keyof RAGConfig>(key: K, value: RAGConfig[K]) => 
             <div class="space-y-3">
               <div class="space-y-1.5">
                 <div class="flex items-center justify-between">
-                  <label class="text-xs text-slate-400 font-mono">Qdrant Server URL</label>
+                  <label class="text-xs text-slate-400 font-mono">Server URL</label>
                   <span class="text-[9px] text-slate-500">Optional</span>
                 </div>
                 <input 
@@ -174,7 +212,7 @@ const updateField = <K extends keyof RAGConfig>(key: K, value: RAGConfig[K]) => 
 
               <div class="space-y-1.5">
                 <div class="flex items-center justify-between">
-                  <label class="text-xs text-slate-400 font-mono">Qdrant API Key</label>
+                  <label class="text-xs text-slate-400 font-mono">API Key</label>
                   <span class="text-[9px] text-slate-500">Optional</span>
                 </div>
                 <input 
@@ -185,25 +223,21 @@ const updateField = <K extends keyof RAGConfig>(key: K, value: RAGConfig[K]) => 
                   placeholder="Enter Qdrant cloud token"
                 />
               </div>
-
-              <p class="text-[10px] text-slate-500 leading-relaxed">
-                If left blank, the integrated sandbox automatically provisions an in-memory database index for seamless, instant testing.
-              </p>
             </div>
           </div>
 
-          <!-- Card 5: Smart Model Parameters (Temperature / TopP) -->
+          <!-- Sampling parameters -->
           <div class="bg-slate-900/30 border border-slate-800 rounded-2xl p-6 space-y-4">
             <h4 class="text-xs font-bold text-slate-200 uppercase tracking-wider flex items-center gap-2 border-b border-slate-800 pb-3">
               <SlidersHorizontal class="w-4 h-4 text-indigo-400" />
-              Model Temperature and Randomness
+              Sampling Parameters
             </h4>
 
             <div class="space-y-4">
               <!-- Temperature -->
               <div class="space-y-2">
                 <div class="flex items-center justify-between text-xs">
-                  <span class="text-slate-400">LLM Temperature</span>
+                  <span class="text-slate-400">Temperature</span>
                   <span class="font-mono text-indigo-400 bg-indigo-500/10 px-2 py-0.5 rounded font-bold">{{ config.temperature }}</span>
                 </div>
                 <input 

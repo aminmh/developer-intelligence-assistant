@@ -25,14 +25,9 @@ const UPLOAD_THRESHOLD_BYTES = Number(import.meta.env.VITE_TUS_THRESHOLD_BYTES ?
 const activeTab = ref<'chat' | 'files' | 'config'>('chat');
 
 const config = ref<RAGConfig>({
-  llmMode: 'gemini',
-  localLlmUrl: 'http://localhost:11434',
-  localLlmModel: 'llama3',
-  embeddingMode: 'ollama',
-  ollamaUrl: 'http://localhost:11434',
-  ollamaModel: 'BGE-M3',
-  hfModel: 'sentence-transformers/all-MiniLM-L6-v2',
-  hfToken: '',
+  ollamaBaseUrl: 'http://host.docker.internal:11434',
+  ollamaEmbedModel: 'BGE-M3',
+  ollamaLlmModel: 'gemma3-4b',
   chunkSize: 500,
   chunkOverlap: 50,
   qdrantUrl: '',

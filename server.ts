@@ -12,7 +12,7 @@ const PYTHON_API_URL = process.env.PYTHON_API_URL || 'http://localhost:9002';
 const INTERNAL_SECRET = process.env.RAG_CALLBACK_SECRET || '';
 
 // Secret fields masked before returning config to the browser (write-only).
-const MASKED_SECRET_KEYS = ['qdrantApiKey', 'hfToken'];
+const MASKED_SECRET_KEYS = ['qdrantApiKey'];
 function maskConfig(config: Record<string, any>) {
   const masked = { ...config };
   for (const key of MASKED_SECRET_KEYS) {
@@ -96,6 +96,29 @@ async function startServer() {
       res.json({ success: true, config: data.config ?? maskConfig(RAGService.getConfig()) });
     } catch (error: any) {
       console.error('Failed to save configurations via Python:', error.message);
+      res.status(500).json({ success: false, error: error.message });
+    }
+  });
+
+  // List models pulled in Ollama (for the model dropdowns)
+  app.get('/api/ollama/models', async (req, res) => {
+    try {
+      const ollamaUrl = process.env.OLLAMA_URL || 'http://host.docker.internal:11434';
+      const r = await fetch(`${ollamaUrl}/api/tags`);
+      if (!r.ok) {
+        return res.status(r.status).json({ success: false, error: 'Failed to list Ollama models.' });
+      }
+      const data = await r.json();
+      const models = Array.from(
+        new Set(
+          (data.models ?? []).map((m: any) =>
+            String(m.name ?? m.model ?? m).replace(/:latest$/, '')
+          )
+        )
+      ).sort();
+      res.json({ success: true, models });
+    } catch (error: any) {
+      console.error('Failed to list Ollama models:', error.message);
       res.status(500).json({ success: false, error: error.message });
     }
   });
