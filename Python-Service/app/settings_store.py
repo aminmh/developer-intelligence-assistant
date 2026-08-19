@@ -15,19 +15,12 @@ from pathlib import Path
 from typing import Any, Dict, Optional
 
 # Canonical UI-editable settings and their defaults. Mirrors web/src/types.ts
-# (RAGConfig). Only a subset is consumed by the Python service itself
-# (ollama url/model, qdrant url/api-key); the rest are stored here and read by
-# the web server for its own embedding/chunking/LLM logic.
+# (RAGConfig). The Python service is the single source of truth; the web server
+# reads these and proxies edits back here.
 RAG_CONFIG_DEFAULTS: Dict[str, Any] = {
-    "llmMode": "gemini",
-    "localLlmUrl": "http://localhost:11434",
-    "localLlmModel": "gemma3-4b",
-    "embeddingMode": "ollama",
-    "ollamaUrl": "http://localhost:11434",
-    "ollamaModel": "BGE-M3",
+    "ollamaBaseUrl": "http://host.docker.internal:11434",
+    "ollamaEmbedModel": "BGE-M3",
     "ollamaLlmModel": "gemma3-4b",
-    "hfModel": "sentence-transformers/all-MiniLM-L6-v2",
-    "hfToken": "",
     "chunkSize": 500,
     "chunkOverlap": 50,
     "qdrantUrl": "",
@@ -38,7 +31,7 @@ RAG_CONFIG_DEFAULTS: Dict[str, Any] = {
 
 # Fields returned masked by GET /settings. They are write-only: a PUT only
 # overwrites them when a non-empty value is supplied.
-SECRET_KEYS = {"qdrantApiKey", "hfToken"}
+SECRET_KEYS = {"qdrantApiKey"}
 
 MASKED_VALUE = ""
 

@@ -21,6 +21,7 @@ from qdrant_client import QdrantClient
 from qdrant_client.models import Distance, VectorParams, PointStruct
 
 from settings import settings
+from query_normalizer import normalize_query
 
 # Feedback collection holds user-submitted corrections: query vector -> route.
 FEEDBACK_COLLECTION = "route_feedback"
@@ -50,7 +51,7 @@ class OllamaEncoder(BaseEncoder):
             body = json.dumps(
                 {
                     "model": settings.ollama_embedding_model,
-                    "prompt": doc,
+                    "prompt": normalize_query(doc),
                 }
             ).encode("utf-8")
 

@@ -51,6 +51,44 @@ def sanitize_collection_name(filename: str) -> str:
     return name.strip("_") or "unnamed"
 
 
+def split_text_into_chunks(text: str, chunk_size: int, chunk_overlap: int) -> list[str]:
+    """Split raw text into overlapping, size-bounded chunks for indexing."""
+    if chunk_size <= 0:
+        chunk_size = 500
+    if chunk_overlap < 0:
+        chunk_overlap = 0
+    if chunk_overlap >= chunk_size:
+        chunk_overlap = chunk_size // 2
+
+    chunks: list[str] = []
+    start = 0
+    n = len(text)
+    while start < n:
+        end = min(start + chunk_size, n)
+
+        # Prefer breaking on a newline or space near the target boundary.
+        if end < n:
+            window_start = max(start, end - 150)
+            window = text[window_start : end + 50]
+            nl = window.rfind("\n")
+            sp = window.rfind(" ")
+            if nl != -1 and (window_start + nl) > start:
+                end = window_start + nl + 1
+            elif sp != -1 and (window_start + sp) > start:
+                end = window_start + sp + 1
+
+        chunk = text[start:end].strip()
+        if chunk:
+            chunks.append(chunk)
+
+        if end >= n:
+            break
+        next_start = end - chunk_overlap
+        start = next_start if next_start > start else end
+
+    return chunks
+
+
 def setup_logger(name: str, filename: str) -> logging.Logger:
     """Create a file-based logger for tracing the download/index pipeline."""
     log_path = Path(settings.log_dir)
@@ -481,16 +519,18 @@ def create_download_job(
     # No structured code chunks — treat raw text, split & index
     elif text and isinstance(text, str) and len(text.strip()) > 0:
         collection_name = sanitize_collection_name(filename)
-        paragraphs = [p.strip() for p in text.split('\n\n') if p.strip()]
-        if not paragraphs:
-            paragraphs = [text.strip()]
+        chunks = split_text_into_chunks(
+            text, int(settings.chunk_size), int(settings.chunk_overlap)
+        )
+        if not chunks:
+            chunks = [text.strip()]
 
         text_chunks = [{
             "type": "document",
             "name": f"chunk_{i}",
-            "code": p,
+            "code": c,
             "file": filename,
-        } for i, p in enumerate(paragraphs)]
+        } for i, c in enumerate(chunks)]
 
         response["collection_name"] = collection_name
         response["chunk_count"] = len(text_chunks)

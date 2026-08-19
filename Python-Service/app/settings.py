@@ -23,15 +23,18 @@ class Settings(BaseModel):
         "sentence-transformers/all-MiniLM-L6-v2",
     )
 
-    ollama_base_url: str = os.getenv("OLLAMA_BASE_URL", "http://ollama:11434")
-    ollama_embedding_model: str = os.getenv(
-        "OLLAMA_EMBED_MODEL",
-        "nomic-embed-text",
-    )
+    ollama_base_url: str = os.getenv("OLLAMA_BASE_URL", "http://host.docker.internal:11434")
+    ollama_embedding_model: str = os.getenv("OLLAMA_EMBED_MODEL", "BGE-M3")
     ollama_llm_model: str = os.getenv("OLLAMA_LLM_MODEL", "gemma3-4b")
 
     temperature: float = float(os.getenv("LLM_TEMPERATURE", "0.7"))
     top_p: float = float(os.getenv("LLM_TOP_P", "0.9"))
+    chunk_size: int = int(os.getenv("CHUNK_SIZE", "500"))
+    chunk_overlap: int = int(os.getenv("CHUNK_OVERLAP", "50"))
+
+    enable_typo_correction: bool = os.getenv(
+        "ENABLE_TYPO_CORRECTION", "false"
+    ).strip().lower() in ("1", "true", "yes", "on")
 
     download_dir: str = os.getenv("DOWNLOAD_DIR", "/app/downloads")
     download_token_secret: str = os.getenv("DOWNLOAD_TOKEN_SECRET", "change-me")
@@ -48,13 +51,15 @@ class RuntimeSettings:
     """
 
     _DYNAMIC = {
-        "ollama_base_url": "ollamaUrl",
-        "ollama_embedding_model": "ollamaModel",
+        "ollama_base_url": "ollamaBaseUrl",
+        "ollama_embedding_model": "ollamaEmbedModel",
         "ollama_llm_model": "ollamaLlmModel",
         "qdrant_url": "qdrantUrl",
         "qdrant_api_key": "qdrantApiKey",
         "temperature": "temperature",
         "top_p": "topP",
+        "chunk_size": "chunkSize",
+        "chunk_overlap": "chunkOverlap",
     }
 
     def __init__(self) -> None:

@@ -282,6 +282,16 @@ class CodePropertyGraph:
         graph_nodes, graph_relations = self._ingest_graph(deduped, collection_name)
         ingested, embed_fails = self._ingest_vectors(deduped, collection_name)
 
+        # Refresh the typo-correction domain dictionary so newly indexed
+        # class/method names become correctable (best-effort).
+        if ingested:
+            try:
+                from query_normalizer import regenerate_domain_dictionary
+
+                regenerate_domain_dictionary(settings.qdrant_url)
+            except Exception:
+                pass
+
         return {
             "collection_name": collection_name,
             "ingested": ingested,

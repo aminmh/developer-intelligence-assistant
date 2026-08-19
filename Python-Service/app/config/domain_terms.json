@@ -1,0 +1,6 @@
+{
+  "_comment": "SkiSchool domain jargon/abbreviation expansion map. Keys are normalized (lowercase). Values are the expanded phrases. Populate with real terms before relying on this for routing quality.",
+  "sc": "ski school",
+  "bsps": "booking schedule planning service",
+  "bss": "booking schedule"
+}
