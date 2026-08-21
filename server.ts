@@ -422,7 +422,10 @@ async function startServer() {
       try {
         const aRes = await fetch(`${pythonUrl}/answer`, {
           method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
+          headers: {
+            'Content-Type': 'application/json',
+            'X-RAG-Trace-Id': queryId,
+          },
           body: JSON.stringify({ query }),
         });
         if (aRes.ok) {
@@ -501,7 +504,10 @@ async function startServer() {
 
         const aRes = await fetch(`${pythonUrl}/answer`, {
           method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
+          headers: {
+            'Content-Type': 'application/json',
+            'X-RAG-Trace-Id': jobToQueryId.get(job_id) || job_id,
+          },
           body: JSON.stringify({
             query: actualQuery,
             collection: targetCollection || undefined,
@@ -565,6 +571,49 @@ async function startServer() {
     } catch (error: any) {
       console.error('Feedback submission error:', error.message);
       res.status(500).json({ success: false, error: error.message });
+    }
+  });
+
+  // Retrieval provenance is fetched separately so the existing answer and
+  // orchestration response contracts remain unchanged.
+  app.get('/api/query/:queryId/insights', async (req, res) => {
+    try {
+      const traceId = req.params.queryId;
+      const pyRes = await fetch(`${PYTHON_API_URL}/retrieval-insights/${encodeURIComponent(traceId)}`, {
+        headers: { 'X-Internal-Secret': INTERNAL_SECRET },
+      });
+      const data = await pyRes.json().catch(() => ({}));
+      if (!pyRes.ok) {
+        if (pyRes.status === 404) {
+          return res.json({
+            success: true,
+            insights: {
+              trace_id: traceId,
+              query_hash: '',
+              mode: 'vector_unavailable',
+              collection: null,
+              searched_collections: [],
+              vector_result_count: 0,
+              graph_neighbor_count: 0,
+              graph_context_count: 0,
+              graph_context_with_code_count: 0,
+              graph_available: false,
+              graph_fallback: false,
+              sources: [],
+              timestamp: new Date().toISOString(),
+              available: false,
+            },
+          });
+        }
+        return res.status(pyRes.status).json({
+          success: false,
+          error: data.detail || data.error || 'Retrieval insights unavailable.',
+        });
+      }
+      return res.json({ success: true, insights: data });
+    } catch (error: any) {
+      console.error('Retrieval insights error:', error.message);
+      return res.status(500).json({ success: false, error: 'Retrieval insights unavailable.' });
     }
   });
 

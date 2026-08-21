@@ -16,6 +16,7 @@ import { SearchMatch, UploadedFile } from '../types';
 import PipelineProgress from './PipelineProgress.vue';
 import ChatLoading from './ChatLoading.vue';
 import EvaluationModal from './EvaluationModal.vue';
+import RetrievalInsights from './RetrievalInsights.vue';
 import type { PipelineStep } from './PipelineProgress.vue';
 
 interface Message {
@@ -218,6 +219,11 @@ const toggleMatchExpansion = (id: string) => {
               </button>
             </div>
           </div>
+
+          <RetrievalInsights
+            v-if="msg.role === 'assistant' && msg.queryId"
+            :queryId="msg.queryId"
+          />
 
           <!-- Expand matches toggle -->
           <button 
