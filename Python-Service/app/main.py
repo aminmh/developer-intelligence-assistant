@@ -752,6 +752,43 @@ def submit_feedback(body: dict):
     return result
 
 
+_eval_cache: dict = {}
+
+
+@app.post(
+    "/evaluate",
+    tags=["Code Intelligence"],
+    summary="Evaluate a Response",
+    description=(
+        "Scores a single (query, answer, retrieved contexts) triple with "
+        "reference-free RAGAS metrics: faithfulness, answer_relevancy, and "
+        "context_precision. Returns per-metric score (0-1) and a human-readable "
+        "tier. On evaluation failure (e.g. judge model timeout) returns success=false."
+    ),
+)
+def evaluate_prompt(body: dict):
+    query = body.get("query", "")
+    answer = body.get("answer", "")
+    contexts = body.get("contexts") or []
+    if not query or not answer:
+        raise HTTPException(status_code=400, detail="Missing query or answer")
+
+    cache_key = json.dumps([query, answer, contexts], sort_keys=True, default=str)
+    if cache_key in _eval_cache:
+        return {"success": True, "metrics": _eval_cache[cache_key]}
+
+    from evaluation import evaluate_response
+
+    try:
+        metrics = evaluate_response(query, answer, contexts)
+    except Exception as exc:
+        get_exception_logger().error("Response evaluation failed: %s", exc)
+        return {"success": False, "error": "Evaluation unavailable for this response"}
+
+    _eval_cache[cache_key] = metrics
+    return {"success": True, "metrics": metrics}
+
+
 def _coerce_setting(key: str, value):
     default = RAG_CONFIG_DEFAULTS.get(key)
     if isinstance(default, int) and not isinstance(value, bool):
