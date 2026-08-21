@@ -28,6 +28,15 @@ const answerCache = new Map<string, any>();
 // the expensive re-embedding step). Reset on server restart.
 const indexedProjects = new Set<string>();
 
+// Per-response evaluation data: queryId -> { query, answer, contexts }.
+const evaluationCache = new Map<string, { query: string; answer: string | null; contexts: string[] }>();
+// Orchestration job_id -> queryId, so /api/query/result can attach the answer.
+const jobToQueryId = new Map<string, string>();
+
+function contextsFromMatches(matches: any[]): string[] {
+  return (matches ?? []).map((m) => m?.chunk?.text ?? '').filter((t) => t);
+}
+
 function labelForExtension(filename: string): string {
   const ext = path.extname(filename).toLowerCase();
   if (ext === '.pdf') return 'pdf';
@@ -351,6 +360,7 @@ async function startServer() {
 
       const pythonUrl = process.env.PYTHON_API_URL || 'http://localhost:9002';
       let classification = { route: 'chat', confidence: 0 };
+      const queryId = crypto.randomUUID();
 
       // Classify if filename attached
       if (filename) {
@@ -393,10 +403,13 @@ async function startServer() {
           });
           if (oRes.ok) {
             const { job_id } = await oRes.json();
+            jobToQueryId.set(job_id, queryId);
+            evaluationCache.set(queryId, { query, answer: null, contexts: [] });
             return res.json({
               success: true,
               phase: 'orchestrating',
               job_id,
+              query_id: queryId,
               classification,
             });
           }
@@ -414,7 +427,12 @@ async function startServer() {
         });
         if (aRes.ok) {
           const answer = await aRes.json();
-          return res.json({ success: true, ...answer, classification });
+          evaluationCache.set(queryId, {
+            query,
+            answer: answer.answer ?? '',
+            contexts: contextsFromMatches(answer.matches),
+          });
+          return res.json({ success: true, ...answer, classification, query_id: queryId });
         }
       } catch {
         // Python answer unavailable — fall through to error
@@ -502,6 +520,16 @@ async function startServer() {
         result.llmUsed = answer.llmUsed;
         result.durationMs = answer.durationMs;
 
+        // Attach the final answer to the evaluation cache.
+        const queryId = jobToQueryId.get(job_id);
+        if (queryId) {
+          evaluationCache.set(queryId, {
+            query: actualQuery,
+            answer: answer.answer ?? '',
+            contexts: contextsFromMatches(answer.matches),
+          });
+        }
+
         // Update cache with real answer
         answerCache.set(job_id, {
           answer: result.answer,
@@ -536,6 +564,37 @@ async function startServer() {
       res.json(data);
     } catch (error: any) {
       console.error('Feedback submission error:', error.message);
+      res.status(500).json({ success: false, error: error.message });
+    }
+  });
+
+  // Evaluate a single response (reference-free RAGAS metrics)
+  app.post('/api/query/:queryId/evaluate', async (req, res) => {
+    try {
+      const entry = evaluationCache.get(req.params.queryId);
+      if (!entry) {
+        return res.status(404).json({ success: false, error: 'Response not found.' });
+      }
+      if (!entry.answer) {
+        return res.status(409).json({ success: false, error: 'Response not ready yet.' });
+      }
+
+      const pyRes = await fetch(`${PYTHON_API_URL}/evaluate`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          query: entry.query,
+          answer: entry.answer,
+          contexts: entry.contexts,
+        }),
+      });
+      const data = await pyRes.json();
+      if (!pyRes.ok) {
+        return res.status(pyRes.status).json({ success: false, error: data.error || 'Evaluation failed.' });
+      }
+      res.json(data);
+    } catch (error: any) {
+      console.error('Evaluation error:', error.message);
       res.status(500).json({ success: false, error: error.message });
     }
   });

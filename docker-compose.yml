@@ -28,6 +28,11 @@ services:
       context: .
       dockerfile: Dockerfile.dev
     container_name: web-dev
+    working_dir: /workspace
+    command:
+      - sh
+      - -c
+      - if [ ! -x /workspace/node_modules/.bin/tsx ] || [ ! -d /workspace/node_modules/tsx/node_modules/@esbuild/linux-arm64 ]; then find /workspace/node_modules -mindepth 1 -maxdepth 1 -exec rm -rf {} +; (cd /app/node_modules && tar cf - .) | (cd /workspace/node_modules && tar xf -); fi; rm -rf /workspace/node_modules/@esbuild/darwin-* /workspace/node_modules/tsx/node_modules/@esbuild/darwin-*; exec npm run dev
     env_file:
       - .env
     environment:
@@ -38,8 +43,12 @@ services:
     ports:
       - "3000:3000"
     volumes:
-      - ".:/app"
-      - "/app/node_modules"
+      - ".:/workspace"
+      - type: volume
+        source: web-dev-node-modules
+        target: /workspace/node_modules
+        volume:
+          nocopy: true
     profiles:
       - dev
     networks:
@@ -50,3 +59,6 @@ networks:
   default: {}
   devassistant_net:
     external: true
+
+volumes:
+  web-dev-node-modules:

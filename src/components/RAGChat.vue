@@ -9,11 +9,13 @@ import {
   ChevronUp,
   Paperclip,
   FolderOpen,
+  Gauge,
   X,
 } from 'lucide-vue-next';
 import { SearchMatch, UploadedFile } from '../types';
 import PipelineProgress from './PipelineProgress.vue';
 import ChatLoading from './ChatLoading.vue';
+import EvaluationModal from './EvaluationModal.vue';
 import type { PipelineStep } from './PipelineProgress.vue';
 
 interface Message {
@@ -26,6 +28,7 @@ interface Message {
   durationMs?: number;
   orchestration?: any;
   query?: string;
+  queryId?: string;
   routeName?: string;
 }
 
@@ -54,6 +57,16 @@ const chatInput = ref('');
 // Feedback UI state: which message's route picker is open / already submitted
 const feedbackOpenId = ref<string | null>(null);
 const feedbackDoneId = ref<string | null>(null);
+
+// Evaluation modal state
+const showEvaluation = ref(false);
+const evalQueryId = ref<string | null>(null);
+
+const openEvaluation = (queryId: string | undefined) => {
+  if (!queryId) return;
+  evalQueryId.value = queryId;
+  showEvaluation.value = true;
+};
 
 const toggleFeedback = (id: string) => {
   feedbackOpenId.value = feedbackOpenId.value === id ? null : id;
@@ -193,6 +206,17 @@ const toggleMatchExpansion = (id: string) => {
                 </button>
               </div>
             </div>
+
+            <!-- Evaluate response -->
+            <div v-if="msg.role === 'assistant' && msg.queryId" class="mt-2 pt-2 border-t border-slate-800 text-left">
+              <button
+                @click="openEvaluation(msg.queryId)"
+                class="text-[10px] text-slate-400 hover:text-indigo-300 flex items-center gap-1 font-mono transition-colors"
+              >
+                <Gauge class="w-3 h-3" />
+                View evaluation
+              </button>
+            </div>
           </div>
 
           <!-- Expand matches toggle -->
@@ -316,5 +340,11 @@ const toggleMatchExpansion = (id: string) => {
         </div>
       </div>
     </div>
+
+    <EvaluationModal
+      :show="showEvaluation"
+      :queryId="evalQueryId"
+      @close="showEvaluation = false"
+    />
   </div>
 </template>

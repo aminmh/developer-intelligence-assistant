@@ -68,6 +68,7 @@ interface Message {
   durationMs?: number;
   orchestration?: any;
   query?: string;
+  queryId?: string;
   routeName?: string;
 }
 
@@ -450,6 +451,7 @@ const sendMessage = async (text: string) => {
     // Phase 1: Orchestration started — poll for progress
     if (data.phase === 'orchestrating' && data.job_id) {
       const jobId = data.job_id;
+      const queryId = data.query_id;
 
       // Clear any previous poll timer
       if (pollTimerId) { clearTimeout(pollTimerId); pollTimerId = null; }
@@ -486,6 +488,7 @@ const sendMessage = async (text: string) => {
               durationMs: rData.durationMs,
               orchestration: rData,
               query: text,
+              queryId,
               routeName: rData.route_name || null,
             });
             loading.value = false;
@@ -530,6 +533,7 @@ const sendMessage = async (text: string) => {
         llmUsed: data.llmUsed || 'Gemini 3.5',
         durationMs: data.durationMs,
         query: text,
+        queryId: data.query_id,
       });
       loading.value = false;
     } else {
