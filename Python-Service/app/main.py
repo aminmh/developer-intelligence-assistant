@@ -653,6 +653,25 @@ def extract_prompt(body: dict):
     return extract_intent(prompt).model_dump()
 
 
+@app.get(
+    "/retrieval-insights/{trace_id}",
+    tags=["Code Intelligence"],
+    summary="Get Retrieval Insights",
+)
+def retrieval_insights(
+    trace_id: str,
+    x_internal_secret: Annotated[str | None, Header(alias="X-Internal-Secret")] = None,
+):
+    if x_internal_secret != settings.internal_secret:
+        raise HTTPException(status_code=401, detail="Unauthorized")
+    from llamaindex_layer import get_retrieval_trace
+
+    trace = get_retrieval_trace(trace_id)
+    if not trace:
+        raise HTTPException(status_code=404, detail="Retrieval trace not found")
+    return trace
+
+
 @app.post(
     "/answer",
     tags=["Code Intelligence"],
@@ -663,7 +682,10 @@ def extract_prompt(body: dict):
         "metadata filters (class_name/file) and extracted entities."
     ),
 )
-def answer_prompt(body: dict):
+def answer_prompt(
+    body: dict,
+    x_rag_trace_id: Annotated[str | None, Header(alias="X-RAG-Trace-Id")] = None,
+):
     query = body.get("query", "")
     if not query or not isinstance(query, str):
         raise HTTPException(status_code=400, detail="Missing or invalid query")
@@ -677,6 +699,7 @@ def answer_prompt(body: dict):
     extra_context = body.get("extra_context")
 
     from llamaindex_layer import CodePropertyGraph
+    from llamaindex_layer import record_retrieval_trace
     from answer import generate_answer
 
     # When an explicit tool context is provided (e.g. the project structure from
@@ -685,6 +708,22 @@ def answer_prompt(body: dict):
     if extra_context and isinstance(extra_context, str) and extra_context.strip():
         results = []
         contexts = []
+        record_retrieval_trace(
+            x_rag_trace_id or "",
+            {
+                "query_hash": __import__("hashlib").sha1(query.encode("utf-8")).hexdigest()[:12],
+                "mode": "explicit_context",
+                "collection": collection,
+                "searched_collections": [],
+                "vector_result_count": 0,
+                "graph_neighbor_count": 0,
+                "graph_context_count": 0,
+                "graph_context_with_code_count": 0,
+                "graph_available": False,
+                "graph_fallback": False,
+                "sources": [],
+            },
+        )
     else:
         result = CodePropertyGraph().hybrid_retrieve(
             query=query,
@@ -692,6 +731,7 @@ def answer_prompt(body: dict):
             limit=10,
             class_name=class_name,
             file=file,
+            trace_id=x_rag_trace_id,
         )
         results = result.get("results", []) or []
         contexts = [(r.get("payload") or {}) for r in results]

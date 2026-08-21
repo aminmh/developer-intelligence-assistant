@@ -21,6 +21,7 @@ services:
       - 9002:9002
     volumes:
       - "./Python-Service/app/:/app"
+      - "./Python-Service/logs/:/app/logs"
     depends_on:
       minio:
         condition: service_healthy
@@ -184,4 +185,3 @@ networks:
   default: {}
   devassistant_net:
     external: true
-

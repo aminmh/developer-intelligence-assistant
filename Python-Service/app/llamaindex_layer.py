@@ -16,6 +16,9 @@ Any graph failure degrades gracefully to vector-only search.
 from __future__ import annotations
 
 import hashlib
+import json
+import threading
+import time
 import uuid
 from typing import Any, Dict, List, Optional
 
@@ -45,6 +48,57 @@ _PSEUDO_RECEIVERS = ("__unknown", "__function", "__global__")
 
 _MAX_CODE_CHARS = 2000
 _MAX_TEXT_CHARS = 4000
+_TRACE_LOCK = threading.Lock()
+_TRACE_CACHE: Dict[str, Dict[str, Any]] = {}
+_TRACE_CACHE_LIMIT = 200
+
+
+def _trace_log_path() -> Any:
+    from pathlib import Path
+
+    path = Path(settings.log_dir) / "retrieval-traces.jsonl"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    return path
+
+
+def record_retrieval_trace(trace_id: str, trace: Dict[str, Any]) -> None:
+    """Persist lightweight retrieval provenance without affecting RAG execution."""
+    if not trace_id:
+        return
+    payload = dict(trace)
+    payload["trace_id"] = trace_id
+    payload.setdefault("timestamp", time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()))
+    try:
+        with _TRACE_LOCK:
+            _TRACE_CACHE[trace_id] = payload
+            while len(_TRACE_CACHE) > _TRACE_CACHE_LIMIT:
+                _TRACE_CACHE.pop(next(iter(_TRACE_CACHE)))
+            with _trace_log_path().open("a", encoding="utf-8") as handle:
+                handle.write(json.dumps(payload, ensure_ascii=False, default=str) + "\n")
+    except Exception as exc:
+        get_exception_logger().warning("Retrieval trace write failed: %s", exc)
+
+
+def get_retrieval_trace(trace_id: str) -> Optional[Dict[str, Any]]:
+    with _TRACE_LOCK:
+        trace = _TRACE_CACHE.get(trace_id)
+        if trace:
+            return dict(trace)
+        try:
+            path = _trace_log_path()
+            if not path.exists():
+                return None
+            for line in reversed(path.read_text(encoding="utf-8").splitlines()):
+                try:
+                    payload = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                if payload.get("trace_id") == trace_id:
+                    _TRACE_CACHE[trace_id] = payload
+                    return dict(payload)
+        except Exception as exc:
+            get_exception_logger().warning("Retrieval trace read failed: %s", exc)
+        return None
 
 _NODE_UPSERT_CYPHER = """
 UNWIND $data AS row
@@ -451,13 +505,29 @@ class CodePropertyGraph:
         limit: int = 10,
         class_name: Optional[str] = None,
         file: Optional[str] = None,
+        trace_id: Optional[str] = None,
     ) -> Dict[str, Any]:
         """Hybrid vector + graph retrieval with graceful vector-only fallback."""
         qdrant = self._get_qdrant()
+        trace: Dict[str, Any] = {
+            "query_hash": hashlib.sha1(query.encode("utf-8")).hexdigest()[:12],
+            "mode": "hybrid",
+            "collection": collection_name,
+            "searched_collections": [],
+            "vector_result_count": 0,
+            "graph_neighbor_count": 0,
+            "graph_context_count": 0,
+            "graph_context_with_code_count": 0,
+            "graph_available": False,
+            "graph_fallback": False,
+            "sources": [],
+        }
 
         try:
             collections = qdrant.get_collections().collections
         except Exception:
+            trace["mode"] = "vector_unavailable"
+            record_retrieval_trace(trace_id or "", trace)
             return {"results": [], "searched_collections": []}
 
         target_collections: List[str] = []
@@ -467,19 +537,28 @@ class CodePropertyGraph:
             if collection_name and col.name != collection_name:
                 continue
             target_collections.append(col.name)
+        trace["searched_collections"] = target_collections
 
         if not target_collections:
+            trace["mode"] = "no_results"
+            record_retrieval_trace(trace_id or "", trace)
             return {"results": [], "searched_collections": []}
 
         try:
             query_vec = self._get_embed_model().get_text_embedding(query)
         except Exception:
+            trace["mode"] = "vector_unavailable"
+            record_retrieval_trace(trace_id or "", trace)
             return {"results": [], "searched_collections": target_collections}
 
         # Optional metadata filter (from extracted intent entities).
         query_filter = _build_query_filter(class_name=class_name, file=file)
 
         store = self._get_graph_store()
+        trace["graph_available"] = store is not None
+        if store is None:
+            trace["graph_fallback"] = True
+            trace["mode"] = "vector_only"
 
         all_results: List[Dict[str, Any]] = []
         seen_ids: set[str] = set()
@@ -505,6 +584,7 @@ class CodePropertyGraph:
                         "via_graph": False,
                     }
                 )
+                trace["vector_result_count"] += 1
 
             # Graph expansion: fetch direct callee/caller neighbours.
             if store is None or not vector_ids:
@@ -512,6 +592,7 @@ class CodePropertyGraph:
             neighbours = self._traverse_neighbours(store, vector_ids)
             if not neighbours:
                 continue
+            trace["graph_neighbor_count"] += len(neighbours)
 
             neighbour_ids = [n["tgt"] for n in neighbours if n["tgt"] not in seen_ids]
             if not neighbour_ids:
@@ -561,8 +642,26 @@ class CodePropertyGraph:
                         "via_graph": True,
                     }
                 )
+                trace["graph_context_count"] += 1
+                if payload.get("code"):
+                    trace["graph_context_with_code_count"] += 1
 
         all_results.sort(key=lambda x: x["score"], reverse=True)
+        if trace["graph_context_count"] > 0:
+            trace["mode"] = "hybrid"
+        elif trace["mode"] == "hybrid":
+            trace["mode"] = "vector_only"
+        trace["sources"] = [
+            {
+                "file": (r.get("payload") or {}).get("file", ""),
+                "class_name": (r.get("payload") or {}).get("class") or (r.get("payload") or {}).get("class_fqn", ""),
+                "name": (r.get("payload") or {}).get("name", ""),
+                "via_graph": bool(r.get("via_graph")),
+                "score": round(float(r.get("score", 0.0)), 4),
+            }
+            for r in all_results[:limit]
+        ]
+        record_retrieval_trace(trace_id or "", trace)
         return {
             "results": all_results[:limit],
             "searched_collections": target_collections,
