@@ -28,6 +28,7 @@ const config = ref<RAGConfig>({
   ollamaBaseUrl: 'http://host.docker.internal:11434',
   ollamaEmbedModel: 'BGE-M3',
   ollamaLlmModel: 'gemma3-4b',
+  ollamaEvalModel: 'gemma3-4b',
   chunkSize: 500,
   chunkOverlap: 50,
   qdrantUrl: '',

@@ -2,12 +2,27 @@ export interface RAGConfig {
   ollamaBaseUrl: string;
   ollamaEmbedModel: string;
   ollamaLlmModel: string;
+  ollamaEvalModel: string;
   chunkSize: number;
   chunkOverlap: number;
   qdrantUrl: string;
   qdrantApiKey: string;
   temperature: number;
   topP: number;
+}
+
+export interface OllamaImportFile {
+  file: string;
+}
+
+export interface OllamaImportJob {
+  id: string;
+  modelName: string;
+  file: string;
+  status: 'pending' | 'running' | 'success' | 'failed';
+  message: string;
+  error?: string;
+  updatedAt: string;
 }
 
 export interface UploadedFile {

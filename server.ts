@@ -1,6 +1,9 @@
 import express from 'express';
 import path from 'path';
 import * as fs from 'fs';
+import crypto from 'crypto';
+import http from 'http';
+import https from 'https';
 import { createServer as createViteServer } from 'vite';
 import dotenv from 'dotenv';
 import { RAGService } from './src/server/rag';
@@ -32,6 +35,16 @@ const indexedProjects = new Set<string>();
 const evaluationCache = new Map<string, { query: string; answer: string | null; contexts: string[] }>();
 // Orchestration job_id -> queryId, so /api/query/result can attach the answer.
 const jobToQueryId = new Map<string, string>();
+type OllamaImportJob = {
+  id: string;
+  modelName: string;
+  file: string;
+  status: 'pending' | 'running' | 'success' | 'failed';
+  message: string;
+  error?: string;
+  updatedAt: string;
+};
+const ollamaImportJobs = new Map<string, OllamaImportJob>();
 
 function contextsFromMatches(matches: any[]): string[] {
   return (matches ?? []).map((m) => m?.chunk?.text ?? '').filter((t) => t);
@@ -43,6 +56,246 @@ function labelForExtension(filename: string): string {
   if (ext === '.zip') return 'zip';
   if (ext === '.md') return 'markdown';
   return 'text';
+}
+
+const ollamaImportRoot = () => path.resolve(
+  process.env.OLLAMA_IMPORT_ROOT || path.join(process.cwd(), 'ollama-imports')
+);
+
+const ollamaHostRoot = () => (
+  process.env.OLLAMA_IMPORT_HOST_ROOT || ollamaImportRoot()
+);
+
+function isWithinRoot(candidate: string, root: string): boolean {
+  const relative = path.relative(root, candidate);
+  return relative === '' || (!relative.startsWith('..') && !path.isAbsolute(relative));
+}
+
+function safeOllamaModelName(value: unknown): string | null {
+  const name = String(value ?? '').trim();
+  return /^[a-zA-Z0-9][a-zA-Z0-9._/-]{1,127}$/.test(name) ? name : null;
+}
+
+async function listGgufFiles(root: string): Promise<string[]> {
+  const files: string[] = [];
+  const visit = async (directory: string) => {
+    const entries = await fs.promises.readdir(directory, { withFileTypes: true });
+    for (const entry of entries) {
+      const fullPath = path.join(directory, entry.name);
+      if (entry.isDirectory()) {
+        await visit(fullPath);
+      } else if (entry.isFile() && entry.name.toLowerCase().endsWith('.gguf')) {
+        files.push(path.relative(root, fullPath).split(path.sep).join('/'));
+      }
+    }
+  };
+  await visit(root);
+  return files.sort();
+}
+
+async function resolveGgufFile(relativeFile: unknown): Promise<{ localPath: string; file: string }> {
+  const root = ollamaImportRoot();
+  const file = String(relativeFile ?? '').trim().replaceAll('\\', '/');
+  if (!file || path.isAbsolute(file) || file.includes('\0')) {
+    throw new Error('Choose a relative GGUF file from the configured import directory.');
+  }
+  const localPath = path.resolve(root, file);
+  if (!isWithinRoot(localPath, root)) {
+    throw new Error('The selected file must remain inside the configured import directory.');
+  }
+  const realRoot = await fs.promises.realpath(root);
+  const realPath = await fs.promises.realpath(localPath);
+  if (!isWithinRoot(realPath, realRoot)) {
+    throw new Error('The selected file must remain inside the configured import directory.');
+  }
+  const stat = await fs.promises.stat(realPath);
+  if (!stat.isFile() || !realPath.toLowerCase().endsWith('.gguf')) {
+    throw new Error('The selected path is not a GGUF file.');
+  }
+  const relative = path.relative(realRoot, realPath);
+  return {
+    localPath: realPath,
+    file: relative.split(path.sep).join('/'),
+  };
+}
+
+function updateOllamaImportJob(job: OllamaImportJob, update: Partial<OllamaImportJob>) {
+  Object.assign(job, update, { updatedAt: new Date().toISOString() });
+}
+
+async function sha256File(filePath: string): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const hash = crypto.createHash('sha256');
+    const stream = fs.createReadStream(filePath);
+    stream.on('data', (chunk) => hash.update(chunk));
+    stream.on('error', reject);
+    stream.on('end', () => resolve(`sha256:${hash.digest('hex')}`));
+  });
+}
+
+async function uploadOllamaBlob(ollamaUrl: string, digest: string, filePath: string): Promise<void> {
+  const target = new URL(`/api/blobs/${digest}`, ollamaUrl);
+  const transport = target.protocol === 'https:' ? https : http;
+  const stat = await fs.promises.stat(filePath);
+  await new Promise<void>((resolve, reject) => {
+    const request = transport.request(
+      target,
+      {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/octet-stream',
+          'Content-Length': stat.size,
+        },
+      },
+      (response) => {
+        let body = '';
+        response.setEncoding('utf8');
+        response.on('data', (chunk) => { body += chunk; });
+        response.on('end', () => {
+          if ((response.statusCode || 500) >= 200 && (response.statusCode || 500) < 300) {
+            resolve();
+            return;
+          }
+          reject(new Error(
+            `Ollama rejected the GGUF upload (${response.statusCode}): ${body || response.statusMessage || 'unknown error'}`
+          ));
+        });
+      },
+    );
+    request.on('error', reject);
+    const stream = fs.createReadStream(filePath);
+    stream.on('error', reject);
+    stream.pipe(request);
+  });
+}
+
+async function runOllamaImport(
+  job: OllamaImportJob,
+  localPath: string,
+  fileName: string,
+  customModelfile: string,
+) {
+  const ollamaUrl = process.env.OLLAMA_URL || 'http://localhost:11434';
+  try {
+    updateOllamaImportJob(job, { status: 'running', message: 'Preparing model file…' });
+    const digest = await sha256File(localPath);
+    await uploadOllamaBlob(ollamaUrl, digest, localPath);
+
+    updateOllamaImportJob(job, { message: 'Creating model in Ollama…' });
+    const response = await fetch(`${ollamaUrl}/api/create`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        model: job.modelName,
+        files: { [fileName]: digest },
+        stream: true,
+      }),
+    });
+    if (!response.ok) {
+      const detail = await response.text().catch(() => response.statusText);
+      throw new Error(`Ollama rejected the import (${response.status}): ${detail || response.statusText}`);
+    }
+    if (!response.body) {
+      throw new Error('Ollama returned no import progress stream.');
+    }
+    const reader = response.body.getReader();
+    const decoder = new TextDecoder();
+    let buffer = '';
+    let sawSuccess = false;
+    while (true) {
+      const chunk = await reader.read();
+      buffer += decoder.decode(chunk.value || new Uint8Array(), { stream: !chunk.done });
+      const lines = buffer.split('\n');
+      buffer = lines.pop() || '';
+      if (chunk.done && buffer.trim()) {
+        lines.push(buffer);
+        buffer = '';
+      }
+      for (const line of lines) {
+        if (!line.trim()) continue;
+        try {
+          const event = JSON.parse(line);
+          if (event.error) throw new Error(String(event.error));
+          if (event.status) {
+            const status = String(event.status);
+            if (status.toLowerCase() === 'success') sawSuccess = true;
+            updateOllamaImportJob(job, { message: status });
+          }
+        } catch (error: any) {
+          if (error instanceof Error && error.message.startsWith('Unexpected')) continue;
+          throw error;
+        }
+      }
+      if (chunk.done) break;
+    }
+    if (!sawSuccess) {
+      throw new Error('Ollama ended the import without reporting success.');
+    }
+    updateOllamaImportJob(job, { status: 'success', message: 'Model imported into Ollama.' });
+  } catch (error: any) {
+    if (error?.cause?.code === 'ECONNREFUSED' || error?.message === 'fetch failed') {
+      error = new Error(
+        `Cannot connect to Ollama at ${ollamaUrl}. Start Ollama and verify OLLAMA_URL before retrying.`
+      );
+    }
+    if (error instanceof Error && /path or Modelfile are required|modelfile|files/i.test(error.message)) {
+      try {
+        const relativeFile = path.relative(ollamaImportRoot(), localPath);
+        const hostPath = path.resolve(ollamaHostRoot(), relativeFile);
+        const legacyModelfile = [`FROM ${hostPath}`, customModelfile].filter(Boolean).join('\n');
+        updateOllamaImportJob(job, { message: 'Retrying with legacy Ollama Modelfile compatibility…' });
+        const legacyResponse = await fetch(`${ollamaUrl}/api/create`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            model: job.modelName,
+            modelfile: legacyModelfile,
+            stream: true,
+          }),
+        });
+        if (!legacyResponse.ok) {
+          const detail = await legacyResponse.text().catch(() => legacyResponse.statusText);
+          throw new Error(`Ollama rejected the legacy import (${legacyResponse.status}): ${detail || legacyResponse.statusText}`);
+        }
+        if (!legacyResponse.body) throw new Error('Ollama returned no legacy import progress stream.');
+        const reader = legacyResponse.body.getReader();
+        const decoder = new TextDecoder();
+        let buffer = '';
+        let sawSuccess = false;
+        while (true) {
+          const chunk = await reader.read();
+          buffer += decoder.decode(chunk.value || new Uint8Array(), { stream: !chunk.done });
+          const lines = buffer.split('\n');
+          buffer = lines.pop() || '';
+          if (chunk.done && buffer.trim()) {
+            lines.push(buffer);
+            buffer = '';
+          }
+          for (const line of lines) {
+            if (!line.trim()) continue;
+            const event = JSON.parse(line);
+            if (event.error) throw new Error(String(event.error));
+            if (event.status) {
+              const status = String(event.status);
+              if (status.toLowerCase() === 'success') sawSuccess = true;
+              updateOllamaImportJob(job, { message: status });
+            }
+          }
+          if (chunk.done) break;
+        }
+        if (!sawSuccess) throw new Error('Ollama ended the legacy import without reporting success.');
+        updateOllamaImportJob(job, { status: 'success', message: 'Model imported into Ollama.' });
+        return;
+      } catch (legacyError: any) {
+        error = legacyError;
+      }
+    }
+    updateOllamaImportJob(job, {
+      status: 'failed',
+      message: 'Model import failed.',
+      error: error?.message || 'Unknown Ollama import error.',
+    });
+  }
 }
 
 async function startServer() {
@@ -130,6 +383,72 @@ async function startServer() {
       console.error('Failed to list Ollama models:', error.message);
       res.status(500).json({ success: false, error: error.message });
     }
+  });
+
+  // List GGUF files from the operator-configured shared import directory.
+  app.get('/api/ollama/import-directory', async (req, res) => {
+    try {
+      const root = ollamaImportRoot();
+      const stat = await fs.promises.stat(root);
+      if (!stat.isDirectory()) throw new Error('The configured Ollama import path is not a directory.');
+      return res.json({
+        success: true,
+        root,
+        files: await listGgufFiles(root),
+      });
+    } catch (error: any) {
+      return res.status(400).json({
+        success: false,
+        error: error?.code === 'ENOENT'
+          ? `Ollama import directory does not exist: ${ollamaImportRoot()}`
+          : error?.message || 'Failed to scan the Ollama import directory.',
+      });
+    }
+  });
+
+  app.post('/api/ollama/import', async (req, res) => {
+    try {
+      const modelName = safeOllamaModelName(req.body?.modelName);
+      if (!modelName) {
+        return res.status(400).json({
+          success: false,
+          error: 'Model name must be 2–128 characters and use only letters, numbers, ., _, /, or -.',
+        });
+      }
+      const selected = await resolveGgufFile(req.body?.file);
+      const customModelfile = typeof req.body?.modelfile === 'string'
+        ? req.body.modelfile.trim()
+        : '';
+      if (customModelfile.length > 12000) {
+        return res.status(400).json({ success: false, error: 'Modelfile is too large.' });
+      }
+      if (/^\s*from\s+/im.test(customModelfile)) {
+        return res.status(400).json({
+          success: false,
+          error: 'Custom Modelfile settings must not include a FROM line; the selected GGUF file is inserted automatically.',
+        });
+      }
+      const id = crypto.randomUUID();
+      const job: OllamaImportJob = {
+        id,
+        modelName,
+        file: selected.file,
+        status: 'pending',
+        message: 'Import queued.',
+        updatedAt: new Date().toISOString(),
+      };
+      ollamaImportJobs.set(id, job);
+      void runOllamaImport(job, selected.localPath, path.basename(selected.file), customModelfile);
+      return res.status(202).json({ success: true, jobId: id, job });
+    } catch (error: any) {
+      return res.status(400).json({ success: false, error: error?.message || 'Failed to start Ollama import.' });
+    }
+  });
+
+  app.get('/api/ollama/import/:jobId', (req, res) => {
+    const job = ollamaImportJobs.get(req.params.jobId);
+    if (!job) return res.status(404).json({ success: false, error: 'Ollama import job not found.' });
+    return res.json({ success: true, job });
   });
 
   // Get uploaded files list (local + PHP-service MinIO files merged)

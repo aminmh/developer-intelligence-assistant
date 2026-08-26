@@ -14,10 +14,13 @@ services:
       PHP_SERVICE_URL: http://php-ast:9003
       OLLAMA_URL: http://host.docker.internal:11434
       PYTHON_API_URL: http://python-api:9002
+      OLLAMA_IMPORT_ROOT: /ollama-imports
+      OLLAMA_IMPORT_HOST_ROOT: ${OLLAMA_IMPORT_HOST_ROOT:-./ollama-imports}
     ports:
       - "3000:3000"
     volumes:
       - "./data:/app/data"
+      - "${OLLAMA_IMPORT_HOST_ROOT:-./ollama-imports}:/ollama-imports:ro"
     restart: unless-stopped
     networks:
       - default
@@ -40,10 +43,13 @@ services:
       PHP_SERVICE_URL: http://php-ast:9003
       OLLAMA_URL: http://host.docker.internal:11434
       PYTHON_API_URL: http://python-api:9002
+      OLLAMA_IMPORT_ROOT: /ollama-imports
+      OLLAMA_IMPORT_HOST_ROOT: ${OLLAMA_IMPORT_HOST_ROOT:-./ollama-imports}
     ports:
       - "3000:3000"
     volumes:
       - ".:/workspace"
+      - "${OLLAMA_IMPORT_HOST_ROOT:-./ollama-imports}:/ollama-imports:ro"
       - type: volume
         source: web-dev-node-modules
         target: /workspace/node_modules
