@@ -21,6 +21,7 @@ RAG_CONFIG_DEFAULTS: Dict[str, Any] = {
     "ollamaBaseUrl": "http://host.docker.internal:11434",
     "ollamaEmbedModel": "BGE-M3",
     "ollamaLlmModel": "gemma3-4b",
+    "ollamaEvalModel": "gemma3-4b",
     "chunkSize": 500,
     "chunkOverlap": 50,
     "qdrantUrl": "",
@@ -142,6 +143,8 @@ def build_config(store: SettingsStore) -> Dict[str, Any]:
         stored = store.get(key)
         if stored is not None:
             config[key] = stored
+    if store.get("ollamaEvalModel") is None:
+        config["ollamaEvalModel"] = config["ollamaLlmModel"]
     return config
 
 

@@ -26,6 +26,7 @@ class Settings(BaseModel):
     ollama_base_url: str = os.getenv("OLLAMA_BASE_URL", "http://host.docker.internal:11434")
     ollama_embedding_model: str = os.getenv("OLLAMA_EMBED_MODEL", "BGE-M3")
     ollama_llm_model: str = os.getenv("OLLAMA_LLM_MODEL", "gemma3-4b")
+    ollama_eval_model: str = os.getenv("OLLAMA_EVAL_MODEL", "")
 
     temperature: float = float(os.getenv("LLM_TEMPERATURE", "0.7"))
     top_p: float = float(os.getenv("LLM_TOP_P", "0.9"))
@@ -54,6 +55,7 @@ class RuntimeSettings:
         "ollama_base_url": "ollamaBaseUrl",
         "ollama_embedding_model": "ollamaEmbedModel",
         "ollama_llm_model": "ollamaLlmModel",
+        "ollama_eval_model": "ollamaEvalModel",
         "qdrant_url": "qdrantUrl",
         "qdrant_api_key": "qdrantApiKey",
         "temperature": "temperature",
@@ -71,6 +73,8 @@ class RuntimeSettings:
             value = settings_store.get(store_key)
             if value not in (None, ""):
                 return value
+        if name == "ollama_eval_model":
+            return self.ollama_llm_model
         return getattr(self._env, name)
 
     def revision(self) -> int:

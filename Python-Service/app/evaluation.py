@@ -62,7 +62,7 @@ def tier_for(score: float) -> str:
 def _get_llm() -> LangchainLLMWrapper:
     return LangchainLLMWrapper(
         ChatOllama(
-            model=settings.ollama_llm_model,
+            model=settings.ollama_eval_model,
             base_url=settings.ollama_base_url,
             temperature=0,
         )
