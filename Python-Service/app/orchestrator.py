@@ -1,8 +1,10 @@
 """Hybrid orchestration with LlamaIndex routing.
 
-This module keeps the existing job lifecycle, status persistence, MCP transport,
-and post-processing pipeline, but adds a LlamaIndex-backed routing and synthesis
-layer so orchestration can evolve without rewriting the runtime again.
+This module keeps the existing job lifecycle, status persistence, and
+post-processing pipeline, but adds a LlamaIndex-backed routing and synthesis
+layer so orchestration can evolve without rewriting the runtime again. Code
+tools (`chunk_code`, `export_structure`) are executed by the in-image pure-PHP
+CLI instead of a remote MCP server.
 """
 
 from __future__ import annotations
@@ -35,7 +37,6 @@ except Exception:  # pragma: no cover
 
 
 DEFAULT_STATUS_DIR = Path(os.environ.get("DOWNLOAD_DIR", "/tmp/orchestrator"))
-DEFAULT_MCP_URL = os.environ.get("MCP_URL", "http://php-ast:9003/mcp")
 DEFAULT_PYTHON_API_URL = os.environ.get("PYTHON_API_URL", "http://python-api:9002")
 DEFAULT_INTERNAL_SECRET = os.environ.get("INTERNAL_SECRET", "")
 
@@ -55,7 +56,7 @@ class JobContext:
     filename: str
     prompt: str
     route: dict[str, Any]
-    php_base_url: str
+    workspace_path: str | None = None
     skip_index: bool = False
 
 
@@ -110,7 +111,6 @@ class Orchestrator:
         route_name: str,
         filename: str,
         prompt: str,
-        php_base_url: str = "http://php-ast:9003",
         skip_index: bool = False,
         entities: dict[str, Any] | None = None,
     ) -> None:
@@ -126,7 +126,6 @@ class Orchestrator:
             "steps": steps,
             "started_at": time.time(),
             "updated_at": time.time(),
-            "php_base_url": php_base_url,
             "skip_index": skip_index,
             "entities": entities or {},
         }
@@ -135,7 +134,7 @@ class Orchestrator:
         self._write_status(job_id)
         thread = threading.Thread(
             target=self._run_job,
-            args=(JobContext(job_id, route_name, filename, prompt, route, php_base_url, skip_index),),
+            args=(JobContext(job_id, route_name, filename, prompt, route, skip_index),),
             daemon=True,
         )
         thread.start()
@@ -164,10 +163,11 @@ class Orchestrator:
         try:
             self._update_step(ctx.job_id, "extracting", "running")
             ws = self._call(
-                f"{ctx.php_base_url.rstrip('/')}/api/workspace/prepare",
+                f"{DEFAULT_PYTHON_API_URL.rstrip('/')}/api/workspace/prepare",
                 method="POST",
                 json_body={"filename": ctx.filename},
             ) or {}
+            workspace_path = ws.get("extracted_path") if isinstance(ws, dict) else None
             file_count = ws.get("file_count") if isinstance(ws, dict) else None
             self._update_step(ctx.job_id, "extracting", "done", file_count=file_count if file_count is not None else "Skipped")
 
@@ -176,10 +176,10 @@ class Orchestrator:
             tool_result: dict[str, Any] | None = None
             if tool_name:
                 self._update_step(ctx.job_id, "tool", "running")
-                tool_result = self._call_mcp_tool(tool_name, ctx.filename, ctx.prompt)
+                tool_result = self._call_php_tool(tool_name, workspace_path)
                 if not tool_result or tool_result.get("success") is False:
                     error_message = None if not tool_result else tool_result.get("error")
-                    raise RuntimeError(error_message or f"MCP tool failed: {tool_name}")
+                    raise RuntimeError(error_message or f"PHP tool failed: {tool_name}")
                 self._update_step(ctx.job_id, "tool", "done")
 
             raw_output = self._extract_tool_output(tool_result) if tool_result else ctx.prompt
@@ -359,7 +359,7 @@ class Orchestrator:
             if handler is None:
                 self._update_step(ctx.job_id, f"post_{action_name}", "done")
                 continue
-            result = handler(result, action_args, tool_name=tool_name, job_id=ctx.job_id, php_base_url=ctx.php_base_url)
+            result = handler(result, action_args, tool_name=tool_name, job_id=ctx.job_id, php_base_url=DEFAULT_PYTHON_API_URL)
             if isinstance(result, dict) and result.get("collection_name"):
                 collection_name = result.get("collection_name")
             self._update_step(ctx.job_id, f"post_{action_name}", "done")
@@ -604,97 +604,52 @@ class Orchestrator:
     def _internal_secret(self) -> str:
         return str(self.config.get("internal_secret") or DEFAULT_INTERNAL_SECRET)
 
-    def _get_mcp_schema(self, tool_name: str, session_id: str, mcp_url: str) -> set[str]:
-        response = self._call(
-            mcp_url,
-            method="POST",
-            headers={"Mcp-Session-Id": session_id, "Accept": "application/json"},
-            json_body={"jsonrpc": "2.0", "id": 1, "method": "tools/list"},
-        )
-        tools = ((response or {}).get("result") or {}).get("tools", [])
-        for tool in tools:
-            if tool.get("name") != tool_name:
-                continue
-            schema = tool.get("inputSchema") or {}
-            properties = schema.get("properties") or {}
-            return set(properties.keys())
-        return set()
-
-    def _call_mcp_tool(self, tool_name: str, filename: str, prompt: str = "") -> dict[str, Any] | None:
+    def _call_php_tool(self, tool_name: str, workspace_path: str | None) -> dict[str, Any] | None:
         try:
-            mcp_url = self._get_mcp_url()
-            init = self._call(
-                mcp_url,
-                method="POST",
-                headers={"Accept": "application/json"},
-                json_body={
-                    "jsonrpc": "2.0",
-                    "id": 1,
-                    "method": "initialize",
-                    "params": {"protocolVersion": "2024-11-05", "clientInfo": {"name": "orchestrator", "version": "1.0"}},
-                },
-            )
-            headers = init.get("headers", {}) if isinstance(init, dict) else {}
-            session_id = headers.get("Mcp-Session-Id") if isinstance(headers, dict) else None
-            if not session_id:
-                raise RuntimeError("MCP session ID missing")
-            self._call(
-                mcp_url,
-                method="POST",
-                headers={"Mcp-Session-Id": session_id, "Accept": "application/json"},
-                json_body={"jsonrpc": "2.0", "method": "notifications/initialized"},
-            )
-            accepted = self._get_mcp_schema(tool_name, session_id, mcp_url)
             tool_config = (self.config.get("tools") or {}).get(tool_name, {})
-            args = {"filename": filename, "prompt": prompt}
+            args: dict[str, Any] = {}
             for key, value in (tool_config.get("args") or {}).items():
                 args[key] = self._resolve_env(value)
-            params = {key: value for key, value in args.items() if key in accepted or not accepted}
-            response = self._call(
-                mcp_url,
-                method="POST",
-                headers={"Mcp-Session-Id": session_id, "Accept": "application/json"},
-                json_body={
-                    "jsonrpc": "2.0",
-                    "id": 2,
-                    "method": "tools/call",
-                    "params": {"name": tool_name, "arguments": params},
-                },
-            )
-            if not isinstance(response, dict):
-                return None
-            if response.get("error"):
-                return {"success": False, "error": response["error"]}
-            result = response.get("result") or {}
-            content = result.get("content") or []
-            if content:
-                first = content[0]
-                if isinstance(first, dict) and first.get("type") == "text":
-                    text = first.get("text", "")
-                    try:
-                        parsed = json.loads(text)
-                        return {"success": True, "result": parsed}
-                    except Exception:
-                        return {"success": True, "stdout": text}
-            return {"success": True, "result": result}
+
+            if tool_name == "chunk_code":
+                return self._php_code_parse(workspace_path, args)
+            if tool_name == "export_structure":
+                return self._php_export_structure(workspace_path, args)
+            return {"success": False, "error": f"Unknown tool: {tool_name}"}
         except Exception as exc:
             get_exception_logger().error(
-                "MCP tool call '%s' failed: %s", tool_name, exc
+                "PHP tool call '%s' failed: %s", tool_name, exc, exc_info=exc
             )
             return None
 
-    def _get_mcp_url(self) -> str:
-        import os
-        servers = self.config.get("mcp_servers", {}) or {}
-        laravel = servers.get("laravel", {}) if isinstance(servers, dict) else {}
-        url = str(laravel.get("url") or DEFAULT_MCP_URL)
-        if url.startswith("${") and url.endswith("}"):
-            import re
-            match = re.match(r'\$\{(\w+):-([^}]+)\}', url)
-            if match:
-                env_var, default = match.groups()
-                url = os.getenv(env_var) or default
-        return url
+    def _php_code_parse(self, workspace_path: str | None, args: dict[str, Any]) -> dict[str, Any]:
+        if not workspace_path or not os.path.isdir(workspace_path):
+            return {"success": False, "error": f"Workspace not found: {workspace_path}"}
+
+        from php_tools import run_code_parse
+
+        chunks = run_code_parse(workspace_path)
+        return {
+            "success": True,
+            "status": "done",
+            "exit_code": 0,
+            "stdout": json.dumps(chunks, ensure_ascii=False),
+        }
+
+    def _php_export_structure(self, workspace_path: str | None, args: dict[str, Any]) -> dict[str, Any]:
+        if not workspace_path or not os.path.isdir(workspace_path):
+            return {"success": False, "error": f"Workspace not found: {workspace_path}"}
+
+        from php_tools import cap_structure, run_export_structure
+
+        depth = int(args.get("depth", 4) or 4)
+        markdown = run_export_structure(workspace_path, depth=depth)
+        return {
+            "success": True,
+            "status": "done",
+            "exit_code": 0,
+            "stdout": cap_structure(markdown),
+        }
 
     def _call(
         self,

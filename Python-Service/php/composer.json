@@ -1,0 +1,21 @@
+{
+    "name": "developer-assistant/php-cli",
+    "description": "Pure PHP CLI tools: AST code chunking (code-parse) and project structure export.",
+    "type": "project",
+    "license": "MIT",
+    "require": {
+        "php": "^8.2",
+        "nikic/php-parser": "^5.7"
+    },
+    "autoload": {
+        "psr-4": {
+            "App\\": "src/"
+        }
+    },
+    "config": {
+        "optimize-autoloader": true,
+        "sort-packages": true
+    },
+    "minimum-stability": "stable",
+    "prefer-stable": true
+}

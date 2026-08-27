@@ -30,8 +30,15 @@ class Settings(BaseModel):
 
     temperature: float = float(os.getenv("LLM_TEMPERATURE", "0.7"))
     top_p: float = float(os.getenv("LLM_TOP_P", "0.9"))
-    chunk_size: int = int(os.getenv("CHUNK_SIZE", "500"))
-    chunk_overlap: int = int(os.getenv("CHUNK_OVERLAP", "50"))
+
+    minio_endpoint: str = os.getenv("AWS_ENDPOINT", "minio:9000")
+    minio_access_key: str = os.getenv("AWS_ACCESS_KEY_ID", "minio")
+    minio_secret_key: str = os.getenv("AWS_SECRET_ACCESS_KEY", "minio123")
+    minio_tus_bucket: str = os.getenv("AWS_TUS_BUCKET", "tus-uploads")
+    upload_token_secret: str = os.getenv("UPLOAD_TOKEN_SECRET", "change-me")
+    tus_public_url: str = os.getenv("TUS_PUBLIC_URL", "http://localhost:1080/files/")
+    workspace_root: str = os.getenv("WORKSPACE_ROOT", "/app/workspaces")
+    php_cli_root: str = os.getenv("PHP_CLI_ROOT", "/opt/php-cli")
 
     enable_typo_correction: bool = os.getenv(
         "ENABLE_TYPO_CORRECTION", "false"
@@ -60,8 +67,6 @@ class RuntimeSettings:
         "qdrant_api_key": "qdrantApiKey",
         "temperature": "temperature",
         "top_p": "topP",
-        "chunk_size": "chunkSize",
-        "chunk_overlap": "chunkOverlap",
     }
 
     def __init__(self) -> None:

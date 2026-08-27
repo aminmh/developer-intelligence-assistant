@@ -22,8 +22,6 @@ RAG_CONFIG_DEFAULTS: Dict[str, Any] = {
     "ollamaEmbedModel": "BGE-M3",
     "ollamaLlmModel": "gemma3-4b",
     "ollamaEvalModel": "gemma3-4b",
-    "chunkSize": 500,
-    "chunkOverlap": 50,
     "qdrantUrl": "",
     "qdrantApiKey": "",
     "temperature": 0.7,

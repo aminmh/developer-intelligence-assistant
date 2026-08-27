@@ -30,17 +30,19 @@ from models import (
 import jwt as pyjwt
 import uuid
 import os
-import io
 import re
 import json
+import base64
 import logging
 import threading
-import urllib.request
 from datetime import datetime, timezone, timedelta
 from pathlib import Path
 from qdrant_client import QdrantClient
-from qdrant_client.models import Distance, VectorParams, PointStruct
 from jinja2 import Template
+
+
+# Matches tusd's `-max-size` (2 GiB).
+MAX_UPLOAD_SIZE = 2 * 1024 * 1024 * 1024
 
 
 def sanitize_collection_name(filename: str) -> str:
@@ -51,42 +53,23 @@ def sanitize_collection_name(filename: str) -> str:
     return name.strip("_") or "unnamed"
 
 
-def split_text_into_chunks(text: str, chunk_size: int, chunk_overlap: int) -> list[str]:
-    """Split raw text into overlapping, size-bounded chunks for indexing."""
-    if chunk_size <= 0:
-        chunk_size = 500
-    if chunk_overlap < 0:
-        chunk_overlap = 0
-    if chunk_overlap >= chunk_size:
-        chunk_overlap = chunk_size // 2
+def collection_exists(collection_name: str) -> bool:
+    """Check whether a Qdrant collection already exists (skip re-indexing)."""
+    try:
+        qdrant = QdrantClient(url=settings.qdrant_url)
+        existing = qdrant.get_collections().collections
+        return any(c.name == collection_name for c in existing)
+    except Exception:
+        return False
 
-    chunks: list[str] = []
-    start = 0
-    n = len(text)
-    while start < n:
-        end = min(start + chunk_size, n)
 
-        # Prefer breaking on a newline or space near the target boundary.
-        if end < n:
-            window_start = max(start, end - 150)
-            window = text[window_start : end + 50]
-            nl = window.rfind("\n")
-            sp = window.rfind(" ")
-            if nl != -1 and (window_start + nl) > start:
-                end = window_start + nl + 1
-            elif sp != -1 and (window_start + sp) > start:
-                end = window_start + sp + 1
-
-        chunk = text[start:end].strip()
-        if chunk:
-            chunks.append(chunk)
-
-        if end >= n:
-            break
-        next_start = end - chunk_overlap
-        start = next_start if next_start > start else end
-
-    return chunks
+def _mint_download_token(download_id: str, filename: str) -> str:
+    expires_at = datetime.now(timezone.utc) + timedelta(hours=24)
+    return pyjwt.encode(
+        {"download_id": download_id, "filename": filename, "exp": expires_at},
+        settings.download_token_secret,
+        algorithm="HS256",
+    )
 
 
 def setup_logger(name: str, filename: str) -> logging.Logger:
@@ -123,107 +106,32 @@ def write_status(download_id: str, status: str, total: int, indexed: int,
         pass  # status file is best-effort — don't fail the job
 
 
-def index_chunks_background(download_id: str, filename: str,
-                            chunks_list: list[dict], collection_name: str) -> None:
-    """Run embedding + Qdrant indexing in a background thread."""
+def index_code_chunks_background(download_id: str, filename: str,
+                                 chunks_list: list[dict], collection_name: str) -> None:
+    """Index code chunks through the property-graph pipeline in a background thread."""
     dl_logger.info("Background indexing started: collection=%s count=%s",
                    collection_name, len(chunks_list))
     write_status(download_id, "embedding", len(chunks_list), 0, collection_name)
 
     try:
-        qdrant = QdrantClient(url=settings.qdrant_url)
+        from llamaindex_layer import CodePropertyGraph
 
-        try:
-            qdrant.delete_collection(collection_name)
-        except Exception:
-            pass
-
-        points = []
-        embed_fails = 0
-        vector_size = None
-
-        for i, chunk in enumerate(chunks_list):
-            chunk_text = chunk.get("code", "")
-            chunk_label = chunk.get("name", "unknown")
-
-            if not chunk_text:
-                continue
-
-            try:
-                embedding = embed_text(chunk_text)
-            except Exception as e:
-                embed_fails += 1
-                dl_logger.error("Embedding failed for chunk #%s '%s': %s",
-                                i, chunk_label, e)
-                continue
-
-            if vector_size is None:
-                vector_size = len(embedding)
-                qdrant.create_collection(
-                    collection_name=collection_name,
-                    vectors_config=VectorParams(size=vector_size, distance=Distance.COSINE),
-                )
-                dl_logger.debug("Created collection %s (dim=%s)", collection_name, vector_size)
-
-            point_id = str(uuid.uuid4())
-            points.append(PointStruct(
-                id=point_id,
-                vector=embedding,
-                payload={
-                    "type": chunk.get("type", ""),
-                    "name": chunk.get("name", ""),
-                    "class": chunk.get("class", ""),
-                    "file": chunk.get("file", ""),
-                    "start_line": chunk.get("start_line", 0),
-                    "end_line": chunk.get("end_line", 0),
-                    "modifiers": chunk.get("modifiers", []),
-                    "parameters": chunk.get("parameters", []),
-                    "return_type": chunk.get("return_type"),
-                    "code": chunk_text,
-                    "docblock": chunk.get("docblock"),
-                    "calls": chunk.get("calls", {}),
-                    "collection": collection_name,
-                    "indexed_at": datetime.now(timezone.utc).isoformat(),
-                },
-            ))
-
-            write_status(download_id, "embedding", len(chunks_list),
-                         len(points), collection_name)
-
-        if points:
-            write_status(download_id, "upserting", len(chunks_list),
-                         len(points), collection_name)
-            qdrant.upsert(collection_name=collection_name, wait=True, points=points)
-
-        dl_logger.info("Background indexing complete: collection=%s indexed=%s embed_fails=%s",
-                       collection_name, len(points), embed_fails)
+        result = CodePropertyGraph().ingest(chunks_list, collection_name)
+        ingested = int(result.get("ingested", 0) or 0)
+        dl_logger.info(
+            "Background indexing complete: collection=%s ingested=%s graph_nodes=%s relations=%s",
+            collection_name,
+            ingested,
+            result.get("graph_nodes", 0),
+            result.get("graph_relations", 0),
+        )
         write_status(download_id, "done", len(chunks_list),
-                     len(points), collection_name)
+                     ingested, collection_name)
 
     except Exception as e:
         dl_logger.error("Background indexing failed for '%s': %s",
                         collection_name, e, exc_info=True)
         write_status(download_id, "error", len(chunks_list), 0, collection_name)
-
-
-def embed_text(text: str) -> list[float]:
-    """Get embedding vector from Ollama."""
-    body = json.dumps({
-        "model": settings.ollama_embedding_model,
-        "prompt": text,
-    }).encode("utf-8")
-    req = urllib.request.Request(
-        f"{settings.ollama_base_url}/api/embeddings",
-        data=body,
-        headers={"Content-Type": "application/json"},
-        method="POST",
-    )
-    with urllib.request.urlopen(req, timeout=120) as resp:
-        result = json.load(resp)
-    embedding = result.get("embedding")
-    if not embedding or not isinstance(embedding, list):
-        raise RuntimeError("Ollama did not return a valid embedding vector")
-    return embedding
 
 
 service = CodeIntelligenceIndex()
@@ -485,7 +393,7 @@ def create_download_job(
         "expires_at": expires_at.isoformat(),
     }
 
-    # Index chunks into Qdrant in a background thread if provided
+    # Index code chunks through the property-graph pipeline in a background thread
     if chunks_payload and isinstance(chunks_payload, dict):
         chunks_list = chunks_payload.get("chunks", [])
         if chunks_list:
@@ -495,12 +403,7 @@ def create_download_job(
             response["chunk_count"] = len(chunks_list)
 
             # Check if already indexed — skip re-indexing
-            try:
-                qdrant = QdrantClient(url=settings.qdrant_url)
-                existing = qdrant.get_collections().collections
-                already = any(c.name == collection_name for c in existing)
-            except Exception:
-                already = False
+            already = collection_exists(collection_name)
 
             if already:
                 dl_logger.info("Collection already indexed — skipping: %s", collection_name)
@@ -510,50 +413,11 @@ def create_download_job(
                                collection_name, len(chunks_list))
 
                 thread = threading.Thread(
-                    target=index_chunks_background,
+                    target=index_code_chunks_background,
                     args=(download_id, filename, chunks_list, collection_name),
                     daemon=True,
                 )
                 thread.start()
-
-    # No structured code chunks — treat raw text, split & index
-    elif text and isinstance(text, str) and len(text.strip()) > 0:
-        collection_name = sanitize_collection_name(filename)
-        chunks = split_text_into_chunks(
-            text, int(settings.chunk_size), int(settings.chunk_overlap)
-        )
-        if not chunks:
-            chunks = [text.strip()]
-
-        text_chunks = [{
-            "type": "document",
-            "name": f"chunk_{i}",
-            "code": c,
-            "file": filename,
-        } for i, c in enumerate(chunks)]
-
-        response["collection_name"] = collection_name
-        response["chunk_count"] = len(text_chunks)
-
-        try:
-            qdrant = QdrantClient(url=settings.qdrant_url)
-            existing = qdrant.get_collections().collections
-            already = any(c.name == collection_name for c in existing)
-        except Exception:
-            already = False
-
-        if already:
-            dl_logger.info("Collection already indexed — skipping: %s", collection_name)
-            response["already_indexed"] = True
-        else:
-            dl_logger.info("Indexing text file: collection=%s paragraphs=%s",
-                           collection_name, len(text_chunks))
-            thread = threading.Thread(
-                target=index_chunks_background,
-                args=(download_id, filename, text_chunks, collection_name),
-                daemon=True,
-            )
-            thread.start()
 
     dl_logger.info("Download job created: id=%s filename=%s collection=%s",
                    download_id, filename, response.get("collection_name", "none"))
@@ -617,6 +481,335 @@ def indexing_status(download_id: str):
     if not status_path.is_file():
         return {"status": "unknown", "total": 0, "indexed": 0}
     return json.loads(status_path.read_text())
+
+
+# ─── Workspace + RAG upload pipeline (replaces php-ast) ────────────────────────
+
+def _extract_workspace(workspace_id: str, zip_data: bytes) -> str:
+    """Extract a project ZIP into a fresh workspace dir, returning its path."""
+    import shutil
+
+    from php_tools import extract_zip_safely
+
+    workspace_dir = Path(settings.workspace_root) / workspace_id
+    if workspace_dir.exists():
+        shutil.rmtree(workspace_dir, ignore_errors=True)
+    workspace_dir.mkdir(parents=True, exist_ok=True)
+    try:
+        extract_zip_safely(zip_data, str(workspace_dir))
+    except Exception:
+        shutil.rmtree(workspace_dir, ignore_errors=True)
+        raise
+    return str(workspace_dir)
+
+
+def _parse_and_index(download_id: str, filename: str, zip_data: bytes,
+                     collection_name: str) -> None:
+    """Extract a ZIP, parse PHP via the CLI, and index chunks in the background."""
+    import shutil
+
+    from php_tools import extract_zip_safely, run_code_parse
+
+    workdir = Path(settings.download_dir) / f"parse_{download_id}"
+    try:
+        write_status(download_id, "embedding", 0, 0, collection_name)
+        file_count = extract_zip_safely(zip_data, str(workdir))
+        dl_logger.info("Parse extracted %s files: %s", file_count, collection_name)
+        chunks = run_code_parse(str(workdir))
+        if not chunks:
+            dl_logger.warning("No PHP chunks produced: %s", collection_name)
+            write_status(download_id, "error", 0, 0, collection_name)
+            return
+        index_code_chunks_background(download_id, filename, chunks, collection_name)
+    except Exception as exc:
+        dl_logger.error("Parse failed for '%s': %s", collection_name, exc, exc_info=True)
+        write_status(download_id, "error", 0, 0, collection_name)
+    finally:
+        shutil.rmtree(workdir, ignore_errors=True)
+
+
+@app.post(
+    "/api/workspace/prepare",
+    tags=["Upload & TUS"],
+    summary="Prepare Workspace",
+    description=(
+        "Downloads the project ZIP from MinIO, extracts it to a local workspace "
+        "directory, and returns the workspace id/path used by the PHP CLI tools."
+    ),
+)
+def workspace_prepare(body: dict):
+    from storage import storage
+
+    filename = body.get("filename")
+    session_id = body.get("upload_session_id")
+    if not filename:
+        raise HTTPException(status_code=400, detail="Missing filename.")
+
+    if not storage.find_rag_file(filename, session_id):
+        raise HTTPException(status_code=404, detail=f"File not found: {filename}")
+
+    data = storage.get_rag_file_bytes(filename, session_id)
+    if data is None:
+        raise HTTPException(status_code=500, detail="Failed to read file from storage.")
+
+    workspace_id = str(uuid.uuid4())
+    try:
+        extracted_path = _extract_workspace(workspace_id, data)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    except Exception:
+        raise HTTPException(status_code=500, detail="Failed to extract ZIP archive.")
+
+    file_count = sum(1 for _ in Path(extracted_path).rglob("*") if _.is_file())
+
+    dl_logger.info("Workspace prepared: id=%s files=%s", workspace_id, file_count)
+    return {
+        "workspace_id": workspace_id,
+        "extracted_path": extracted_path,
+        "file_count": file_count,
+    }
+
+
+@app.delete(
+    "/api/workspace/{workspace_id}",
+    tags=["Upload & TUS"],
+    summary="Delete Workspace",
+    description="Removes an extracted workspace directory.",
+)
+def workspace_destroy(workspace_id: str):
+    from php_tools import safe_rmtree
+
+    workspace_dir = Path(settings.workspace_root) / workspace_id
+    if workspace_dir.exists():
+        safe_rmtree(str(workspace_dir))
+    return {"deleted": True}
+
+
+@app.get(
+    "/api/rag/files",
+    tags=["Upload & TUS"],
+    summary="List Uploaded Files",
+    description="Lists RAG uploads stored in MinIO (rag-uploads prefix).",
+)
+def rag_files():
+    from storage import storage
+
+    return {"files": storage.list_rag_files()}
+
+
+@app.delete(
+    "/api/rag/files",
+    tags=["Upload & TUS"],
+    summary="Delete Uploaded File",
+    description="Deletes a file from MinIO rag-uploads by filename and optional session.",
+)
+def rag_files_delete(body: dict):
+    from storage import storage
+
+    filename = body.get("filename")
+    if not filename:
+        raise HTTPException(status_code=400, detail="Missing filename.")
+    match = storage.find_rag_file(filename, body.get("upload_session_id"))
+    if not match:
+        raise HTTPException(status_code=404, detail=f"File not found: {filename}")
+    storage.delete_rag_file(filename, match["upload_session_id"])
+    return {
+        "deleted": True,
+        "filename": filename,
+        "upload_session_id": match["upload_session_id"],
+    }
+
+
+@app.post(
+    "/api/rag/upload",
+    tags=["Upload & TUS"],
+    summary="Upload a ZIP — direct or TUS session",
+    description=(
+        "Stores a project ZIP in MinIO. If {filename, content (base64), size} is "
+        "provided the file is stored directly; if only {filename, size} is given a "
+        "resumable TUS upload session is created and a JWT upload token returned."
+    ),
+)
+def rag_upload(body: dict):
+    from storage import storage
+
+    filename = body.get("filename")
+    content = body.get("content")
+    size = int(body.get("size", 0) or 0)
+
+    if not filename:
+        raise HTTPException(status_code=400, detail="Missing filename.")
+
+    ext = Path(filename).suffix.lower()
+    if ext != ".zip":
+        raise HTTPException(
+            status_code=400,
+            detail=f"Unsupported file type: {ext or '(none)'} — only .zip archives are supported.",
+        )
+
+    if size > MAX_UPLOAD_SIZE:
+        raise HTTPException(status_code=413, detail="File is too large")
+
+    # TUS session mode — no content, just filename + size
+    if not content:
+        upload_session_id = str(uuid.uuid4())
+        expires_at = datetime.now(timezone.utc) + timedelta(minutes=60)
+        token = pyjwt.encode(
+            {
+                "sub": "user-123",
+                "upload_session_id": upload_session_id,
+                "filename": filename,
+                "maximum_size": size,
+                "upload_kind": "rag-document",
+                "exp": expires_at,
+            },
+            settings.upload_token_secret,
+            algorithm="HS256",
+        )
+        return {
+            "upload_session_id": upload_session_id,
+            "tus_endpoint": settings.tus_public_url,
+            "upload_token": token,
+            "expires_at": expires_at.isoformat(),
+        }
+
+    # Direct upload mode — base64 content provided
+    try:
+        decoded = base64.b64decode(content, validate=True)
+    except Exception:
+        raise HTTPException(status_code=400, detail="Invalid base64 content.")
+
+    upload_session_id = str(uuid.uuid4())
+    try:
+        storage.put_rag_file(upload_session_id, filename, decoded)
+    except Exception as exc:
+        dl_logger.error("Upload store failed: %s", exc, exc_info=True)
+        raise HTTPException(status_code=500, detail="Failed to store upload.")
+
+    dl_logger.info("File uploaded: filename=%s session=%s size=%s",
+                   filename, upload_session_id, len(decoded))
+    return {
+        "upload_session_id": upload_session_id,
+        "filename": filename,
+        "type": "zip",
+        "text": f"Uploaded ZIP archive: {filename} (binary content, not text-indexed).",
+        "size": len(decoded),
+    }
+
+
+@app.post(
+    "/api/rag/parse-code",
+    tags=["Upload & TUS"],
+    summary="Parse PHP Code from ZIP",
+    description=(
+        "Finds an uploaded ZIP in MinIO, extracts it, parses PHP via the in-image "
+        "CLI, and indexes the chunks in the background. Returns a download token "
+        "and collection name for progress polling."
+    ),
+)
+def rag_parse_code(body: dict):
+    from storage import storage
+
+    filename = body.get("filename")
+    session_id = body.get("upload_session_id")
+    if not filename:
+        raise HTTPException(status_code=400, detail="Missing filename.")
+
+    ext = Path(filename).suffix.lower()
+    if ext != ".zip":
+        raise HTTPException(status_code=400, detail=f"Only ZIP files can be parsed. Got: {ext or '(none)'}")
+
+    match = storage.find_rag_file(filename, session_id)
+    if not match:
+        raise HTTPException(status_code=404, detail=f"File not found in uploads: {filename}")
+
+    data = storage.get_rag_file_bytes(filename, session_id)
+    if data is None:
+        raise HTTPException(status_code=500, detail="Failed to read file from storage.")
+
+    collection_name = sanitize_collection_name(filename)
+    already = collection_exists(collection_name)
+    download_id = str(uuid.uuid4())
+    token = _mint_download_token(download_id, filename)
+
+    response = {
+        "download_id": download_id,
+        "download_token": token,
+        "download_url": f"http://localhost:9002/download/{token}",
+        "expires_at": (datetime.now(timezone.utc) + timedelta(hours=24)).isoformat(),
+        "collection_name": collection_name,
+        "already_indexed": already,
+    }
+
+    if already:
+        dl_logger.info("Parse skipped — already indexed: %s", collection_name)
+        return response
+
+    thread = threading.Thread(
+        target=_parse_and_index,
+        args=(download_id, filename, data, collection_name),
+        daemon=True,
+    )
+    thread.start()
+    return response
+
+
+@app.post(
+    "/api/internal/tusd/hooks",
+    tags=["Upload & TUS"],
+    summary="TUSD Webhook Handler",
+    description=(
+        "Receives post-finish hook events from tusd after a resumable ZIP upload "
+        "completes. Verifies the upload-session JWT carried in the tus metadata and "
+        "moves the object under rag-uploads/{session}/{filename}. No text extraction "
+        "is performed — code archives are parsed on demand."
+    ),
+)
+def tusd_hook(body: dict):
+    from storage import RAG_UPLOADS_PREFIX, storage
+
+    if body.get("Type") != "post-finish":
+        return {"ok": True, "handled": False}
+
+    upload = (body.get("Event") or {}).get("Upload") or {}
+    metadata = upload.get("MetaData") or {}
+
+    if metadata.get("upload_kind") != "rag-document":
+        return {"ok": True, "handled": False}
+
+    token = metadata.get("upload_token")
+    if not token:
+        raise HTTPException(status_code=401, detail="Missing upload token")
+
+    try:
+        claims = pyjwt.decode(token, settings.upload_token_secret, algorithms=["HS256"])
+    except Exception:
+        raise HTTPException(status_code=401, detail="Invalid or expired upload token")
+
+    if claims.get("upload_kind") != "rag-document":
+        raise HTTPException(status_code=401, detail="Token not valid for RAG upload")
+    if claims.get("upload_session_id") != metadata.get("upload_session_id"):
+        raise HTTPException(status_code=401, detail="Upload session mismatch")
+
+    storage_info = upload.get("Storage") or {}
+    object_key = storage_info.get("Key")
+    if not object_key:
+        raise HTTPException(status_code=400, detail="Missing upload storage information")
+
+    filename = claims.get("filename")
+    upload_session_id = claims.get("upload_session_id")
+    if not filename or not upload_session_id:
+        raise HTTPException(status_code=400, detail="Missing upload metadata")
+
+    dest_key = f"{RAG_UPLOADS_PREFIX}/{upload_session_id}/{filename}"
+    try:
+        storage.copy_object(object_key, dest_key)
+    except Exception as exc:
+        dl_logger.error("tusd hook copy failed: %s", exc, exc_info=True)
+        raise HTTPException(status_code=500, detail="Failed to store upload")
+
+    dl_logger.info("tusd upload stored: %s", dest_key)
+    return {"ok": True, "handled": True}
 
 
 @app.post(

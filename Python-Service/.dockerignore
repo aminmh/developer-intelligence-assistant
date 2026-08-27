@@ -1,5 +1,8 @@
 .git
 
+# PHP CLI vendor is installed inside the image at /opt/php-cli; never copy it.
+php/vendor/
+
 app/__pycache__/
 *.pyc
 *.pyo

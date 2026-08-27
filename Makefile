@@ -2,12 +2,11 @@ SHELL := /bin/bash
 
 COMPOSE ?= docker compose
 PYTHON_SERVICE ?= python-api
-PHP_SERVICE ?= php-ast
 NETWORK ?= devassistant_net
 
 .PHONY: help network build up down stop restart logs ps \
-        python-shell php-shell python-exec php-exec \
-        minio-logs qdrant-logs tusd-logs python-logs php-logs minio-bucket \
+        python-shell python-exec php-exec \
+        minio-logs qdrant-logs tusd-logs python-logs minio-bucket \
         rebuild clean prune
 
 help:
@@ -22,11 +21,9 @@ help:
 	@echo "  make ps              - Show service status"
 	@echo "  make rebuild         - Rebuild and restart all services"
 	@echo "  make python-shell    - Open shell in python-api"
-	@echo "  make php-shell       - Open shell in php-ast"
 	@echo "  make python-exec CMD='...' - Run command in python-api"
-	@echo "  make php-exec CMD='...'    - Run command in php-ast"
+	@echo "  make php-exec CMD='bin/code-parse --path=/app/...' - Run the PHP CLI in python-api"
 	@echo "  make python-logs     - Follow python-api logs"
-	@echo "  make php-logs        - Follow php-ast logs"
 	@echo "  make tusd-logs       - Follow tusd logs"
 	@echo "  make minio-logs      - Follow minio logs"
 	@echo "  make qdrant-logs     - Follow qdrant logs"
@@ -66,22 +63,17 @@ rebuild: network
 python-shell:
 	$(COMPOSE) exec $(PYTHON_SERVICE) /bin/sh
 
-php-shell:
-	$(COMPOSE) exec $(PHP_SERVICE) /bin/sh
-
 python-exec:
 	@test -n "$(CMD)" || (echo "Usage: make python-exec CMD='your command'"; exit 1)
 	$(COMPOSE) exec $(PYTHON_SERVICE) $(CMD)
 
+# The PHP CLI ships inside the python-api image at /opt/php-cli.
 php-exec:
-	@test -n "$(CMD)" || (echo "Usage: make php-exec CMD='your command'"; exit 1)
-	$(COMPOSE) exec $(PHP_SERVICE) $(CMD)
+	@test -n "$(CMD)" || (echo "Usage: make php-exec CMD='bin/code-parse --path=/app'"; exit 1)
+	$(COMPOSE) exec $(PYTHON_SERVICE) php /opt/php-cli/$(CMD)
 
 python-logs:
 	$(COMPOSE) logs -f $(PYTHON_SERVICE)
-
-php-logs:
-	$(COMPOSE) logs -f $(PHP_SERVICE)
 
 tusd-logs:
 	$(COMPOSE) logs -f tusd

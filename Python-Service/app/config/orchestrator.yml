@@ -1,24 +1,16 @@
-mcp_servers:
-  laravel:
-    transport: streamable_http
-    url: ${LARAVEL_MCP_URL:-http://php-ast:9003/mcp}
-    timeout_seconds: 300
-
 defaults:
   min_confidence: 0.35
-  workspace_root: /workspace/project
+  workspace_root: /app/workspaces
   max_tool_timeout_seconds: 300
   status_poll_interval_ms: 1000
 
 tools:
   chunk_code:
-    server: laravel
     args:
       export_format: json
       no_index: true
 
   export_structure:
-    server: laravel
     args:
       depth: 4
       include_hidden: false
