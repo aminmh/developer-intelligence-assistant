@@ -40,6 +40,12 @@ class Settings(BaseModel):
     workspace_root: str = os.getenv("WORKSPACE_ROOT", "/app/workspaces")
     php_cli_root: str = os.getenv("PHP_CLI_ROOT", "/opt/php-cli")
 
+    lsp_timeout: float = float(os.getenv("LSP_TIMEOUT", "10"))
+    lsp_max_retries: int = int(os.getenv("LSP_MAX_RETRIES", "2"))
+    lsp_validation_enabled: bool = os.getenv(
+        "LSP_VALIDATION_ENABLED", "true"
+    ).strip().lower() in ("1", "true", "yes", "on")
+
     enable_typo_correction: bool = os.getenv(
         "ENABLE_TYPO_CORRECTION", "false"
     ).strip().lower() in ("1", "true", "yes", "on")

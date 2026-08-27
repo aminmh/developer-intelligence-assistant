@@ -1,0 +1,20 @@
+{
+    "name": "developer-assistant/php-lsp",
+    "description": "PHP language-server toolchain (Phpactor + PHPStan) used by the Python service to validate LLM-generated PHP code.",
+    "type": "project",
+    "license": "MIT",
+    "require": {
+        "php": "^8.2",
+        "phpactor/phpactor": "^2025.0",
+        "phpstan/phpstan": "^2.1"
+    },
+    "config": {
+        "optimize-autoloader": true,
+        "sort-packages": true,
+        "allow-plugins": {
+            "php-http/discovery": true
+        }
+    },
+    "minimum-stability": "dev",
+    "prefer-stable": true
+}

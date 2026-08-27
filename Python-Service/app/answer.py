@@ -127,8 +127,34 @@ def generate_answer(
         )
     duration_ms = int((time.time() - started) * 1000)
 
+    validation: List[Dict[str, Any]] = []
+    if getattr(settings, "lsp_validation_enabled", True):
+        try:
+            from lsp import build_note, validate_markdown
+
+            new_answer, summary = validate_markdown(
+                answer,
+                question,
+                max_retries=getattr(settings, "lsp_max_retries", 2),
+            )
+            if summary:
+                answer = new_answer + "\n\n" + build_note(summary)
+                validation = [
+                    {
+                        "language": s["language"],
+                        "index": s["index"],
+                        "status": s["status"],
+                        "errors": s["errors"],
+                        "warnings": s["warnings"],
+                    }
+                    for s in summary
+                ]
+        except Exception as exc:
+            get_exception_logger().warning("LSP validation skipped: %s", exc)
+
     return {
         "answer": answer,
         "model": settings.ollama_llm_model,
         "duration_ms": duration_ms,
+        "code_validation": validation,
     }

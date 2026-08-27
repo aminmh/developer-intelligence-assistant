@@ -144,7 +144,25 @@ async def lifespan(app: FastAPI):
             service.rebuild(settings.report_path)
     except Exception:
         pass  # First startup or empty report — skip rebuild
+
+    # Warm the language servers so the first answer isn't slow (they index /
+    # build caches on first use). Best-effort + non-blocking.
+    if getattr(settings, "lsp_validation_enabled", True):
+        try:
+            from lsp import warmup
+
+            warmup()
+        except Exception:
+            pass
+
     yield
+
+    try:
+        from lsp import shutdown
+
+        shutdown()
+    except Exception:
+        pass
 
 
 tags_metadata = [
@@ -963,6 +981,7 @@ def answer_prompt(
         "matches": matches,
         "llmUsed": f"Local LLM ({gen['model']})",
         "durationMs": gen["duration_ms"],
+        "code_validation": gen.get("code_validation", []),
     }
 
 

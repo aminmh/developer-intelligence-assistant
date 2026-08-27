@@ -33,6 +33,23 @@ RUN --mount=type=cache,target=./tmp/pip-cache \
 COPY php/ /opt/php-cli/
 RUN cd /opt/php-cli && composer install --no-dev --no-interaction --no-progress --optimize-autoloader
 
+# PHP language-server toolchain (Phpactor + PHPStan) — validates LLM-generated PHP.
+COPY php/lsp/ /opt/php-lsp/
+RUN cd /opt/php-lsp && composer install --no-dev --no-interaction --no-progress --optimize-autoloader \
+    && mkdir -p /root/.config/phpactor \
+    && cat > /root/.config/phpactor/phpactor.json <<'EOF'
+{
+  "language_server_phpstan.enabled": true,
+  "language_server_phpstan.bin": "/opt/php-lsp/vendor/bin/phpstan",
+  "language_server_phpstan.config": "/opt/php-lsp/phpstan.neon",
+  "language_server.enable_trust_check": false,
+  "language_server.diagnostic_sleep_time": 100,
+  "language_server.diagnostic_outsource": false,
+  "language_server.diagnostics_on_open": true,
+  "indexer.enabled_watchers": ["php"]
+}
+EOF
+
 COPY . .
 
 EXPOSE 9002
