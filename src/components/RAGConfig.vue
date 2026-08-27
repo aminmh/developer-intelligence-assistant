@@ -7,7 +7,6 @@ import {
   SlidersHorizontal,
   RefreshCw,
   Server,
-  Scissors,
   FolderSearch,
   Upload,
   CheckCircle,
@@ -352,52 +351,8 @@ onUnmounted(stopImportPolling);
           </div>
         </div>
 
-        <!-- Column 2: chunking + Qdrant + sampling params -->
+        <!-- Column 2: Qdrant + sampling params -->
         <div class="space-y-6">
-
-          <!-- Document chunking -->
-          <div class="bg-slate-900/30 border border-slate-800 rounded-2xl p-6 space-y-5">
-            <h4 class="text-xs font-bold text-slate-200 uppercase tracking-wider flex items-center gap-2 border-b border-slate-800 pb-3">
-              <Scissors class="w-4 h-4 text-indigo-400" />
-              Document Chunking
-            </h4>
-
-            <div class="space-y-4">
-              <!-- Chunk Size -->
-              <div class="space-y-2">
-                <div class="flex items-center justify-between text-xs">
-                  <span class="text-slate-400">Chunk Size (characters)</span>
-                  <span class="font-mono text-indigo-400 bg-indigo-500/10 px-2 py-0.5 rounded font-bold">{{ config.chunkSize }}</span>
-                </div>
-                <input 
-                  type="range" 
-                  min="100" 
-                  max="2000" 
-                  step="50" 
-                  :value="config.chunkSize"
-                  @input="updateField('chunkSize', parseInt(($event.target as HTMLInputElement).value))"
-                  class="w-full h-1 bg-slate-800 rounded-lg appearance-none cursor-pointer accent-indigo-500" 
-                />
-              </div>
-
-              <!-- Chunk Overlap -->
-              <div class="space-y-2">
-                <div class="flex items-center justify-between text-xs">
-                  <span class="text-slate-400">Chunk Overlap</span>
-                  <span class="font-mono text-indigo-400 bg-indigo-500/10 px-2 py-0.5 rounded font-bold">{{ config.chunkOverlap }}</span>
-                </div>
-                <input 
-                  type="range" 
-                  min="0" 
-                  max="400" 
-                  step="10" 
-                  :value="config.chunkOverlap"
-                  @input="updateField('chunkOverlap', parseInt(($event.target as HTMLInputElement).value))"
-                  class="w-full h-1 bg-slate-800 rounded-lg appearance-none cursor-pointer accent-indigo-500" 
-                />
-              </div>
-            </div>
-          </div>
 
           <!-- Qdrant -->
           <div class="bg-slate-900/30 border border-slate-800 rounded-2xl p-6 space-y-4">

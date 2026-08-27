@@ -99,9 +99,9 @@ const handleIndexFile = () => {
         <div class="flex items-center justify-between mb-4">
           <h4 class="text-xs font-bold tracking-wider uppercase text-slate-400 flex items-center gap-2">
             <Upload class="w-4 h-4 text-indigo-400" />
-            Upload Source Documents
+            Upload Project Archives
           </h4>
-          <span class="text-[10px] text-slate-500">Accepted: PDF, MD, TXT, JS, TS, JSON</span>
+          <span class="text-[10px] text-slate-500">Accepted: ZIP</span>
         </div>
 
         <div
@@ -112,18 +112,18 @@ const handleIndexFile = () => {
             id="file-upload-input"
             type="file"
             multiple
-            accept=".pdf,.md,.txt,.js,.ts,.tsx,.json"
+            accept=".zip"
             class="hidden"
             @change="handleFileUpload"
           />
           <FileText class="w-8 h-8 text-slate-600 mx-auto mb-3" />
-          <p class="text-sm text-slate-400 font-medium">Click or drop files here for indexing & embeddings generation</p>
-          <p class="text-[10px] text-slate-500 mt-2">Maximum file size: depends on your runtime environment limits.</p>
+          <p class="text-sm text-slate-400 font-medium">Click or drop project ZIP archives here for PHP code indexing</p>
+          <p class="text-[10px] text-slate-500 mt-2">PHP source is parsed on demand — index a project to enable code search.</p>
         </div>
 
         <div v-if="uploading" class="mt-4 flex items-center gap-3 p-3 bg-emerald-950/10 border border-emerald-500/20 rounded-xl text-xs text-emerald-300">
           <div class="w-4 h-4 border-2 border-emerald-400 border-t-transparent rounded-full animate-spin"></div>
-          <p class="text-[10px] text-indigo-400 mt-0.5">We are generating context chunks based on your configured chunk size, computing high-dimensional vectors, and populating your vectorDB.</p>
+          <p class="text-[10px] text-indigo-400 mt-0.5">Storing project archive…</p>
         </div>
 
         <!-- Per-file resumable upload progress (large files, TUS path) -->

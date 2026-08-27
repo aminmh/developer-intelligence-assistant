@@ -3,8 +3,6 @@ export interface RAGConfig {
   ollamaEmbedModel: string;
   ollamaLlmModel: string;
   ollamaEvalModel: string;
-  chunkSize: number;
-  chunkOverlap: number;
   qdrantUrl: string;
   qdrantApiKey: string;
   temperature: number;

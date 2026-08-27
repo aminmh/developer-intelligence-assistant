@@ -29,8 +29,6 @@ const config = ref<RAGConfig>({
   ollamaEmbedModel: 'BGE-M3',
   ollamaLlmModel: 'gemma3-4b',
   ollamaEvalModel: 'gemma3-4b',
-  chunkSize: 500,
-  chunkOverlap: 50,
   qdrantUrl: '',
   qdrantApiKey: '',
   temperature: 0.7,
@@ -277,8 +275,7 @@ const parseFile = async (id: string, name: string) => {
   indexingProgress.value = { total: 0, indexed: 0, status: '' };
   triggerToast(`Parsing "${name}" — extracting PHP code...`, true);
   try {
-    const phpUrl = import.meta.env.VITE_UPLOAD_API_URL || 'http://localhost:9003';
-    const res = await fetch(`${phpUrl}/api/rag/parse-code`, {
+    const res = await makeRequest('/api/rag/parse-code', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ filename: name }),
@@ -335,39 +332,8 @@ const parseFile = async (id: string, name: string) => {
 };
 
 const indexFile = async (id: string, name: string) => {
-  const file = files.value.find(f => f.id === id);
-  const isZip = file?.type === 'zip';
-
-  if (isZip) {
-    // ZIP: full parse-code pipeline
-    await parseFile(id, name);
-    return;
-  }
-
-  // Non-ZIP: re-index stored file
-  parsingFileId.value = id;
-  indexingProgress.value = { total: 1, indexed: 0, status: '' };
-  triggerToast(`Indexing "${name}"...`, true);
-  try {
-    const res = await makeRequest('/api/reindex', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ filename: name, uploadSessionId: file?.uploadSessionId, fileId: id }),
-    });
-    const data = await res.json();
-    if (data.success) {
-      indexingProgress.value = { total: 1, indexed: 1, status: 'done' };
-      triggerToast(`"${name}" indexed — ${data.file?.chunkCount || 0} chunks.`, true);
-      await fetchFiles();
-    } else {
-      triggerToast(data.error || 'Indexing failed.', false);
-    }
-  } catch (err: any) {
-    triggerToast(`Index error: ${err.message}`, false);
-  } finally {
-    parsingFileId.value = null;
-    indexingProgress.value = { total: 0, indexed: 0, status: '' };
-  }
+  // All uploaded files are project ZIP archives now — full parse-code pipeline.
+  await parseFile(id, name);
 };
 
 const attachZip = async (file: File) => {

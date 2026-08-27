@@ -22,8 +22,6 @@ let ragConfig: RAGConfig = {
   ollamaEmbedModel: process.env.OLLAMA_MODEL || 'BGE-M3',
   ollamaLlmModel: 'gemma3-4b',
   ollamaEvalModel: process.env.OLLAMA_EVAL_MODEL || 'gemma3-4b',
-  chunkSize: 500,
-  chunkOverlap: 50,
   qdrantUrl: '',
   qdrantApiKey: '',
   temperature: 0.7,
@@ -82,86 +80,9 @@ export const RAGService = {
     return ragConfig;
   },
 
-  // Save configurations (kept for backward compat; disk persistence removed —
-  // the Python service is now the source of truth).
-  updateConfig(newConfig: Partial<RAGConfig>): RAGConfig {
-    return this.applyConfig(newConfig);
-  },
-
   // Get uploaded files list
   getFiles(): UploadedFile[] {
     return uploadedFiles;
-  },
-
-  // Track a file that was uploaded/stored upstream (PHP/MinIO). Indexing now
-  // happens in the Python service; the web only records metadata for /api/files.
-  async uploadExtractedText(name: string, type: string, size: number, text: string, uploadSessionId?: string): Promise<UploadedFile> {
-    if (!text || text.trim().length === 0) {
-      throw new Error('Extracted file text is empty or invalid.');
-    }
-
-    const fileId = `file_${Date.now()}_${Math.random().toString(36).substring(2, 9)}`;
-    const uploadedFile: UploadedFile = {
-      id: fileId,
-      name,
-      type,
-      size,
-      chunkCount: 0,
-      uploadedAt: new Date().toISOString(),
-      status: 'ready',
-      uploadSessionId,
-    };
-
-    uploadedFiles.push(uploadedFile);
-    saveDatabase();
-    return uploadedFile;
-  },
-
-  // Track a file that was indexed externally (Python Qdrant) — no local
-  // chunking/embedding, just adds to the tracking array so it appears in /api/files.
-  async addTrackedFile(name: string, type: string, size: number, chunkCount: number, uploadSessionId?: string): Promise<UploadedFile> {
-    const fileId = `file_${Date.now()}_${Math.random().toString(36).substring(2, 9)}`;
-
-    const uploadedFile: UploadedFile = {
-      id: fileId,
-      name,
-      type,
-      size: size || 0,
-      chunkCount: chunkCount || 0,
-      uploadedAt: new Date().toISOString(),
-      status: 'ready',
-      uploadSessionId,
-    };
-
-    uploadedFiles.push(uploadedFile);
-    saveDatabase();
-    return uploadedFile;
-  },
-
-  // Track text already extracted upstream (large-file TUS path). No longer
-  // embeds/chunks locally — the Python service handles indexing; here we only
-  // record the file so it appears in /api/files.
-  async indexExtractedText(name: string, type: string, size: number, text: string, uploadSessionId: string): Promise<UploadedFile> {
-    const existing = uploadedFiles.find((f) => f.uploadSessionId === uploadSessionId);
-    if (existing) {
-      return existing;
-    }
-
-    const fileId = `file_${Date.now()}_${Math.random().toString(36).substring(2, 9)}`;
-    const uploadedFile: UploadedFile = {
-      id: fileId,
-      name,
-      type,
-      size,
-      chunkCount: 0,
-      uploadedAt: new Date().toISOString(),
-      status: 'ready',
-      uploadSessionId,
-    };
-
-    uploadedFiles.push(uploadedFile);
-    saveDatabase();
-    return uploadedFile;
   },
 
   // Delete a tracked file record

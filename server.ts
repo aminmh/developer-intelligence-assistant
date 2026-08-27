@@ -451,18 +451,17 @@ async function startServer() {
     return res.json({ success: true, job });
   });
 
-  // Get uploaded files list (local + PHP-service MinIO files merged)
+  // Get uploaded files list (local tracking + Python/MinIO rag-uploads merged)
   app.get('/api/files', async (req, res) => {
     try {
       const files: UploadedFile[] = [...RAGService.getFiles()];
       const seen = new Set(files.map(f => f.uploadSessionId).filter(Boolean));
 
-      // Fetch files from PHP service (TUS uploads stored in MinIO/rag-uploads)
-      const phpUrl = process.env.PHP_SERVICE_URL || 'http://127.0.0.1:9003';      
+      // Fetch files from Python service (TUS uploads stored in MinIO/rag-uploads)
       try {
-        const phpRes = await fetch(`${phpUrl}/api/rag/files`);        
-        if (phpRes.ok) {
-          const data = await phpRes.json() as { files?: any[] };
+        const pyRes = await fetch(`${PYTHON_API_URL}/api/rag/files`);
+        if (pyRes.ok) {
+          const data = await pyRes.json() as { files?: any[] };
           for (const f of data.files ?? []) {
             if (f.upload_session_id && seen.has(f.upload_session_id)) continue;
             seen.add(f.upload_session_id);
@@ -479,7 +478,7 @@ async function startServer() {
           }
         }
       } catch (err: any) {
-        console.error('[files] PHP service unreachable, using local files only:', err.message);
+        console.error('[files] Python service unreachable, using local files only:', err.message);
       }
 
       res.json({ success: true, files });
@@ -488,7 +487,8 @@ async function startServer() {
     }
   });
 
-  // Upload a file for indexing — forwards to PHP service for storage + extraction
+  // Upload a file for indexing — forwards to Python service for MinIO storage.
+  // Documents are not supported; only project ZIP archives are accepted.
   app.post('/api/upload', async (req, res) => {
     try {
       const { name, size, content } = req.body;
@@ -496,81 +496,71 @@ async function startServer() {
         return res.status(400).json({ success: false, error: 'Missing name or content in payload.' });
       }
 
-      // Forward to PHP service for storage and text extraction
-      const phpUrl = process.env.PHP_SERVICE_URL || 'http://127.0.0.1:9003';
-      const phpRes = await fetch(`${phpUrl}/api/rag/upload`, {
+      // Forward to Python service for storage
+      const pyRes = await fetch(`${PYTHON_API_URL}/api/rag/upload`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ filename: name, content, size: size || 0 }),
       });
 
-      if (!phpRes.ok) {
-        const phpErr = await phpRes.json().catch(() => ({ error: phpRes.statusText }));
-        return res.status(phpRes.status).json({ success: false, error: phpErr.error || 'Upload to PHP service failed.' });
+      const pyData = await pyRes.json().catch(() => ({}));
+      if (!pyRes.ok) {
+        return res.status(pyRes.status).json({ success: false, error: pyData.error || pyData.detail || 'Upload to Python service failed.' });
       }
 
-      const phpData = await phpRes.json();
-
-      // ZIP files: store only, no indexing — on-demand via orchestrator in chat
-      if (path.extname(name).toLowerCase() === '.zip') {
-        return res.json({
-          success: true,
-          file: {
-            id: phpData.upload_session_id,
-            name,
-            type: 'zip',
-            size: size || phpData.size || 0,
-            chunkCount: 0,
-            uploadedAt: new Date().toISOString(),
-            status: 'ready',
-            uploadSessionId: phpData.upload_session_id,
-          },
-        });
-      }
-
-      // Index extracted text locally
-      const file = await RAGService.uploadExtractedText(
-        phpData.filename,
-        phpData.type,
-        phpData.size ?? size ?? 0,
-        phpData.text,
-        phpData.upload_session_id,
-      );
-
-      res.json({ success: true, file });
+      return res.json({
+        success: true,
+        file: {
+          id: pyData.upload_session_id,
+          name,
+          type: 'zip',
+          size: size || pyData.size || 0,
+          chunkCount: 0,
+          uploadedAt: new Date().toISOString(),
+          status: 'ready',
+          uploadSessionId: pyData.upload_session_id,
+        },
+      });
     } catch (error: any) {
       console.error('File upload error:', error);
       res.status(500).json({ success: false, error: error.message });
     }
   });
 
-  // Internal callback: index text already extracted upstream (large-file TUS path).
-  // Authenticated via a shared secret, not by CORS/browser origin — this is called
-  // server-to-server by python-api after it downloads and extracts a tusd upload.
-  app.post('/api/internal/rag-index', async (req, res) => {
-    const secret = req.header('X-Internal-Secret');
-    if (!secret || secret !== process.env.RAG_CALLBACK_SECRET) {
-      return res.status(401).json({ success: false, error: 'Unauthorized' });
-    }
+  // Proxy: mint a TUS resumable upload session (browser → web → Python)
+  app.post('/api/rag/upload', async (req, res) => {
     try {
-      const { name, type, size, text, uploadSessionId } = req.body;
-      if (!name || !type || typeof text !== 'string' || !uploadSessionId) {
-        return res.status(400).json({ success: false, error: 'Missing name, type, text, or uploadSessionId in payload.' });
-      }
-
-      const file = await RAGService.indexExtractedText(name, type, size || 0, text, uploadSessionId);
-      res.status(202).json({ success: true, file });
+      const pyRes = await fetch(`${PYTHON_API_URL}/api/rag/upload`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(req.body),
+      });
+      res.status(pyRes.status).json(await pyRes.json());
     } catch (error: any) {
-      console.error('RAG index callback error:', error);
-      res.status(500).json({ success: false, error: error.message });
+      res.status(502).json({ success: false, error: error.message });
     }
   });
+
+  // Proxy: parse PHP code from an uploaded ZIP (browser → web → Python)
+  app.post('/api/rag/parse-code', async (req, res) => {
+    try {
+      const pyRes = await fetch(`${PYTHON_API_URL}/api/rag/parse-code`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(req.body),
+      });
+      res.status(pyRes.status).json(await pyRes.json());
+    } catch (error: any) {
+      res.status(502).json({ success: false, error: error.message });
+    }
+  });
+
   // Delete file
   app.delete('/api/files/:id', async (req, res) => {
     try {
       const fileId = req.params.id;
 
-      // Capture filename + session before deletion so we can forward to PHP
+      // Capture filename + session before deletion so we can forward to Python
       const files = RAGService.getFiles();
       const file = files.find(f => f.id === fileId);
       const fileName = file?.name ?? req.body?.filename ?? null;
@@ -578,11 +568,10 @@ async function startServer() {
 
       const deleted = file ? await RAGService.deleteFile(fileId) : true;
 
-      // Also delete from PHP service (MinIO-backed rag-uploads storage)
+      // Also delete from Python service (MinIO-backed rag-uploads storage)
       if (fileName) {
-        const phpUrl = process.env.PHP_SERVICE_URL || 'http://127.0.0.1:9003';
         try {
-          await fetch(`${phpUrl}/api/rag/files`, {
+          await fetch(`${PYTHON_API_URL}/api/rag/files`, {
             method: 'DELETE',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({
@@ -591,7 +580,7 @@ async function startServer() {
             }),
           });
         } catch {
-          console.error('[files] Failed to delete from PHP service');
+          console.error('[files] Failed to delete from Python service');
         }
       }
 
@@ -601,70 +590,6 @@ async function startServer() {
 
       res.json({ success: true, message: 'File deleted successfully.' });
     } catch (error: any) {
-      res.status(500).json({ success: false, error: error.message });
-    }
-  });
-
-  // Re-index a stored file via Python service (Qdrant storage)
-  app.post('/api/reindex', async (req, res) => {
-    try {
-      const { filename, uploadSessionId, fileId } = req.body;
-      if (!filename) {
-        return res.status(400).json({ success: false, error: 'Missing filename.' });
-      }
-
-      // Remove old local entry to avoid duplicates
-      if (fileId) {
-        await RAGService.deleteFile(fileId);
-      }
-
-      const phpUrl = process.env.PHP_SERVICE_URL || 'http://127.0.0.1:9003';
-
-      // Extract text from PHP/MinIO
-      const phpRes = await fetch(`${phpUrl}/api/rag/extract`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ filename, upload_session_id: uploadSessionId || undefined }),
-      });
-      if (!phpRes.ok) {
-        const err = await phpRes.json().catch(() => ({ error: 'Extraction failed' }));
-        return res.status(phpRes.status).json({ success: false, error: err.error });
-      }
-
-      const phpData = await phpRes.json();
-
-      // Send to Python for Qdrant indexing (chunks + embed + store)
-      const pythonUrl = process.env.PYTHON_API_URL || 'http://localhost:9002';
-      const pyRes = await fetch(`${pythonUrl}/download-jobs`, {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          'X-Internal-Secret': process.env.RAG_CALLBACK_SECRET || '',
-        },
-        body: JSON.stringify({
-          filename: (phpData.filename || filename).replace(/\.[^/.]+$/, '') + '.txt',
-          text: phpData.text,
-        }),
-      });
-      if (!pyRes.ok) {
-        const err = await pyRes.json().catch(() => ({ error: 'Python indexing failed' }));
-        return res.status(pyRes.status).json({ success: false, error: err.error });
-      }
-
-      const pyData = await pyRes.json();
-
-      // Track locally (no local embedding — everything in Qdrant via Python)
-      const file = await RAGService.addTrackedFile(
-        phpData.filename || filename,
-        phpData.type,
-        0,
-        pyData.chunk_count || 0,
-        phpData.upload_session_id,
-      );
-
-      res.json({ success: true, file });
-    } catch (error: any) {
-      console.error('Reindex error:', error);
       res.status(500).json({ success: false, error: error.message });
     }
   });
