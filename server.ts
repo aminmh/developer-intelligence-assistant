@@ -13,9 +13,11 @@ dotenv.config();
 
 const PYTHON_API_URL = process.env.PYTHON_API_URL || 'http://localhost:9002';
 const INTERNAL_SECRET = process.env.RAG_CALLBACK_SECRET || '';
+const SYS_MON_URL = process.env.SYS_MON_URL || 'http://host.docker.internal:8765';
+const SYS_MON_LOCAL_URL = 'http://localhost:8765';
 
 // Secret fields masked before returning config to the browser (write-only).
-const MASKED_SECRET_KEYS = ['qdrantApiKey'];
+const MASKED_SECRET_KEYS = ['qdrantApiKey', 'llmRemoteApiKey'];
 function maskConfig(config: Record<string, any>) {
   const masked = { ...config };
   for (const key of MASKED_SECRET_KEYS) {
@@ -35,6 +37,8 @@ const indexedProjects = new Set<string>();
 const evaluationCache = new Map<string, { query: string; answer: string | null; contexts: string[] }>();
 // Orchestration job_id -> queryId, so /api/query/result can attach the answer.
 const jobToQueryId = new Map<string, string>();
+// Orchestration job_id -> use_remote flag, so the answer step uses the same LLM.
+const jobToUseRemote = new Map<string, boolean>();
 type OllamaImportJob = {
   id: string;
   modelName: string;
@@ -48,6 +52,31 @@ const ollamaImportJobs = new Map<string, OllamaImportJob>();
 
 function contextsFromMatches(matches: any[]): string[] {
   return (matches ?? []).map((m) => m?.chunk?.text ?? '').filter((t) => t);
+}
+
+async function fetchWithTimeout(url: string, timeoutMs: number): Promise<Response> {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    return await fetch(url, { signal: controller.signal });
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+async function fetchSysStats(): Promise<any> {
+  const urls = [SYS_MON_URL, SYS_MON_LOCAL_URL];
+  for (const url of urls) {
+    try {
+      const response = await fetchWithTimeout(`${url}/stats`, 2500);
+      if (!response.ok) continue;
+      const stats = await response.json();
+      return { online: true, ...stats };
+    } catch {
+      // Try the next endpoint (dev mode runs server.ts directly on the host).
+    }
+  }
+  return { online: false };
 }
 
 function labelForExtension(filename: string): string {
@@ -451,6 +480,31 @@ async function startServer() {
     return res.json({ success: true, job });
   });
 
+  // Host system stats (CPU/RAM/temperature/GPU) from the host-side sys-mon agent.
+  app.get('/api/sysmon', async (req, res) => {
+    try {
+      const stats = await fetchSysStats();
+      res.json({ success: true, ...stats });
+    } catch (error: any) {
+      console.error('Failed to fetch system stats:', error.message);
+      res.status(500).json({ success: false, error: error.message });
+    }
+  });
+
+  // Remote LLM provider health (proxies to Python service).
+  app.get('/api/health/llm', async (req, res) => {
+    try {
+      const pyRes = await fetch(`${PYTHON_API_URL}/health/llm`);
+      if (!pyRes.ok) {
+        return res.status(pyRes.status).json({ success: false, error: 'Health check failed.' });
+      }
+      res.json(await pyRes.json());
+    } catch (error: any) {
+      console.error('Failed to check LLM health via Python:', error.message);
+      res.status(500).json({ success: false, error: error.message });
+    }
+  });
+
   // Get uploaded files list (local tracking + Python/MinIO rag-uploads merged)
   app.get('/api/files', async (req, res) => {
     try {
@@ -597,7 +651,7 @@ async function startServer() {
   // Query RAG system (Semantic retrieval + LLM prompt generation)
   app.post('/api/query', async (req, res) => {
     try {
-      const { query, filename } = req.body;
+      const { query, filename, use_remote } = req.body;
       if (!query || query.trim() === '') {
         return res.status(400).json({ success: false, error: 'Query parameter is required.' });
       }
@@ -648,6 +702,7 @@ async function startServer() {
           if (oRes.ok) {
             const { job_id } = await oRes.json();
             jobToQueryId.set(job_id, queryId);
+            jobToUseRemote.set(job_id, !!use_remote);
             evaluationCache.set(queryId, { query, answer: null, contexts: [] });
             return res.json({
               success: true,
@@ -670,7 +725,7 @@ async function startServer() {
             'Content-Type': 'application/json',
             'X-RAG-Trace-Id': queryId,
           },
-          body: JSON.stringify({ query }),
+          body: JSON.stringify({ query, use_remote: !!use_remote }),
         });
         if (aRes.ok) {
           const answer = await aRes.json();
@@ -694,10 +749,11 @@ async function startServer() {
   // Poll orchestration status + get final LLM answer
   app.post('/api/query/result', async (req, res) => {
     try {
-      const { job_id, user_query } = req.body;
+      const { job_id, user_query, use_remote } = req.body;
       if (!job_id) {
         return res.status(400).json({ success: false, error: 'Missing job_id.' });
       }
+      const wantRemote = use_remote !== undefined ? !!use_remote : (jobToUseRemote.get(job_id) ?? false);
 
       const pythonUrl = process.env.PYTHON_API_URL || 'http://localhost:9002';
 
@@ -759,6 +815,7 @@ async function startServer() {
             file: entities.target_file || undefined,
             entities,
             extra_context: extraContext,
+            use_remote: wantRemote,
           }),
         });
         if (!aRes.ok) {

@@ -5,6 +5,9 @@ export interface RAGConfig {
   ollamaEvalModel: string;
   qdrantUrl: string;
   qdrantApiKey: string;
+  llmRemoteBaseUrl: string;
+  llmRemoteModel: string;
+  llmRemoteApiKey: string;
   temperature: number;
   topP: number;
 }

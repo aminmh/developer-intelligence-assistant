@@ -17,6 +17,7 @@ import PipelineProgress from './PipelineProgress.vue';
 import ChatLoading from './ChatLoading.vue';
 import EvaluationModal from './EvaluationModal.vue';
 import RetrievalInsights from './RetrievalInsights.vue';
+import SysMonitor from './SysMonitor.vue';
 import type { PipelineStep } from './PipelineProgress.vue';
 
 interface Message {
@@ -41,6 +42,7 @@ const props = defineProps<{
   activeFileName: string | null;
   orchestrationSteps: PipelineStep[];
   generatingAnswer: boolean;
+  useRemote: boolean;
 }>();
 
 const emit = defineEmits<{
@@ -49,6 +51,7 @@ const emit = defineEmits<{
   (e: 'selectAttachment', fileName: string): void;
   (e: 'clearAttach'): void;
   (e: 'feedback', query: string, route: string): void;
+  (e: 'update:useRemote', value: boolean): void;
 }>();
 
 const ROUTES = ['code_explain', 'code_refactor', 'debug', 'search', 'knowledge', 'chat'];
@@ -140,6 +143,7 @@ const toggleMatchExpansion = (id: string) => {
       
       <!-- Messages list -->
       <div class="max-w-4xl mx-auto space-y-4">
+        <SysMonitor />
         <div 
           v-for="msg in messages" 
           :key="msg.id" 
@@ -324,6 +328,18 @@ const toggleMatchExpansion = (id: string) => {
         </form>
         <div class="mt-2 flex items-center justify-between gap-3 text-[10px] text-slate-500">
           <div class="flex items-center gap-3 flex-wrap">
+            <button
+              type="button"
+              @click="emit('update:useRemote', !useRemote)"
+              :class="useRemote ? 'bg-indigo-600/20 border-indigo-500/40 text-indigo-300' : 'bg-[#11162d] border-slate-800 text-slate-400 hover:text-white'"
+              class="px-2.5 py-1 rounded-lg border text-[10px] font-mono inline-flex items-center gap-1 transition-all"
+              :disabled="loading"
+              title="Route this answer to the remote GPU model (vLLM)"
+              aria-label="Toggle remote GPU model"
+            >
+              <Cpu class="w-3.5 h-3.5" />
+              {{ useRemote ? 'GPU Mode' : 'Local Mode' }}
+            </button>
             <label class="cursor-pointer hover:text-indigo-400 transition-colors flex items-center gap-1">
               <input type="file" accept=".zip" hidden @change="onAttachZip" />
               <Paperclip class="w-3.5 h-3.5" />

@@ -31,9 +31,15 @@ const config = ref<RAGConfig>({
   ollamaEvalModel: 'gemma3-4b',
   qdrantUrl: '',
   qdrantApiKey: '',
+  llmRemoteBaseUrl: '',
+  llmRemoteModel: '',
+  llmRemoteApiKey: '',
   temperature: 0.7,
   topP: 0.9,
 });
+
+// Route chat answers to the remote GPU LLM (vLLM) instead of the local Ollama model.
+const useRemote = ref(false);
 
 const files = ref<UploadedFile[]>([]);
 const loading = ref(false);
@@ -410,6 +416,7 @@ const sendMessage = async (text: string) => {
         query: text,
         limit: 4,
         filename: activeFileName.value || undefined,
+        use_remote: useRemote.value,
       }),
     });
 
@@ -431,7 +438,7 @@ const sendMessage = async (text: string) => {
           const rRes = await makeRequest('/api/query/result', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ job_id: jobId, user_query: text }),
+            body: JSON.stringify({ job_id: jobId, user_query: text, use_remote: useRemote.value }),
           });
 
           const rData = await rRes.json();
@@ -658,6 +665,8 @@ onMounted(async () => {
         @selectAttachment="selectAttachment"
         @clearAttach="clearAttach"
         @feedback="submitFeedback"
+        :useRemote="useRemote"
+        @update:useRemote="useRemote = $event"
       />
 
       <RAGFiles

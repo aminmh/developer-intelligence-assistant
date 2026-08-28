@@ -11,6 +11,8 @@ import {
   Upload,
   CheckCircle,
   AlertTriangle,
+  Gauge,
+  Zap,
 } from 'lucide-vue-next';
 import { RAGConfig, OllamaImportFile, OllamaImportJob } from '../types';
 
@@ -39,6 +41,82 @@ const importJob = ref<OllamaImportJob | null>(null);
 const importError = ref('');
 const importSuccess = ref('');
 let importPollTimer: ReturnType<typeof setTimeout> | null = null;
+
+const llmHealth = ref<any>(null);
+const loadingHealth = ref(false);
+
+const apiBaseUrl = import.meta.env.VITE_API_URL || '';
+
+const makeRequest = async (path: string, options: RequestInit = {}) => {
+  const base = apiBaseUrl.replace(/\/+$/, '');
+  const url = base ? `${base}${path}` : path;
+  return fetch(url, options);
+};
+
+const fetchHealth = async () => {
+  loadingHealth.value = true;
+  try {
+    const res = await makeRequest('/api/health/llm');
+    const data = await res.json();
+    llmHealth.value = res.ok ? data : null;
+  } catch {
+    llmHealth.value = null;
+  } finally {
+    loadingHealth.value = false;
+  }
+};
+
+// The backend may return health as nested ({ ollama, remote }) or flat
+// ({ ollama_online, remote_configured, ... }) payloads — normalize both at
+// the boundary so the template only ever sees parsed, trusted values.
+const ollamaHealth = computed(() => {
+  const h = llmHealth.value;
+  if (!h) return null;
+  return h.ollama ?? h.local ?? h;
+});
+
+const ollamaOnline = computed(() => {
+  const h = ollamaHealth.value;
+  if (!h) return false;
+  return Boolean(h.online ?? h.reachable ?? h.connected ?? h.ollama_online);
+});
+
+const ollamaModelCount = computed(() => {
+  const h = ollamaHealth.value;
+  if (!h) return 0;
+  if (Array.isArray(h.models)) return h.models.length;
+  const n = Number(h.models ?? h.modelCount ?? h.count ?? h.ollama_models ?? 0);
+  return Number.isFinite(n) ? n : 0;
+});
+
+const remoteHealth = computed(() => {
+  const h = llmHealth.value;
+  if (!h) return null;
+  return h.remote ?? h.gpu ?? null;
+});
+
+const remoteConfigured = computed(() => {
+  const h = remoteHealth.value;
+  if (!h) return false;
+  return Boolean(
+    h.configured ??
+      h.online != null ??
+      h.reachable != null ??
+      Boolean(h.model ?? h.serving_model ?? h.baseUrl ?? h.llmRemoteBaseUrl),
+  );
+});
+
+const remoteOnline = computed(() => {
+  const h = remoteHealth.value;
+  if (!h) return false;
+  return Boolean(h.online ?? h.reachable ?? h.remote_online);
+});
+
+const remoteServingModel = computed(() => {
+  const h = remoteHealth.value;
+  if (!h) return '';
+  return String(h.model ?? h.serving_model ?? h.remote_model ?? '');
+});
 
 const fetchModels = async () => {
   loadingModels.value = true;
@@ -162,6 +240,7 @@ const evalModelOptions = computed(() => {
 onMounted(() => {
   fetchModels();
   scanImportDirectory();
+  fetchHealth();
 });
 
 onUnmounted(stopImportPolling);
@@ -347,6 +426,115 @@ onUnmounted(stopImportPolling);
             <div v-if="importError" class="flex items-start gap-2 text-[10px] text-amber-300 font-mono">
               <AlertTriangle class="w-3.5 h-3.5 shrink-0" />
               <span>{{ importError }}</span>
+            </div>
+          </div>
+
+          <!-- Remote GPU LLM (vLLM) -->
+          <div class="bg-slate-900/30 border border-slate-800 rounded-2xl p-6 space-y-4">
+            <h4 class="text-xs font-bold text-slate-200 uppercase tracking-wider flex items-center gap-2 border-b border-slate-800 pb-3">
+              <Zap class="w-4 h-4 text-indigo-400" />
+              Remote GPU LLM (vLLM)
+            </h4>
+
+            <div class="space-y-1.5">
+              <label class="text-xs text-slate-400 font-mono">Base URL</label>
+              <input
+                :value="config.llmRemoteBaseUrl"
+                @input="updateField('llmRemoteBaseUrl', ($event.target as HTMLInputElement).value)"
+                type="text"
+                class="w-full bg-[#11162d] border border-slate-800 rounded-xl px-4 py-2.5 text-xs font-mono focus:outline-none focus:border-indigo-500 text-slate-200"
+                placeholder="e.g. http://localhost:8000"
+              />
+              <p class="text-[9px] text-slate-600">OpenAI-compatible endpoint (vLLM). Leave empty to disable.</p>
+            </div>
+
+            <div class="space-y-1.5">
+              <label class="text-xs text-slate-400 font-mono">Model</label>
+              <input
+                :value="config.llmRemoteModel"
+                @input="updateField('llmRemoteModel', ($event.target as HTMLInputElement).value)"
+                type="text"
+                class="w-full bg-[#11162d] border border-slate-800 rounded-xl px-4 py-2.5 text-xs font-mono focus:outline-none focus:border-indigo-500 text-slate-200"
+                placeholder="e.g. qwen2.5-coder-32b-instruct"
+              />
+            </div>
+
+            <div class="space-y-1.5">
+              <label class="text-xs text-slate-400 font-mono">API Key</label>
+              <input
+                :value="config.llmRemoteApiKey"
+                @input="updateField('llmRemoteApiKey', ($event.target as HTMLInputElement).value)"
+                type="password"
+                class="w-full bg-[#11162d] border border-slate-800 rounded-xl px-4 py-2.5 text-xs font-mono focus:outline-none focus:border-indigo-500 text-slate-200"
+                placeholder="optional"
+              />
+            </div>
+          </div>
+
+          <!-- LLM Provider Status -->
+          <div class="bg-slate-900/30 border border-slate-800 rounded-2xl p-6 space-y-4">
+            <h4 class="text-xs font-bold text-slate-200 uppercase tracking-wider flex items-center justify-between gap-2 border-b border-slate-800 pb-3">
+              <span class="flex items-center gap-2">
+                <Gauge class="w-4 h-4 text-indigo-400" />
+                LLM Provider Status
+              </span>
+              <button
+                type="button"
+                @click="fetchHealth"
+                class="text-[10px] text-slate-400 hover:text-indigo-300 flex items-center gap-1 font-mono"
+                :disabled="loadingHealth"
+              >
+                <RefreshCw class="w-3 h-3" :class="loadingHealth ? 'animate-spin' : ''" />
+                refresh
+              </button>
+            </h4>
+
+            <div v-if="loadingHealth" class="flex items-center gap-2 text-[10px] text-slate-400 font-mono">
+              <RefreshCw class="w-3.5 h-3.5 animate-spin" />
+              checking…
+            </div>
+            <div v-else-if="!llmHealth" class="text-[10px] text-slate-500 font-mono">
+              Health endpoint unavailable.
+            </div>
+            <div v-else class="space-y-3">
+              <div class="flex items-center justify-between gap-3">
+                <span class="text-xs text-slate-400 font-mono flex items-center gap-1.5">
+                  <Server class="w-3.5 h-3.5 text-indigo-400" />
+                  Local Ollama
+                </span>
+                <span
+                  class="px-2 py-0.5 rounded-full border text-[10px] font-mono"
+                  :class="ollamaOnline
+                    ? 'bg-emerald-500/10 text-emerald-400 border-emerald-500/30'
+                    : 'bg-rose-500/10 text-rose-400 border-rose-500/30'"
+                >
+                  {{ ollamaOnline ? `connected (${ollamaModelCount} models)` : 'offline' }}
+                </span>
+              </div>
+              <div class="flex items-center justify-between gap-3">
+                <span class="text-xs text-slate-400 font-mono flex items-center gap-1.5">
+                  <Zap class="w-3.5 h-3.5 text-indigo-400" />
+                  Remote GPU (vLLM)
+                </span>
+                <span
+                  v-if="!remoteConfigured"
+                  class="px-2 py-0.5 rounded-full border text-[10px] font-mono bg-slate-800/40 text-slate-400 border-slate-700"
+                >
+                  not configured
+                </span>
+                <span
+                  v-else-if="remoteOnline"
+                  class="px-2 py-0.5 rounded-full border text-[10px] font-mono bg-emerald-500/10 text-emerald-400 border-emerald-500/30"
+                >
+                  connected — serving {{ remoteServingModel || 'remote model' }}
+                </span>
+                <span
+                  v-else
+                  class="px-2 py-0.5 rounded-full border text-[10px] font-mono bg-amber-500/10 text-amber-400 border-amber-500/30"
+                >
+                  configured but offline (is the tunnel up?)
+                </span>
+              </div>
             </div>
           </div>
         </div>
