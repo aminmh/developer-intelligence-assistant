@@ -35,6 +35,7 @@ import json
 import base64
 import logging
 import threading
+import urllib.request
 from datetime import datetime, timezone, timedelta
 from pathlib import Path
 from qdrant_client import QdrantClient
@@ -248,6 +249,64 @@ def health():
         unresolved_edges=service.unresolved_edges_count,
         collection=settings.qdrant_collection,
     )
+
+
+def _probe_local_llm() -> dict:
+    """Probe the local Ollama server; never raises."""
+    try:
+        req = urllib.request.Request(
+            f"{settings.ollama_base_url.rstrip('/')}/api/tags",
+            headers={"Content-Type": "application/json"},
+        )
+        with urllib.request.urlopen(req, timeout=2.0) as resp:
+            data = json.loads(resp.read().decode("utf-8"))
+        models = data.get("models") or []
+        return {"configured": True, "reachable": True, "models": len(models)}
+    except Exception as exc:
+        logging.getLogger(__name__).warning(
+            "Local LLM health probe failed: %s", exc
+        )
+        return {"configured": True, "reachable": False, "models": None}
+
+
+def _probe_remote_llm() -> dict:
+    """Probe the optional remote vLLM server; never raises."""
+    base_url = (settings.llm_remote_base_url or "").strip()
+    if not base_url:
+        return {"configured": False, "reachable": False, "model": None, "error": None}
+    try:
+        headers = {"Accept": "application/json"}
+        api_key = (settings.llm_remote_api_key or "").strip()
+        if api_key:
+            headers["Authorization"] = f"Bearer {api_key}"
+        req = urllib.request.Request(
+            f"{base_url.rstrip('/')}/v1/models",
+            headers=headers,
+        )
+        with urllib.request.urlopen(req, timeout=2.0) as resp:
+            data = json.loads(resp.read().decode("utf-8"))
+        items = data.get("data") or []
+        model = items[0].get("id") if items else None
+        return {"configured": True, "reachable": True, "model": model, "error": None}
+    except Exception as exc:
+        return {"configured": True, "reachable": False, "model": None, "error": str(exc)}
+
+
+@app.get(
+    "/health/llm",
+    tags=["Health & System"],
+    summary="LLM Provider Health",
+    description=(
+        "Checks reachability of the local Ollama and optional remote vLLM LLM "
+        "providers. Never raises — each provider reports its own status."
+    ),
+)
+def health_llm():
+    """LLM provider health: local Ollama + optional remote vLLM."""
+    return {
+        "local": _probe_local_llm(),
+        "remote": _probe_remote_llm(),
+    }
 
 
 @app.post(
@@ -908,6 +967,7 @@ def answer_prompt(
     temperature = body.get("temperature")
     top_p = body.get("top_p")
     extra_context = body.get("extra_context")
+    use_remote = body.get("use_remote") is True
 
     from llamaindex_layer import CodePropertyGraph
     from llamaindex_layer import record_retrieval_trace
@@ -954,6 +1014,7 @@ def answer_prompt(
         temperature=temperature,
         top_p=top_p,
         extra_context=extra_context if isinstance(extra_context, str) else None,
+        use_remote=use_remote,
     )
 
     matches = []
@@ -979,7 +1040,12 @@ def answer_prompt(
         "success": True,
         "answer": gen["answer"],
         "matches": matches,
-        "llmUsed": f"Local LLM ({gen['model']})",
+        "llmUsed": (
+            f"Remote GPU LLM ({gen['model']})"
+            if gen.get("provider") == "remote"
+            else f"Local LLM ({gen['model']})"
+        ),
+        "provider": gen.get("provider", "local"),
         "durationMs": gen["duration_ms"],
         "code_validation": gen.get("code_validation", []),
     }

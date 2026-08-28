@@ -1,8 +1,10 @@
-"""Shared LLM client backed by Ollama's OpenAI-compatible endpoint."""
+"""Shared LLM client backed by Ollama's OpenAI-compatible endpoint, with an
+optional remote vLLM (OpenAI-compatible) provider for heavy answers.
+"""
 
 from __future__ import annotations
 
-from typing import Any, List, Optional
+from typing import Any, List, Optional, Tuple
 
 import instructor
 from openai import OpenAI
@@ -11,6 +13,10 @@ from settings import settings
 
 _openai_client: Optional[OpenAI] = None
 _instructor_client: Optional[Any] = None
+
+# (base_url, api_key, client) — re-created whenever either the dynamic base_url
+# or api_key setting changes.
+_remote_client_state: Optional[Tuple[str, str, OpenAI]] = None
 
 
 def _get_openai_client() -> OpenAI:
@@ -46,25 +52,44 @@ def extract(response_model, prompt: str):
     )
 
 
-def complete(
+def _get_remote_client() -> OpenAI:
+    """Return a lazily-created OpenAI client for the remote vLLM server.
+
+    The cache is keyed on (base_url, api_key) because settings are dynamic
+    (SQLite-backed); a changed URL or key re-creates the client on the next call.
+    """
+    global _remote_client_state
+    base_url = settings.llm_remote_base_url.rstrip("/") + "/v1"
+    api_key = settings.llm_remote_api_key or "EMPTY"
+    if _remote_client_state is None or (
+        _remote_client_state[0] != base_url or _remote_client_state[1] != api_key
+    ):
+        _remote_client_state = (base_url, api_key, OpenAI(base_url=base_url, api_key=api_key))
+    return _remote_client_state[2]
+
+
+def remote_configured() -> bool:
+    """Return True when a remote vLLM base URL is configured."""
+    return bool((settings.llm_remote_base_url or "").strip())
+
+
+def _run_chat(
+    client: OpenAI,
+    model: str,
     prompt: str,
     system: Optional[str] = None,
     temperature: Optional[float] = None,
     top_p: Optional[float] = None,
     max_tokens: int = 2048,
 ) -> str:
-    """Return a plain text completion from the configured Ollama chat model.
-
-    Raises on LLM failure — callers are expected to degrade gracefully.
-    """
-    client = _get_openai_client()
+    """Run a chat completion on `client` and return the plain text content."""
     messages: List[dict] = []
     if system:
         messages.append({"role": "system", "content": system})
     messages.append({"role": "user", "content": prompt})
 
     kwargs: dict = {
-        "model": settings.ollama_llm_model,
+        "model": model,
         "messages": messages,
         "max_tokens": max_tokens,
     }
@@ -76,3 +101,71 @@ def complete(
     response = client.chat.completions.create(**kwargs)
     content = response.choices[0].message.content if response.choices else ""
     return content or ""
+
+
+def complete_with_model(
+    prompt: str,
+    system: Optional[str] = None,
+    temperature: Optional[float] = None,
+    top_p: Optional[float] = None,
+    max_tokens: int = 2048,
+    provider: str = "local",
+) -> Tuple[str, str, str]:
+    """Return (content, model_used, provider_used).
+
+    provider_used is "remote" only when the remote path actually succeeded,
+    otherwise "local". An unconfigured or failing remote silently falls back to
+    the local Ollama chat model — no error is raised for remote failures.
+    """
+    if provider == "remote" and remote_configured():
+        model = settings.llm_remote_model or settings.ollama_llm_model
+        try:
+            content = _run_chat(
+                _get_remote_client(),
+                model,
+                prompt,
+                system=system,
+                temperature=temperature,
+                top_p=top_p,
+                max_tokens=max_tokens,
+            )
+            if content:
+                return content, model, "remote"
+            # Empty/falsy content is a remote failure — fall through to local.
+        except Exception:
+            pass  # silently fall back to the local model
+
+    model = settings.ollama_llm_model
+    content = _run_chat(
+        _get_openai_client(),
+        model,
+        prompt,
+        system=system,
+        temperature=temperature,
+        top_p=top_p,
+        max_tokens=max_tokens,
+    )
+    return content, model, "local"
+
+
+def complete(
+    prompt: str,
+    system: Optional[str] = None,
+    temperature: Optional[float] = None,
+    top_p: Optional[float] = None,
+    max_tokens: int = 2048,
+    provider: str = "local",
+) -> str:
+    """Return a plain text completion, optionally routed to the remote vLLM.
+
+    Raises on local LLM failure — callers are expected to degrade gracefully.
+    """
+    content, _, _ = complete_with_model(
+        prompt,
+        system=system,
+        temperature=temperature,
+        top_p=top_p,
+        max_tokens=max_tokens,
+        provider=provider,
+    )
+    return content

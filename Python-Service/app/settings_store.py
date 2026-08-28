@@ -22,6 +22,9 @@ RAG_CONFIG_DEFAULTS: Dict[str, Any] = {
     "ollamaEmbedModel": "BGE-M3",
     "ollamaLlmModel": "gemma3-4b",
     "ollamaEvalModel": "gemma3-4b",
+    "llmRemoteBaseUrl": "",
+    "llmRemoteModel": "",
+    "llmRemoteApiKey": "",
     "qdrantUrl": "",
     "qdrantApiKey": "",
     "temperature": 0.7,
@@ -30,7 +33,7 @@ RAG_CONFIG_DEFAULTS: Dict[str, Any] = {
 
 # Fields returned masked by GET /settings. They are write-only: a PUT only
 # overwrites them when a non-empty value is supplied.
-SECRET_KEYS = {"qdrantApiKey"}
+SECRET_KEYS = {"qdrantApiKey", "llmRemoteApiKey"}
 
 MASKED_VALUE = ""
 

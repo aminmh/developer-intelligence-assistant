@@ -12,7 +12,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 from exception_logger import get_exception_logger
-from llm import complete
+from llm import complete_with_model
 from settings import settings
 
 SYSTEM_PROMPT = (
@@ -100,6 +100,7 @@ def generate_answer(
     temperature: Optional[float] = None,
     top_p: Optional[float] = None,
     extra_context: Optional[str] = None,
+    use_remote: bool = False,
 ) -> Dict[str, Any]:
     """Generate an answer from retrieved code context + entities."""
     contexts = contexts or []
@@ -112,11 +113,12 @@ def generate_answer(
 
     started = time.time()
     try:
-        answer = complete(
+        answer, model_used, provider_used = complete_with_model(
             prompt,
             system=SYSTEM_PROMPT,
             temperature=temp,
             top_p=topp,
+            provider="remote" if use_remote else "local",
         )
     except Exception as exc:
         get_exception_logger().error("Answer generation failed: %s", exc)
@@ -125,6 +127,8 @@ def generate_answer(
             "temporarily unavailable. Please try again.\n\n"
             f"Error: {exc}"
         )
+        model_used = settings.ollama_llm_model
+        provider_used = "local"
     duration_ms = int((time.time() - started) * 1000)
 
     validation: List[Dict[str, Any]] = []
@@ -154,7 +158,8 @@ def generate_answer(
 
     return {
         "answer": answer,
-        "model": settings.ollama_llm_model,
+        "model": model_used,
+        "provider": provider_used,
         "duration_ms": duration_ms,
         "code_validation": validation,
     }

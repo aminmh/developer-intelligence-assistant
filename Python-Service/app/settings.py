@@ -27,6 +27,9 @@ class Settings(BaseModel):
     ollama_embedding_model: str = os.getenv("OLLAMA_EMBED_MODEL", "BGE-M3")
     ollama_llm_model: str = os.getenv("OLLAMA_LLM_MODEL", "gemma3-4b")
     ollama_eval_model: str = os.getenv("OLLAMA_EVAL_MODEL", "")
+    llm_remote_base_url: str = os.getenv("LLM_REMOTE_BASE_URL", "")
+    llm_remote_model: str = os.getenv("LLM_REMOTE_MODEL", "")
+    llm_remote_api_key: str = os.getenv("LLM_REMOTE_API_KEY", "")
 
     temperature: float = float(os.getenv("LLM_TEMPERATURE", "0.7"))
     top_p: float = float(os.getenv("LLM_TOP_P", "0.9"))
@@ -69,6 +72,9 @@ class RuntimeSettings:
         "ollama_embedding_model": "ollamaEmbedModel",
         "ollama_llm_model": "ollamaLlmModel",
         "ollama_eval_model": "ollamaEvalModel",
+        "llm_remote_base_url": "llmRemoteBaseUrl",
+        "llm_remote_model": "llmRemoteModel",
+        "llm_remote_api_key": "llmRemoteApiKey",
         "qdrant_url": "qdrantUrl",
         "qdrant_api_key": "qdrantApiKey",
         "temperature": "temperature",
