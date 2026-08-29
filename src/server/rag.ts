@@ -9,7 +9,7 @@ const STORE_DIR = path.join(process.cwd(), 'data');
 const FILES_PATH = path.join(STORE_DIR, 'files.json');
 
 // Secret fields are write-only: masked on read, only overwritten on non-empty write.
-const SECRET_CONFIG_KEYS = ['qdrantApiKey', 'llmRemoteApiKey'] as const;
+const SECRET_CONFIG_KEYS = ['qdrantApiKey', 'llmRemoteApiKey', 'runpodApiKey'] as const;
 
 // Ensure directory exists
 if (!fs.existsSync(STORE_DIR)) {
@@ -27,6 +27,7 @@ let ragConfig: RAGConfig = {
   llmRemoteBaseUrl: '',
   llmRemoteModel: '',
   llmRemoteApiKey: '',
+  runpodApiKey: '',
   temperature: 0.7,
   topP: 0.9,
 };

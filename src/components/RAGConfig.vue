@@ -118,6 +118,55 @@ const remoteServingModel = computed(() => {
   return String(h.model ?? h.serving_model ?? h.remote_model ?? '');
 });
 
+// --- RunPod serverless connection -----------------------------------------
+
+const runpodResult = ref<{ ok: boolean; latency_ms: number; detail: string } | null>(null);
+const testingRunpod = ref(false);
+
+const runpodConfigured = computed(() => Boolean((props.config.runpodApiKey ?? '').trim()));
+const runpodHealth = computed(() => {
+  const h = llmHealth.value;
+  if (!h) return null;
+  return h.runpod ?? null;
+});
+const runpodReachable = computed(() => Boolean(runpodHealth.value?.reachable));
+const runpodEndpointCount = computed(() => {
+  const n = Number(runpodHealth.value?.endpoint_count ?? 0);
+  return Number.isFinite(n) ? n : 0;
+});
+const runpodLabel = computed(() => {
+  const r = runpodResult.value;
+  if (!r) return runpodConfigured.value ? 'Not tested' : 'No API key';
+  return r.ok ? `Connected · ${r.latency_ms}ms` : r.detail || 'Failed';
+});
+const runpodConnCls = computed(() => {
+  const r = runpodResult.value;
+  if (!r) return runpodConfigured.value ? 'text-slate-500' : 'text-slate-600';
+  return r.ok ? 'text-emerald-300' : 'text-rose-300';
+});
+
+const testRunpodConnection = async () => {
+  testingRunpod.value = true;
+  runpodResult.value = null;
+  try {
+    const res = await makeRequest('/api/health/test/runpod', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({}),
+    });
+    const data = await res.json();
+    runpodResult.value = {
+      ok: Boolean(data.ok),
+      latency_ms: Number(data.latency_ms) || 0,
+      detail: String(data.detail ?? data.error ?? 'request failed'),
+    };
+  } catch (err) {
+    runpodResult.value = { ok: false, latency_ms: 0, detail: String(err) };
+  } finally {
+    testingRunpod.value = false;
+  }
+};
+
 const fetchModels = async () => {
   loadingModels.value = true;
   try {
@@ -247,187 +296,249 @@ onUnmounted(stopImportPolling);
 </script>
 
 <template>
-  <div class="flex-1 overflow-y-auto p-6 space-y-6 text-left">
-    <div class="max-w-4xl mx-auto space-y-6">
-      
+  <div class="flex-1 overflow-y-auto p-6 space-y-8 text-left">
+    <div class="max-w-4xl mx-auto space-y-8">
+
       <div class="bg-slate-900/40 rounded-2xl border border-slate-800/80 p-6">
         <h3 class="text-lg font-bold text-white flex items-center gap-2">
           <Sliders class="w-5 h-5 text-indigo-400" />
           RAG Pipeline Configuration
         </h3>
-        <p class="text-xs text-slate-400 mt-1">Configure Ollama models and Qdrant connection details.</p>
+        <p class="text-xs text-slate-400 mt-1">Configure LLM providers, GPU offload, the vector store and model import.</p>
       </div>
 
-      <div class="grid grid-cols-1 md:grid-cols-2 gap-6">
-        
-        <!-- Column 1: Ollama connection + models -->
-        <div class="space-y-6">
+      <!-- ============ LLM Providers ============ -->
+      <div class="space-y-3">
+        <div class="flex items-center gap-2">
+          <span class="w-1 h-3.5 bg-indigo-500 rounded-full"></span>
+          <h4 class="text-[11px] font-bold text-slate-400 uppercase tracking-widest">LLM Providers</h4>
+        </div>
+        <div class="grid grid-cols-1 md:grid-cols-2 gap-6">
+          <div class="space-y-6">
 
-          <!-- Ollama connection -->
-          <div class="bg-slate-900/30 border border-slate-800 rounded-2xl p-6 space-y-4">
-            <h4 class="text-xs font-bold text-slate-200 uppercase tracking-wider flex items-center gap-2 border-b border-slate-800 pb-3">
-              <Server class="w-4 h-4 text-indigo-400" />
-              Ollama Server
-            </h4>
+            <!-- Ollama connection -->
+            <div class="bg-slate-900/30 border border-slate-800 rounded-2xl p-6 space-y-4">
+              <h4 class="text-xs font-bold text-slate-200 uppercase tracking-wider flex items-center gap-2 border-b border-slate-800 pb-3">
+                <Server class="w-4 h-4 text-indigo-400" />
+                Ollama Server
+              </h4>
 
-            <div class="space-y-1.5">
-              <label class="text-xs text-slate-400 font-mono">Base URL</label>
-              <input 
-                :value="config.ollamaBaseUrl" 
-                @input="updateField('ollamaBaseUrl', ($event.target as HTMLInputElement).value)"
-                type="text" 
-                class="w-full bg-[#11162d] border border-slate-800 rounded-xl px-4 py-2.5 text-xs font-mono focus:outline-none focus:border-emerald-500 text-slate-200"
-                placeholder="e.g. http://host.docker.internal:11434"
-              />
+              <div class="space-y-1.5">
+                <label class="text-xs text-slate-400 font-mono">Base URL</label>
+                <input
+                  :value="config.ollamaBaseUrl"
+                  @input="updateField('ollamaBaseUrl', ($event.target as HTMLInputElement).value)"
+                  type="text"
+                  class="w-full bg-[#11162d] border border-slate-800 rounded-xl px-4 py-2.5 text-xs font-mono focus:outline-none focus:border-emerald-500 text-slate-200"
+                  placeholder="e.g. http://host.docker.internal:11434"
+                />
+              </div>
             </div>
-          </div>
 
-          <!-- Model selection -->
-          <div class="bg-slate-900/30 border border-slate-800 rounded-2xl p-6 space-y-4">
-            <h4 class="text-xs font-bold text-slate-200 uppercase tracking-wider flex items-center justify-between gap-2 border-b border-slate-800 pb-3">
-              <span class="flex items-center gap-2">
-                <Cpu class="w-4 h-4 text-indigo-400" />
-                Models
-              </span>
-              <button
-                type="button"
-                @click="fetchModels"
-                class="text-[10px] text-slate-400 hover:text-indigo-300 flex items-center gap-1 font-mono"
-              >
-                <RefreshCw class="w-3 h-3" :class="loadingModels ? 'animate-spin' : ''" />
-                refresh
-              </button>
-            </h4>
-
-            <div class="space-y-3">
-              <div class="space-y-1.5">
-                <label class="text-xs text-slate-400 font-mono">LLM (Chat) Model</label>
-                <select
-                  :value="config.ollamaLlmModel"
-                  @change="updateField('ollamaLlmModel', ($event.target as HTMLSelectElement).value)"
-                  class="w-full bg-[#11162d] border border-slate-800 rounded-xl px-4 py-2.5 text-xs font-mono focus:outline-none focus:border-emerald-500 text-slate-200"
+            <!-- Model selection -->
+            <div class="bg-slate-900/30 border border-slate-800 rounded-2xl p-6 space-y-4">
+              <h4 class="text-xs font-bold text-slate-200 uppercase tracking-wider flex items-center justify-between gap-2 border-b border-slate-800 pb-3">
+                <span class="flex items-center gap-2">
+                  <Cpu class="w-4 h-4 text-indigo-400" />
+                  Models
+                </span>
+                <button
+                  type="button"
+                  @click="fetchModels"
+                  class="text-[10px] text-slate-400 hover:text-indigo-300 flex items-center gap-1 font-mono"
                 >
-                  <option v-for="m in llmModelOptions" :key="m" :value="m">{{ m }}</option>
-                </select>
-              </div>
+                  <RefreshCw class="w-3 h-3" :class="loadingModels ? 'animate-spin' : ''" />
+                  refresh
+                </button>
+              </h4>
 
-              <div class="space-y-1.5">
-                <label class="text-xs text-slate-400 font-mono">Embedding Model</label>
-                <select
-                  :value="config.ollamaEmbedModel"
-                  @change="updateField('ollamaEmbedModel', ($event.target as HTMLSelectElement).value)"
-                  class="w-full bg-[#11162d] border border-slate-800 rounded-xl px-4 py-2.5 text-xs font-mono focus:outline-none focus:border-emerald-500 text-slate-200"
-                >
-                  <option v-for="m in embedModelOptions" :key="m" :value="m">{{ m }}</option>
-                </select>
-              </div>
-
-              <div class="space-y-1.5">
-                <div class="flex items-center justify-between">
-                  <label class="text-xs text-slate-400 font-mono">Evaluation Judge Model</label>
-                  <span class="text-[9px] text-slate-500">RAGAS</span>
+              <div class="space-y-3">
+                <div class="flex items-center justify-between gap-4">
+                  <label class="text-xs text-slate-400 font-mono shrink-0">LLM (Chat) Model</label>
+                  <select
+                    :value="config.ollamaLlmModel"
+                    @change="updateField('ollamaLlmModel', ($event.target as HTMLSelectElement).value)"
+                    class="w-[15rem] max-w-full bg-[#11162d] border border-slate-800 rounded-xl px-3 py-2.5 text-xs font-mono focus:outline-none focus:border-emerald-500 text-slate-200"
+                  >
+                    <option v-for="m in llmModelOptions" :key="m" :value="m">{{ m }}</option>
+                  </select>
                 </div>
-                <select
-                  :value="config.ollamaEvalModel"
-                  @change="updateField('ollamaEvalModel', ($event.target as HTMLSelectElement).value)"
-                  class="w-full bg-[#11162d] border border-slate-800 rounded-xl px-4 py-2.5 text-xs font-mono focus:outline-none focus:border-emerald-500 text-slate-200"
-                >
-                  <option v-for="m in evalModelOptions" :key="m" :value="m">{{ m }}</option>
-                </select>
-                <p class="text-[9px] text-slate-600">Used only to score answers; it does not generate chat responses.</p>
+
+                <div class="flex items-center justify-between gap-4">
+                  <label class="text-xs text-slate-400 font-mono shrink-0">Embedding Model</label>
+                  <select
+                    :value="config.ollamaEmbedModel"
+                    @change="updateField('ollamaEmbedModel', ($event.target as HTMLSelectElement).value)"
+                    class="w-[15rem] max-w-full bg-[#11162d] border border-slate-800 rounded-xl px-3 py-2.5 text-xs font-mono focus:outline-none focus:border-emerald-500 text-slate-200"
+                  >
+                    <option v-for="m in embedModelOptions" :key="m" :value="m">{{ m }}</option>
+                  </select>
+                </div>
+
+                <div class="flex items-center justify-between gap-4">
+                  <div class="flex items-center gap-2 shrink-0">
+                    <label class="text-xs text-slate-400 font-mono">Evaluation Judge Model</label>
+                    <span class="text-[9px] text-slate-500 bg-slate-800/60 px-1.5 py-0.5 rounded font-mono">RAGAS</span>
+                  </div>
+                  <select
+                    :value="config.ollamaEvalModel"
+                    @change="updateField('ollamaEvalModel', ($event.target as HTMLSelectElement).value)"
+                    class="w-[15rem] max-w-full bg-[#11162d] border border-slate-800 rounded-xl px-3 py-2.5 text-xs font-mono focus:outline-none focus:border-emerald-500 text-slate-200"
+                  >
+                    <option v-for="m in evalModelOptions" :key="m" :value="m">{{ m }}</option>
+                  </select>
+                </div>
+                <p class="text-[9px] text-slate-600">Judge model only scores answers; it never generates chat responses.</p>
               </div>
             </div>
           </div>
 
-          <!-- GGUF import -->
-          <div class="bg-slate-900/30 border border-slate-800 rounded-2xl p-6 space-y-4">
-            <h4 class="text-xs font-bold text-slate-200 uppercase tracking-wider flex items-center justify-between gap-2 border-b border-slate-800 pb-3">
-              <span class="flex items-center gap-2">
-                <FolderSearch class="w-4 h-4 text-indigo-400" />
-                Import GGUF Model
-              </span>
-              <button
-                type="button"
-                @click="scanImportDirectory"
-                class="text-[10px] text-slate-400 hover:text-indigo-300 flex items-center gap-1 font-mono"
-                :disabled="scanningImportDirectory"
-              >
-                <RefreshCw class="w-3 h-3" :class="scanningImportDirectory ? 'animate-spin' : ''" />
-                scan
-              </button>
-            </h4>
+          <div class="space-y-6">
+            <!-- LLM Provider Status -->
+            <div class="bg-slate-900/30 border border-slate-800 rounded-2xl p-6 space-y-4">
+              <h4 class="text-xs font-bold text-slate-200 uppercase tracking-wider flex items-center justify-between gap-2 border-b border-slate-800 pb-3">
+                <span class="flex items-center gap-2">
+                  <Gauge class="w-4 h-4 text-indigo-400" />
+                  LLM Provider Status
+                </span>
+                <button
+                  type="button"
+                  @click="fetchHealth"
+                  class="text-[10px] text-slate-400 hover:text-indigo-300 flex items-center gap-1 font-mono"
+                  :disabled="loadingHealth"
+                >
+                  <RefreshCw class="w-3 h-3" :class="loadingHealth ? 'animate-spin' : ''" />
+                  refresh
+                </button>
+              </h4>
 
-            <p class="text-[10px] leading-relaxed text-slate-500">
-              GGUF files must be placed in the shared directory configured for this deployment.
-              The app uploads the selected file to Ollama and reports progress here.
-            </p>
-
-            <div class="space-y-1.5">
-              <label class="text-xs text-slate-400 font-mono">Configured directory</label>
-              <input
-                :value="importRoot"
-                readonly
-                class="w-full bg-[#11162d] border border-slate-800 rounded-xl px-4 py-2.5 text-[10px] font-mono text-slate-500"
-                placeholder="Scan to load configured directory"
-              />
+              <div v-if="loadingHealth" class="flex items-center gap-2 text-[10px] text-slate-400 font-mono">
+                <RefreshCw class="w-3.5 h-3.5 animate-spin" />
+                checking…
+              </div>
+              <div v-else-if="!llmHealth" class="text-[10px] text-slate-500 font-mono">
+                Health endpoint unavailable.
+              </div>
+              <div v-else class="space-y-3">
+                <div class="flex items-center justify-between gap-3">
+                  <span class="text-xs text-slate-400 font-mono flex items-center gap-1.5">
+                    <Server class="w-3.5 h-3.5 text-indigo-400" />
+                    Local Ollama
+                  </span>
+                  <span
+                    class="px-2 py-0.5 rounded-full border text-[10px] font-mono"
+                    :class="ollamaOnline
+                      ? 'bg-emerald-500/10 text-emerald-400 border-emerald-500/30'
+                      : 'bg-rose-500/10 text-rose-400 border-rose-500/30'"
+                  >
+                    {{ ollamaOnline ? `connected (${ollamaModelCount} models)` : 'offline' }}
+                  </span>
+                </div>
+                <div class="flex items-center justify-between gap-3">
+                  <span class="text-xs text-slate-400 font-mono flex items-center gap-1.5">
+                    <Zap class="w-3.5 h-3.5 text-indigo-400" />
+                    Remote GPU (vLLM)
+                  </span>
+                  <span
+                    v-if="!remoteConfigured"
+                    class="px-2 py-0.5 rounded-full border text-[10px] font-mono bg-slate-800/40 text-slate-400 border-slate-700"
+                  >
+                    not configured
+                  </span>
+                  <span
+                    v-else-if="remoteOnline"
+                    class="px-2 py-0.5 rounded-full border text-[10px] font-mono bg-emerald-500/10 text-emerald-400 border-emerald-500/30"
+                  >
+                    connected — serving {{ remoteServingModel || 'remote model' }}
+                  </span>
+                  <span
+                    v-else
+                    class="px-2 py-0.5 rounded-full border text-[10px] font-mono bg-amber-500/10 text-amber-400 border-amber-500/30"
+                  >
+                    configured but offline (is the tunnel up?)
+                  </span>
+                </div>
+                <div class="flex items-center justify-between gap-3">
+                  <span class="text-xs text-slate-400 font-mono flex items-center gap-1.5">
+                    <Zap class="w-3.5 h-3.5 text-amber-400" />
+                    RunPod Serverless
+                  </span>
+                  <span
+                    v-if="!runpodConfigured"
+                    class="px-2 py-0.5 rounded-full border text-[10px] font-mono bg-slate-800/40 text-slate-400 border-slate-700"
+                  >
+                    not configured
+                  </span>
+                  <span
+                    v-else-if="runpodReachable"
+                    class="px-2 py-0.5 rounded-full border text-[10px] font-mono bg-emerald-500/10 text-emerald-400 border-emerald-500/30"
+                  >
+                    connected — {{ runpodEndpointCount }} endpoint{{ runpodEndpointCount === 1 ? '' : 's' }}
+                  </span>
+                  <span
+                    v-else
+                    class="px-2 py-0.5 rounded-full border text-[10px] font-mono bg-rose-500/10 text-rose-400 border-rose-500/30"
+                  >
+                    auth failed
+                  </span>
+                </div>
+              </div>
             </div>
 
-            <div class="space-y-1.5">
-              <label class="text-xs text-slate-400 font-mono">GGUF file</label>
-              <select
-                v-model="selectedGgufFile"
-                class="w-full bg-[#11162d] border border-slate-800 rounded-xl px-4 py-2.5 text-xs font-mono focus:outline-none focus:border-indigo-500 text-slate-200"
-                :disabled="!ggufFiles.length"
-              >
-                <option value="" disabled>Select a GGUF file</option>
-                <option v-for="entry in ggufFiles" :key="entry.file" :value="entry.file">{{ entry.file }}</option>
-              </select>
-            </div>
+            <!-- Sampling parameters -->
+            <div class="bg-slate-900/30 border border-slate-800 rounded-2xl p-6 space-y-4">
+              <h4 class="text-xs font-bold text-slate-200 uppercase tracking-wider flex items-center gap-2 border-b border-slate-800 pb-3">
+                <SlidersHorizontal class="w-4 h-4 text-indigo-400" />
+                Sampling Parameters
+              </h4>
 
-            <div class="space-y-1.5">
-              <label class="text-xs text-slate-400 font-mono">Ollama model name</label>
-              <input
-                v-model="importModelName"
-                type="text"
-                class="w-full bg-[#11162d] border border-slate-800 rounded-xl px-4 py-2.5 text-xs font-mono focus:outline-none focus:border-indigo-500 text-slate-200"
-                placeholder="e.g. my-coder-model"
-              />
-            </div>
+              <div class="space-y-4">
+                <!-- Temperature -->
+                <div class="space-y-2">
+                  <div class="flex items-center justify-between text-xs">
+                    <span class="text-slate-400">Temperature</span>
+                    <span class="font-mono text-indigo-400 bg-indigo-500/10 px-2 py-0.5 rounded font-bold">{{ config.temperature }}</span>
+                  </div>
+                  <input
+                    type="range"
+                    min="0"
+                    max="1.2"
+                    step="0.05"
+                    :value="config.temperature"
+                    @input="updateField('temperature', parseFloat(($event.target as HTMLInputElement).value))"
+                    class="w-full h-1 bg-slate-800 rounded-lg appearance-none cursor-pointer accent-indigo-500"
+                  />
+                </div>
 
-            <div class="space-y-1.5">
-              <label class="text-xs text-slate-400 font-mono">Optional Modelfile settings</label>
-              <textarea
-                v-model="importModelfile"
-                rows="4"
-                class="w-full bg-[#11162d] border border-slate-800 rounded-xl px-4 py-2.5 text-[10px] font-mono focus:outline-none focus:border-indigo-500 text-slate-200 resize-y"
-                placeholder="SYSTEM You are a helpful coding assistant&#10;PARAMETER temperature 0.2"
-              />
-              <p class="text-[9px] text-slate-600">The app inserts the selected GGUF as the FROM source automatically.</p>
-            </div>
-
-            <button
-              type="button"
-              @click="startImport"
-              :disabled="startingImport || importJob?.status === 'pending' || importJob?.status === 'running' || !ggufFiles.length"
-              class="w-full flex items-center justify-center gap-2 bg-indigo-600 hover:bg-indigo-700 disabled:opacity-50 disabled:cursor-not-allowed text-white font-semibold text-xs px-4 py-2.5 rounded-xl transition-all"
-            >
-              <Upload class="w-3.5 h-3.5" />
-              {{ startingImport ? 'Starting…' : importJob?.status === 'running' ? 'Importing…' : 'Import model' }}
-            </button>
-
-            <div v-if="importJob && (importJob.status === 'pending' || importJob.status === 'running')" class="flex items-center gap-2 text-[10px] text-indigo-300 font-mono">
-              <RefreshCw class="w-3.5 h-3.5 animate-spin" />
-              <span>{{ importJob.message }}</span>
-            </div>
-            <div v-if="importSuccess" class="flex items-start gap-2 text-[10px] text-emerald-300 font-mono">
-              <CheckCircle class="w-3.5 h-3.5 shrink-0" />
-              <span>{{ importSuccess }}</span>
-            </div>
-            <div v-if="importError" class="flex items-start gap-2 text-[10px] text-amber-300 font-mono">
-              <AlertTriangle class="w-3.5 h-3.5 shrink-0" />
-              <span>{{ importError }}</span>
+                <!-- Top P -->
+                <div class="space-y-2">
+                  <div class="flex items-center justify-between text-xs">
+                    <span class="text-slate-400">Top-P Sampling</span>
+                    <span class="font-mono text-indigo-400 bg-indigo-500/10 px-2 py-0.5 rounded font-bold">{{ config.topP }}</span>
+                  </div>
+                  <input
+                    type="range"
+                    min="0"
+                    max="1"
+                    step="0.05"
+                    :value="config.topP"
+                    @input="updateField('topP', parseFloat(($event.target as HTMLInputElement).value))"
+                    class="w-full h-1 bg-slate-800 rounded-lg appearance-none cursor-pointer accent-indigo-500"
+                  />
+                </div>
+              </div>
             </div>
           </div>
+        </div>
+      </div>
+
+      <!-- ============ GPU Offload ============ -->
+      <div class="space-y-3">
+        <div class="flex items-center gap-2">
+          <span class="w-1 h-3.5 bg-amber-500 rounded-full"></span>
+          <h4 class="text-[11px] font-bold text-slate-400 uppercase tracking-widest">GPU Offload</h4>
+        </div>
+        <div class="grid grid-cols-1 md:grid-cols-2 gap-6">
 
           <!-- Remote GPU LLM (vLLM) -->
           <div class="bg-slate-900/30 border border-slate-800 rounded-2xl p-6 space-y-4">
@@ -471,165 +582,195 @@ onUnmounted(stopImportPolling);
             </div>
           </div>
 
-          <!-- LLM Provider Status -->
+          <!-- RunPod Serverless (GPU LLM) -->
           <div class="bg-slate-900/30 border border-slate-800 rounded-2xl p-6 space-y-4">
-            <h4 class="text-xs font-bold text-slate-200 uppercase tracking-wider flex items-center justify-between gap-2 border-b border-slate-800 pb-3">
-              <span class="flex items-center gap-2">
-                <Gauge class="w-4 h-4 text-indigo-400" />
-                LLM Provider Status
-              </span>
-              <button
-                type="button"
-                @click="fetchHealth"
-                class="text-[10px] text-slate-400 hover:text-indigo-300 flex items-center gap-1 font-mono"
-                :disabled="loadingHealth"
-              >
-                <RefreshCw class="w-3 h-3" :class="loadingHealth ? 'animate-spin' : ''" />
-                refresh
-              </button>
+            <h4 class="text-xs font-bold text-slate-200 uppercase tracking-wider flex items-center gap-2 border-b border-slate-800 pb-3">
+              <Zap class="w-4 h-4 text-amber-400" />
+              RunPod Serverless (GPU LLM)
             </h4>
 
-            <div v-if="loadingHealth" class="flex items-center gap-2 text-[10px] text-slate-400 font-mono">
-              <RefreshCw class="w-3.5 h-3.5 animate-spin" />
-              checking…
+            <div class="space-y-1.5">
+              <label class="text-xs text-slate-400 font-mono">API Key</label>
+              <input
+                :value="config.runpodApiKey"
+                @input="updateField('runpodApiKey', ($event.target as HTMLInputElement).value)"
+                type="password"
+                class="w-full bg-[#11162d] border border-slate-800 rounded-xl px-4 py-2.5 text-xs font-mono focus:outline-none focus:border-amber-500 text-slate-200"
+                placeholder="rpa_..."
+              />
+              <p class="text-[9px] text-slate-600">Serverless API key from runpod.io. Used to manage serverless endpoints.</p>
             </div>
-            <div v-else-if="!llmHealth" class="text-[10px] text-slate-500 font-mono">
-              Health endpoint unavailable.
-            </div>
-            <div v-else class="space-y-3">
-              <div class="flex items-center justify-between gap-3">
-                <span class="text-xs text-slate-400 font-mono flex items-center gap-1.5">
-                  <Server class="w-3.5 h-3.5 text-indigo-400" />
-                  Local Ollama
-                </span>
-                <span
-                  class="px-2 py-0.5 rounded-full border text-[10px] font-mono"
-                  :class="ollamaOnline
-                    ? 'bg-emerald-500/10 text-emerald-400 border-emerald-500/30'
-                    : 'bg-rose-500/10 text-rose-400 border-rose-500/30'"
-                >
-                  {{ ollamaOnline ? `connected (${ollamaModelCount} models)` : 'offline' }}
-                </span>
+
+            <div class="pt-3 border-t border-slate-800 flex items-center justify-between gap-2">
+              <div class="min-w-0 flex-1 truncate text-[10px] font-mono" :class="runpodConnCls">
+                <CheckCircle v-if="runpodResult?.ok" class="w-3 h-3 inline mr-1 shrink-0" />
+                <AlertTriangle v-else-if="runpodResult" class="w-3 h-3 inline mr-1 shrink-0" />
+                {{ runpodLabel }}
               </div>
-              <div class="flex items-center justify-between gap-3">
-                <span class="text-xs text-slate-400 font-mono flex items-center gap-1.5">
-                  <Zap class="w-3.5 h-3.5 text-indigo-400" />
-                  Remote GPU (vLLM)
-                </span>
-                <span
-                  v-if="!remoteConfigured"
-                  class="px-2 py-0.5 rounded-full border text-[10px] font-mono bg-slate-800/40 text-slate-400 border-slate-700"
-                >
-                  not configured
-                </span>
-                <span
-                  v-else-if="remoteOnline"
-                  class="px-2 py-0.5 rounded-full border text-[10px] font-mono bg-emerald-500/10 text-emerald-400 border-emerald-500/30"
-                >
-                  connected — serving {{ remoteServingModel || 'remote model' }}
-                </span>
-                <span
-                  v-else
-                  class="px-2 py-0.5 rounded-full border text-[10px] font-mono bg-amber-500/10 text-amber-400 border-amber-500/30"
-                >
-                  configured but offline (is the tunnel up?)
-                </span>
-              </div>
+              <button
+                type="button"
+                @click="testRunpodConnection"
+                :disabled="testingRunpod"
+                class="text-[10px] font-mono text-slate-400 hover:text-amber-300 flex items-center gap-1 disabled:opacity-50 shrink-0"
+              >
+                <RefreshCw class="w-3 h-3" :class="testingRunpod ? 'animate-spin' : ''" />
+                {{ testingRunpod ? 'Testing…' : 'Test connection' }}
+              </button>
             </div>
           </div>
         </div>
+      </div>
 
-        <!-- Column 2: Qdrant + sampling params -->
-        <div class="space-y-6">
+      <!-- ============ Vector Store ============ -->
+      <div class="space-y-3">
+        <div class="flex items-center gap-2">
+          <span class="w-1 h-3.5 bg-emerald-500 rounded-full"></span>
+          <h4 class="text-[11px] font-bold text-slate-400 uppercase tracking-widest">Vector Store</h4>
+        </div>
 
-          <!-- Qdrant -->
-          <div class="bg-slate-900/30 border border-slate-800 rounded-2xl p-6 space-y-4">
-            <h4 class="text-xs font-bold text-slate-200 uppercase tracking-wider flex items-center gap-2 border-b border-slate-800 pb-3">
-              <Database class="w-4 h-4 text-indigo-400" />
-              Qdrant Vector Database
-            </h4>
+        <!-- Qdrant -->
+        <div class="bg-slate-900/30 border border-slate-800 rounded-2xl p-6 space-y-4">
+          <h4 class="text-xs font-bold text-slate-200 uppercase tracking-wider flex items-center gap-2 border-b border-slate-800 pb-3">
+            <Database class="w-4 h-4 text-indigo-400" />
+            Qdrant Vector Database
+          </h4>
 
-            <div class="space-y-3">
-              <div class="space-y-1.5">
-                <div class="flex items-center justify-between">
-                  <label class="text-xs text-slate-400 font-mono">Server URL</label>
-                  <span class="text-[9px] text-slate-500">Optional</span>
-                </div>
-                <input 
-                  :value="config.qdrantUrl" 
-                  @input="updateField('qdrantUrl', ($event.target as HTMLInputElement).value)"
-                  type="text" 
-                  class="w-full bg-[#11162d] border border-slate-800 rounded-xl px-4 py-2.5 text-xs font-mono focus:outline-none focus:border-indigo-500 text-slate-200"
-                  placeholder="e.g. https://your-cluster.qdrant.tech"
-                />
+          <div class="grid grid-cols-1 md:grid-cols-2 gap-4">
+            <div class="space-y-1.5">
+              <div class="flex items-center justify-between">
+                <label class="text-xs text-slate-400 font-mono">Server URL</label>
+                <span class="text-[9px] text-slate-500">Optional</span>
               </div>
+              <input
+                :value="config.qdrantUrl"
+                @input="updateField('qdrantUrl', ($event.target as HTMLInputElement).value)"
+                type="text"
+                class="w-full bg-[#11162d] border border-slate-800 rounded-xl px-4 py-2.5 text-xs font-mono focus:outline-none focus:border-indigo-500 text-slate-200"
+                placeholder="e.g. https://your-cluster.qdrant.tech"
+              />
+            </div>
 
-              <div class="space-y-1.5">
-                <div class="flex items-center justify-between">
-                  <label class="text-xs text-slate-400 font-mono">API Key</label>
-                  <span class="text-[9px] text-slate-500">Optional</span>
-                </div>
-                <input 
-                  :value="config.qdrantApiKey" 
-                  @input="updateField('qdrantApiKey', ($event.target as HTMLInputElement).value)"
-                  type="password" 
-                  class="w-full bg-[#11162d] border border-slate-800 rounded-xl px-4 py-2.5 text-xs font-mono focus:outline-none focus:border-indigo-500 text-slate-200"
-                  placeholder="Enter Qdrant cloud token"
-                />
+            <div class="space-y-1.5">
+              <div class="flex items-center justify-between">
+                <label class="text-xs text-slate-400 font-mono">API Key</label>
+                <span class="text-[9px] text-slate-500">Optional</span>
               </div>
+              <input
+                :value="config.qdrantApiKey"
+                @input="updateField('qdrantApiKey', ($event.target as HTMLInputElement).value)"
+                type="password"
+                class="w-full bg-[#11162d] border border-slate-800 rounded-xl px-4 py-2.5 text-xs font-mono focus:outline-none focus:border-indigo-500 text-slate-200"
+                placeholder="Enter Qdrant cloud token"
+              />
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <!-- ============ Model Import ============ -->
+      <div class="space-y-3">
+        <div class="flex items-center gap-2">
+          <span class="w-1 h-3.5 bg-sky-500 rounded-full"></span>
+          <h4 class="text-[11px] font-bold text-slate-400 uppercase tracking-widest">Model Import</h4>
+        </div>
+
+        <!-- GGUF import -->
+        <div class="bg-slate-900/30 border border-slate-800 rounded-2xl p-6 space-y-4">
+          <h4 class="text-xs font-bold text-slate-200 uppercase tracking-wider flex items-center justify-between gap-2 border-b border-slate-800 pb-3">
+            <span class="flex items-center gap-2">
+              <FolderSearch class="w-4 h-4 text-indigo-400" />
+              Import GGUF Model
+            </span>
+            <button
+              type="button"
+              @click="scanImportDirectory"
+              class="text-[10px] text-slate-400 hover:text-indigo-300 flex items-center gap-1 font-mono"
+              :disabled="scanningImportDirectory"
+            >
+              <RefreshCw class="w-3 h-3" :class="scanningImportDirectory ? 'animate-spin' : ''" />
+              scan
+            </button>
+          </h4>
+
+          <p class="text-[10px] leading-relaxed text-slate-500">
+            GGUF files must be placed in the shared directory configured for this deployment.
+            The app uploads the selected file to Ollama and reports progress here.
+          </p>
+
+          <div class="grid grid-cols-1 md:grid-cols-2 gap-4">
+            <div class="space-y-1.5">
+              <label class="text-xs text-slate-400 font-mono">Configured directory</label>
+              <input
+                :value="importRoot"
+                readonly
+                class="w-full bg-[#11162d] border border-slate-800 rounded-xl px-4 py-2.5 text-[10px] font-mono text-slate-500"
+                placeholder="Scan to load configured directory"
+              />
+            </div>
+
+            <div class="space-y-1.5">
+              <label class="text-xs text-slate-400 font-mono">Ollama model name</label>
+              <input
+                v-model="importModelName"
+                type="text"
+                class="w-full bg-[#11162d] border border-slate-800 rounded-xl px-4 py-2.5 text-xs font-mono focus:outline-none focus:border-indigo-500 text-slate-200"
+                placeholder="e.g. my-coder-model"
+              />
             </div>
           </div>
 
-          <!-- Sampling parameters -->
-          <div class="bg-slate-900/30 border border-slate-800 rounded-2xl p-6 space-y-4">
-            <h4 class="text-xs font-bold text-slate-200 uppercase tracking-wider flex items-center gap-2 border-b border-slate-800 pb-3">
-              <SlidersHorizontal class="w-4 h-4 text-indigo-400" />
-              Sampling Parameters
-            </h4>
+          <div class="space-y-1.5">
+            <label class="text-xs text-slate-400 font-mono">GGUF file</label>
+            <select
+              v-model="selectedGgufFile"
+              class="w-full bg-[#11162d] border border-slate-800 rounded-xl px-4 py-2.5 text-xs font-mono focus:outline-none focus:border-indigo-500 text-slate-200"
+              :disabled="!ggufFiles.length"
+            >
+              <option value="" disabled>Select a GGUF file</option>
+              <option v-for="entry in ggufFiles" :key="entry.file" :value="entry.file">{{ entry.file }}</option>
+            </select>
+          </div>
 
-            <div class="space-y-4">
-              <!-- Temperature -->
-              <div class="space-y-2">
-                <div class="flex items-center justify-between text-xs">
-                  <span class="text-slate-400">Temperature</span>
-                  <span class="font-mono text-indigo-400 bg-indigo-500/10 px-2 py-0.5 rounded font-bold">{{ config.temperature }}</span>
-                </div>
-                <input 
-                  type="range" 
-                  min="0" 
-                  max="1.2" 
-                  step="0.05" 
-                  :value="config.temperature"
-                  @input="updateField('temperature', parseFloat(($event.target as HTMLInputElement).value))"
-                  class="w-full h-1 bg-slate-800 rounded-lg appearance-none cursor-pointer accent-indigo-500" 
-                />
-              </div>
+          <div class="space-y-1.5">
+            <label class="text-xs text-slate-400 font-mono">Optional Modelfile settings</label>
+            <textarea
+              v-model="importModelfile"
+              rows="4"
+              class="w-full bg-[#11162d] border border-slate-800 rounded-xl px-4 py-2.5 text-[10px] font-mono focus:outline-none focus:border-indigo-500 text-slate-200 resize-y"
+              placeholder="SYSTEM You are a helpful coding assistant&#10;PARAMETER temperature 0.2"
+            />
+            <p class="text-[9px] text-slate-600">The app inserts the selected GGUF as the FROM source automatically.</p>
+          </div>
 
-              <!-- Top P -->
-              <div class="space-y-2">
-                <div class="flex items-center justify-between text-xs">
-                  <span class="text-slate-400">Top-P Sampling</span>
-                  <span class="font-mono text-indigo-400 bg-indigo-500/10 px-2 py-0.5 rounded font-bold">{{ config.topP }}</span>
-                </div>
-                <input 
-                  type="range" 
-                  min="0" 
-                  max="1" 
-                  step="0.05" 
-                  :value="config.topP"
-                  @input="updateField('topP', parseFloat(($event.target as HTMLInputElement).value))"
-                  class="w-full h-1 bg-slate-800 rounded-lg appearance-none cursor-pointer accent-indigo-500" 
-                />
-              </div>
-            </div>
+          <button
+            type="button"
+            @click="startImport"
+            :disabled="startingImport || importJob?.status === 'pending' || importJob?.status === 'running' || !ggufFiles.length"
+            class="w-full md:w-auto flex items-center justify-center gap-2 bg-indigo-600 hover:bg-indigo-700 disabled:opacity-50 disabled:cursor-not-allowed text-white font-semibold text-xs px-6 py-2.5 rounded-xl transition-all"
+          >
+            <Upload class="w-3.5 h-3.5" />
+            {{ startingImport ? 'Starting…' : importJob?.status === 'running' ? 'Importing…' : 'Import model' }}
+          </button>
+
+          <div v-if="importJob && (importJob.status === 'pending' || importJob.status === 'running')" class="flex items-center gap-2 text-[10px] text-indigo-300 font-mono">
+            <RefreshCw class="w-3.5 h-3.5 animate-spin" />
+            <span>{{ importJob.message }}</span>
+          </div>
+          <div v-if="importSuccess" class="flex items-start gap-2 text-[10px] text-emerald-300 font-mono">
+            <CheckCircle class="w-3.5 h-3.5 shrink-0" />
+            <span>{{ importSuccess }}</span>
+          </div>
+          <div v-if="importError" class="flex items-start gap-2 text-[10px] text-amber-300 font-mono">
+            <AlertTriangle class="w-3.5 h-3.5 shrink-0" />
+            <span>{{ importError }}</span>
           </div>
         </div>
       </div>
 
       <!-- Action Footer -->
       <div class="pt-4 border-t border-slate-800 flex justify-end">
-        <button 
-          type="button" 
+        <button
+          type="button"
           @click="emit('saveConfig')"
           class="bg-indigo-600 hover:bg-indigo-700 text-white font-semibold text-xs px-6 py-3 rounded-xl transition-all shadow-md shadow-indigo-600/10"
         >

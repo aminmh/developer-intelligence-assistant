@@ -8,6 +8,7 @@ export interface RAGConfig {
   llmRemoteBaseUrl: string;
   llmRemoteModel: string;
   llmRemoteApiKey: string;
+  runpodApiKey: string;
   temperature: number;
   topP: number;
 }

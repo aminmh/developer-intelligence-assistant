@@ -505,6 +505,38 @@ async function startServer() {
     }
   });
 
+  // RunPod serverless: test the API key against rest.runpod.io
+  app.post('/api/health/test/runpod', async (req, res) => {
+    try {
+      const pyRes = await fetch(`${PYTHON_API_URL}/health/test/runpod`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(req.body ?? {}),
+      });
+      if (!pyRes.ok) {
+        return res.status(pyRes.status).json({ success: false, error: 'RunPod connection test failed.' });
+      }
+      res.json(await pyRes.json());
+    } catch (error: any) {
+      console.error('Failed to test RunPod connection via Python:', error.message);
+      res.status(500).json({ success: false, error: error.message });
+    }
+  });
+
+  // RunPod serverless: list endpoints on the account
+  app.get('/api/runpod/endpoints', async (req, res) => {
+    try {
+      const pyRes = await fetch(`${PYTHON_API_URL}/api/runpod/endpoints`);
+      if (!pyRes.ok) {
+        return res.status(pyRes.status).json({ success: false, error: 'Failed to list RunPod endpoints.' });
+      }
+      res.json(await pyRes.json());
+    } catch (error: any) {
+      console.error('Failed to list RunPod endpoints via Python:', error.message);
+      res.status(500).json({ success: false, error: error.message });
+    }
+  });
+
   // Get uploaded files list (local tracking + Python/MinIO rag-uploads merged)
   app.get('/api/files', async (req, res) => {
     try {
