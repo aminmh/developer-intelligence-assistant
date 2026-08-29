@@ -30,6 +30,7 @@ class Settings(BaseModel):
     llm_remote_base_url: str = os.getenv("LLM_REMOTE_BASE_URL", "")
     llm_remote_model: str = os.getenv("LLM_REMOTE_MODEL", "")
     llm_remote_api_key: str = os.getenv("LLM_REMOTE_API_KEY", "")
+    runpod_api_key: str = os.getenv("RUNPOD_API_KEY", "")
 
     temperature: float = float(os.getenv("LLM_TEMPERATURE", "0.7"))
     top_p: float = float(os.getenv("LLM_TOP_P", "0.9"))
@@ -75,6 +76,7 @@ class RuntimeSettings:
         "llm_remote_base_url": "llmRemoteBaseUrl",
         "llm_remote_model": "llmRemoteModel",
         "llm_remote_api_key": "llmRemoteApiKey",
+        "runpod_api_key": "runpodApiKey",
         "qdrant_url": "qdrantUrl",
         "qdrant_api_key": "qdrantApiKey",
         "temperature": "temperature",

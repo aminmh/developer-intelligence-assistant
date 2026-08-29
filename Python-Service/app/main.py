@@ -292,21 +292,108 @@ def _probe_remote_llm() -> dict:
         return {"configured": True, "reachable": False, "model": None, "error": str(exc)}
 
 
+_RUNPOD_API = "https://rest.runpod.io/v1"
+
+
+def _probe_runpod() -> dict:
+    """Probe the RunPod REST API (list endpoints) with the stored key; never raises."""
+    api_key = (settings.runpod_api_key or "").strip()
+    if not api_key:
+        return {"configured": False, "reachable": False, "endpoint_count": 0, "error": None}
+    try:
+        req = urllib.request.Request(
+            f"{_RUNPOD_API}/endpoints",
+            headers={"Authorization": f"Bearer {api_key}", "Accept": "application/json"},
+        )
+        with urllib.request.urlopen(req, timeout=5.0) as resp:
+            data = json.loads(resp.read().decode("utf-8"))
+        count = len(data) if isinstance(data, list) else 0
+        return {"configured": True, "reachable": True, "endpoint_count": count, "error": None}
+    except Exception as exc:
+        return {"configured": True, "reachable": False, "endpoint_count": 0, "error": str(exc)}
+
+
 @app.get(
     "/health/llm",
     tags=["Health & System"],
     summary="LLM Provider Health",
     description=(
-        "Checks reachability of the local Ollama and optional remote vLLM LLM "
-        "providers. Never raises — each provider reports its own status."
+        "Checks reachability of the local Ollama, optional remote vLLM LLM "
+        "providers, and the RunPod serverless account. Never raises — each "
+        "provider reports its own status."
     ),
 )
 def health_llm():
-    """LLM provider health: local Ollama + optional remote vLLM."""
+    """LLM provider health: local Ollama + optional remote vLLM + RunPod."""
     return {
         "local": _probe_local_llm(),
         "remote": _probe_remote_llm(),
+        "runpod": _probe_runpod(),
     }
+
+
+@app.get(
+    "/api/runpod/endpoints",
+    tags=["RunPod Serverless"],
+    summary="List RunPod Endpoints",
+    description=(
+        "Lists the account's RunPod serverless endpoints via the RunPod REST "
+        "API. Returns {ok, endpoints, error}; never raises."
+    ),
+)
+def runpod_list_endpoints():
+    """List RunPod serverless endpoints for the stored account key."""
+    api_key = (settings.runpod_api_key or "").strip()
+    if not api_key:
+        return {"ok": False, "endpoints": [], "error": "not configured (no RunPod API key)"}
+    try:
+        req = urllib.request.Request(
+            f"{_RUNPOD_API}/endpoints",
+            headers={"Authorization": f"Bearer {api_key}", "Accept": "application/json"},
+        )
+        with urllib.request.urlopen(req, timeout=8.0) as resp:
+            data = json.loads(resp.read().decode("utf-8"))
+        endpoints = data if isinstance(data, list) else []
+        return {"ok": True, "endpoints": endpoints, "error": None}
+    except Exception as exc:
+        return {"ok": False, "endpoints": [], "error": str(exc)}
+
+
+@app.post(
+    "/health/test/runpod",
+    tags=["RunPod Serverless"],
+    summary="Test RunPod Connection",
+    description=(
+        "Validates the stored RunPod API key by calling the RunPod REST API "
+        "list-endpoints endpoint. Returns a uniform {ok, latency_ms, detail} "
+        "result; never raises."
+    ),
+)
+def runpod_test_connection():
+    """Test the stored RunPod key; uniform {ok, latency_ms, detail} response."""
+    import time as _t
+
+    api_key = (settings.runpod_api_key or "").strip()
+    t0 = _t.monotonic()
+    if not api_key:
+        return {"ok": False, "latency_ms": 0, "detail": "not configured (no RunPod API key)"}
+    try:
+        req = urllib.request.Request(
+            f"{_RUNPOD_API}/endpoints",
+            headers={"Authorization": f"Bearer {api_key}", "Accept": "application/json"},
+        )
+        with urllib.request.urlopen(req, timeout=8.0) as resp:
+            data = json.loads(resp.read().decode("utf-8"))
+        count = len(data) if isinstance(data, list) else 0
+        latency_ms = round((_t.monotonic() - t0) * 1000)
+        return {
+            "ok": True,
+            "latency_ms": latency_ms,
+            "detail": f"authenticated · {count} endpoint(s) on account",
+        }
+    except Exception as exc:
+        latency_ms = round((_t.monotonic() - t0) * 1000)
+        return {"ok": False, "latency_ms": latency_ms, "detail": str(exc)[:300]}
 
 
 @app.post(
