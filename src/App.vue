@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ref, onMounted } from 'vue';
+import { ref, watch, onMounted } from 'vue';
 import { 
   FileText, 
   Settings, 
@@ -38,8 +38,18 @@ const config = ref<RAGConfig>({
   topP: 0.9,
 });
 
-// Route chat answers to the remote GPU LLM (vLLM) instead of the local Ollama model.
+// Route chat answers to the remote GPU LLM instead of the local Ollama model.
+// Once an external OpenAI-compatible model is configured, it is used for final
+// answers by default (the chat toggle can still override it per session).
 const useRemote = ref(false);
+
+watch(
+  () => config.value.llmRemoteBaseUrl,
+  (url) => {
+    useRemote.value = Boolean((url ?? '').trim());
+  },
+  { immediate: true },
+);
 
 const files = ref<UploadedFile[]>([]);
 const loading = ref(false);

@@ -167,6 +167,67 @@ const testRunpodConnection = async () => {
   }
 };
 
+// --- External OpenAI-compatible endpoint -----------------------------------
+
+// Preset base URLs deliberately omit "/v1" — the backend appends it.
+const remotePresets = [
+  { id: 'openai', label: 'OpenAI', baseUrl: 'https://api.openai.com' },
+  { id: 'groq', label: 'Groq', baseUrl: 'https://api.groq.com/openai' },
+  { id: 'openrouter', label: 'OpenRouter', baseUrl: 'https://openrouter.ai/api' },
+  { id: 'together', label: 'Together AI', baseUrl: 'https://api.together.xyz' },
+  { id: 'lmstudio', label: 'LM Studio', baseUrl: 'http://localhost:1234' },
+  { id: 'custom', label: 'Custom', baseUrl: '' },
+];
+
+const remotePresetId = computed({
+  get: () => {
+    const url = (props.config.llmRemoteBaseUrl ?? '').trim().replace(/\/+$/, '');
+    const hit = remotePresets.find((p) => p.baseUrl === url);
+    return hit ? hit.id : 'custom';
+  },
+  set: (id: string) => {
+    const preset = remotePresets.find((p) => p.id === id);
+    if (preset) updateField('llmRemoteBaseUrl', preset.baseUrl);
+  },
+});
+
+const remoteResult = ref<{ ok: boolean; latency_ms: number; detail: string; model: string } | null>(null);
+const testingRemote = ref(false);
+
+const remoteLabel = computed(() => {
+  const r = remoteResult.value;
+  if (!r) return remoteConfigured.value ? 'Not tested' : 'Not configured';
+  return r.ok ? `Connected · ${r.latency_ms}ms${r.model ? ` · ${r.model}` : ''}` : r.detail || 'Failed';
+});
+const remoteConnCls = computed(() => {
+  const r = remoteResult.value;
+  if (!r) return remoteConfigured.value ? 'text-slate-500' : 'text-slate-600';
+  return r.ok ? 'text-emerald-300' : 'text-rose-300';
+});
+
+const testRemoteConnection = async () => {
+  testingRemote.value = true;
+  remoteResult.value = null;
+  try {
+    const res = await makeRequest('/api/health/test/remote', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({}),
+    });
+    const data = await res.json();
+    remoteResult.value = {
+      ok: Boolean(data.ok),
+      latency_ms: Number(data.latency_ms) || 0,
+      detail: String(data.detail ?? data.error ?? 'request failed'),
+      model: String(data.model ?? ''),
+    };
+  } catch (err) {
+    remoteResult.value = { ok: false, latency_ms: 0, detail: String(err), model: '' };
+  } finally {
+    testingRemote.value = false;
+  }
+};
+
 const fetchModels = async () => {
   loadingModels.value = true;
   try {
@@ -437,7 +498,7 @@ onUnmounted(stopImportPolling);
                 <div class="flex items-center justify-between gap-3">
                   <span class="text-xs text-slate-400 font-mono flex items-center gap-1.5">
                     <Zap class="w-3.5 h-3.5 text-indigo-400" />
-                    Remote GPU (vLLM)
+                    External OpenAI-Compatible
                   </span>
                   <span
                     v-if="!remoteConfigured"
@@ -455,7 +516,7 @@ onUnmounted(stopImportPolling);
                     v-else
                     class="px-2 py-0.5 rounded-full border text-[10px] font-mono bg-amber-500/10 text-amber-400 border-amber-500/30"
                   >
-                    configured but offline (is the tunnel up?)
+                    configured but unreachable — check URL, key and model
                   </span>
                 </div>
                 <div class="flex items-center justify-between gap-3">
@@ -538,85 +599,118 @@ onUnmounted(stopImportPolling);
           <span class="w-1 h-3.5 bg-amber-500 rounded-full"></span>
           <h4 class="text-[11px] font-bold text-slate-400 uppercase tracking-widest">GPU Offload</h4>
         </div>
-        <div class="grid grid-cols-1 md:grid-cols-2 gap-6">
 
-          <!-- Remote GPU LLM (vLLM) -->
-          <div class="bg-slate-900/30 border border-slate-800 rounded-2xl p-6 space-y-4">
-            <h4 class="text-xs font-bold text-slate-200 uppercase tracking-wider flex items-center gap-2 border-b border-slate-800 pb-3">
-              <Zap class="w-4 h-4 text-indigo-400" />
-              Remote GPU LLM (vLLM)
-            </h4>
+        <!-- RunPod Serverless (GPU LLM) -->
+        <div class="bg-slate-900/30 border border-slate-800 rounded-2xl p-6 space-y-4 max-w-2xl">
+          <h4 class="text-xs font-bold text-slate-200 uppercase tracking-wider flex items-center gap-2 border-b border-slate-800 pb-3">
+            <Zap class="w-4 h-4 text-amber-400" />
+            RunPod Serverless (GPU LLM)
+          </h4>
 
-            <div class="space-y-1.5">
-              <label class="text-xs text-slate-400 font-mono">Base URL</label>
-              <input
-                :value="config.llmRemoteBaseUrl"
-                @input="updateField('llmRemoteBaseUrl', ($event.target as HTMLInputElement).value)"
-                type="text"
-                class="w-full bg-[#11162d] border border-slate-800 rounded-xl px-4 py-2.5 text-xs font-mono focus:outline-none focus:border-indigo-500 text-slate-200"
-                placeholder="e.g. http://localhost:8000"
-              />
-              <p class="text-[9px] text-slate-600">OpenAI-compatible endpoint (vLLM). Leave empty to disable.</p>
-            </div>
-
-            <div class="space-y-1.5">
-              <label class="text-xs text-slate-400 font-mono">Model</label>
-              <input
-                :value="config.llmRemoteModel"
-                @input="updateField('llmRemoteModel', ($event.target as HTMLInputElement).value)"
-                type="text"
-                class="w-full bg-[#11162d] border border-slate-800 rounded-xl px-4 py-2.5 text-xs font-mono focus:outline-none focus:border-indigo-500 text-slate-200"
-                placeholder="e.g. qwen2.5-coder-32b-instruct"
-              />
-            </div>
-
-            <div class="space-y-1.5">
-              <label class="text-xs text-slate-400 font-mono">API Key</label>
-              <input
-                :value="config.llmRemoteApiKey"
-                @input="updateField('llmRemoteApiKey', ($event.target as HTMLInputElement).value)"
-                type="password"
-                class="w-full bg-[#11162d] border border-slate-800 rounded-xl px-4 py-2.5 text-xs font-mono focus:outline-none focus:border-indigo-500 text-slate-200"
-                placeholder="optional"
-              />
-            </div>
+          <div class="space-y-1.5">
+            <label class="text-xs text-slate-400 font-mono">API Key</label>
+            <input
+              :value="config.runpodApiKey"
+              @input="updateField('runpodApiKey', ($event.target as HTMLInputElement).value)"
+              type="password"
+              class="w-full bg-[#11162d] border border-slate-800 rounded-xl px-4 py-2.5 text-xs font-mono focus:outline-none focus:border-amber-500 text-slate-200"
+              placeholder="rpa_..."
+            />
+            <p class="text-[9px] text-slate-600">Serverless API key from runpod.io. Used to manage serverless endpoints.</p>
           </div>
 
-          <!-- RunPod Serverless (GPU LLM) -->
-          <div class="bg-slate-900/30 border border-slate-800 rounded-2xl p-6 space-y-4">
-            <h4 class="text-xs font-bold text-slate-200 uppercase tracking-wider flex items-center gap-2 border-b border-slate-800 pb-3">
-              <Zap class="w-4 h-4 text-amber-400" />
-              RunPod Serverless (GPU LLM)
-            </h4>
-
-            <div class="space-y-1.5">
-              <label class="text-xs text-slate-400 font-mono">API Key</label>
-              <input
-                :value="config.runpodApiKey"
-                @input="updateField('runpodApiKey', ($event.target as HTMLInputElement).value)"
-                type="password"
-                class="w-full bg-[#11162d] border border-slate-800 rounded-xl px-4 py-2.5 text-xs font-mono focus:outline-none focus:border-amber-500 text-slate-200"
-                placeholder="rpa_..."
-              />
-              <p class="text-[9px] text-slate-600">Serverless API key from runpod.io. Used to manage serverless endpoints.</p>
+          <div class="pt-3 border-t border-slate-800 flex items-center justify-between gap-2">
+            <div class="min-w-0 flex-1 truncate text-[10px] font-mono" :class="runpodConnCls">
+              <CheckCircle v-if="runpodResult?.ok" class="w-3 h-3 inline mr-1 shrink-0" />
+              <AlertTriangle v-else-if="runpodResult" class="w-3 h-3 inline mr-1 shrink-0" />
+              {{ runpodLabel }}
             </div>
+            <button
+              type="button"
+              @click="testRunpodConnection"
+              :disabled="testingRunpod"
+              class="text-[10px] font-mono text-slate-400 hover:text-amber-300 flex items-center gap-1 disabled:opacity-50 shrink-0"
+            >
+              <RefreshCw class="w-3 h-3" :class="testingRunpod ? 'animate-spin' : ''" />
+              {{ testingRunpod ? 'Testing…' : 'Test connection' }}
+            </button>
+          </div>
+        </div>
+      </div>
 
-            <div class="pt-3 border-t border-slate-800 flex items-center justify-between gap-2">
-              <div class="min-w-0 flex-1 truncate text-[10px] font-mono" :class="runpodConnCls">
-                <CheckCircle v-if="runpodResult?.ok" class="w-3 h-3 inline mr-1 shrink-0" />
-                <AlertTriangle v-else-if="runpodResult" class="w-3 h-3 inline mr-1 shrink-0" />
-                {{ runpodLabel }}
-              </div>
-              <button
-                type="button"
-                @click="testRunpodConnection"
-                :disabled="testingRunpod"
-                class="text-[10px] font-mono text-slate-400 hover:text-amber-300 flex items-center gap-1 disabled:opacity-50 shrink-0"
-              >
-                <RefreshCw class="w-3 h-3" :class="testingRunpod ? 'animate-spin' : ''" />
-                {{ testingRunpod ? 'Testing…' : 'Test connection' }}
-              </button>
+      <!-- ============ External OpenAI-Compatible Models ============ -->
+      <div class="space-y-3">
+        <div class="flex items-center gap-2">
+          <span class="w-1 h-3.5 bg-sky-500 rounded-full"></span>
+          <h4 class="text-[11px] font-bold text-slate-400 uppercase tracking-widest">External OpenAI-Compatible Models</h4>
+        </div>
+
+        <div class="bg-slate-900/30 border border-slate-800 rounded-2xl p-6 space-y-4 max-w-2xl">
+          <h4 class="text-xs font-bold text-slate-200 uppercase tracking-wider flex items-center gap-2 border-b border-slate-800 pb-3">
+            <Zap class="w-4 h-4 text-sky-400" />
+            OpenAI-Compatible Endpoint
+          </h4>
+
+          <div class="flex items-center justify-between gap-4">
+            <label class="text-xs text-slate-400 font-mono shrink-0">Provider</label>
+            <select
+              v-model="remotePresetId"
+              class="w-[15rem] max-w-full bg-[#11162d] border border-slate-800 rounded-xl px-3 py-2.5 text-xs font-mono focus:outline-none focus:border-sky-500 text-slate-200"
+            >
+              <option v-for="p in remotePresets" :key="p.id" :value="p.id">{{ p.label }}</option>
+            </select>
+          </div>
+
+          <div class="space-y-1.5">
+            <label class="text-xs text-slate-400 font-mono">Base URL</label>
+            <input
+              :value="config.llmRemoteBaseUrl"
+              @input="updateField('llmRemoteBaseUrl', ($event.target as HTMLInputElement).value)"
+              type="text"
+              class="w-full bg-[#11162d] border border-slate-800 rounded-xl px-4 py-2.5 text-xs font-mono focus:outline-none focus:border-sky-500 text-slate-200"
+              placeholder="e.g. https://api.openai.com"
+            />
+            <p class="text-[9px] text-slate-600">Any OpenAI-compatible endpoint — OpenAI, Groq, OpenRouter, Together, LM Studio, vLLM. Leave empty to disable.</p>
+          </div>
+
+          <div class="space-y-1.5">
+            <label class="text-xs text-slate-400 font-mono">Model</label>
+            <input
+              :value="config.llmRemoteModel"
+              @input="updateField('llmRemoteModel', ($event.target as HTMLInputElement).value)"
+              type="text"
+              class="w-full bg-[#11162d] border border-slate-800 rounded-xl px-4 py-2.5 text-xs font-mono focus:outline-none focus:border-sky-500 text-slate-200"
+              placeholder="e.g. gpt-4o-mini"
+            />
+          </div>
+
+          <div class="space-y-1.5">
+            <label class="text-xs text-slate-400 font-mono">API Key</label>
+            <input
+              :value="config.llmRemoteApiKey"
+              @input="updateField('llmRemoteApiKey', ($event.target as HTMLInputElement).value)"
+              type="password"
+              class="w-full bg-[#11162d] border border-slate-800 rounded-xl px-4 py-2.5 text-xs font-mono focus:outline-none focus:border-sky-500 text-slate-200"
+              placeholder="sk-..."
+            />
+            <p class="text-[9px] text-slate-600">Optional — local endpoints (LM Studio, vLLM) usually need none.</p>
+          </div>
+
+          <div class="pt-3 border-t border-slate-800 flex items-center justify-between gap-2">
+            <div class="min-w-0 flex-1 truncate text-[10px] font-mono" :class="remoteConnCls">
+              <CheckCircle v-if="remoteResult?.ok" class="w-3 h-3 inline mr-1 shrink-0" />
+              <AlertTriangle v-else-if="remoteResult" class="w-3 h-3 inline mr-1 shrink-0" />
+              {{ remoteLabel }}
             </div>
+            <button
+              type="button"
+              @click="testRemoteConnection"
+              :disabled="testingRemote"
+              class="text-[10px] font-mono text-slate-400 hover:text-sky-300 flex items-center gap-1 disabled:opacity-50 shrink-0"
+            >
+              <RefreshCw class="w-3 h-3" :class="testingRemote ? 'animate-spin' : ''" />
+              {{ testingRemote ? 'Testing…' : 'Test connection' }}
+            </button>
           </div>
         </div>
       </div>

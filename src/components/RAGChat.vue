@@ -334,11 +334,11 @@ const toggleMatchExpansion = (id: string) => {
               :class="useRemote ? 'bg-indigo-600/20 border-indigo-500/40 text-indigo-300' : 'bg-[#11162d] border-slate-800 text-slate-400 hover:text-white'"
               class="px-2.5 py-1 rounded-lg border text-[10px] font-mono inline-flex items-center gap-1 transition-all"
               :disabled="loading"
-              title="Route this answer to the remote GPU model (vLLM)"
-              aria-label="Toggle remote GPU model"
+              title="Route this answer to the external OpenAI-compatible model"
+              aria-label="Toggle external model"
             >
               <Cpu class="w-3.5 h-3.5" />
-              {{ useRemote ? 'GPU Mode' : 'Local Mode' }}
+              {{ useRemote ? 'External Model' : 'Local Model' }}
             </button>
             <label class="cursor-pointer hover:text-indigo-400 transition-colors flex items-center gap-1">
               <input type="file" accept=".zip" hidden @change="onAttachZip" />
