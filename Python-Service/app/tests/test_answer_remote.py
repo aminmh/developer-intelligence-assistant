@@ -112,6 +112,7 @@ def test_health_llm_reports_reachable_providers(monkeypatch):
     monkeypatch.setattr(main.settings, "ollama_base_url", "http://localhost:11434/")
     monkeypatch.setattr(main.settings, "llm_remote_base_url", "http://localhost:8000/")
     monkeypatch.setattr(main.settings, "llm_remote_api_key", "sekret")
+    monkeypatch.setattr(main.settings, "runpod_api_key", "")
 
     result = main.health_llm()
 
@@ -130,7 +131,7 @@ def test_health_llm_sends_no_auth_when_key_unset(monkeypatch):
     main = _load_main()
     captured = {}
 
-    def fake_urlopen(req, timeout=2.0):
+    def fake_urlopen(req, timeout=5.0):
         captured["url"] = req.full_url
         captured["auth"] = req.get_header("Authorization")
         return _FakeHttpResponse({"data": [{"id": "qwen2.5-32b"}]})
@@ -139,6 +140,7 @@ def test_health_llm_sends_no_auth_when_key_unset(monkeypatch):
     monkeypatch.setattr(main.settings, "ollama_base_url", "http://localhost:11434/")
     monkeypatch.setattr(main.settings, "llm_remote_base_url", "http://localhost:8000/")
     monkeypatch.setattr(main.settings, "llm_remote_api_key", "")
+    monkeypatch.setattr(main.settings, "runpod_api_key", "")
 
     result = main.health_llm()
 

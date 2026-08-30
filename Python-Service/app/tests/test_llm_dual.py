@@ -169,3 +169,65 @@ def test_complete_defaults_to_local_provider(monkeypatch):
 
     assert content == "local-answer"
     assert local_client.calls[0]["model"] == llm.settings.ollama_llm_model
+
+
+def test_remote_client_normalises_trailing_v1(monkeypatch):
+    """A pasted full provider URL (with /v1) must not become /v1/v1."""
+    _configure_remote(monkeypatch, base_url="http://vllm:8000/v1")
+
+    captured = {}
+    monkeypatch.setattr(
+        llm, "OpenAI", lambda base_url, api_key: captured.update(base_url=base_url, api_key=api_key)
+    )
+
+    llm._get_remote_client()
+
+    assert captured["base_url"] == "http://vllm:8000/v1"
+    assert captured["api_key"] == "sekret"
+
+
+def test_remote_client_normalises_plain_base(monkeypatch):
+    _configure_remote(monkeypatch, base_url="http://vllm:8000")
+
+    captured = {}
+    monkeypatch.setattr(
+        llm, "OpenAI", lambda base_url, api_key: captured.update(base_url=base_url, api_key=api_key)
+    )
+
+    llm._get_remote_client()
+
+    assert captured["base_url"] == "http://vllm:8000/v1"
+
+
+def test_test_remote_ok(monkeypatch):
+    _configure_remote(monkeypatch)
+    monkeypatch.setattr(llm, "_get_remote_client", lambda: _FakeClient(content="ok"))
+
+    result = llm.test_remote()
+
+    assert result["ok"] is True
+    assert result["model"] == "qwen2.5-32b"
+    assert result["detail"] == "connected"
+    assert result["latency_ms"] >= 0
+
+
+def test_test_remote_error_reports_detail(monkeypatch):
+    _configure_remote(monkeypatch)
+    monkeypatch.setattr(
+        llm, "_get_remote_client", lambda: _FakeClient(error=RuntimeError("401 invalid key"))
+    )
+
+    result = llm.test_remote()
+
+    assert result["ok"] is False
+    assert "401 invalid key" in result["detail"]
+
+
+def test_test_remote_unconfigured(monkeypatch):
+    monkeypatch.setattr(llm.settings, "llm_remote_base_url", "")
+    monkeypatch.setattr(llm.settings, "llm_remote_model", "")
+
+    result = llm.test_remote()
+
+    assert result["ok"] is False
+    assert "No base URL configured" in result["detail"]

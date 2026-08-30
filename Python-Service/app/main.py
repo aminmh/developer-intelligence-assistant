@@ -5,6 +5,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, StreamingResponse
 from indexer import CodeIntelligenceIndex
 from settings import settings
+import llm as llm_module
 from router import classify as semantic_classify
 from router import submit_feedback as router_submit_feedback
 from intent import extract_intent
@@ -394,6 +395,21 @@ def runpod_test_connection():
     except Exception as exc:
         latency_ms = round((_t.monotonic() - t0) * 1000)
         return {"ok": False, "latency_ms": latency_ms, "detail": str(exc)[:300]}
+
+
+@app.post(
+    "/health/test/remote",
+    tags=["LLM Providers"],
+    summary="Test External OpenAI-Compatible Connection",
+    description=(
+        "Probes the configured external OpenAI-compatible endpoint (llmRemoteBaseUrl) "
+        "with a tiny chat completion. Returns a uniform {ok, latency_ms, detail, model} "
+        "result; never raises."
+    ),
+)
+def remote_test_connection():
+    """Test the configured external OpenAI-compatible endpoint."""
+    return llm_module.test_remote()
 
 
 @app.post(
@@ -1054,7 +1070,9 @@ def answer_prompt(
     temperature = body.get("temperature")
     top_p = body.get("top_p")
     extra_context = body.get("extra_context")
-    use_remote = body.get("use_remote") is True
+    # Default to the remote OpenAI-compatible model when the field is omitted;
+    # falls back to the local Ollama model automatically when none is configured.
+    use_remote = body.get("use_remote", True) is True
 
     from llamaindex_layer import CodePropertyGraph
     from llamaindex_layer import record_retrieval_trace

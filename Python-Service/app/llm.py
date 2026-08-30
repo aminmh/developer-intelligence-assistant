@@ -4,6 +4,7 @@ optional remote vLLM (OpenAI-compatible) provider for heavy answers.
 
 from __future__ import annotations
 
+import time
 from typing import Any, List, Optional, Tuple
 
 import instructor
@@ -53,13 +54,19 @@ def extract(response_model, prompt: str):
 
 
 def _get_remote_client() -> OpenAI:
-    """Return a lazily-created OpenAI client for the remote vLLM server.
+    """Return a lazily-created OpenAI client for the remote OpenAI-compatible server.
 
     The cache is keyed on (base_url, api_key) because settings are dynamic
     (SQLite-backed); a changed URL or key re-creates the client on the next call.
+
+    A trailing ``/v1`` is tolerated so users may paste full provider URLs; the
+    endpoint path is always normalised to ``<base>/v1`` for the OpenAI SDK.
     """
     global _remote_client_state
-    base_url = settings.llm_remote_base_url.rstrip("/") + "/v1"
+    base_url = settings.llm_remote_base_url.rstrip("/")
+    if base_url.endswith("/v1"):
+        base_url = base_url[: -len("/v1")]
+    base_url = f"{base_url}/v1"
     api_key = settings.llm_remote_api_key or "EMPTY"
     if _remote_client_state is None or (
         _remote_client_state[0] != base_url or _remote_client_state[1] != api_key
@@ -69,8 +76,33 @@ def _get_remote_client() -> OpenAI:
 
 
 def remote_configured() -> bool:
-    """Return True when a remote vLLM base URL is configured."""
+    """Return True when a remote OpenAI-compatible base URL is configured."""
     return bool((settings.llm_remote_base_url or "").strip())
+
+
+def test_remote(timeout: float = 30.0) -> dict:
+    """Probe the configured remote OpenAI-compatible endpoint.
+
+    Returns ``{"ok": bool, "latency_ms": float, "detail": str, "model": str}``.
+    Raises nothing — connection/auth/model errors are folded into ``ok``.
+    """
+    if not remote_configured():
+        return {"ok": False, "latency_ms": 0.0, "detail": "No base URL configured", "model": ""}
+    model = settings.llm_remote_model or settings.ollama_llm_model
+    started = time.monotonic()
+    try:
+        _run_chat(
+            _get_remote_client(),
+            model,
+            "Reply with the single word: ok",
+            max_tokens=1,
+        )
+        latency_ms = (time.monotonic() - started) * 1000.0
+        return {"ok": True, "latency_ms": round(latency_ms, 1), "detail": "connected", "model": model}
+    except Exception as exc:  # noqa: BLE001 — report any failure shape to the UI
+        latency_ms = (time.monotonic() - started) * 1000.0
+        detail = str(exc).strip() or exc.__class__.__name__
+        return {"ok": False, "latency_ms": round(latency_ms, 1), "detail": detail, "model": model}
 
 
 def _run_chat(
