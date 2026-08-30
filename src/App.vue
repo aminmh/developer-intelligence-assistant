@@ -31,6 +31,8 @@ const config = ref<RAGConfig>({
   ollamaEvalModel: 'gemma3-4b',
   qdrantUrl: '',
   qdrantApiKey: '',
+  sandboxDockerHost: '',
+  sandboxJobsRoot: '/jobs',
   llmRemoteBaseUrl: '',
   llmRemoteModel: '',
   llmRemoteApiKey: '',

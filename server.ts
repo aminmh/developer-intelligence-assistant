@@ -505,6 +505,20 @@ async function startServer() {
     }
   });
 
+  // Sandbox runner status (proxies to Python service).
+  app.get('/api/sandbox/status', async (req, res) => {
+    try {
+      const pyRes = await fetch(`${PYTHON_API_URL}/sandbox/status`);
+      if (!pyRes.ok) {
+        return res.status(pyRes.status).json({ success: false, error: 'Sandbox status check failed.' });
+      }
+      res.json(await pyRes.json());
+    } catch (error: any) {
+      console.error('Failed to check sandbox status via Python:', error.message);
+      res.status(500).json({ success: false, error: error.message });
+    }
+  });
+
   // RunPod serverless: test the API key against rest.runpod.io
   app.post('/api/health/test/runpod', async (req, res) => {
     try {

@@ -24,6 +24,8 @@ let ragConfig: RAGConfig = {
   ollamaEvalModel: process.env.OLLAMA_EVAL_MODEL || 'gemma3-4b',
   qdrantUrl: '',
   qdrantApiKey: '',
+  sandboxDockerHost: '',
+  sandboxJobsRoot: '/jobs',
   llmRemoteBaseUrl: '',
   llmRemoteModel: '',
   llmRemoteApiKey: '',

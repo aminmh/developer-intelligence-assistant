@@ -5,6 +5,8 @@ export interface RAGConfig {
   ollamaEvalModel: string;
   qdrantUrl: string;
   qdrantApiKey: string;
+  sandboxDockerHost: string;
+  sandboxJobsRoot: string;
   llmRemoteBaseUrl: string;
   llmRemoteModel: string;
   llmRemoteApiKey: string;
