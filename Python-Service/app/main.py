@@ -4,6 +4,7 @@ from fastapi import FastAPI, HTTPException, Header, Query, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, StreamingResponse
 from indexer import CodeIntelligenceIndex
+from sandbox_runtime import sandbox_available
 from settings import settings
 import llm as llm_module
 from router import classify as semantic_classify
@@ -410,6 +411,26 @@ def runpod_test_connection():
 def remote_test_connection():
     """Test the configured external OpenAI-compatible endpoint."""
     return llm_module.test_remote()
+
+
+@app.get(
+    "/sandbox/status",
+    tags=["Sandbox"],
+    summary="Sandbox Runner Status",
+    description=(
+        "Probes the configured sandbox runner daemon (sandboxDockerHost, falling "
+        "back to DOCKER_HOST or the host socket) and reports whether the runsc "
+        "runtime is registered. Includes the effective Docker host and jobs root "
+        "so logs can say which backend answered."
+    ),
+)
+def sandbox_status():
+    """Report sandbox backend availability for the configured runner."""
+    host = settings.sandbox_docker_host or None
+    result = sandbox_available(docker_host=host)
+    result["dockerHost"] = host or "(default — host daemon socket)"
+    result["jobsRoot"] = settings.sandbox_jobs_root or "/jobs"
+    return {"success": True, **result}
 
 
 @app.post(

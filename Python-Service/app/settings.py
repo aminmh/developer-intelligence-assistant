@@ -44,6 +44,9 @@ class Settings(BaseModel):
     workspace_root: str = os.getenv("WORKSPACE_ROOT", "/app/workspaces")
     php_cli_root: str = os.getenv("PHP_CLI_ROOT", "/opt/php-cli")
 
+    sandbox_docker_host: str = os.getenv("DOCKER_HOST", "")
+    sandbox_jobs_root: str = os.getenv("JOBS_ROOT", "/jobs")
+
     lsp_timeout: float = float(os.getenv("LSP_TIMEOUT", "10"))
     lsp_max_retries: int = int(os.getenv("LSP_MAX_RETRIES", "2"))
     lsp_validation_enabled: bool = os.getenv(
@@ -79,6 +82,8 @@ class RuntimeSettings:
         "runpod_api_key": "runpodApiKey",
         "qdrant_url": "qdrantUrl",
         "qdrant_api_key": "qdrantApiKey",
+        "sandbox_docker_host": "sandboxDockerHost",
+        "sandbox_jobs_root": "sandboxJobsRoot",
         "temperature": "temperature",
         "top_p": "topP",
     }

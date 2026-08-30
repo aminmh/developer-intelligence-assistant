@@ -28,6 +28,8 @@ RAG_CONFIG_DEFAULTS: Dict[str, Any] = {
     "runpodApiKey": "",
     "qdrantUrl": "",
     "qdrantApiKey": "",
+    "sandboxDockerHost": "",
+    "sandboxJobsRoot": "/jobs",
     "temperature": 0.7,
     "topP": 0.9,
 }
