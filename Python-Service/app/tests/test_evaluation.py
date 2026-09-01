@@ -27,17 +27,24 @@ def test_evaluate_response_returns_three_metrics(monkeypatch):
                 ]
             )
 
+    class FakeEmbeddings:
+        def embed_query(self, query):
+            return [1.0, 0.0]
+
+        def embed_documents(self, docs):
+            return [[1.0, 0.0]] * len(docs)
+
     monkeypatch.setattr(evaluation, "evaluate", lambda **kwargs: FakeResult())
     monkeypatch.setattr(evaluation, "_get_llm", lambda: None)
-    monkeypatch.setattr(evaluation, "_get_embeddings", lambda: None)
+    monkeypatch.setattr(evaluation, "_get_embeddings", lambda: FakeEmbeddings())
 
     metrics = evaluation.evaluate_response("q", "a", ["c1", "c2"])
 
     assert set(metrics.keys()) == {"faithfulness", "answer_relevancy", "context_precision"}
     assert metrics["faithfulness"]["score"] == 0.9
     assert metrics["faithfulness"]["tier"] == "Excellent"
-    assert metrics["context_precision"]["score"] == 0.5
-    assert metrics["context_precision"]["tier"] == "Needs review"
+    assert metrics["context_precision"]["score"] == 1.0
+    assert metrics["context_precision"]["tier"] == "Excellent"
 
 
 def test_evaluate_response_handles_nan(monkeypatch):
@@ -53,9 +60,16 @@ def test_evaluate_response_handles_nan(monkeypatch):
                 ]
             )
 
+    class FakeEmbeddings:
+        def embed_query(self, query):
+            return [1.0, 0.0]
+
+        def embed_documents(self, docs):
+            return [[1.0, 0.0]] * len(docs)
+
     monkeypatch.setattr(evaluation, "evaluate", lambda **kwargs: FakeResult())
     monkeypatch.setattr(evaluation, "_get_llm", lambda: None)
-    monkeypatch.setattr(evaluation, "_get_embeddings", lambda: None)
+    monkeypatch.setattr(evaluation, "_get_embeddings", lambda: FakeEmbeddings())
 
     metrics = evaluation.evaluate_response("q", "a", ["c"])
 

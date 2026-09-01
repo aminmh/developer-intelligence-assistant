@@ -12,7 +12,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 from exception_logger import get_exception_logger
-from llm import complete_with_model
+from llm import complete_with_model, stream_complete_with_model
 from settings import settings
 
 SYSTEM_PROMPT = (
@@ -22,8 +22,15 @@ SYSTEM_PROMPT = (
     "state clearly what is missing and then use your broad pre-trained software "
     "development knowledge to give a comprehensive, helpful solution. Always "
     "output Markdown with complete type declarations and clear syntax-highlighted "
-    "code blocks where appropriate."
+    "code blocks where appropriate.\n\n"
+    "CRITICAL: Answer the user's question directly. Never restate, quote, or "
+    "reproduce the retrieved context verbatim in your answer. The retrieved code "
+    "is source material only — cite or summarize from it, do not dump it."
 )
+
+# Cap retrieved context so the model answers instead of echoing the dump.
+MAX_CONTEXT_BLOCKS = 8
+MAX_CONTEXT_CHARS = 2500
 
 
 def build_user_prompt(
@@ -40,10 +47,12 @@ def build_user_prompt(
 
     if contexts:
         blocks = []
-        for i, ctx in enumerate(contexts):
+        for i, ctx in enumerate(contexts[:MAX_CONTEXT_BLOCKS]):
             name = ctx.get("name") or ctx.get("class") or "symbol"
             file = ctx.get("file") or ""
             code = ctx.get("code") or ""
+            if len(code) > MAX_CONTEXT_CHARS:
+                code = code[:MAX_CONTEXT_CHARS] + "\n… (truncated)"
             blocks.append(
                 f"[{i + 1}] {file} | {name}\n```\n{code}\n```"
             )
@@ -101,6 +110,7 @@ def generate_answer(
     top_p: Optional[float] = None,
     extra_context: Optional[str] = None,
     use_remote: bool = False,
+    route: str = "chat",
 ) -> Dict[str, Any]:
     """Generate an answer from retrieved code context + entities."""
     contexts = contexts or []
@@ -131,30 +141,7 @@ def generate_answer(
         provider_used = "local"
     duration_ms = int((time.time() - started) * 1000)
 
-    validation: List[Dict[str, Any]] = []
-    if getattr(settings, "lsp_validation_enabled", True):
-        try:
-            from lsp import build_note, validate_markdown
-
-            new_answer, summary = validate_markdown(
-                answer,
-                question,
-                max_retries=getattr(settings, "lsp_max_retries", 2),
-            )
-            if summary:
-                answer = new_answer + "\n\n" + build_note(summary)
-                validation = [
-                    {
-                        "language": s["language"],
-                        "index": s["index"],
-                        "status": s["status"],
-                        "errors": s["errors"],
-                        "warnings": s["warnings"],
-                    }
-                    for s in summary
-                ]
-        except Exception as exc:
-            get_exception_logger().warning("LSP validation skipped: %s", exc)
+    answer, validation = _validate_answer(answer, question, route)
 
     return {
         "answer": answer,
@@ -163,3 +150,114 @@ def generate_answer(
         "duration_ms": duration_ms,
         "code_validation": validation,
     }
+
+
+def generate_answer_stream(
+    question: str,
+    contexts: Optional[List[Dict[str, Any]]] = None,
+    entities: Optional[Dict[str, Any]] = None,
+    temperature: Optional[float] = None,
+    top_p: Optional[float] = None,
+    extra_context: Optional[str] = None,
+    use_remote: bool = False,
+    route: str = "chat",
+) -> Any:
+    """Generator yielding answer events for SSE streaming.
+
+    Events: ``start`` (model/provider), ``delta`` (text), ``error``,
+    ``validation`` (code_validation list), ``done`` (answer, model, provider,
+    duration_ms).
+    """
+    contexts = contexts or []
+    prompt = build_user_prompt(question, contexts, entities, extra_context)
+
+    temp = settings.temperature if temperature is None else temperature
+    topp = settings.top_p if top_p is None else top_p
+
+    _log_prompt(question, prompt)
+
+    started = time.time()
+    buffer: List[str] = []
+    try:
+        for delta, model_used, provider_used in stream_complete_with_model(
+            prompt,
+            system=SYSTEM_PROMPT,
+            temperature=temp,
+            top_p=topp,
+            provider="remote" if use_remote else "local",
+        ):
+            if delta:
+                buffer.append(delta)
+                yield {"type": "delta", "text": delta}
+            elif not buffer:
+                yield {"type": "start", "model": model_used, "provider": provider_used}
+    except Exception as exc:  # noqa: BLE001 — report any failure shape to the caller as an error event
+        get_exception_logger().error("Streaming answer failed: %s", exc)
+        if not buffer:
+            yield {
+                "type": "error",
+                "detail": "I couldn't generate an answer because the model is "
+                "temporarily unavailable. Please try again.",
+            }
+            return
+        # Mid-stream failure — surface what we have and stop.
+        answer = "".join(buffer)
+        yield {
+            "type": "done",
+            "answer": answer,
+            "model": settings.ollama_llm_model,
+            "provider": "local",
+            "duration_ms": int((time.time() - started) * 1000),
+            "truncated": True,
+            "code_validation": [],
+        }
+        return
+
+    answer = "".join(buffer)
+    answer, validation = _validate_answer(answer, question, route)
+    yield {"type": "validation", "code_validation": validation}
+    yield {
+        "type": "done",
+        "answer": answer,
+        "model": model_used,
+        "provider": provider_used,
+        "duration_ms": int((time.time() - started) * 1000),
+        "truncated": False,
+        "code_validation": validation,
+    }
+
+
+def _validate_answer(answer: str, question: str, route: str) -> tuple[str, List[Dict[str, Any]]]:
+    """Run post-generation LSP validation; skipped for chat/knowledge routes.
+
+    Returns (possibly rewritten answer, validation list).
+    """
+    # Chat and knowledge answers are free-form prose — validating their code
+    # blocks against a language server adds latency without signal.
+    if route in ("chat", "knowledge"):
+        return answer, []
+    if not getattr(settings, "lsp_validation_enabled", True):
+        return answer, []
+    try:
+        from lsp import build_note, validate_markdown
+
+        new_answer, summary = validate_markdown(
+            answer,
+            question,
+            max_retries=getattr(settings, "lsp_max_retries", 2),
+        )
+        if summary:
+            validation = [
+                {
+                    "language": s["language"],
+                    "index": s["index"],
+                    "status": s["status"],
+                    "errors": s["errors"],
+                    "warnings": s["warnings"],
+                }
+                for s in summary
+            ]
+            return new_answer + "\n\n" + build_note(summary), validation
+    except Exception as exc:  # noqa: BLE001 — validation is best-effort; never fail the answer over it
+        get_exception_logger().warning("LSP validation skipped: %s", exc)
+    return answer, []

@@ -180,6 +180,103 @@ def complete_with_model(
     return content, model, "local"
 
 
+def stream_chat(
+    client: OpenAI,
+    model: str,
+    prompt: str,
+    system: Optional[str] = None,
+    temperature: Optional[float] = None,
+    top_p: Optional[float] = None,
+    max_tokens: int = 2048,
+) -> Any:
+    """OpenAI-compatible streaming chat; yields text deltas.
+
+    Raises on transport/API failure — callers degrade gracefully.
+    """
+    messages: list[dict] = []
+    if system:
+        messages.append({"role": "system", "content": system})
+    messages.append({"role": "user", "content": prompt})
+
+    kwargs: dict = {
+        "model": model,
+        "messages": messages,
+        "max_tokens": max_tokens,
+        "stream": True,
+    }
+    if temperature is not None:
+        kwargs["temperature"] = temperature
+    if top_p is not None:
+        kwargs["top_p"] = top_p
+
+    response = client.chat.completions.create(**kwargs)
+    for chunk in response:
+        if not chunk.choices:
+            continue
+        delta = chunk.choices[0].delta.content
+        if delta:
+            yield delta
+
+
+def stream_complete_with_model(
+    prompt: str,
+    system: Optional[str] = None,
+    temperature: Optional[float] = None,
+    top_p: Optional[float] = None,
+    max_tokens: int = 2048,
+    provider: str = "local",
+) -> Any:
+    """Yield (delta, model, provider) text deltas, mirroring complete_with_model.
+
+    Remote-first when ``provider == "remote"`` and configured; an empty first
+    delta marks the start (``("", model, provider)``). A remote failure before
+    the first text chunk silently falls back to the local Ollama model (re-emits
+    the start marker with the local model). Failures after the stream began
+    propagate to the caller.
+    """
+    emitted = False
+
+    def _local_stream():
+        model = settings.ollama_llm_model
+        yield "", model, "local"
+        yield from (
+            (delta, model, "local")
+            for delta in stream_chat(
+                _get_openai_client(),
+                model,
+                prompt,
+                system=system,
+                temperature=temperature,
+                top_p=top_p,
+                max_tokens=max_tokens,
+            )
+        )
+
+    if provider == "remote" and remote_configured():
+        model = settings.llm_remote_model or settings.ollama_llm_model
+        try:
+            first = stream_chat(
+                _get_remote_client(),
+                model,
+                prompt,
+                system=system,
+                temperature=temperature,
+                top_p=top_p,
+                max_tokens=max_tokens,
+            )
+            for delta in first:
+                if not emitted:
+                    yield "", model, "remote"
+                    emitted = True
+                yield delta, model, "remote"
+            return
+        except Exception:
+            # Nothing delivered yet — fall back to the local model.  # noqa: S110, BLE001 — intentional degradation to the local path
+            pass
+
+    yield from _local_stream()
+
+
 def complete(
     prompt: str,
     system: Optional[str] = None,

@@ -1066,13 +1066,61 @@ def retrieval_insights(
     return trace
 
 
+def _answer_context(
+    body: dict, query: str, x_rag_trace_id: str | None
+) -> tuple[list, list, str | None]:
+    """Resolve retrieval contexts for an answer request.
+
+    Returns (results, contexts, extra_context). An explicit tool context (e.g.
+    project structure from the `knowledge` route) grounds the answer directly;
+    otherwise Qdrant is searched via CodePropertyGraph.hybrid_retrieve.
+    """
+    from llamaindex_layer import CodePropertyGraph
+    from llamaindex_layer import record_retrieval_trace
+
+    collection = body.get("collection")
+    class_name = body.get("class_name")
+    file = body.get("file")
+    extra_context = body.get("extra_context")
+
+    if extra_context and isinstance(extra_context, str) and extra_context.strip():
+        record_retrieval_trace(
+            x_rag_trace_id or "",
+            {
+                "query_hash": __import__("hashlib").sha1(query.encode("utf-8")).hexdigest()[:12],
+                "mode": "explicit_context",
+                "collection": collection,
+                "searched_collections": [],
+                "vector_result_count": 0,
+                "graph_neighbor_count": 0,
+                "graph_context_count": 0,
+                "graph_context_with_code_count": 0,
+                "graph_available": False,
+                "graph_fallback": False,
+                "sources": [],
+            },
+        )
+        return [], [], extra_context
+
+    result = CodePropertyGraph().hybrid_retrieve(
+        query=query,
+        collection_name=collection,
+        limit=10,
+        class_name=class_name,
+        file=file,
+        trace_id=x_rag_trace_id,
+    )
+    results = result.get("results", []) or []
+    contexts = [(r.get("payload") or {}) for r in results]
+    return results, contexts, None
+
+
 @app.post(
     "/answer",
-    tags=["Code Intelligence"],
+    tags=["LLM"],
     summary="Generate Answer",
     description=(
-        "Retrieves relevant code context from Qdrant/Neo4j and generates a final "
-        "LLM answer using the configured local chat model. Accepts optional "
+        "Generate a final answer from retrieved code context, optional "
         "metadata filters (class_name/file) and extracted entities."
     ),
 )
@@ -1094,44 +1142,11 @@ def answer_prompt(
     # Default to the remote OpenAI-compatible model when the field is omitted;
     # falls back to the local Ollama model automatically when none is configured.
     use_remote = body.get("use_remote", True) is True
+    route = body.get("route", "chat")
 
-    from llamaindex_layer import CodePropertyGraph
-    from llamaindex_layer import record_retrieval_trace
     from answer import generate_answer
 
-    # When an explicit tool context is provided (e.g. the project structure from
-    # the `knowledge` route), use it as the grounding context instead of searching
-    # Qdrant for code chunks.
-    if extra_context and isinstance(extra_context, str) and extra_context.strip():
-        results = []
-        contexts = []
-        record_retrieval_trace(
-            x_rag_trace_id or "",
-            {
-                "query_hash": __import__("hashlib").sha1(query.encode("utf-8")).hexdigest()[:12],
-                "mode": "explicit_context",
-                "collection": collection,
-                "searched_collections": [],
-                "vector_result_count": 0,
-                "graph_neighbor_count": 0,
-                "graph_context_count": 0,
-                "graph_context_with_code_count": 0,
-                "graph_available": False,
-                "graph_fallback": False,
-                "sources": [],
-            },
-        )
-    else:
-        result = CodePropertyGraph().hybrid_retrieve(
-            query=query,
-            collection_name=collection,
-            limit=10,
-            class_name=class_name,
-            file=file,
-            trace_id=x_rag_trace_id,
-        )
-        results = result.get("results", []) or []
-        contexts = [(r.get("payload") or {}) for r in results]
+    results, contexts, extra_context = _answer_context(body, query, x_rag_trace_id)
 
     gen = generate_answer(
         query,
@@ -1139,8 +1154,9 @@ def answer_prompt(
         entities=entities,
         temperature=temperature,
         top_p=top_p,
-        extra_context=extra_context if isinstance(extra_context, str) else None,
+        extra_context=extra_context,
         use_remote=use_remote,
+        route=route,
     )
 
     matches = []
@@ -1175,6 +1191,57 @@ def answer_prompt(
         "durationMs": gen["duration_ms"],
         "code_validation": gen.get("code_validation", []),
     }
+
+
+@app.post(
+    "/answer/stream",
+    tags=["LLM"],
+    summary="Streaming Answer (SSE)",
+    description=(
+        "Generate an answer and stream it as Server-Sent Events: start, delta, "
+        "validation and done events. Same retrieval semantics as /answer."
+    ),
+)
+def answer_stream(
+    body: dict,
+    x_rag_trace_id: Annotated[str | None, Header(alias="X-RAG-Trace-Id")] = None,
+):
+    query = body.get("query", "")
+    if not query or not isinstance(query, str):
+        raise HTTPException(status_code=400, detail="Missing or invalid query")
+
+    entities = body.get("entities") or {}
+    temperature = body.get("temperature")
+    top_p = body.get("top_p")
+    use_remote = body.get("use_remote", True) is True
+    route = body.get("route", "chat")
+
+    results, contexts, extra_context = _answer_context(body, query, x_rag_trace_id)
+
+    from answer import generate_answer_stream
+
+    def _sse():
+        try:
+            for event in generate_answer_stream(
+                query,
+                contexts=contexts,
+                entities=entities,
+                temperature=temperature,
+                top_p=top_p,
+                extra_context=extra_context,
+                use_remote=use_remote,
+                route=route,
+            ):
+                yield f"data: {json.dumps(event)}\n\n"
+        except Exception as exc:
+            get_exception_logger().error("SSE answer failed: %s", exc)
+            yield f"data: {json.dumps({'type': 'error', 'detail': str(exc)})}\n\n"
+
+    return StreamingResponse(
+        _sse(),
+        media_type="text/event-stream",
+        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+    )
 
 
 @app.post(

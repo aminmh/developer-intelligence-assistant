@@ -6,3 +6,4 @@ data/
 tmp
 php/vendor
 php/lsp/vendor
+workspaces/

@@ -29,6 +29,34 @@ def test_build_user_prompt_without_context_or_entities():
     assert "Detected context" not in prompt
 
 
+def test_system_prompt_forbids_echoing_context():
+    assert "Never restate, quote, or reproduce the retrieved context" in answer.SYSTEM_PROMPT
+    assert "source material only" in answer.SYSTEM_PROMPT
+
+
+def test_build_user_prompt_truncates_large_chunks():
+    contexts = [
+        {"class": "A", "name": "b", "file": "f.php", "code": "x" * (answer.MAX_CONTEXT_CHARS + 500)},
+    ]
+    prompt = answer.build_user_prompt("q", contexts, None)
+
+    assert "… (truncated)" in prompt
+    assert "x" * answer.MAX_CONTEXT_CHARS in prompt
+    assert "x" * (answer.MAX_CONTEXT_CHARS + 500) not in prompt
+
+
+def test_build_user_prompt_caps_context_block_count():
+    contexts = [
+        {"class": f"C{i}", "name": f"n{i}", "file": f"f{i}.php", "code": "c"}
+        for i in range(answer.MAX_CONTEXT_BLOCKS + 5)
+    ]
+    prompt = answer.build_user_prompt("q", contexts, None)
+
+    # Only the first MAX_CONTEXT_BLOCKS blocks are embedded.
+    assert f"[{answer.MAX_CONTEXT_BLOCKS + 1}]" not in prompt
+    assert f"f{answer.MAX_CONTEXT_BLOCKS - 1}.php" in prompt
+
+
 def test_generate_answer_returns_expected_shape(monkeypatch):
     captured = {}
 
