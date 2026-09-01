@@ -87,6 +87,8 @@ interface Message {
   query?: string;
   queryId?: string;
   routeName?: string;
+  streaming?: boolean;
+  code_validation?: any[];
 }
 
 const ROUTES = ['code_explain', 'code_refactor', 'debug', 'search', 'knowledge', 'chat'];
@@ -420,7 +422,92 @@ const sendMessage = async (text: string) => {
     if (remaining > 0) await new Promise((r) => setTimeout(r, remaining));
   };
 
+  // Stream an answer via SSE (no orchestration job, no polling).
+  const streamAnswer = async (text: string) => {
+    const msgId = `assistant_${Date.now()}`;
+    messages.value.push({
+      id: msgId,
+      role: 'assistant',
+      content: '',
+      timestamp: new Date().toLocaleTimeString(),
+      query: text,
+      streaming: true,
+    });
+    scrollToBottom();
+
+    let llmUsed = '';
+    let deltas = 0;
+    try {
+      const res = await makeRequest('/api/query/stream', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ query: text, use_remote: useRemote.value }),
+      });
+      if (!res.ok || !res.body) {
+        throw new Error(`Stream unavailable (${res.status})`);
+      }
+
+      const reader = res.body.getReader();
+      const decoder = new TextDecoder();
+      let buf = '';
+      for (;;) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        buf += decoder.decode(value, { stream: true });
+        let idx: number;
+        while ((idx = buf.indexOf('\n\n')) >= 0) {
+          const raw = buf.slice(0, idx);
+          buf = buf.slice(idx + 2);
+          const line = raw.split('\n').find((l) => l.startsWith('data: '));
+          if (!line) continue;
+          let evt: any;
+          try {
+            evt = JSON.parse(line.slice(6));
+          } catch {
+            continue;
+          }
+          const m = messages.value.find((x) => x.id === msgId);
+          if (!m) return;
+          if (evt.type === 'start') {
+            llmUsed = evt.provider === 'remote'
+              ? `Remote GPU LLM (${evt.model})`
+              : `Local LLM (${evt.model})`;
+          } else if (evt.type === 'delta') {
+            m.content += evt.text;
+            if (++deltas % 8 === 0) scrollToBottom();
+          } else if (evt.type === 'validation') {
+            m.code_validation = evt.code_validation || [];
+          } else if (evt.type === 'error') {
+            if (!m.content) m.content = `❌ **Error:** ${evt.detail}`;
+          } else if (evt.type === 'done') {
+            m.content = evt.answer || m.content;
+            m.llmUsed = llmUsed;
+            m.durationMs = evt.duration_ms;
+            m.streaming = false;
+          }
+        }
+      }
+      const m = messages.value.find((x) => x.id === msgId);
+      if (m) {
+        m.streaming = false;
+        if (!m.content) m.content = '_(empty response)_';
+      }
+    } catch (err: any) {
+      const m = messages.value.find((x) => x.id === msgId);
+      if (m) {
+        m.content = m.content || `❌ **Stream error:** ${err.message}`;
+        m.streaming = false;
+      }
+    }
+  };
+
   try {
+    // No attached project — stream the answer straight from the LLM.
+    if (!activeFileName.value) {
+      await streamAnswer(text);
+      return;
+    }
+
     const res = await makeRequest('/api/query', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },

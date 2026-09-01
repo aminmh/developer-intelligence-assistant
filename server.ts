@@ -771,7 +771,7 @@ async function startServer() {
             'Content-Type': 'application/json',
             'X-RAG-Trace-Id': queryId,
           },
-          body: JSON.stringify({ query, use_remote: !!use_remote }),
+          body: JSON.stringify({ query, use_remote: !!use_remote, route: classification.route }),
         });
         if (aRes.ok) {
           const answer = await aRes.json();
@@ -789,6 +789,93 @@ async function startServer() {
     } catch (error: any) {
       console.error('Query execution error:', error);
       res.status(500).json({ success: false, error: error.message });
+    }
+  });
+
+  // Stream an answer directly (SSE) — no orchestration job, no polling.
+  // Used for chat/knowledge routes where the project is already indexed.
+  app.post('/api/query/stream', async (req, res) => {
+    try {
+      const { query, filename, use_remote, route } = req.body;
+      if (!query || query.trim() === '') {
+        return res.status(400).json({ success: false, error: 'Query parameter is required.' });
+      }
+
+      const pythonUrl = process.env.PYTHON_API_URL || 'http://localhost:9002';
+      const queryId = crypto.randomUUID();
+
+      // Route is provided by the client (chat/knowledge) or classified here.
+      let routeName: string = route || 'chat';
+      if (filename && (route === undefined || route === '')) {
+        try {
+          const cRes = await fetch(`${pythonUrl}/classify`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ prompt: query }),
+          });
+          if (cRes.ok) {
+            const classification = await cRes.json();
+            routeName = classification.route || 'chat';
+          }
+        } catch {
+          // Classification unavailable — default to chat
+        }
+      }
+
+      const pyRes = await fetch(`${pythonUrl}/answer/stream`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'X-RAG-Trace-Id': queryId,
+        },
+        body: JSON.stringify({
+          query,
+          use_remote: !!use_remote,
+          route: routeName,
+        }),
+      });
+
+      if (!pyRes.ok) {
+        const errBody = await pyRes.json().catch(() => ({}));
+        return res.status(pyRes.status).json({
+          success: false,
+          error: (errBody as any).detail || 'Answer generation failed.',
+        });
+      }
+
+      res.writeHead(200, {
+        'Content-Type': 'text/event-stream',
+        'Cache-Control': 'no-cache',
+        'Connection': 'keep-alive',
+        'X-Accel-Buffering': 'no',
+      });
+
+      // Pipe the Python SSE stream straight through to the browser.
+      const reader = (pyRes.body as any).getReader();
+      const pump = async () => {
+        try {
+          for (;;) {
+            const { done, value } = await reader.read();
+            if (done) break;
+            res.write(Buffer.from(value));
+          }
+        } catch {
+          // Client disconnected or upstream died — close quietly.
+        }
+        res.end();
+      };
+      pump();
+
+      req.on('close', () => {
+        reader.cancel().catch(() => {});
+      });
+    } catch (error: any) {
+      console.error('Stream query error:', error);
+      if (!res.headersSent) {
+        res.status(500).json({ success: false, error: error.message });
+      } else {
+        res.end();
+      }
     }
   });
 
@@ -862,9 +949,13 @@ async function startServer() {
             entities,
             extra_context: extraContext,
             use_remote: wantRemote,
+            route: status.route_name || 'explain',
           }),
         });
         if (!aRes.ok) {
+          // Un-poison the cache so the next poll retries the answer call
+          // instead of looping on the pending placeholder forever.
+          answerCache.delete(job_id);
           throw new Error(`Answer generation failed (${aRes.status})`);
         }
         const answer = await aRes.json();

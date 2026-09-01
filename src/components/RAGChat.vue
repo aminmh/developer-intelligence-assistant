@@ -158,6 +158,7 @@ const toggleMatchExpansion = (id: string) => {
               : 'bg-slate-900/60 border border-slate-800 text-slate-300 rounded-tl-none'"
           >
             <div class="prose prose-invert prose-sm max-w-none text-left" v-if="msg.role === 'assistant'" v-html="msg.content.replace(/\n/g, '<br>')"></div>
+            <span v-if="msg.role === 'assistant' && msg.streaming" class="inline-block w-2 h-4 bg-indigo-400 animate-pulse ml-0.5 align-text-bottom"></span>
             <div class="text-sm text-left font-mono leading-relaxed text-slate-100" v-else>{{ msg.content }}</div>
             
             <!-- Assistant message metadata -->
