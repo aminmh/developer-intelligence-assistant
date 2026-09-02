@@ -45,33 +45,9 @@ class OllamaEncoder(BaseEncoder):
         super().__init__(name=name)
 
     def __call__(self, docs: List[str]) -> List[List[float]]:
-        embeddings = []
+        from embeddings import embed_texts
 
-        for doc in docs:
-            body = json.dumps(
-                {
-                    "model": settings.ollama_embedding_model,
-                    "prompt": normalize_query(doc),
-                }
-            ).encode("utf-8")
-
-            req = urllib.request.Request(
-                f"{settings.ollama_base_url}/api/embeddings",
-                data=body,
-                headers={"Content-Type": "application/json"},
-                method="POST",
-            )
-
-            with urllib.request.urlopen(req, timeout=120) as response:
-                data = json.loads(response.read().decode("utf-8"))
-
-            embedding = data.get("embedding")
-            if not embedding or not isinstance(embedding, list):
-                raise RuntimeError("Invalid embedding returned from Ollama")
-
-            embeddings.append(embedding)
-
-        return embeddings
+        return embed_texts([normalize_query(doc) for doc in docs])
 
 
 code_explain = Route(
@@ -213,7 +189,14 @@ def _ensure_feedback_collection(qdrant: QdrantClient, dim: int) -> None:
     try:
         existing = [c.name for c in qdrant.get_collections().collections]
         if FEEDBACK_COLLECTION in existing:
-            return
+            # Recreate when the embedding model changed the vector dimension
+            # (Qdrant cannot alter an existing collection's vector size).
+            info = qdrant.get_collection(FEEDBACK_COLLECTION)
+            current = getattr(info.config.params.vectors, "size", None)
+            if current != dim:
+                qdrant.delete_collection(FEEDBACK_COLLECTION)
+            else:
+                return
         qdrant.create_collection(
             collection_name=FEEDBACK_COLLECTION,
             vectors_config=VectorParams(size=dim, distance=Distance.COSINE),

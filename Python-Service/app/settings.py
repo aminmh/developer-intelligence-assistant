@@ -26,6 +26,15 @@ class Settings(BaseModel):
     ollama_base_url: str = os.getenv("OLLAMA_BASE_URL", "http://host.docker.internal:11434")
     ollama_embedding_model: str = os.getenv("OLLAMA_EMBED_MODEL", "BGE-M3")
     ollama_llm_model: str = os.getenv("OLLAMA_LLM_MODEL", "gemma3-4b")
+    # Optional OpenAI-compatible embedding server (LM Studio / Bionic). When set,
+    # embeddings are produced via `{base}/v1/embeddings`; when empty they stay on
+    # the Ollama server (`ollama_base_url` /api/embeddings).
+    embedding_base_url: str = os.getenv("EMBEDDING_BASE_URL", "")
+    # Optional override for the LOCAL chat provider (e.g. LM Studio/Bionic).
+    # Defaults to the Ollama server when unset. Embeddings/classification stay
+    # on the Ollama server regardless.
+    local_llm_url: str = os.getenv("LOCAL_LLM_URL", "")
+    local_llm_model: str = os.getenv("LOCAL_LLM_MODEL", "")
     ollama_eval_model: str = os.getenv("OLLAMA_EVAL_MODEL", "")
     llm_remote_base_url: str = os.getenv("LLM_REMOTE_BASE_URL", "")
     llm_remote_model: str = os.getenv("LLM_REMOTE_MODEL", "")
@@ -74,8 +83,11 @@ class RuntimeSettings:
     _DYNAMIC = {
         "ollama_base_url": "ollamaBaseUrl",
         "ollama_embedding_model": "ollamaEmbedModel",
+        "embedding_base_url": "embeddingBaseUrl",
         "ollama_llm_model": "ollamaLlmModel",
         "ollama_eval_model": "ollamaEvalModel",
+        "local_llm_url": "localLlmUrl",
+        "local_llm_model": "localLlmModel",
         "llm_remote_base_url": "llmRemoteBaseUrl",
         "llm_remote_model": "llmRemoteModel",
         "llm_remote_api_key": "llmRemoteApiKey",

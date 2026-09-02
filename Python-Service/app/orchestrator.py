@@ -274,6 +274,12 @@ class Orchestrator:
             "tool_result": tool_result,
             "post_process_result": post_process_result,
         }
+        # Raw tool output can be huge (full symbol JSON) — cap it so the
+        # summarization prompt never blows the model's context window.
+        context_json = json.dumps(context, ensure_ascii=False, default=str)
+        max_chars = getattr(self, "_context_cap_chars", 8000)
+        if len(context_json) > max_chars:
+            context_json = context_json[:max_chars] + "\n… (truncated)"
         template_text = (
             "You are answering a developer query from tool output."
 
@@ -283,7 +289,7 @@ class Orchestrator:
 
             f"User prompt: {prompt}"
 
-            f"Context: {json.dumps(context, ensure_ascii=False, default=str)}"
+            f"Context: {context_json}"
         )
         result = self._llamaindex_complete_text(template_text)
         return result.strip() if isinstance(result, str) and result.strip() else None

@@ -1,11 +1,12 @@
 from contextlib import asynccontextmanager
-from typing import Annotated
+from typing import Annotated, Optional
 from fastapi import FastAPI, HTTPException, Header, Query, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, StreamingResponse
 from indexer import CodeIntelligenceIndex
 from sandbox_runtime import sandbox_available
 from settings import settings
+from lmstudio import lmstudio_load, lmstudio_models
 import llm as llm_module
 from router import classify as semantic_classify
 from router import submit_feedback as router_submit_feedback
@@ -431,6 +432,41 @@ def sandbox_status():
     result["dockerHost"] = host or "(default — host daemon socket)"
     result["jobsRoot"] = settings.sandbox_jobs_root or "/jobs"
     return {"success": True, **result}
+
+
+@app.get(
+    "/lmstudio/models",
+    tags=["LM Studio"],
+    summary="List LM Studio Models",
+    description=(
+        "Lists models available on the configured LM Studio server (the "
+        "llmRemoteBaseUrl setting). Each entry reports id, engine (mlx / "
+        "llama.cpp) and quantization so the UI can show which models run on "
+        "the MLX engine."
+    ),
+)
+def lmstudio_models_endpoint(base_url: Optional[str] = None):
+    """List models from the configured LM Studio server."""
+    host = base_url or settings.llm_remote_base_url or ""
+    result = lmstudio_models(host)
+    return {"success": result.pop("ok"), **result}
+
+
+@app.post(
+    "/lmstudio/load",
+    tags=["LM Studio"],
+    summary="Load Model into LM Studio",
+    description=(
+        "Loads the given model id into the LM Studio engine (MLX for "
+        "mlx-format models) on the configured server."
+    ),
+)
+def lmstudio_load_endpoint(body: dict):
+    """Load a model into the LM Studio engine."""
+    model_id = (body.get("model") or "").strip()
+    base_url = body.get("base_url") or settings.llm_remote_base_url or ""
+    result = lmstudio_load(base_url, model_id)
+    return {"success": result.pop("ok"), **result}
 
 
 @app.post(

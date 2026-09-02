@@ -4,6 +4,7 @@ import types
 
 import query_normalizer
 import router
+import embeddings
 
 
 def test_nfkc_unicode_normalization():
@@ -50,6 +51,9 @@ def test_encoder_invokes_normalize_query(monkeypatch):
             return json.dumps({"embedding": [0.1, 0.2]}).encode()
 
     monkeypatch.setattr(router.urllib.request, "urlopen", lambda *a, **k: FakeResp())
+    # Force the Ollama embedding path — the mock replies in Ollama's native
+    # /api/embeddings shape (not the OpenAI-compatible /v1/embeddings shape).
+    monkeypatch.setattr(embeddings.settings, "embedding_base_url", "")
 
     enc = router.OllamaEncoder()
     enc(["Hello  World"])

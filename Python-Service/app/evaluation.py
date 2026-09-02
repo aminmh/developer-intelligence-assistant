@@ -11,7 +11,6 @@ import warnings
 from typing import Any
 
 from langchain_community.chat_models import ChatOllama
-from langchain_community.embeddings import OllamaEmbeddings
 
 # langchain-community's Ollama classes are deprecated in favour of
 # langchain-ollama; suppress the noise since they still work and this project
@@ -19,11 +18,6 @@ from langchain_community.embeddings import OllamaEmbeddings
 warnings.filterwarnings(
     "ignore",
     message=".*ChatOllama.*deprecated.*",
-    category=DeprecationWarning,
-)
-warnings.filterwarnings(
-    "ignore",
-    message=".*OllamaEmbeddings.*deprecated.*",
     category=DeprecationWarning,
 )
 
@@ -71,12 +65,9 @@ def _get_llm() -> LangchainLLMWrapper:
 
 
 def _get_embeddings() -> LangchainEmbeddingsWrapper:
-    return LangchainEmbeddingsWrapper(
-        OllamaEmbeddings(
-            model=settings.ollama_embedding_model,
-            base_url=settings.ollama_base_url,
-        )
-    )
+    from embeddings import get_langchain_embeddings
+
+    return LangchainEmbeddingsWrapper(get_langchain_embeddings())
 
 
 def _cosine(a: list[float], b: list[float]) -> float:

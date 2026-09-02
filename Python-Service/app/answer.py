@@ -43,6 +43,8 @@ def build_user_prompt(
     sections: List[str] = []
 
     if extra_context:
+        if len(extra_context) > MAX_CONTEXT_CHARS:
+            extra_context = extra_context[:MAX_CONTEXT_CHARS] + "\n… (truncated)"
         sections.append(extra_context)
 
     if contexts:

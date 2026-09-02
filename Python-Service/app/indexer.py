@@ -2,19 +2,17 @@ import json
 from typing import Any, Dict, List, Optional, Tuple
 
 from llama_index.core import Document, Settings, VectorStoreIndex
-from llama_index.embeddings.ollama import OllamaEmbedding
 from llama_index.vector_stores.qdrant import QdrantVectorStore
 from qdrant_client import QdrantClient
 
+from embeddings import get_llamaindex_embed_model
 from graph_store import InMemoryCodeGraph
 from models import EdgeModel, ParameterModel, SymbolModel
 from settings import settings
 
-# Always use Ollama for embeddings
-Settings.embed_model = OllamaEmbedding(
-    model_name=settings.ollama_embedding_model,
-    base_url=settings.ollama_base_url,
-)
+# Embeddings come from the configured embedding server (Ollama by default, or
+# an OpenAI-compatible endpoint like LM Studio when embeddingBaseUrl is set).
+Settings.embed_model = get_llamaindex_embed_model()
 
 
 def build_symbol_id(chunk: Dict[str, Any]) -> str:
@@ -172,12 +170,7 @@ class CodeIntelligenceIndex:
 
     def _configure_embedding_model(self) -> None:
         if settings.embedding_backend == "ollama":
-            from llama_index.embeddings.ollama import OllamaEmbedding
-
-            Settings.embed_model = OllamaEmbedding(
-                model_name=settings.ollama_embedding_model,
-                base_url=settings.ollama_base_url,
-            )
+            Settings.embed_model = get_llamaindex_embed_model()
 
     def rebuild(self, report_path: str) -> None:
         self.graph = InMemoryCodeGraph()

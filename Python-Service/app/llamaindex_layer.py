@@ -22,7 +22,7 @@ import time
 import uuid
 from typing import Any, Dict, List, Optional
 
-from llama_index.embeddings.ollama import OllamaEmbedding
+from embeddings import get_llamaindex_embed_model
 from qdrant_client import QdrantClient
 from qdrant_client.models import (
     Distance,
@@ -302,11 +302,9 @@ class CodePropertyGraph:
             self._qdrant_revision = revision
         return self._qdrant
 
-    def _get_embed_model(self) -> OllamaEmbedding:
-        return OllamaEmbedding(
-            model_name=settings.ollama_embedding_model,
-            base_url=settings.ollama_base_url,
-        )
+    def _get_embed_model(self):
+        """Embedding model for the configured server (Ollama or OpenAI-compatible)."""
+        return get_llamaindex_embed_model()
 
     # --- ingestion ----------------------------------------------------------
 

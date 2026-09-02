@@ -12,7 +12,8 @@ from openai import OpenAI
 
 from settings import settings
 
-_openai_client: Optional[OpenAI] = None
+_openai_client: Optional[Tuple[str, OpenAI]] = None
+_extract_client_state: Optional[Tuple[str, OpenAI]] = None
 _instructor_client: Optional[Any] = None
 
 # (base_url, api_key, client) — re-created whenever either the dynamic base_url
@@ -21,12 +22,32 @@ _remote_client_state: Optional[Tuple[str, str, OpenAI]] = None
 
 
 def _get_openai_client() -> OpenAI:
-    """Return a lazily-created raw OpenAI client pointing at Ollama's /v1 endpoint."""
+    """Return a lazily-created raw OpenAI client for the LOCAL chat provider.
+
+    Points at the local LLM server when configured (``localLlmUrl``, e.g. an
+    LM Studio/Bionic OpenAI-compatible endpoint), otherwise falls back to the
+    Ollama server's /v1 endpoint. The cache is keyed on the base URL so a
+    changed setting re-creates the client on the next call.
+    """
     global _openai_client
-    if _openai_client is None:
-        base_url = settings.ollama_base_url.rstrip("/")
-        _openai_client = OpenAI(base_url=f"{base_url}/v1", api_key="ollama")
-    return _openai_client
+    base_url = (settings.local_llm_url or settings.ollama_base_url).rstrip("/")
+    if isinstance(_openai_client, tuple) and _openai_client[0] == base_url:
+        return _openai_client[1]
+    _openai_client = (base_url, OpenAI(base_url=f"{base_url}/v1", api_key="ollama"))
+    return _openai_client[1]
+
+
+def _get_extract_client() -> OpenAI:
+    """Return a lazily-created raw OpenAI client pinned to the Ollama server.
+
+    Structured extraction (JSON mode via instructor) and route classification
+    stay on Ollama even when the local chat provider points elsewhere.
+    """
+    global _extract_client_state
+    base_url = settings.ollama_base_url.rstrip("/")
+    if _extract_client_state is None or _extract_client_state[0] != base_url:
+        _extract_client_state = (base_url, OpenAI(base_url=f"{base_url}/v1", api_key="ollama"))
+    return _extract_client_state[1]
 
 
 def get_client():
@@ -34,7 +55,7 @@ def get_client():
     global _instructor_client
     if _instructor_client is None:
         _instructor_client = instructor.from_openai(
-            _get_openai_client(), mode=instructor.Mode.JSON
+            _get_extract_client(), mode=instructor.Mode.JSON
         )
     return _instructor_client
 
@@ -167,7 +188,7 @@ def complete_with_model(
         except Exception:
             pass  # silently fall back to the local model
 
-    model = settings.ollama_llm_model
+    model = settings.local_llm_model or settings.ollama_llm_model
     content = _run_chat(
         _get_openai_client(),
         model,
@@ -237,7 +258,7 @@ def stream_complete_with_model(
     emitted = False
 
     def _local_stream():
-        model = settings.ollama_llm_model
+        model = settings.local_llm_model or settings.ollama_llm_model
         yield "", model, "local"
         yield from (
             (delta, model, "local")

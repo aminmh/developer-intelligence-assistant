@@ -38,10 +38,19 @@ class _FakeClient:
 
 
 @pytest.fixture(autouse=True)
-def _reset_remote_client_state():
+def _reset_remote_client_state(monkeypatch):
     """Undo the module-level remote client cache between tests."""
     yield
     llm._remote_client_state = None
+    llm._openai_client = None
+
+
+@pytest.fixture(autouse=True)
+def _isolate_local_chat_settings(monkeypatch):
+    """Isolate from any user-saved localLlmUrl/localLlmModel in the live
+    settings.db — the local chat provider defaults to Ollama in tests."""
+    monkeypatch.setattr(llm.settings, "local_llm_url", "")
+    monkeypatch.setattr(llm.settings, "local_llm_model", "")
 
 
 def _configure_remote(monkeypatch, base_url="http://vllm:8000", model="qwen2.5-32b"):

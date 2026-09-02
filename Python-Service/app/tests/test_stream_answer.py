@@ -1,7 +1,21 @@
 """Tests for LLM streaming and answer streaming events."""
 
+import pytest
+
 import answer
 import llm
+
+
+@pytest.fixture(autouse=True)
+def _isolate_chat_settings(monkeypatch):
+    """Isolate from any user-saved local/remote chat settings in the live
+    settings.db — the local chat provider defaults to Ollama in tests."""
+    monkeypatch.setattr(llm.settings, "local_llm_url", "")
+    monkeypatch.setattr(llm.settings, "local_llm_model", "")
+    monkeypatch.setattr(llm.settings, "llm_remote_base_url", "")
+    monkeypatch.setattr(llm.settings, "llm_remote_api_key", "")
+    yield
+    llm._openai_client = None
 
 
 class _Chunk:
@@ -66,7 +80,10 @@ def test_stream_chat_skips_empty_deltas(monkeypatch):
 def test_stream_complete_with_model_local_default(monkeypatch):
     client = _FakeClient([_Chunk("one"), _Chunk("two")])
     monkeypatch.setattr(llm, "_get_openai_client", lambda: client)
-    # No remote configured — provider stays local.
+    # No remote configured — provider stays local. Isolated from any
+    # user-saved llmRemoteBaseUrl in the live settings.db.
+    monkeypatch.setattr(llm.settings, "llm_remote_base_url", "")
+    monkeypatch.setattr(llm.settings, "llm_remote_api_key", "")
     events = list(llm.stream_complete_with_model("p", provider="remote"))
     assert events[0] == ("", llm.settings.ollama_llm_model, "local")
     assert events[1:] == [("one", llm.settings.ollama_llm_model, "local"),
