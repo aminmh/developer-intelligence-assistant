@@ -1,6 +1,7 @@
 export interface RAGConfig {
   ollamaBaseUrl: string;
   ollamaEmbedModel: string;
+  embeddingBaseUrl: string;
   ollamaLlmModel: string;
   ollamaEvalModel: string;
   qdrantUrl: string;

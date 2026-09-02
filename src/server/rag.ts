@@ -20,6 +20,7 @@ if (!fs.existsSync(STORE_DIR)) {
 let ragConfig: RAGConfig = {
   ollamaBaseUrl: process.env.OLLAMA_URL || 'http://host.docker.internal:11434',
   ollamaEmbedModel: process.env.OLLAMA_MODEL || 'BGE-M3',
+  embeddingBaseUrl: '',
   ollamaLlmModel: 'gemma3-4b',
   ollamaEvalModel: process.env.OLLAMA_EVAL_MODEL || 'gemma3-4b',
   qdrantUrl: '',

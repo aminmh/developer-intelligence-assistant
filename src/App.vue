@@ -27,6 +27,7 @@ const activeTab = ref<'chat' | 'files' | 'config'>('chat');
 const config = ref<RAGConfig>({
   ollamaBaseUrl: 'http://host.docker.internal:11434',
   ollamaEmbedModel: 'BGE-M3',
+  embeddingBaseUrl: '',
   ollamaLlmModel: 'gemma3-4b',
   ollamaEvalModel: 'gemma3-4b',
   qdrantUrl: '',

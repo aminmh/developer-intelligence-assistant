@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import { ref, computed, onMounted } from 'vue';
+import MarkdownIt from 'markdown-it';
 import { 
   Send, 
   Cpu, 
@@ -57,6 +58,16 @@ const emit = defineEmits<{
 const ROUTES = ['code_explain', 'code_refactor', 'debug', 'search', 'knowledge', 'chat'];
 
 const chatInput = ref('');
+
+// Render assistant answers as GitHub-flavoured markdown. `html: false` keeps
+// raw HTML in model output inert (XSS-safe); linkify turns bare URLs clickable.
+const md = new MarkdownIt({
+  html: false,
+  linkify: true,
+  breaks: true,
+});
+
+const renderMarkdown = (content: string): string => md.render(content || '');
 
 // Feedback UI state: which message's route picker is open / already submitted
 const feedbackOpenId = ref<string | null>(null);
@@ -157,9 +168,9 @@ const toggleMatchExpansion = (id: string) => {
               ? 'bg-indigo-600/10 border border-indigo-500/20 text-slate-100 rounded-br-none'
               : 'bg-slate-900/60 border border-slate-800 text-slate-300 rounded-tl-none'"
           >
-            <div class="prose prose-invert prose-sm max-w-none text-left" v-if="msg.role === 'assistant'" v-html="msg.content.replace(/\n/g, '<br>')"></div>
+            <div class="prose prose-invert prose-sm max-w-none text-left" v-if="msg.role === 'assistant'" v-html="renderMarkdown(msg.content)"></div>
             <span v-if="msg.role === 'assistant' && msg.streaming" class="inline-block w-2 h-4 bg-indigo-400 animate-pulse ml-0.5 align-text-bottom"></span>
-            <div class="text-sm text-left font-mono leading-relaxed text-slate-100" v-else>{{ msg.content }}</div>
+            <div class="text-sm text-left font-mono leading-relaxed text-slate-100 whitespace-pre-wrap break-words" v-else>{{ msg.content }}</div>
             
             <!-- Assistant message metadata -->
             <div v-if="msg.role === 'assistant'" class="mt-3 pt-3 border-t border-slate-800 flex items-center justify-between text-[10px] text-slate-500 font-mono">

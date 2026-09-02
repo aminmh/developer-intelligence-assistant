@@ -519,6 +519,59 @@ async function startServer() {
     }
   });
 
+  // LM Studio: list models available on the configured server.
+  app.get('/api/lmstudio/models', async (req, res) => {
+    try {
+      const qs = typeof req.query?.base_url === 'string' && req.query.base_url
+        ? `?base_url=${encodeURIComponent(req.query.base_url)}`
+        : '';
+      const pyRes = await fetch(`${PYTHON_API_URL}/lmstudio/models${qs}`);
+      if (!pyRes.ok) {
+        return res.status(pyRes.status).json({ success: false, error: 'LM Studio model list failed.' });
+      }
+      res.json(await pyRes.json());
+    } catch (error: any) {
+      console.error('Failed to list LM Studio models via Python:', error.message);
+      res.status(500).json({ success: false, error: error.message });
+    }
+  });
+
+  // LM Studio: load a model into the engine (MLX for mlx-format models).
+  app.post('/api/lmstudio/load', async (req, res) => {
+    try {
+      const pyRes = await fetch(`${PYTHON_API_URL}/lmstudio/load`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(req.body || {}),
+      });
+      if (!pyRes.ok) {
+        return res.status(pyRes.status).json({ success: false, error: 'LM Studio model load failed.' });
+      }
+      res.json(await pyRes.json());
+    } catch (error: any) {
+      console.error('Failed to load LM Studio model via Python:', error.message);
+      res.status(500).json({ success: false, error: error.message });
+    }
+  });
+
+  // External OpenAI-compatible provider: test connection (proxies to Python service).
+  app.post('/api/health/test/remote', async (req, res) => {
+    try {
+      const pyRes = await fetch(`${PYTHON_API_URL}/health/test/remote`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(req.body ?? {}),
+      });
+      if (!pyRes.ok) {
+        return res.status(pyRes.status).json({ success: false, error: 'Remote connection test failed.' });
+      }
+      res.json(await pyRes.json());
+    } catch (error: any) {
+      console.error('Failed to test remote connection via Python:', error.message);
+      res.status(500).json({ success: false, error: error.message });
+    }
+  });
+
   // RunPod serverless: test the API key against rest.runpod.io
   app.post('/api/health/test/runpod', async (req, res) => {
     try {
