@@ -28,6 +28,7 @@ routes:
       no_index: false
     post_process:
       - action: llamaindex_ingest
+    doc_retrieval: true
     prompt_template: explain
 
   code_refactor:
@@ -37,6 +38,7 @@ routes:
       no_index: false
     post_process:
       - action: llamaindex_ingest
+    doc_retrieval: true
     prompt_template: refactor
 
   debug:
@@ -46,6 +48,7 @@ routes:
       no_index: false
     post_process:
       - action: llamaindex_ingest
+    doc_retrieval: true
     prompt_template: debug
 
   search:

@@ -469,6 +469,79 @@ def lmstudio_load_endpoint(body: dict):
     return {"success": result.pop("ok"), **result}
 
 
+@app.get(
+    "/docretrieval/deps",
+    tags=["Documentation Retrieval"],
+    summary="Scan workspace dependencies",
+    description=(
+        "Scans a workspace path for dependency files (composer.lock, "
+        "package-lock.json, uv.lock, ...) and returns the normalized, "
+        "version-aware dependency map used for documentation lookups."
+    ),
+)
+def docretrieval_deps(workspace: str = ""):
+    """Scan a workspace for its installed dependencies."""
+    from dependencies import scan_dependencies
+
+    path = workspace or settings.workspace_root
+    result = scan_dependencies(path)
+    result["workspace"] = path
+    return {"success": True, **result}
+
+
+@app.post(
+    "/docretrieval/test",
+    tags=["Documentation Retrieval"],
+    summary="Test documentation retrieval",
+    description=(
+        "Resolves documentation for a sample package via the configured "
+        "provider pipeline (Context7 → GitMCP) and returns the retrieved "
+        "chunk count + provenance. Safe to call — no prompts are generated."
+    ),
+)
+def docretrieval_test(body: dict):
+    """Probe the doc-retrieval pipeline for a package/query."""
+    from doc_retrieval import retrieve_documentation
+
+    package = (body.get("package") or "laravel/framework").strip()
+    query = (body.get("query") or "routing basics").strip()
+    packages = {
+        package: {
+            "requested_version": body.get("requested_version"),
+            "resolved_version": body.get("resolved_version") or None,
+            "source": "test",
+            "installed": True,
+        }
+    }
+    strict = body.get("strict") if isinstance(body.get("strict"), bool) else None
+    result = retrieve_documentation(packages, query, strict=strict)
+    return {"success": result.get("ok"), **result}
+
+
+@app.get(
+    "/docretrieval/status",
+    tags=["Documentation Retrieval"],
+    summary="Doc-retrieval configuration status",
+)
+def docretrieval_status():
+    """Report the effective doc-retrieval settings (no secrets)."""
+    return {
+        "success": True,
+        "enabled": settings.doc_retrieval_enabled,
+        "context7": {
+            "enabled": settings.doc_context7_enabled,
+            "use_public_endpoint_without_key": True,
+            "timeout_seconds": settings.doc_context7_timeout,
+            "max_retries": settings.doc_context7_max_retries,
+        },
+        "gitmcp": {
+            "enabled": settings.doc_gitmcp_enabled,
+            "timeout_seconds": settings.doc_gitmcp_timeout,
+        },
+        "strict_mode": settings.doc_strict_mode,
+    }
+
+
 @app.post(
     "/rebuild",
     tags=["Health & System"],
@@ -1175,6 +1248,13 @@ def answer_prompt(
     temperature = body.get("temperature")
     top_p = body.get("top_p")
     extra_context = body.get("extra_context")
+    # Documentation grounding chunks (Context7/GitMCP) fetched by the
+    # orchestrator — injected as their own prompt section.
+    doc_chunks = body.get("doc_chunks")
+    if isinstance(doc_chunks, list):
+        doc_chunks = [c for c in doc_chunks if isinstance(c, str) and c.strip()]
+    else:
+        doc_chunks = None
     # Default to the remote OpenAI-compatible model when the field is omitted;
     # falls back to the local Ollama model automatically when none is configured.
     use_remote = body.get("use_remote", True) is True
@@ -1191,6 +1271,7 @@ def answer_prompt(
         temperature=temperature,
         top_p=top_p,
         extra_context=extra_context,
+        doc_chunks=doc_chunks,
         use_remote=use_remote,
         route=route,
     )
@@ -1251,6 +1332,11 @@ def answer_stream(
     top_p = body.get("top_p")
     use_remote = body.get("use_remote", True) is True
     route = body.get("route", "chat")
+    doc_chunks = body.get("doc_chunks")
+    if isinstance(doc_chunks, list):
+        doc_chunks = [c for c in doc_chunks if isinstance(c, str) and c.strip()]
+    else:
+        doc_chunks = None
 
     results, contexts, extra_context = _answer_context(body, query, x_rag_trace_id)
 
@@ -1265,6 +1351,7 @@ def answer_stream(
                 temperature=temperature,
                 top_p=top_p,
                 extra_context=extra_context,
+                doc_chunks=doc_chunks,
                 use_remote=use_remote,
                 route=route,
             ):

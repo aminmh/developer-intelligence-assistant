@@ -32,20 +32,37 @@ SYSTEM_PROMPT = (
 MAX_CONTEXT_BLOCKS = 8
 MAX_CONTEXT_CHARS = 2500
 
+# Documentation grounding (Context7/GitMCP) rides in as its own section with a
+# larger budget than code blocks — it is concise reference material, not source.
+MAX_DOC_SECTIONS = 6
+MAX_DOC_CHARS = 4000
+
+
+def _cap(text: str, limit: int) -> str:
+    return text if len(text) <= limit else text[:limit] + "\n… (truncated)"
+
 
 def build_user_prompt(
     question: str,
     contexts: List[Dict[str, Any]],
     entities: Optional[Dict[str, Any]] = None,
     extra_context: Optional[str] = None,
+    doc_chunks: Optional[List[str]] = None,
 ) -> str:
-    """Assemble the user-facing prompt: tool context + code + entities + question."""
+    """Assemble the user-facing prompt: docs + tool context + code + entities + question."""
     sections: List[str] = []
 
     if extra_context:
-        if len(extra_context) > MAX_CONTEXT_CHARS:
-            extra_context = extra_context[:MAX_CONTEXT_CHARS] + "\n… (truncated)"
-        sections.append(extra_context)
+        sections.append(_cap(extra_context, MAX_CONTEXT_CHARS))
+
+    if doc_chunks:
+        docs = []
+        for i, chunk in enumerate(doc_chunks[:MAX_DOC_SECTIONS]):
+            docs.append(f"--- Library doc {i + 1} ---\n{_cap(chunk, MAX_DOC_CHARS)}")
+        sections.append(
+            "Current library documentation (use it when it is relevant; "
+            "ignore what is not):\n\n" + "\n\n".join(docs)
+        )
 
     if contexts:
         blocks = []
@@ -111,12 +128,13 @@ def generate_answer(
     temperature: Optional[float] = None,
     top_p: Optional[float] = None,
     extra_context: Optional[str] = None,
+    doc_chunks: Optional[List[str]] = None,
     use_remote: bool = False,
     route: str = "chat",
 ) -> Dict[str, Any]:
     """Generate an answer from retrieved code context + entities."""
     contexts = contexts or []
-    prompt = build_user_prompt(question, contexts, entities, extra_context)
+    prompt = build_user_prompt(question, contexts, entities, extra_context, doc_chunks)
 
     temp = settings.temperature if temperature is None else temperature
     topp = settings.top_p if top_p is None else top_p
@@ -161,6 +179,7 @@ def generate_answer_stream(
     temperature: Optional[float] = None,
     top_p: Optional[float] = None,
     extra_context: Optional[str] = None,
+    doc_chunks: Optional[List[str]] = None,
     use_remote: bool = False,
     route: str = "chat",
 ) -> Any:
@@ -171,7 +190,7 @@ def generate_answer_stream(
     duration_ms).
     """
     contexts = contexts or []
-    prompt = build_user_prompt(question, contexts, entities, extra_context)
+    prompt = build_user_prompt(question, contexts, entities, extra_context, doc_chunks)
 
     temp = settings.temperature if temperature is None else temperature
     topp = settings.top_p if top_p is None else top_p

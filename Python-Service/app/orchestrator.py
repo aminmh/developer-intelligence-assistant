@@ -154,12 +154,15 @@ class Orchestrator:
             steps.append({"key": "tool", "label": f"Running {tool_name}", "status": "pending"})
         elif route.get("llamaindex", True):
             steps.append({"key": "tool", "label": "Running selected tool", "status": "pending"})
+        if route.get("doc_retrieval"):
+            steps.append({"key": "doc_retrieval", "label": "Fetching Library Docs", "status": "pending"})
         for action in route.get("post_process", []) or []:
             action_name = action.get("action") if isinstance(action, dict) else str(action)
             steps.append({"key": f"post_{action_name}", "label": action_name.replace("_", " ").title(), "status": "pending"})
         return steps
 
     def _run_job(self, ctx: JobContext) -> None:
+        workspace_path: str | None = None
         try:
             self._update_step(ctx.job_id, "extracting", "running")
             ws = self._call(
@@ -189,6 +192,16 @@ class Orchestrator:
                 tool_name=tool_name,
                 tool_result=tool_result,
             )
+            # Documentation grounding: when the route opts in (doc_retrieval:
+            # true) scan the workspace's dependency files and fetch version-aware
+            # docs (Context7 → GitMCP). Chunks ride alongside the job so the web
+            # answer step can inject them as grounded extra_context.
+            if (ctx.route or {}).get("doc_retrieval"):
+                self._update_step(ctx.job_id, "doc_retrieval", "running")
+            doc_context = self._collect_doc_context(ctx, workspace_path, post_process_result)
+            if (ctx.route or {}).get("doc_retrieval"):
+                detail = "docs fetched" if doc_context and doc_context.get("chunks") else ("unavailable" if doc_context else "skipped")
+                self._update_step(ctx.job_id, "doc_retrieval", "done", detail=detail)
             synthesized_output = self._synthesize_with_llamaindex(
                 ctx=ctx,
                 tool_name=tool_name,
@@ -204,6 +217,7 @@ class Orchestrator:
                 collection_name=collection_name,
                 tool_result=tool_result,
                 tool_output=post_process_result,
+                doc_context=doc_context,
             )
         except Exception as exc:
             self._save_error(ctx.job_id, str(exc))
@@ -213,6 +227,32 @@ class Orchestrator:
                 ctx.route_name,
                 exc,
                 exc_info=exc,
+            )
+        finally:
+            # Remove the extracted workspace footprint. The extracted files are
+            # only needed while the PHP tool + doc retrieval run; the final LLM
+            # answer reads from the Qdrant collection, never from this dir.
+            # Set WORKSPACE_KEEP_EXTRACTED=1 to retain for debugging.
+            keep = os.environ.get("WORKSPACE_KEEP_EXTRACTED", "").strip().lower() in ("1", "true", "yes")
+            if not keep:
+                self._cleanup_workspace(workspace_path)
+
+    def _cleanup_workspace(self, workspace_path: str | None) -> None:
+        """Delete an extracted workspace dir — only if it lives safely inside
+        the configured workspace root (never the root itself)."""
+        if not workspace_path or not os.path.isdir(workspace_path):
+            return
+        try:
+            root = os.path.realpath(settings.workspace_root)
+            target = os.path.realpath(workspace_path)
+            if target == root or not target.startswith(root.rstrip("/") + os.sep):
+                return  # safety: never remove the workspace root or outside it
+            from php_tools import safe_rmtree
+
+            safe_rmtree(target)
+        except Exception as exc:  # noqa: BLE001
+            get_exception_logger().warning(
+                "Workspace cleanup skipped for %s: %s", workspace_path, exc
             )
 
     def _select_tool(self, ctx: JobContext) -> str | None:
@@ -370,6 +410,60 @@ class Orchestrator:
                 collection_name = result.get("collection_name")
             self._update_step(ctx.job_id, f"post_{action_name}", "done")
         return result, collection_name
+
+    def _collect_doc_context(
+        self,
+        ctx: JobContext,
+        workspace_path: str | None,
+        post_process_result: Any,
+    ) -> dict[str, Any] | None:
+        """Fetch version-aware dependency docs for routes that opt in.
+
+        Returns ``None`` (skipped) unless:
+          * the route declares ``doc_retrieval: true``,
+          * doc retrieval is globally enabled,
+          * a real workspace path with dependency files is available.
+
+        Result shape: ``{"chunks": [...], "provenance": [...], "provider": ...,
+        "warning": ...}`` — stored on the job so the answer step can ground on
+        it without blowing the context window (chunks already bounded).
+        """
+        if not (ctx.route or {}).get("doc_retrieval"):
+            return None
+        if not workspace_path or not os.path.isdir(workspace_path):
+            return None
+        try:
+            from dependencies import scan_dependencies
+            from doc_retrieval import retrieve_documentation
+
+            dep_map = scan_dependencies(workspace_path)
+            packages = dep_map.get("packages") or {}
+            if not packages:
+                return None
+            result = retrieve_documentation(packages, ctx.prompt)
+            if result.get("ok") and result.get("chunks"):
+                return {
+                    "chunks": result["chunks"],
+                    "provenance": result.get("provenance", []),
+                    "provider": result.get("provider"),
+                    "warning": result.get("warning"),
+                }
+            if result.get("warning"):
+                # record the degradation so the UI can surface it
+                return {
+                    "chunks": [],
+                    "provenance": result.get("provenance", []),
+                    "provider": None,
+                    "warning": result["warning"],
+                }
+        except Exception:
+            get_exception_logger().error(
+                "Doc retrieval failed for job %s (route=%s)",
+                ctx.job_id,
+                ctx.route_name,
+                exc_info=True,
+            )
+        return None
 
     def _act_extract_json(
         self,
@@ -727,6 +821,8 @@ class Orchestrator:
                 "output": job.get("output"),
                 "tool_name": job.get("tool_name"),
                 "collection_name": job.get("collection_name"),
+                "tool_output": job.get("tool_output"),
+                "doc_context": job.get("doc_context"),
                 "entities": job.get("entities"),
                 "error": job.get("error"),
             }
@@ -740,6 +836,7 @@ class Orchestrator:
         collection_name: str | None = None,
         tool_result: dict[str, Any] | None = None,
         tool_output: Any = None,
+        doc_context: dict[str, Any] | None = None,
     ) -> None:
         with self._lock:
             job = self._jobs.get(job_id)
@@ -751,6 +848,7 @@ class Orchestrator:
             job["tool_result"] = tool_result
             job["tool_output"] = tool_output
             job["output"] = output
+            job["doc_context"] = doc_context
             job["updated_at"] = time.time()
         self._write_status(job_id)
 

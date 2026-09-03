@@ -41,6 +41,18 @@ class Settings(BaseModel):
     llm_remote_api_key: str = os.getenv("LLM_REMOTE_API_KEY", "")
     runpod_api_key: str = os.getenv("RUNPOD_API_KEY", "")
 
+    # Documentation retrieval (Context7 primary, GitMCP fallback). The doc
+    # lookup key is read straight from CONTEXT7_API_KEY when present — never
+    # stored through the settings UI (no context7ApiKey dynamic key).
+    doc_retrieval_enabled: bool = os.getenv("DOC_RETRIEVAL_ENABLED", "true").strip().lower() in ("1", "true", "yes", "on")
+    doc_context7_enabled: bool = os.getenv("DOC_CONTEXT7_ENABLED", "true").strip().lower() in ("1", "true", "yes", "on")
+    doc_gitmcp_enabled: bool = os.getenv("DOC_GITMCP_ENABLED", "true").strip().lower() in ("1", "true", "yes", "on")
+    doc_strict_mode: bool = os.getenv("DOC_STRICT_MODE", "false").strip().lower() in ("1", "true", "yes", "on")
+    doc_context7_timeout: float = float(os.getenv("DOC_CONTEXT7_TIMEOUT", "10"))
+    doc_context7_max_retries: int = int(os.getenv("DOC_CONTEXT7_MAX_RETRIES", "1"))
+    doc_gitmcp_timeout: float = float(os.getenv("DOC_GITMCP_TIMEOUT", "15"))
+    context7_api_key_env: str = os.getenv("CONTEXT7_API_KEY_ENV", "CONTEXT7_API_KEY")
+
     temperature: float = float(os.getenv("LLM_TEMPERATURE", "0.7"))
     top_p: float = float(os.getenv("LLM_TOP_P", "0.9"))
 
@@ -92,6 +104,12 @@ class RuntimeSettings:
         "llm_remote_model": "llmRemoteModel",
         "llm_remote_api_key": "llmRemoteApiKey",
         "runpod_api_key": "runpodApiKey",
+        "doc_retrieval_enabled": "docRetrievalEnabled",
+        "doc_context7_enabled": "docContext7Enabled",
+        "doc_gitmcp_enabled": "docGitmcpEnabled",
+        "doc_strict_mode": "docStrictMode",
+        "doc_context7_timeout": "docContext7TimeoutS",
+        "doc_gitmcp_timeout": "docGitmcpTimeoutS",
         "qdrant_url": "qdrantUrl",
         "qdrant_api_key": "qdrantApiKey",
         "sandbox_docker_host": "sandboxDockerHost",
