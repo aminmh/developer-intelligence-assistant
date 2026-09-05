@@ -29,6 +29,7 @@ routes:
     post_process:
       - action: llamaindex_ingest
     doc_retrieval: true
+    framework_aware: true
     prompt_template: explain
 
   code_refactor:
@@ -39,7 +40,23 @@ routes:
     post_process:
       - action: llamaindex_ingest
     doc_retrieval: true
+    framework_aware: true
     prompt_template: refactor
+
+  sandbox_analyze:
+    # Full sandbox run: framework profile + static knowledge, then the project
+    # is staged into the gVisor DinD backend, composer-installed (tier 1,
+    # networked) and probed under runsc (tier 2, --network=none read-only).
+    tool: chunk_code
+    override_args:
+      export_format: json
+      no_index: false
+    post_process:
+      - action: llamaindex_ingest
+    framework_aware: true
+    sandbox: true
+    sandbox_probes: [routes, schedule]
+    prompt_template: explain
 
   debug:
     tool: chunk_code
@@ -49,6 +66,7 @@ routes:
     post_process:
       - action: llamaindex_ingest
     doc_retrieval: true
+    framework_aware: true
     prompt_template: debug
 
   search:

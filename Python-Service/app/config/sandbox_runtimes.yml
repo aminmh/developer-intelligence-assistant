@@ -1,0 +1,48 @@
+# Sandbox runtime profiles — image + dependency installer + probe templates.
+#
+# Image policy: the executor FIRST searches images already pulled on the sandbox
+# daemon (docker images); composer:2 is preloaded in dind-storage. A pull is
+# attempted only when the daemon has egress; otherwise probes report an honest
+# "image unavailable" failure — nothing ever auto-installs a runtime silently.
+#
+# Tier 1 (install) runs the installer on a WRITABLE networked copy.
+# Tier 2 (probes) re-runs the same project READ-ONLY under runsc, no network,
+# with the _PROBE_ENV harness (sqlite :memory:, array drivers) injected.
+runtimes:
+  # Shared composer-based runtime (anchor reused by every PHP-family framework).
+  php: &php_runtime
+    image: composer:2
+    # Marker file locating the real app dir: uploads often wrap the project in
+    # a top-level folder (Archive/…). Staging binds the whole workspace, and
+    # install/probe commands run from the dir containing this marker.
+    manifest: composer.json
+    # Dependency installer argv (tier 1). --no-scripts/-dev/--prefer-dist are
+    # configurable policy knobs: enabling scripts executes the repo's own
+    # composer scripts (CI semantics); disable for stricter lockdown.
+    installer:
+      - composer
+      - install
+      - --no-interaction
+      - --no-progress
+      - --prefer-dist
+      - --no-dev
+    probes:
+      routes:
+        - php
+        - artisan
+        - route:list
+        - --json
+      schedule:
+        - php
+        - artisan
+        - schedule:list
+      tests:
+        - ./vendor/bin/phpunit
+        - --no-coverage
+
+  # Laravel ships the same composer toolchain — probe templates identical.
+  laravel: *php_runtime
+  # TODO(future): django → python runtime (pip install -r + manage.py probes);
+  # rails → ruby (bundle install + rails routes); express → node (npm ci).
+  # Each needs its runtime image preloaded/pulled into the DinD backend.
+
