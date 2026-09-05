@@ -35,6 +35,7 @@ import uuid
 import os
 import re
 import json
+import time
 import base64
 import logging
 import threading
@@ -482,6 +483,40 @@ def sandbox_command(body: dict):
         framework=framework,
         cwd=body.get("cwd"),
     )
+    return {"success": result.get("status") == "done", **result}
+
+
+def _project_stem(filename: str) -> str:
+    """zip stem → daemon project id (matches orchestrator staging keys)."""
+    import re as _re
+
+    stem = filename.rsplit(".", 1)[0] if "." in filename else filename
+    return _re.sub(r"[^A-Za-z0-9_.-]", "_", stem).strip("._") or "project"
+
+
+@app.post(
+    "/sandbox/clean",
+    tags=["Sandbox"],
+    summary="Remove a Staged Project from the Sandbox Daemon",
+    description=(
+        "Deletes the staged copy (/jobs/<stem>/src) of an analyzed project from "
+        "the sandbox daemon volume, reclaiming disk. Safe id validation only — "
+        "the path is derived from the zip filename. Running analyses are "
+        "unaffected (per-run staging dirs)."
+    ),
+)
+def sandbox_clean(body: dict):
+    from sandbox.executor import default_executor
+
+    filename = body.get("filename", "")
+    if not isinstance(filename, str) or not filename:
+        return {"success": False, "error": "Missing filename"}
+    pid = _project_stem(filename)
+    try:
+        executor = default_executor()
+    except ValueError as exc:
+        return {"success": False, "error": f"sandbox backend unavailable: {exc}"}
+    result = executor.cleanup_staging(pid)
     return {"success": result.get("status") == "done", **result}
 
 
@@ -944,7 +979,45 @@ def workspace_destroy(workspace_id: str):
     workspace_dir = Path(settings.workspace_root) / workspace_id
     if workspace_dir.exists():
         safe_rmtree(str(workspace_dir))
+    try:
+        from projects.workspace_registry import forget
+
+        forget(workspace_id)
+    except Exception:  # noqa: BLE001 — registry is best-effort
+        pass
     return {"deleted": True}
+
+
+@app.get(
+    "/api/workspaces",
+    tags=["Upload & TUS"],
+    summary="List Retained Workspaces",
+    description=(
+        "Retained (bounded-LRU) extracted workspaces from sandbox analyses — "
+        "used by the inspect file reads and manual cleanup. Newest first."
+    ),
+)
+def workspaces_list():
+    from projects.workspace_registry import list_workspaces
+
+    entries = list_workspaces()
+    out = []
+    for e in entries:
+        path = e.get("path") or ""
+        try:
+            file_count = sum(1 for _ in Path(path).rglob("*") if _.is_file())
+        except OSError:
+            file_count = 0
+        out.append(
+            {
+                "id": e.get("id"),
+                "filename": e.get("filename"),
+                "path": path,
+                "files": file_count,
+                "age_s": max(0, int(time.time() - float(e.get("ts") or 0))),
+            }
+        )
+    return {"workspaces": out}
 
 
 @app.get(
@@ -1648,6 +1721,131 @@ def orchestration_status(job_id: str):
     if job is None:
         return {"status": "unknown", "step": 0, "total_steps": 0}
     return job
+
+
+_ANSI_RE = None
+
+
+def _strip_ansi(text: object) -> object:
+    """Remove terminal escapes + stray CR so payloads stay strict-JSON friendly."""
+    global _ANSI_RE
+    if not isinstance(text, str):
+        return text
+    if _ANSI_RE is None:
+        import re as _re
+
+        _ANSI_RE = _re.compile(r"\x1b\[[0-9;?]*[A-Za-z]|\r")
+    return _ANSI_RE.sub("", text)
+
+
+def _job_summary(job: dict | None) -> dict | None:
+    """Compact, ANSI-free projection of a job (cons F16).
+
+    Excludes the heavy keys (doc_context, full profile, chunk stdout) that made
+    the whole status payload unparseable for strict JSON consumers.
+    """
+    if not job:
+        return None
+    sandbox = job.get("sandbox") or {}
+    probes = []
+    for p in sandbox.get("probes") or []:
+        if not isinstance(p, dict):
+            continue
+        probes.append(
+            {
+                "name": p.get("name"),
+                "status": p.get("status"),
+                "exit_code": p.get("exit_code"),
+                "command": p.get("command"),
+                "reason": p.get("reason"),
+            }
+        )
+    install = sandbox.get("install")
+    if isinstance(install, dict):
+        install = {
+            "status": install.get("status"),
+            "exit_code": install.get("exit_code"),
+            "error": install.get("error"),
+            "reason": install.get("reason"),
+        }
+    steps = []
+    for s in job.get("steps") or []:
+        if isinstance(s, dict):
+            steps.append(
+                {
+                    "key": s.get("key"),
+                    "label": s.get("label"),
+                    "status": s.get("status"),
+                    "detail": s.get("detail"),
+                }
+            )
+    profile = job.get("project_profile") or {}
+    output = _strip_ansi(job.get("output"))
+    return {
+        "job_id": job.get("job_id"),
+        "status": job.get("status"),
+        "error": job.get("error"),
+        "route_name": job.get("route_name"),
+        "filename": job.get("filename"),
+        "collection_name": job.get("collection_name"),
+        "created_at": job.get("created_at"),
+        "steps": steps,
+        "profile": {
+            "framework": profile.get("framework"),
+            "version": profile.get("version"),
+            "routes": len(profile.get("routes") or []),
+            "routes_source": profile.get("routes_source"),
+            "summary": profile.get("summary"),
+        },
+        "sandbox": {
+            "staged": sandbox.get("staged"),
+            "runtime_image": sandbox.get("runtime_image"),
+            "source": sandbox.get("source"),
+            "install": install,
+            "probes": probes,
+        },
+        "output_preview": (str(output)[:500] + ("…" if output and len(str(output)) > 500 else ""))
+        if output
+        else None,
+    }
+
+
+@app.get(
+    "/orchestrate/{job_id}/summary",
+    tags=["Code Intelligence"],
+    summary="Orchestration Job Summary (compact)",
+    description=(
+        "Compact, ANSI-stripped projection of an orchestration job for status "
+        "polling and UI history — the full status payload embeds raw stdout "
+        "(chunks/doc_context) that breaks strict JSON parsers. Falls back to "
+        "the durable result bundle once the in-memory job is evicted."
+    ),
+)
+def orchestration_summary(job_id: str):
+    job = orchestrator.get_job(job_id)
+    if job is None:
+        try:
+            from analysis.analysis_service import load_bundle
+
+            bundle = load_bundle(job_id)
+        except Exception:  # noqa: BLE001 — job may simply be unknown
+            bundle = None
+        if bundle:
+            job = {
+                "job_id": job_id,
+                "status": bundle.get("status") or "done",
+                "route_name": bundle.get("route_name"),
+                "filename": bundle.get("filename"),
+                "collection_name": bundle.get("collection_name"),
+                "created_at": bundle.get("created_at"),
+                "output": bundle.get("output"),
+                "project_profile": bundle.get("project_profile"),
+                "sandbox": bundle.get("sandbox"),
+            }
+    summary = _job_summary(job)
+    if summary is None:
+        return {"status": "unknown"}
+    return summary
 
 
 @app.post(

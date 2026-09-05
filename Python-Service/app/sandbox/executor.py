@@ -821,9 +821,19 @@ class SandboxExecutor:
 
         if install.get("status") == "done" and install.get("exit_code") == 0:
             for name in probes or list((rt.get("probes") or {}).keys()):
-                out["probes"].append(
-                    self.run_probe(project_id, name, framework, image=image)
-                )
+                # C6: one crashing probe never cancels the remaining probes.
+                try:
+                    out["probes"].append(
+                        self.run_probe(project_id, name, framework, image=image)
+                    )
+                except Exception as exc:  # noqa: BLE001 — probe isolation
+                    out["probes"].append(
+                        {
+                            "name": name,
+                            "status": "failed",
+                            "error": str(exc)[:300],
+                        }
+                    )
         else:
             reason = install.get("reason") or install.get("error") or (
                 f"install exit {install.get('exit_code')}"
@@ -833,6 +843,28 @@ class SandboxExecutor:
                 for n in (probes or list((rt.get("probes") or {}).keys()))
             ]
         return out
+
+    def cleanup_staging(self, project_id: str) -> dict[str, Any]:
+        """Delete the daemon-side staged project dir (cons F17).
+
+        The nested DinD volume accumulates one ``/jobs/<pid>/src`` tree per
+        analysis; the orchestrator no longer auto-removes it so shell sessions
+        stay usable — an explicit cleanup (UI button / endpoint) reclaims it.
+        """
+        if not project_id or "/" in project_id or ".." in Path(project_id).parts:
+            return {"status": "skipped", "reason": f"unsafe project_id: {project_id!r}"}
+        try:
+            self.api.run_once(
+                image="alpine:3.20.3",
+                argv=["sh", "-c", f"rm -rf '{jobs_root()}/{project_id}'"],
+                working_dir="/",
+                host_config={"Binds": [f"{jobs_root()}:/jobs"]},
+            )
+            self._rel.pop(project_id, None)
+            self._runtime_images.pop(project_id, None)
+            return {"status": "done", "staging": f"{jobs_root()}/{project_id}"}
+        except Exception as exc:  # noqa: BLE001 — cleanup is best-effort
+            return {"status": "failed", "error": str(exc)[:300]}
 
 
 def load_runtime_yml(path: str = CONFIG_PATH) -> dict[str, Any]:

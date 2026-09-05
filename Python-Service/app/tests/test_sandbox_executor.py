@@ -499,3 +499,42 @@ class TestShellCommand:
         assert "cd /app || exit 9" in run_call
         assert "composer.json" in run_call
         assert record["working_dir"] == "/app"
+
+
+class TestConsHardening:
+    """C6 probe isolation + F17 staging cleanup."""
+
+    def test_analyze_isolates_probe_crash(self, fake_api, tmp_path):
+        ex_module, executor = fake_api
+        fake = ex_module.DockerApi()
+
+        real_run_once = fake.run_once
+        calls = {"n": 0}
+
+        def flaky_run_once(**kw):
+            calls["n"] += 1
+            # install is call #2 → probe[0] (routes) is #3 and dies
+            if calls["n"] == 3:
+                raise RuntimeError("daemon reset mid-probe")
+            return real_run_once(**kw)
+
+        fake.run_once = flaky_run_once
+        out = executor.analyze(str(_workspace(tmp_path)), "proj-1", "php")
+        assert out["install"]["exit_code"] == 0
+        assert out["probes"][0]["status"] == "failed"
+        assert "daemon reset" in out["probes"][0]["error"]
+        assert out["probes"][1]["status"] == "done"  # remaining probe still ran
+
+    def test_cleanup_staging_removes_daemon_dir(self, fake_api):
+        ex_module, executor = fake_api
+        result = executor.cleanup_staging("proj-1")
+        assert result["status"] == "done"
+        assert any(
+            c == "run:alpine:3.20.3:sh -c rm -rf '/jobs/proj-1'"
+            for c in ex_module.DockerApi().calls
+        )
+
+    def test_cleanup_staging_rejects_unsafe_ids(self, fake_api):
+        _m, executor = fake_api
+        assert executor.cleanup_staging("../escape")["status"] == "skipped"
+        assert executor.cleanup_staging("a/b")["status"] == "skipped"

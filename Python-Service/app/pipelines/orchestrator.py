@@ -175,7 +175,17 @@ class Orchestrator:
             # answer reads from the Qdrant collection, never from this dir.
             # Set WORKSPACE_KEEP_EXTRACTED=1 to retain for debugging.
             keep = os.environ.get("WORKSPACE_KEEP_EXTRACTED", "").strip().lower() in ("1", "true", "yes")
-            if not keep:
+            # F17: sandbox routes retain their workspace (bounded LRU) so the
+            # /api/inspect Tier-2/3 file reads keep working after the job.
+            retain = keep or bool((ctx.route or {}).get("sandbox"))
+            if retain and workspace_path and os.path.isdir(workspace_path):
+                try:
+                    from projects.workspace_registry import register
+
+                    register(workspace_path, ctx.filename)
+                except Exception:  # noqa: BLE001 — retention is best-effort
+                    self._cleanup_workspace(workspace_path)
+            elif not keep:
                 self._cleanup_workspace(workspace_path)
 
     def _prepare_workspace(self, ctx: JobContext) -> tuple[str | None, int | None]:
@@ -538,12 +548,55 @@ class Orchestrator:
                     "doc_context": doc_context,
                     "project_profile": project_profile,
                     "sandbox": sandbox_result,
+                    # F15: compact run manifest — everything a downstream
+                    # consumer needs without re-reading the heavy payloads.
+                    "manifest": self._bundle_manifest(
+                        ctx, job, doc_context, project_profile, sandbox_result
+                    ),
                 },
             )
         except Exception as exc:
             get_exception_logger().error(
                 "Result bundle write failed for job %s: %s", ctx.job_id, exc
             )
+
+    @staticmethod
+    def _bundle_manifest(
+        ctx: JobContext,
+        job: dict[str, Any],
+        doc_context: dict[str, Any] | None,
+        project_profile: dict[str, Any] | None,
+        sandbox_result: dict[str, Any] | None,
+    ) -> dict[str, Any]:
+        """Compact counts for the durable bundle (F15) — pure derivation."""
+        profile = project_profile or {}
+        sandbox = sandbox_result or {}
+        probes = [
+            {
+                "name": (p or {}).get("name"),
+                "status": (p or {}).get("status"),
+                "exit_code": (p or {}).get("exit_code"),
+            }
+            for p in (sandbox.get("probes") or [])
+        ]
+        output = job.get("output")
+        return {
+            "filename": ctx.filename,
+            "route": ctx.route_name,
+            "status": job.get("status"),
+            "output_chars": len(output) if isinstance(output, str) else None,
+            "collection": job.get("collection_name"),
+            "doc_chunks": len((doc_context or {}).get("chunks") or []),
+            "doc_provider": (doc_context or {}).get("provider"),
+            "routes": len(profile.get("routes") or []),
+            "routes_source": profile.get("routes_source"),
+            "models": len(profile.get("models") or []),
+            "tables": len(profile.get("schema") or []),
+            "controllers": len(profile.get("controllers") or []),
+            "sandbox_image": sandbox.get("runtime_image"),
+            "install": (sandbox.get("install") or {}).get("status"),
+            "probes": probes,
+        }
 
     def _act_extract_json(
         self,
