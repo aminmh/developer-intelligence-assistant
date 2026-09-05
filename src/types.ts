@@ -12,6 +12,12 @@ export interface RAGConfig {
   llmRemoteModel: string;
   llmRemoteApiKey: string;
   runpodApiKey: string;
+  docRetrievalEnabled: boolean;
+  docContext7Enabled: boolean;
+  docGitmcpEnabled: boolean;
+  docStrictMode: boolean;
+  docContext7TimeoutS: number;
+  docGitmcpTimeoutS: number;
   temperature: number;
   topP: number;
 }
@@ -87,4 +93,44 @@ export interface QueryResponse {
   sourceFiles: string[];
   llmUsed: string;
   durationMs: number;
+}
+
+// --- Sandbox analysis persistence (Python backend analysis_service) --------
+
+export interface SandboxProbe {
+  name: string;
+  status: 'done' | 'skipped' | 'failed' | 'unavailable';
+  exit_code?: number;
+  command?: string;
+  image?: string;
+  reason?: string;
+  stdout?: string;
+}
+
+export interface SandboxResult {
+  staged?: boolean;
+  source?: string;
+  runtime_image?: string;
+  install?: { status: string; exit_code?: number; error?: string; reason?: string; stdout?: string };
+  probes?: SandboxProbe[];
+  status?: string;
+  error?: string;
+}
+
+export interface AnalysisSession {
+  id: string;
+  job_id: string;
+  filename: string;
+  collection_name: string | null;
+  label: string;
+  status: string;
+  created_at: string;
+  summary: string;
+  grounding_md?: string;
+  profile?: Record<string, any>;
+  runtime?: Record<string, any>;
+  counts?: Record<string, any>;
+  ingest?: { ingested?: number; chunk_count?: number; error?: string };
+  link?: { linked?: number; reason?: string };
+  knowledge_chunks?: number;
 }

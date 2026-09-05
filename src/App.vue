@@ -6,6 +6,7 @@ import {
   Terminal, 
   Sparkles, 
   BookOpen, 
+  FlaskConical,
   X,
   CheckCircle,
   AlertTriangle
@@ -16,13 +17,14 @@ import { uploadViaTus } from './services/tusUpload';
 import RAGChat from './components/RAGChat.vue';
 import RAGFiles from './components/RAGFiles.vue';
 import RAGConfigComponent from './components/RAGConfig.vue';
+import SandboxAnalyses from './components/SandboxAnalyses.vue';
 import type { PipelineStep } from './components/PipelineProgress.vue';
 
 // Files at or above this size use the resumable TUS upload path instead of the
 // inline base64/JSON POST, so a dropped connection doesn't mean starting over.
 const UPLOAD_THRESHOLD_BYTES = Number(import.meta.env.VITE_TUS_THRESHOLD_BYTES ?? 10 * 1024 * 1024);
 
-const activeTab = ref<'chat' | 'files' | 'config'>('chat');
+const activeTab = ref<'chat' | 'files' | 'sandbox' | 'config'>('chat');
 
 const config = ref<RAGConfig>({
   ollamaBaseUrl: 'http://host.docker.internal:11434',
@@ -37,6 +39,12 @@ const config = ref<RAGConfig>({
   llmRemoteBaseUrl: '',
   llmRemoteModel: '',
   llmRemoteApiKey: '',
+  docRetrievalEnabled: true,
+  docContext7Enabled: true,
+  docGitmcpEnabled: true,
+  docStrictMode: false,
+  docContext7TimeoutS: 10,
+  docGitmcpTimeoutS: 15,
   temperature: 0.7,
   topP: 0.9,
 });
@@ -711,6 +719,15 @@ onMounted(async () => {
         </button>
 
         <button 
+          @click="activeTab = 'sandbox'" 
+          class="w-full flex items-center gap-3 px-4 py-3 rounded-xl text-sm font-medium transition-all"
+          :class="activeTab === 'sandbox' ? 'bg-indigo-600 text-white shadow-md shadow-indigo-600/20' : 'text-slate-400 hover:text-white hover:bg-slate-800/50'"
+        >
+          <FlaskConical class="w-4 h-4" />
+          <span>Sandbox Analyzer</span>
+        </button>
+
+        <button 
           @click="activeTab = 'config'" 
           class="w-full flex items-center gap-3 px-4 py-3 rounded-xl text-sm font-medium transition-all"
           :class="activeTab === 'config' ? 'bg-indigo-600 text-white shadow-md shadow-indigo-600/20' : 'text-slate-400 hover:text-white hover:bg-slate-800/50'"
@@ -736,6 +753,7 @@ onMounted(async () => {
           <h2 class="text-sm font-semibold text-white">
             <span v-if="activeTab === 'chat'">Developer Playground</span>
             <span v-else-if="activeTab === 'files'">Document Chunker & Vector Indexer</span>
+            <span v-else-if="activeTab === 'sandbox'">Sandbox Project Analysis</span>
             <span v-else-if="activeTab === 'config'">RAG Pipeline Configurations</span>
           </h2>
         </div>
@@ -780,6 +798,11 @@ onMounted(async () => {
         @uploadFiles="processFiles"
         @deleteFile="deleteFile"
         @indexFile="indexFile"
+      />
+
+      <SandboxAnalyses
+        v-else-if="activeTab === 'sandbox'"
+        :files="files"
       />
 
       <RAGConfigComponent

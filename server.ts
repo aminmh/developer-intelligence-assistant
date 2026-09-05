@@ -37,6 +37,25 @@ const indexedProjects = new Set<string>();
 const evaluationCache = new Map<string, { query: string; answer: string | null; contexts: string[] }>();
 // Orchestration job_id -> queryId, so /api/query/result can attach the answer.
 const jobToQueryId = new Map<string, string>();
+
+// ============================================================================
+// ROUTE MAP (proxies + passthroughs to the python backend). New endpoints
+// should slot under one of these families; each family proxies to PYTHON_API_URL
+// with the same path unless noted.
+//   /api/rag/*            upload + file list + reindex (TUS + python /api/rag/*)
+//   /api/query/*          chat flow — orchestrates + streams, answers at result
+//   /api/answer/*         direct python /answer (no orchestration)
+//   /api/settings         GET/PUT config (masked secrets) + /api/health/*
+//   /api/sandbox/*        status, command (python /sandbox/*), project analyze,
+//                         analysis save/list/get/delete (python /project/analyze,
+//                         /analysis)
+//   /api/lmstudio/*       LM Studio model list/load (python /api/lmstudio/*)
+//   /api/ollama/*         models + GGUF import (python /api/ollama/*)
+//   /api/docretrieval/*   doc-lookup test/deps (python /api/docretrieval/*)
+//   /api/collection/*     code collections list (python /api/rag/collections)
+//   /api/feedback + /api/eval  python /api/* — served by RAGService handlers
+//   /sys-monitor/*        SystemMonitor WebSocket/HTTP host service (SYS_MON_URL)
+// ============================================================================
 // Orchestration job_id -> use_remote flag, so the answer step uses the same LLM.
 const jobToUseRemote = new Map<string, boolean>();
 type OllamaImportJob = {
@@ -519,6 +538,121 @@ async function startServer() {
     }
   });
 
+  // Launch a sandbox analysis orchestration job (extract → framework profile
+  // → composer install in DinD → runsc probes). Returns { job_id }.
+  app.post('/api/project/analyze', async (req, res) => {
+    try {
+      const pyRes = await fetch(`${PYTHON_API_URL}/project/analyze`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(req.body ?? {}),
+      });
+      if (!pyRes.ok) {
+        const body = await pyRes.json().catch(() => ({}));
+        return res.status(pyRes.status).json({ success: false, error: body.detail || body.error || 'Sandbox analysis failed to start.' });
+      }
+      res.json(await pyRes.json());
+    } catch (error: any) {
+      console.error('Failed to start sandbox analysis via Python:', error.message);
+      res.status(500).json({ success: false, error: error.message });
+    }
+  });
+
+  // Run an arbitrary shell command in the staged project sandbox.
+  app.post('/api/sandbox/command', async (req, res) => {
+    try {
+      const pyRes = await fetch(`${PYTHON_API_URL}/sandbox/command`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(req.body ?? {}),
+      });
+      if (!pyRes.ok) {
+        const body = await pyRes.json().catch(() => ({}));
+        return res.status(pyRes.status).json({ success: false, error: body.detail || body.error || 'Sandbox command failed.' });
+      }
+      res.json(await pyRes.json());
+    } catch (error: any) {
+      console.error('Failed to run sandbox command via Python:', error.message);
+      res.status(500).json({ success: false, error: error.message });
+    }
+  });
+
+  // Poll an orchestration job status (carries sandbox object when done).
+  app.get('/api/project/analyze/:jobId/status', async (req, res) => {
+    try {
+      const pyRes = await fetch(`${PYTHON_API_URL}/orchestrate/${req.params.jobId}/status`);
+      if (!pyRes.ok) {
+        return res.status(pyRes.status).json({ success: false, error: 'Job status check failed.' });
+      }
+      res.json(await pyRes.json());
+    } catch (error: any) {
+      console.error('Failed to poll job status via Python:', error.message);
+      res.status(500).json({ success: false, error: error.message });
+    }
+  });
+
+  // Save an analysis session from a completed job (persist to Qdrant + Neo4j).
+  app.post('/api/analysis', async (req, res) => {
+    try {
+      const pyRes = await fetch(`${PYTHON_API_URL}/analysis`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(req.body ?? {}),
+      });
+      if (!pyRes.ok) {
+        const body = await pyRes.json().catch(() => ({}));
+        return res.status(pyRes.status).json({ success: false, error: body.detail || body.error || 'Save failed.' });
+      }
+      res.json(await pyRes.json());
+    } catch (error: any) {
+      console.error('Failed to save analysis via Python:', error.message);
+      res.status(500).json({ success: false, error: error.message });
+    }
+  });
+
+  // List saved analysis sessions.
+  app.get('/api/analysis', async (req, res) => {
+    try {
+      const qs = typeof req.query?.limit === 'string' ? `?limit=${encodeURIComponent(req.query.limit)}` : '';
+      const pyRes = await fetch(`${PYTHON_API_URL}/analysis${qs}`);
+      if (!pyRes.ok) {
+        return res.status(pyRes.status).json({ success: false, error: 'Analysis list failed.' });
+      }
+      res.json(await pyRes.json());
+    } catch (error: any) {
+      console.error('Failed to list analyses via Python:', error.message);
+      res.status(500).json({ success: false, error: error.message });
+    }
+  });
+
+  // Fetch one saved analysis (includes grounding_md + profile).
+  app.get('/api/analysis/:id', async (req, res) => {
+    try {
+      const pyRes = await fetch(`${PYTHON_API_URL}/analysis/${req.params.id}`);
+      if (!pyRes.ok) {
+        return res.status(pyRes.status).json({ success: false, error: 'Analysis not found.' });
+      }
+      res.json(await pyRes.json());
+    } catch (error: any) {
+      console.error('Failed to fetch analysis via Python:', error.message);
+      res.status(500).json({ success: false, error: error.message });
+    }
+  });
+
+  // Delete a saved analysis (row + artifact files).
+  app.delete('/api/analysis/:id', async (req, res) => {
+    try {
+      const pyRes = await fetch(`${PYTHON_API_URL}/analysis/${req.params.id}`, { method: 'DELETE' });
+      if (!pyRes.ok) {
+        return res.status(pyRes.status).json({ success: false, error: 'Analysis delete failed.' });
+      }
+      res.json(await pyRes.json());
+    } catch (error: any) {
+      console.error('Failed to delete analysis via Python:', error.message);
+      res.status(500).json({ success: false, error: error.message });
+    }
+  });
+
   // LM Studio: list models available on the configured server.
   app.get('/api/lmstudio/models', async (req, res) => {
     try {
@@ -568,6 +702,24 @@ async function startServer() {
       res.json(await pyRes.json());
     } catch (error: any) {
       console.error('Failed to test remote connection via Python:', error.message);
+      res.status(500).json({ success: false, error: error.message });
+    }
+  });
+
+  // Documentation retrieval probe (Context7 → GitMCP pipeline test)
+  app.post('/api/docretrieval/test', async (req, res) => {
+    try {
+      const pyRes = await fetch(`${PYTHON_API_URL}/docretrieval/test`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(req.body ?? {}),
+      });
+      if (!pyRes.ok) {
+        return res.status(pyRes.status).json({ success: false, error: 'Doc-retrieval probe failed.' });
+      }
+      res.json(await pyRes.json());
+    } catch (error: any) {
+      console.error('Failed to probe doc retrieval via Python:', error.message);
       res.status(500).json({ success: false, error: error.message });
     }
   });
@@ -1001,6 +1153,10 @@ async function startServer() {
             file: entities.target_file || undefined,
             entities,
             extra_context: extraContext,
+            doc_chunks: Array.isArray((status as any).doc_context?.chunks)
+              ? (status as any).doc_context.chunks
+              : undefined,
+            project_profile: (status as any).project_profile ?? undefined,
             use_remote: wantRemote,
             route: status.route_name || 'explain',
           }),
