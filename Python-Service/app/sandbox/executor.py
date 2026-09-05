@@ -416,10 +416,15 @@ class SandboxExecutor:
     ) -> tuple[str, str | None]:
         """Pick the daemon image for a framework + project.
 
-        Order: runtime ``php_versions`` map keyed by PHP floor, matched against
-        the local composer.json require.php → exact floor, else nearest lower
-        floor, else the runtime default image. ``detail`` explains the choice
-        ('' / 'php 8.3' / fallback reason) for honest job reporting.
+        Static order (no daemon): runtime ``php_versions`` map keyed by PHP
+        floor, matched against the local composer.json require.php → exact
+        floor, else nearest lower floor, else the runtime default image.
+
+        Daemon-aware refinement: when the Docker backend answers, the chosen
+        image must actually be pulled. Exact-floor images commonly do not exist
+        on a fresh DinD (only a subset is pre-loaded) — we then fall back to
+        the next available floor image, then the runtime default, and say so
+        in ``detail``. ``detail`` explains the choice for honest job reporting.
         """
         rt = self.runtime_for(framework)
         if not rt:
@@ -434,20 +439,47 @@ class SandboxExecutor:
         floor = _detect_php_floor(root)
         if not floor:
             return image, None
-        if floor in versions:
-            return versions[floor], f"php {floor}"
-        available = sorted(
+
+        # Preference order: static choice first, remaining floors (desc), then
+        # the runtime default as the last resort.
+        keys = sorted(
             ((tuple(int(x) for x in v.split("."))), v)
             for v in versions
-            if v.count(".") == 1 and v != floor
+            if v.count(".") == 1
         )
         target = tuple(int(x) for x in floor.split("."))
-        best = next(
-            (v for t, v in reversed(available) if t < target), None
-        )
-        if best:
-            return versions[best], f"php {floor} required, {best} image"
-        return image, f"php {floor} required, no matching image — default {image}"
+        if floor in versions:
+            chosen = versions[floor]
+            base_detail = f"php {floor}"
+        else:
+            best = next(
+                (v for t, v in reversed(keys) if t < target), None
+            )
+            if best:
+                chosen = versions[best]
+                base_detail = f"php {floor} required, {best} image"
+            else:
+                chosen = image
+                base_detail = f"php {floor} required, no matching image — default {image}"
+
+        preference: list[str] = []
+        for cand in [chosen, *(versions[k] for _, k in reversed(keys)), image]:
+            if cand and cand not in preference:
+                preference.append(cand)
+
+        # If the backend answers, honor reality: the picked image must exist.
+        try:
+            if self.api.image_exists(preference[0]):
+                return preference[0], base_detail
+            for cand in preference[1:]:
+                if self.api.image_exists(cand):
+                    return cand, (
+                        f"{base_detail} — {preference[0]} unavailable, "
+                        f"using {cand} (loaded on daemon)"
+                    )
+            return preference[0], base_detail
+        except Exception:  # noqa: BLE001 — daemon unreachable → static order
+            return preference[0], base_detail
 
     # -- staging ------------------------------------------------------------
 

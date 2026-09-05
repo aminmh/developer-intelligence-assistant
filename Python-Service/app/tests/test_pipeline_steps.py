@@ -55,6 +55,10 @@ class _FakeRunner:
             return None
         return {"status": "done", "install": {"status": "done", "exit_code": 0}, "probes": []}
 
+    def _merge_runtime_routes(self, project_profile, sandbox_result):
+        self.calls.append("merge_routes")
+        return project_profile
+
     def _synthesize_with_llamaindex(self, **kwargs):
         self.calls.append("synthesize")
         return "synth-out"
@@ -120,6 +124,7 @@ class TestRunPlan:
             "docs",
             "framework",
             "sandbox",
+            "merge_routes",
             "synthesize",
             "save_outputs",
             "persist_bundle",

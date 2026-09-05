@@ -57,15 +57,24 @@ class InspectionService:
 
     # --- graph indexing -----------------------------------------------------
 
-    def index(self, project_dir: str, stem: str) -> dict[str, Any]:
+    def index(
+        self,
+        project_dir: str,
+        stem: str,
+        exclude: list[str] | None = None,
+    ) -> dict[str, Any]:
         """Export defs + refs and materialize the sym_<stem> symbol graph.
+
+        ``exclude`` = extra relative dir segments skipped by the exporter
+        (e.g. ``["tests", "coverage", "stubs"]``) — callers decide; the
+        exporter always skips vendor/node_modules/.git noise.
 
         Returns counts; ``indexed`` False when Neo4j is unreachable (export
         already happened — re-callable once the store is back).
         """
         collection = sym_collection_for(stem)
-        defs = php_cli.inspect_symbols(project_dir)
-        refs = php_cli.inspect_references(project_dir)
+        defs = php_cli.inspect_symbols(project_dir, exclude)
+        refs = php_cli.inspect_references(project_dir, exclude)
 
         nodes = [self._def_node(d, collection) for d in defs]
         node_rows = [n for n in nodes if n is not None]
@@ -105,6 +114,7 @@ class InspectionService:
         def_keys = {_node_key_for_record(d) for d in defs}
         ref_rows = []
         linked = 0
+        via_counts: dict[str, int] = {}
         for r in refs:
             src = self._source_key(r)
             if src is None or src not in def_keys:
@@ -112,6 +122,9 @@ class InspectionService:
             dst = self._target_key(r, by_fqn)
             if dst is None or dst not in def_keys:
                 continue
+            via = r.get("via")
+            if r.get("kind") == "method_call" and via:
+                via_counts[str(via)] = via_counts.get(str(via), 0) + 1
             ref_rows.append(
                 {
                     "source_id": src,
@@ -134,6 +147,7 @@ class InspectionService:
             "relations": relations,
             "links": links,
             "unlinked": len(refs) - linked,
+            "via": via_counts,
         }
 
     # --- graph queries ------------------------------------------------------

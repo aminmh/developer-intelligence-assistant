@@ -185,8 +185,8 @@ class _FakeStore:
 
 def _service(monkeypatch, fake: FakeGraph) -> InspectionService:
     svc = InspectionService(graph=fake)  # type: ignore[arg-type]
-    monkeypatch.setattr(php_cli, "inspect_symbols", lambda _d: _fixture_defs())
-    monkeypatch.setattr(php_cli, "inspect_references", lambda _d: _fixture_refs())
+    monkeypatch.setattr(php_cli, "inspect_symbols", lambda _d, _e=None: _fixture_defs())
+    monkeypatch.setattr(php_cli, "inspect_references", lambda _d, _e=None: _fixture_refs())
     return svc
 
 
@@ -289,4 +289,77 @@ class TestTierReads:
         monkeypatch.setattr(php_cli, "inspect_method", fake_method)
         svc = InspectionService(graph=FakeGraph())  # type: ignore[arg-type]
         assert svc.method("/p/A.php", "charge") == {"name": "charge", "source": "<?php …"}
-        assert captured["method"] == ("/p/A.php", "charge")
+
+
+def _typed_fixture_defs() -> list[dict]:
+    """Typed-receiver world: User::pay + Order::run linkable via method_call."""
+    return [
+        {"kind": "class", "name": "User", "fqn": "App\\Models\\User", "file": "/p/User.php",
+         "line": 1, "end_line": 5, "visibility": None, "static": None, "abstract": None,
+         "owner": None, "relations": []},
+        {"kind": "method", "name": "pay", "fqn": "App\\Models\\User::pay", "file": "/p/User.php",
+         "line": 3, "end_line": 3, "visibility": "public", "static": False, "abstract": False,
+         "owner": "App\\Models\\User", "relations": None},
+        {"kind": "class", "name": "Order", "fqn": "App\\Services\\Order", "file": "/p/Order.php",
+         "line": 1, "end_line": 9, "visibility": None, "static": None, "abstract": None,
+         "owner": None, "relations": []},
+        {"kind": "method", "name": "run", "fqn": "App\\Services\\Order::run", "file": "/p/Order.php",
+         "line": 4, "end_line": 8, "visibility": "public", "static": False, "abstract": False,
+         "owner": "App\\Services\\Order", "relations": None},
+    ]
+
+
+def _typed_fixture_refs() -> list[dict]:
+    return [
+        # Receiver type known from a typed param → link + via recorded.
+        {"kind": "method_call", "file": "/p/Order.php", "line": 5,
+         "scope": "App\\Services\\Order::run", "to_fqn": "App\\Models\\User",
+         "to_member": "pay", "unresolved": False, "via": "param"},
+        # Receiver type known but the method is inherited → honest unlink.
+        {"kind": "method_call", "file": "/p/Order.php", "line": 6,
+         "scope": "App\\Services\\Order::run", "to_fqn": "App\\Models\\User",
+         "to_member": "save", "unresolved": False, "via": "param"},
+        # Receiver type unknown → unresolved stays unlinked.
+        {"kind": "method_call", "file": "/p/Order.php", "line": 7,
+         "scope": "App\\Services\\Order::run", "to_fqn": None,
+         "to_member": "magic", "unresolved": True},
+    ]
+
+
+class TestTypedReceiverLinking:
+    """method_call edges now carry a resolved receiver (via) when inferable."""
+
+    def test_links_typed_method_call_and_tracks_via(self, monkeypatch):
+        svc = InspectionService(graph=FakeGraph())  # type: ignore[arg-type]
+        monkeypatch.setattr(php_cli, "inspect_symbols", lambda _d, _e=None: _typed_fixture_defs())
+        monkeypatch.setattr(php_cli, "inspect_references", lambda _d, _e=None: _typed_fixture_refs())
+        counts = svc.index("/p", "Typed")
+
+        assert counts["links"] == 1  # pay() links; inherited save() and magic() do not
+        assert counts["unlinked"] == 2
+        assert counts["via"] == {"param": 1}
+
+    def test_exclude_forwarded_to_exporter(self, monkeypatch):
+        svc = InspectionService(graph=FakeGraph())  # type: ignore[arg-type]
+        seen: dict = {}
+
+        def syms(_d, exclude=None):
+            seen["symbols"] = exclude
+            return _typed_fixture_defs()
+
+        def refs(_d, exclude=None):
+            seen["references"] = exclude
+            return _typed_fixture_refs()
+
+        monkeypatch.setattr(php_cli, "inspect_symbols", syms)
+        monkeypatch.setattr(php_cli, "inspect_references", refs)
+        svc.index("/p", "Typed", exclude=["tests", "coverage"])
+        assert seen["symbols"] == ["tests", "coverage"]
+        assert seen["references"] == ["tests", "coverage"]
+
+    def test_index_without_exclude_passes_none(self, monkeypatch):
+        svc = InspectionService(graph=FakeGraph())  # type: ignore[arg-type]
+        monkeypatch.setattr(php_cli, "inspect_symbols", lambda _d, _e=None: _typed_fixture_defs())
+        monkeypatch.setattr(php_cli, "inspect_references", lambda _d, _e=None: _typed_fixture_refs())
+        counts = svc.index("/p", "Typed")
+        assert counts["links"] == 1

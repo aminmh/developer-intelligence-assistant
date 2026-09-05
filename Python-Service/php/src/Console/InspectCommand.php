@@ -15,8 +15,11 @@ use App\Inspection\SymbolExporter;
  *   php bin/project-inspect skeleton <file>
  *   php bin/project-inspect attributes <file> [class]
  *   php bin/project-inspect method <file> <method>
- *   php bin/project-inspect symbols <dir>
- *   php bin/project-inspect references <dir>
+ *   php bin/project-inspect symbols <dir> [exclude_csv]
+ *   php bin/project-inspect references <dir> [exclude_csv]
+ *
+ * exclude_csv: comma-separated relative dir segments to skip (e.g.
+ * tests,coverage). Built-ins (vendor, node_modules, .git, …) always skip.
  *
  * Exit codes: 0 = ok (stdout carries one JSON document), 1 = failure (stderr
  * explains), 2 = usage error.
@@ -24,6 +27,16 @@ use App\Inspection\SymbolExporter;
 final class InspectCommand
 {
     private const JSON_FLAGS = JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE | JSON_INVALID_UTF8_SUBSTITUTE;
+
+    /** @return list<string> */
+    private function excludes(array $argv): array
+    {
+        $csv = $argv[3] ?? '';
+        if ($csv === '') {
+            return [];
+        }
+        return array_values(array_filter(array_map('trim', explode(',', $csv)), fn ($s) => $s !== ''));
+    }
 
     public function run(array $argv): int
     {
@@ -44,11 +57,11 @@ final class InspectCommand
                     ? $this->emitMethod((new AstProbe()), realpath($path), $argv[3])
                     : $this->usage("method <file> <method>"),
                 'symbols' => $this->dirPath($path)
-                    ? $this->emit((new SymbolExporter())->exportDefinitions(realpath($path)))
-                    : $this->usage("symbols <dir>"),
+                    ? $this->emit((new SymbolExporter())->exportDefinitions(realpath($path), $this->excludes($argv)))
+                    : $this->usage("symbols <dir> [exclude_csv]"),
                 'references' => $this->dirPath($path)
-                    ? $this->emit((new SymbolExporter())->exportReferences(realpath($path)))
-                    : $this->usage("references <dir>"),
+                    ? $this->emit((new SymbolExporter())->exportReferences(realpath($path), $this->excludes($argv)))
+                    : $this->usage("references <dir> [exclude_csv]"),
                 default => $this->usage('<skeleton|attributes|method|symbols|references> …'),
             };
         } catch (\Throwable $e) {

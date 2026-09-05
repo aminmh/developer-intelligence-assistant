@@ -46,7 +46,13 @@ def _collection(payload: dict) -> str:
 @router.post("/index", summary="Build the sym_<stem> symbol graph for a project")
 def inspect_index(payload: dict) -> dict[str, Any]:
     project_dir, stem = _body(payload, "project_dir", "stem")
-    return _service().index(project_dir, stem)
+    exclude = payload.get("exclude")
+    excludes = (
+        [e for e in exclude if isinstance(e, str) and e]
+        if isinstance(exclude, list)
+        else None
+    )
+    return _service().index(project_dir, stem, exclude=excludes)
 
 
 @router.post("/skeleton", summary="Tier-2 API surface of one file (no bodies)")

@@ -491,6 +491,22 @@ class Orchestrator:
             )
             return {"status": "failed", "error": str(exc)[:500]}
 
+    def _merge_runtime_routes(
+        self,
+        project_profile: dict[str, Any] | None,
+        sandbox_result: dict[str, Any] | None,
+    ) -> dict[str, Any] | None:
+        """Promote the sandbox routes probe into the profile (runtime truth)."""
+        try:
+            from projects.project_profile import merge_runtime_routes
+
+            return merge_runtime_routes(project_profile, sandbox_result)
+        except Exception as exc:
+            get_exception_logger().error(
+                "Runtime route merge failed: %s", exc, exc_info=exc
+            )
+            return project_profile
+
     def _persist_result_bundle(
         self,
         ctx: JobContext,

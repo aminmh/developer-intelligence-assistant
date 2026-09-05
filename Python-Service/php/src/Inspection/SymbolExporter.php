@@ -24,10 +24,17 @@ use PhpParser\ParserFactory;
  *                  class const, free function — FQN, file, line range, plus
  *                  structural relation edges (extends/implements/uses_trait).
  *  - `references`→ static use-sites: new-instance, static calls, class-const
- *                  reads, instanceof, catch types, plain function calls and
- *                  low-confidence bare method-call names (owner unresolvable).
+ *                  reads, instanceof, catch types, plain function calls, and
+ *                  method calls with a best-effort receiver type.
  *
- * Vendorless by design: resolution is namespace + file scan based.
+ * Receiver inference (honest, file-local only): inside each method/closure we
+ * track the type of ``$this``, typed parameters (incl. promoted constructor
+ * properties), typed properties, and variables assigned from ``new X`` /
+ * ``$this->prop`` / another typed variable. A ``method_call`` is only linked
+ * when that receiver type is known — everything else stays ``unresolved`` with
+ * ``to_fqn`` null rather than guessing.
+ *
+ * Optional extra excludes (e.g. ``tests``) narrow the scanned tree.
  */
 final class SymbolExporter
 {
@@ -43,9 +50,10 @@ final class SymbolExporter
         $this->parser = (new ParserFactory())->createForNewestSupportedVersion();
     }
 
-    /** @return list<string> */
-    public function phpFiles(string $rootPath): array
+    /** @param list<string> $exclude extra relative dir segments to skip */
+    public function phpFiles(string $rootPath, array $exclude = []): array
     {
+        $skip = array_merge(self::SKIP_DIRS, $exclude);
         $out = [];
         $iterator = new \RecursiveIteratorIterator(
             new \RecursiveDirectoryIterator($rootPath, \FilesystemIterator::SKIP_DOTS)
@@ -53,14 +61,16 @@ final class SymbolExporter
         foreach ($iterator as $file) {
             if ($file->isFile() && $file->getExtension() === 'php') {
                 $path = $file->getPathname();
-                $skip = false;
-                foreach (self::SKIP_DIRS as $dir) {
-                    if (str_contains($path, DIRECTORY_SEPARATOR . $dir . DIRECTORY_SEPARATOR)) {
-                        $skip = true;
+                $skipped = false;
+                foreach ($skip as $dir) {
+                    if ($dir !== ''
+                        && str_contains($path, DIRECTORY_SEPARATOR . $dir . DIRECTORY_SEPARATOR)
+                    ) {
+                        $skipped = true;
                         break;
                     }
                 }
-                if (!$skip) {
+                if (!$skipped) {
                     $out[] = $path;
                 }
             }
@@ -70,10 +80,10 @@ final class SymbolExporter
     }
 
     /** @return array<int,array<string,mixed>> definition records */
-    public function exportDefinitions(string $rootPath): array
+    public function exportDefinitions(string $rootPath, array $exclude = []): array
     {
         $defs = [];
-        foreach ($this->phpFiles($rootPath) as $file) {
+        foreach ($this->phpFiles($rootPath, $exclude) as $file) {
             $ast = $this->parseResolved($file);
             if ($ast === null) {
                 continue;
@@ -90,7 +100,7 @@ final class SymbolExporter
                 {
                     if ($node instanceof Stmt\ClassLike) {
                         $fqn = $this->fqn($node);
-                        $def = [
+                        $this->defs[] = [
                             'kind' => $node instanceof Stmt\Interface_ ? 'interface'
                                 : ($node instanceof Stmt\Trait_ ? 'trait'
                                     : ($node instanceof Stmt\Enum_ ? 'enum' : 'class')),
@@ -105,7 +115,6 @@ final class SymbolExporter
                             'owner' => null,
                             'relations' => $this->relations($node),
                         ];
-                        $this->defs[] = $def;
                         $this->classFqn = $fqn;
                         return null;
                     }
@@ -271,10 +280,10 @@ final class SymbolExporter
     }
 
     /** @return array<int,array<string,mixed>> reference records */
-    public function exportReferences(string $rootPath): array
+    public function exportReferences(string $rootPath, array $exclude = []): array
     {
         $refs = [];
-        foreach ($this->phpFiles($rootPath) as $file) {
+        foreach ($this->phpFiles($rootPath, $exclude) as $file) {
             $ast = $this->parseResolved($file);
             if ($ast === null) {
                 continue;
@@ -284,6 +293,15 @@ final class SymbolExporter
                 private ?string $scope = null;
                 private ?string $classFqn = null;
                 private ?string $extendsTarget = null;
+
+                /** @var array<string,string> declared property types ($x → FQN) */
+                private array $propTypes = [];
+
+                /** @var array<int,array<string,string>> scoped variable types */
+                private array $varStack = [];
+
+                /** @var array<int,array<string,string>> scoped variable origins */
+                private array $originStack = [];
 
                 public function __construct(private readonly string $file)
                 {
@@ -297,18 +315,30 @@ final class SymbolExporter
                         if ($node instanceof Stmt\Class_ && $node->extends !== null) {
                             $this->extendsTarget = $node->extends->toString();
                         }
+                        $this->propTypes = $this->propertyTypes($node);
                         return null;
                     }
                     if ($node instanceof Stmt\ClassMethod) {
                         $this->scope = ($this->classFqn ?? '') . '::' . $node->name->toString();
+                        $this->pushScope($node->params);
                         return null;
                     }
-                    if ($node instanceof Stmt\Function_) {
-                        $this->scope = $node->namespacedName?->toString() ?: $node->name->toString();
+                    if ($node instanceof Stmt\Function_ || $node instanceof Expr\Closure
+                        || $node instanceof Expr\ArrowFunction
+                    ) {
+                        if ($node instanceof Stmt\Function_) {
+                            $this->scope = $node->namespacedName?->toString()
+                                ?: $node->name->toString();
+                        }
+                        $this->pushScope($node->params);
                         return null;
                     }
 
                     $line = $node->getStartLine();
+                    if ($node instanceof Expr\Assign || $node instanceof Expr\AssignRef) {
+                        $this->trackAssignment($node->var, $node->expr);
+                        return null;
+                    }
                     if ($node instanceof Expr\New_) {
                         if ($node->class instanceof Name) {
                             $this->add('new', $node->class->toString(), null, $line);
@@ -355,9 +385,21 @@ final class SymbolExporter
                         }
                         return null;
                     }
-                    if ($node instanceof Expr\MethodCall) {
+                    if ($node instanceof Expr\MethodCall || $node instanceof Expr\NullsafeMethodCall) {
                         if ($node->name instanceof Node\Identifier) {
-                            $this->add('method_call', null, $node->name->toString(), $line, true);
+                            [$type, $via] = $this->receiverType($node->var);
+                            if ($type !== null && $type !== '') {
+                                $this->add(
+                                    'method_call',
+                                    $type,
+                                    $node->name->toString(),
+                                    $line,
+                                    false,
+                                    $via,
+                                );
+                            } else {
+                                $this->add('method_call', null, $node->name->toString(), $line, true);
+                            }
                         }
                         return null;
                     }
@@ -366,15 +408,166 @@ final class SymbolExporter
 
                 public function leaveNode(Node $node): mixed
                 {
-                    if ($node instanceof Stmt\ClassMethod || $node instanceof Stmt\Function_) {
+                    if ($node instanceof Stmt\ClassMethod || $node instanceof Stmt\Function_
+                        || $node instanceof Expr\Closure || $node instanceof Expr\ArrowFunction
+                    ) {
                         $this->scope = null;
+                        $this->popScope();
                     }
                     if ($node instanceof Stmt\ClassLike) {
                         $this->classFqn = null;
                         $this->extendsTarget = null;
+                        $this->propTypes = [];
                     }
                     return null;
                 }
+
+                // --- receiver inference ------------------------------------
+
+                /** @param array<int,Node\Param> $params */
+                private function pushScope(array $params): void
+                {
+                    $vars = [];
+                    $origins = [];
+                    foreach ($params as $p) {
+                        if (!$p->var instanceof Expr\Variable
+                            || !is_string($p->var->name)
+                        ) {
+                            continue;
+                        }
+                        $type = $this->typeToString($p->type);
+                        if ($type === null) {
+                            continue;
+                        }
+                        $vars['$' . $p->var->name] = $type;
+                        $origins['$' . $p->var->name] = 'param';
+                    }
+                    $this->varStack[] = $vars;
+                    $this->originStack[] = $origins;
+                }
+
+                private function popScope(): void
+                {
+                    array_pop($this->varStack);
+                    array_pop($this->originStack);
+                }
+
+                /** @return array<string,string> declared+promoted property types */
+                private function propertyTypes(Stmt\ClassLike $node): array
+                {
+                    $types = [];
+                    foreach ($node->stmts as $member) {
+                        if ($member instanceof Stmt\Property) {
+                            $declared = $this->typeToString($member->type);
+                            if ($declared === null) {
+                                continue;
+                            }
+                            foreach ($member->props as $p) {
+                                $types['$' . $p->name->toString()] = $declared;
+                            }
+                        }
+                        if ($member instanceof Stmt\ClassMethod
+                            && $member->name->toString() === '__construct'
+                        ) {
+                            foreach ($member->params as $p) {
+                                if (!($p->flags & (Stmt\Class_::MODIFIER_PUBLIC
+                                        | Stmt\Class_::MODIFIER_PROTECTED
+                                        | Stmt\Class_::MODIFIER_PRIVATE))
+                                    || !$p->var instanceof Expr\Variable
+                                    || !is_string($p->var->name)
+                                ) {
+                                    continue;
+                                }
+                                $declared = $this->typeToString($p->type);
+                                if ($declared !== null) {
+                                    $types['$' . $p->var->name] = $declared;
+                                }
+                            }
+                        }
+                    }
+                    return $types;
+                }
+
+                private function trackAssignment(Expr $target, Expr $value): void
+                {
+                    if (!$target instanceof Expr\Variable || !is_string($target->name)) {
+                        return;
+                    }
+                    $key = '$' . $target->name;
+                    [$type, $via] = $this->receiverType($value);
+                    if ($type === null || $type === '') {
+                        return;
+                    }
+                    $frame = $this->varStack[count($this->varStack) - 1] ?? null;
+                    if ($frame === null) {
+                        return;
+                    }
+                    $frame[$key] = $type;
+                    $this->varStack[count($this->varStack) - 1] = $frame;
+                    $originFrame = $this->originStack[count($this->originStack) - 1];
+                    $originFrame[$key] = $via ?? 'local';
+                    $this->originStack[count($this->originStack) - 1] = $originFrame;
+                }
+
+                /** @return array{0:string|null,1:string|null} [type, via] */
+                private function receiverType(Expr $expr): array
+                {
+                    if ($expr instanceof Expr\Variable) {
+                        if ($expr->name === 'this') {
+                            return [$this->classFqn, 'self'];
+                        }
+                        if (!is_string($expr->name)) {
+                            return [null, null];
+                        }
+                        $key = '$' . $expr->name;
+                        $frame = $this->varStack[count($this->varStack) - 1] ?? [];
+                        $type = $frame[$key] ?? null;
+                        $origins = $this->originStack[count($this->originStack) - 1] ?? [];
+                        return [$type, $origins[$key] ?? null];
+                    }
+                    if ($expr instanceof Expr\PropertyFetch) {
+                        if ($expr->var instanceof Expr\Variable && $expr->var->name === 'this') {
+                            $name = $expr->name instanceof Node\Identifier ? $expr->name->toString() : '';
+                            $type = $this->propTypes['$' . $name] ?? null;
+                            return [$type, $type !== null ? 'property' : null];
+                        }
+                        // $other->prop where $other is a typed local: needs the
+                        // *other class's* property map — not file-local → skip.
+                        return [null, null];
+                    }
+                    if ($expr instanceof Expr\New_) {
+                        if ($expr->class instanceof Name) {
+                            return [$expr->class->toString(), 'new'];
+                        }
+                        return [null, null];
+                    }
+                    if ($expr instanceof Expr\Clone_) {
+                        return $this->receiverType($expr->expr);
+                    }
+                    return [null, null];
+                }
+
+                /** Resolve a type AST node to a single FQN (nullable/union unwrap). */
+                private function typeToString(?Node $type): ?string
+                {
+                    while ($type instanceof Node\NullableType) {
+                        $type = $type->type;
+                    }
+                    if ($type instanceof Name) {
+                        return $type->toString();
+                    }
+                    if ($type instanceof Node\UnionType) {
+                        foreach ($type->types as $part) {
+                            if ($part instanceof Name) {
+                                return $part->toString();
+                            }
+                        }
+                        return null;
+                    }
+                    return null;
+                }
+
+                // --- records -------------------------------------------------
 
                 private function resolveSelfish(Name $name): string
                 {
@@ -394,8 +587,9 @@ final class SymbolExporter
                     ?string $toMember,
                     int $line,
                     bool $unresolved = false,
+                    ?string $via = null,
                 ): void {
-                    $this->refs[] = [
+                    $row = [
                         'kind' => $kind,
                         'file' => $this->file,
                         'line' => $line,
@@ -404,6 +598,10 @@ final class SymbolExporter
                         'to_member' => $toMember,
                         'unresolved' => $unresolved,
                     ];
+                    if ($kind === 'method_call') {
+                        $row['via'] = $via;
+                    }
+                    $this->refs[] = $row;
                 }
             };
 

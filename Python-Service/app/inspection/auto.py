@@ -31,6 +31,10 @@ MAX_SOURCE_CHARS = 500
 MAX_METHOD_READS = 2
 INDEX_RETRY_GUARD_S = 300.0
 
+# Trees that add noise to symbol-graph grounding (test doubles, generated
+# coverage/stub output) — excluded from the auto-index by default.
+DEFAULT_EXCLUDE = ("tests", "coverage", "stubs", "fixtures")
+
 # project_dir|stem -> (ok_at_timestamp | None while in flight)
 _indexed: dict[str, bool | float] = {}
 _inflight: set[str] = set()
@@ -40,7 +44,12 @@ def _key(project_dir: str, stem: str) -> str:
     return f"{project_dir}|{stem}"
 
 
-def _ensure_indexed(svc: InspectionService, project_dir: str, stem: str) -> bool:
+def _ensure_indexed(
+    svc: InspectionService,
+    project_dir: str,
+    stem: str,
+    exclude: list[str] | None = None,
+) -> bool:
     """Index once per process/project; repeat after a short failure guard."""
     key = _key(project_dir, stem)
     if key in _indexed:
@@ -49,7 +58,7 @@ def _ensure_indexed(svc: InspectionService, project_dir: str, stem: str) -> bool
         return False
     _inflight.add(key)
     try:
-        result = svc.index(project_dir, stem)
+        result = svc.index(project_dir, stem, exclude=exclude)
         _indexed[key] = bool(result.get("indexed")) and result.get("nodes", 0) > 0
     except Exception as exc:  # noqa: BLE001 — exporter failures are not fatal
         logger.warning("Auto-inspection index failed for %s: %s", key, exc)
@@ -103,7 +112,7 @@ def build_inspection_grounding(
     from inspection.service import sym_collection_for
 
     collection = sym_collection_for(stem)
-    if not _ensure_indexed(svc, project_dir, stem):
+    if not _ensure_indexed(svc, project_dir, stem, list(DEFAULT_EXCLUDE)):
         return None
 
     lines: list[str] = []

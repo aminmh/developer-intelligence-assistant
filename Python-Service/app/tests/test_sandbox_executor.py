@@ -264,6 +264,37 @@ class TestRuntimeImageResolution:
         assert image == "composer:2"
         assert detail is None
 
+    def test_availability_falls_to_next_pulled_floor(self, tmp_path):
+        executor = self._executor(tmp_path, self.VERSIONS)
+        fake = FakeDockerApi()
+        fake.images = ["composer:2", "php-composer:8.3"]
+        executor.api = fake  # type: ignore[assignment]
+        root = self._php_project(tmp_path, "^8.2")
+        image, detail = executor.resolve_runtime_image("php", str(root), "")
+        assert image == "php-composer:8.3"
+        assert "php-composer:8.2 unavailable" in (detail or "")
+        assert "loaded on daemon" in (detail or "")
+
+    def test_availability_falls_to_default_when_no_floor_pulled(self, tmp_path):
+        executor = self._executor(tmp_path, self.VERSIONS)
+        fake = FakeDockerApi()
+        fake.images = ["composer:2"]
+        executor.api = fake  # type: ignore[assignment]
+        root = self._php_project(tmp_path, "^8.2")
+        image, detail = executor.resolve_runtime_image("php", str(root), "")
+        assert image == "composer:2"
+        assert "using composer:2" in (detail or "")
+
+    def test_availability_exact_pulled_wins(self, tmp_path):
+        executor = self._executor(tmp_path, self.VERSIONS)
+        fake = FakeDockerApi()
+        fake.images = ["php-composer:8.2", "php-composer:8.3"]
+        executor.api = fake  # type: ignore[assignment]
+        root = self._php_project(tmp_path, "^8.2")
+        image, detail = executor.resolve_runtime_image("php", str(root), "")
+        assert image == "php-composer:8.2"
+        assert detail == "php 8.2"
+
     def test_nested_rel_reads_its_composer_json(self, tmp_path):
         executor = self._executor(tmp_path, self.VERSIONS)
         root = tmp_path / "wrapped"

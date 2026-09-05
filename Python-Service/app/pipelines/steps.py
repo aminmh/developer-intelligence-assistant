@@ -137,6 +137,12 @@ def _sandbox(runner: Any, ctx: Any, shared: SharedState) -> None:
     shared.sandbox_result = runner._run_sandbox_analysis(
         ctx, shared.workspace_path, shared.project_profile
     )
+    if shared.sandbox_result and shared.project_profile:
+        # Runtime route:list (when the routes probe succeeded) supersedes the
+        # static parser's route table — real verbs, middleware, package routes.
+        shared.project_profile = runner._merge_runtime_routes(
+            shared.project_profile, shared.sandbox_result
+        )
     if (ctx.route or {}).get("sandbox"):
         detail = "run complete"
         if (

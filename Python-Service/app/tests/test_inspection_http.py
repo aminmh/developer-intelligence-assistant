@@ -21,7 +21,7 @@ class FakeInspection:
     def __init__(self) -> None:
         self.calls: list[tuple] = []
 
-    def index(self, project_dir: str, stem: str) -> dict:
+    def index(self, project_dir: str, stem: str, exclude: list[str] | None = None) -> dict:
         self.calls.append(("index", project_dir, stem))
         return {"collection": sym_collection_for(stem), "indexed": True, "nodes": 3}
 
@@ -122,7 +122,7 @@ class FakeAutoService:
         self.indexed: set[str] = set()
         self.calls: list[str] = []
 
-    def index(self, project_dir: str, stem: str) -> dict:
+    def index(self, project_dir: str, stem: str, exclude: list[str] | None = None) -> dict:
         self.calls.append(f"index:{stem}")
         self.indexed.add(stem)
         return {"collection": sym_collection_for(stem), "indexed": True, "nodes": 1}
@@ -178,7 +178,7 @@ class TestAutoGrounding:
 
     def test_index_failure_none(self):
         class Failing(FakeAutoService):
-            def index(self, project_dir: str, stem: str) -> dict:
+            def index(self, project_dir: str, stem: str, exclude: list[str] | None = None) -> dict:
                 raise RuntimeError("neo4j down")
 
         assert auto_mod.build_inspection_grounding(

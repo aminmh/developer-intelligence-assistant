@@ -108,13 +108,23 @@ def inspect_method(file_path: str, method_name: str) -> dict[str, Any] | None:
     return data if isinstance(data, dict) else None
 
 
-def inspect_symbols(project_dir: str) -> list[dict[str, Any]]:
-    """Tier-4 export: every definition across the tree."""
-    data = run_inspect("symbols", project_dir)
+def inspect_symbols(project_dir: str, exclude: list[str] | None = None) -> list[dict[str, Any]]:
+    """Tier-4 export: every definition across the tree.
+
+    ``exclude`` = extra relative dir segments to skip (tests, coverage, …);
+    the exporter always skips vendor/node_modules/.git/… itself.
+    """
+    args = [project_dir]
+    if exclude:
+        args.append(",".join(e for e in exclude if e))
+    data = run_inspect("symbols", *args)
     return data if isinstance(data, list) else []
 
 
-def inspect_references(project_dir: str) -> list[dict[str, Any]]:
-    """Tier-4 export: every use-site across the tree."""
-    data = run_inspect("references", project_dir)
+def inspect_references(project_dir: str, exclude: list[str] | None = None) -> list[dict[str, Any]]:
+    """Tier-4 export: every use-site across the tree (see ``inspect_symbols``)."""
+    args = [project_dir]
+    if exclude:
+        args.append(",".join(e for e in exclude if e))
+    data = run_inspect("references", *args)
     return data if isinstance(data, list) else []
