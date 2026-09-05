@@ -208,6 +208,10 @@ app = FastAPI(
     redoc_url="/redoc",
 )
 
+from inspection.http import router as inspection_router  # noqa: E402 — after app exists
+
+app.include_router(inspection_router)
+
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -1304,6 +1308,29 @@ def _resolve_project_profile(body: dict, query: str) -> dict | None:
         return None
 
 
+def _maybe_inspect_context(results: list, body: dict) -> str | None:
+    """Agent-style symbol-graph grounding for /answer requests.
+
+    Opt-in via ``auto_inspect: true`` + ``project_dir``/``stem`` in the body.
+    Bounded, best-effort; any failure degrades to None (no inspection block).
+    """
+    if not body.get("auto_inspect"):
+        return None
+    project_dir = body.get("project_dir")
+    stem = body.get("stem")
+    if not isinstance(project_dir, str) or not project_dir or not isinstance(stem, str):
+        return None
+    if not results:
+        return None
+    try:
+        from inspection.auto import build_inspection_grounding
+
+        return build_inspection_grounding(results, project_dir, stem)
+    except Exception:  # noqa: BLE001 — inspection is optional enrichment
+        get_exception_logger().warning("Auto-inspection grounding skipped", exc_info=True)
+        return None
+
+
 @app.post(
     "/answer",
     tags=["LLM"],
@@ -1344,6 +1371,14 @@ def answer_prompt(
     from rag.answer import generate_answer
 
     results, contexts, extra_context = _answer_context(body, query, x_rag_trace_id)
+
+    inspection_block = _maybe_inspect_context(results, body)
+    if inspection_block:
+        extra_context = (
+            f"{extra_context}\n\n{inspection_block}"
+            if isinstance(extra_context, str) and extra_context.strip()
+            else inspection_block
+        )
 
     gen = generate_answer(
         query,
@@ -1422,6 +1457,14 @@ def answer_stream(
     project_profile = _resolve_project_profile(body, query)
 
     results, contexts, extra_context = _answer_context(body, query, x_rag_trace_id)
+
+    inspection_block = _maybe_inspect_context(results, body)
+    if inspection_block:
+        extra_context = (
+            f"{extra_context}\n\n{inspection_block}"
+            if isinstance(extra_context, str) and extra_context.strip()
+            else inspection_block
+        )
 
     from rag.answer import generate_answer_stream
 
