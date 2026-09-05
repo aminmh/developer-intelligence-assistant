@@ -71,6 +71,9 @@ class AnalysisResult:
     scope: AnalysisScope
     findings: list[AnalysisFinding] = field(default_factory=list)
     summary: str = ""
+    # Structured analyzer output (framework-specific), e.g. a Laravel route
+    # table. Kept generic: plugins define their own schema under ``data``.
+    data: dict[str, Any] = field(default_factory=dict)
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -84,6 +87,7 @@ class AnalysisResult:
                 }
                 for f in self.findings
             ],
+            "data": self.data,
         }
 
 

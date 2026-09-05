@@ -59,7 +59,7 @@ class PhpLanguagePlugin(LanguagePlugin):
 
     def analyze(self, workspace: Workspace) -> AnalysisResult:
         # Reuse the existing PHP AST extractor (php_tools.run_code_parse).
-        from php_tools import run_code_parse
+        from infra.php_tools import run_code_parse
 
         scope = AnalysisScope(kind="ast", detail="PHP AST chunks via php bin/code-parse")
         try:

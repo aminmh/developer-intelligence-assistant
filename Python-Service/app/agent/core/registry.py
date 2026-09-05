@@ -11,7 +11,7 @@ core code.
 
 from __future__ import annotations
 
-import importlib.metadata
+import importlib.metadata as metadata
 import logging
 
 from agent.core.profile import (
@@ -40,7 +40,7 @@ def _load_entry_point_classes(
     """
     discovered: dict[str, type] = {}
     try:
-        eps = importlib.metadata.entry_points(group=group)
+        eps = metadata.entry_points(group=group)
     except Exception:  # noqa: BLE001 - metadata backend can fail in many ways
         return discovered
     for ep in eps:
