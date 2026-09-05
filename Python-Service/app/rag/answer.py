@@ -49,6 +49,11 @@ def _cap(text: str, limit: int) -> str:
     return text if len(text) <= limit else text[:limit] + "\n… (truncated)"
 
 
+def render_context_window(system: str, prompt: str) -> str:
+    """Render the exact context window (system + user prompt) as markdown."""
+    return f"# System prompt\n\n{system}\n\n---\n\n# Context window sent to model\n\n{prompt}"
+
+
 def build_user_prompt(
     question: str,
     contexts: List[Dict[str, Any]],
@@ -148,12 +153,40 @@ def generate_answer(
     project_profile: Optional[Dict[str, Any]] = None,
     use_remote: bool = False,
     route: str = "chat",
+    preview_window: str | None = None,
+    preview_only: bool = False,
+    *,
+    preview_mode: str = "off",
 ) -> Dict[str, Any]:
-    """Generate an answer from retrieved code context + entities."""
+    """Generate an answer from retrieved code context + entities.
+
+    With ``preview_only`` the model is never invoked: the caller receives only
+    the rendered context window (``context_preview`` + ``preview_only: True``).
+    Otherwise the window is always attached as ``context_preview`` so inline
+    callers can surface what the model saw. ``preview_mode`` is accepted for
+    signature parity with the stream path; callers decide whether to surface
+    ``context_preview`` based on the resolved mode.
+    """
     contexts = contexts or []
     prompt = build_user_prompt(
         question, contexts, entities, extra_context, doc_chunks, project_profile
     )
+    window = (
+        preview_window
+        if preview_window is not None
+        else render_context_window(SYSTEM_PROMPT, prompt)
+    )
+
+    if preview_only:
+        return {
+            "answer": None,
+            "model": None,
+            "provider": None,
+            "duration_ms": 0,
+            "code_validation": [],
+            "context_preview": window,
+            "preview_only": True,
+        }
 
     temp = settings.temperature if temperature is None else temperature
     topp = settings.top_p if top_p is None else top_p
@@ -188,6 +221,7 @@ def generate_answer(
         "provider": provider_used,
         "duration_ms": duration_ms,
         "code_validation": validation,
+        "context_preview": window,
     }
 
 
@@ -202,22 +236,51 @@ def generate_answer_stream(
     project_profile: Optional[Dict[str, Any]] = None,
     use_remote: bool = False,
     route: str = "chat",
+    preview_window: str | None = None,
+    preview_only: bool = False,
+    *,
+    preview_mode: str = "off",
 ) -> Any:
     """Generator yielding answer events for SSE streaming.
 
     Events: ``start`` (model/provider), ``delta`` (text), ``error``,
     ``validation`` (code_validation list), ``done`` (answer, model, provider,
-    duration_ms).
+    duration_ms). A leading ``context`` event (the rendered context window)
+    precedes the stream whenever ``preview_mode`` is not "off"; with
+    ``preview_only`` that context event is the whole response (emitted
+    regardless of ``preview_mode``) and the model is never invoked.
     """
     contexts = contexts or []
     prompt = build_user_prompt(
         question, contexts, entities, extra_context, doc_chunks, project_profile
     )
+    window = (
+        preview_window
+        if preview_window is not None
+        else render_context_window(SYSTEM_PROMPT, prompt)
+    )
+
+    if preview_only:
+        yield {"type": "context", "preview": window}
+        yield {
+            "type": "done",
+            "answer": None,
+            "model": None,
+            "provider": None,
+            "duration_ms": 0,
+            "truncated": False,
+            "code_validation": [],
+            "preview_only": True,
+        }
+        return
 
     temp = settings.temperature if temperature is None else temperature
     topp = settings.top_p if top_p is None else top_p
 
     _log_prompt(question, prompt)
+
+    if preview_mode != "off":
+        yield {"type": "context", "preview": window}
 
     started = time.time()
     buffer: List[str] = []

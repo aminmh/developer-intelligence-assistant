@@ -1404,13 +1404,29 @@ def _maybe_inspect_context(results: list, body: dict) -> str | None:
         return None
 
 
+_PREVIEW_MODES = {"off", "inline", "gate"}
+
+
+def _resolve_preview_mode(body: dict) -> str:
+    mode = body.get("preview_mode")
+    if not isinstance(mode, str) or mode not in _PREVIEW_MODES:
+        mode = settings.context_preview_mode
+    if mode not in _PREVIEW_MODES:
+        mode = "off"
+    return mode
+
+
 @app.post(
     "/answer",
     tags=["LLM"],
     summary="Generate Answer",
     description=(
         "Generate a final answer from retrieved code context, optional "
-        "metadata filters (class_name/file) and extracted entities."
+        "metadata filters (class_name/file) and extracted entities. "
+        "Context-window preview is optional: the request may send "
+        "`preview_mode` (\"off\"|\"inline\"|\"gate\") and `preview`: true. "
+        "When previewing, the response carries `context_preview`/`preview_only` "
+        "with `answer` and `llmUsed` null and no model call is made."
     ),
 )
 def answer_prompt(
@@ -1453,6 +1469,9 @@ def answer_prompt(
             else inspection_block
         )
 
+    preview_mode = _resolve_preview_mode(body)
+    preview_only = preview_mode == "gate" and body.get("preview") is True
+
     gen = generate_answer(
         query,
         contexts=contexts,
@@ -1464,6 +1483,8 @@ def answer_prompt(
         project_profile=project_profile,
         use_remote=use_remote,
         route=route,
+        preview_only=preview_only,
+        preview_mode=preview_mode,
     )
 
     matches = []
@@ -1485,19 +1506,28 @@ def answer_prompt(
             }
         )
 
-    return {
+    resp = {
         "success": True,
-        "answer": gen["answer"],
+        "answer": None,
         "matches": matches,
-        "llmUsed": (
-            f"Remote GPU LLM ({gen['model']})"
-            if gen.get("provider") == "remote"
-            else f"Local LLM ({gen['model']})"
-        ),
+        "llmUsed": None,
         "provider": gen.get("provider", "local"),
         "durationMs": gen["duration_ms"],
         "code_validation": gen.get("code_validation", []),
     }
+    if not gen.get("preview_only"):
+        resp["answer"] = gen["answer"]
+        resp["llmUsed"] = (
+            f"Remote GPU LLM ({gen['model']})"
+            if gen.get("provider") == "remote"
+            else f"Local LLM ({gen['model']})"
+        )
+    if preview_mode != "off":
+        resp["context_preview"] = gen.get("context_preview")
+        resp["preview_mode"] = preview_mode
+        if gen.get("preview_only"):
+            resp["preview_only"] = True
+    return resp
 
 
 @app.post(
@@ -1506,7 +1536,11 @@ def answer_prompt(
     summary="Streaming Answer (SSE)",
     description=(
         "Generate an answer and stream it as Server-Sent Events: start, delta, "
-        "validation and done events. Same retrieval semantics as /answer."
+        "validation and done events. Same retrieval semantics as /answer. When "
+        "context preview is enabled (preview_mode inline/gate) a leading "
+        "\"context\" event carrying the rendered context window precedes the "
+        "stream; gate-preview requests emit only the context event followed by "
+        "a done event (no start/delta) and never invoke the model."
     ),
 )
 def answer_stream(
@@ -1539,6 +1573,14 @@ def answer_stream(
             else inspection_block
         )
 
+    # Stream mode is carried by the generator itself: a leading ``context``
+    # event is emitted only when the resolved mode is not "off", and
+    # ``preview_only`` is reflected in the terminal ``done`` event. A request
+    # only skips the model when the resolved mode is "gate" AND the client
+    # explicitly asked for a preview.
+    preview_mode = _resolve_preview_mode(body)
+    preview_only = preview_mode == "gate" and body.get("preview") is True
+
     from rag.answer import generate_answer_stream
 
     def _sse():
@@ -1554,6 +1596,8 @@ def answer_stream(
                 project_profile=project_profile,
                 use_remote=use_remote,
                 route=route,
+                preview_only=preview_only,
+                preview_mode=preview_mode,
             ):
                 yield f"data: {json.dumps(event)}\n\n"
         except Exception as exc:
@@ -1672,6 +1716,14 @@ def get_settings(
 )
 def update_settings(body: dict):
     incoming = body.get("config", body) if isinstance(body, dict) else {}
+    if (
+        "contextPreviewMode" in incoming
+        and incoming["contextPreviewMode"] not in _PREVIEW_MODES
+    ):
+        raise HTTPException(
+            status_code=400,
+            detail="contextPreviewMode must be one of off, inline, gate",
+        )
     updates = {}
     for key in RAG_CONFIG_DEFAULTS:
         if key not in incoming:

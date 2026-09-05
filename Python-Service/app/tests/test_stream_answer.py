@@ -104,7 +104,28 @@ def _fake_stream_complete():
 
 def test_generate_answer_stream_events(monkeypatch):
     monkeypatch.setattr(answer, "stream_complete_with_model", _fake_stream_complete())
-    events = list(answer.generate_answer_stream("q", route="chat"))
+    events = list(
+        answer.generate_answer_stream("q", route="chat", preview_mode="inline")
+    )
+    types = [e["type"] for e in events]
+    assert types == ["context", "start", "delta", "delta", "validation", "done"]
+    assert events[0]["type"] == "context"
+    assert events[0]["preview"].startswith("# System prompt")
+    assert events[1]["model"] == "gemma-4b"
+    assert "".join(e["text"] for e in events if e["type"] == "delta") == "Hello world"
+    done = events[-1]
+    assert done["answer"] == "Hello world"
+    assert done["provider"] == "local"
+    assert done["code_validation"] == []
+
+
+def test_generate_answer_stream_off_mode_preserves_event_order(monkeypatch):
+    """Default off mode keeps the prior byte-identical event order: no leading
+    context event — start, delta, delta, validation, done."""
+    monkeypatch.setattr(answer, "stream_complete_with_model", _fake_stream_complete())
+    events = list(
+        answer.generate_answer_stream("q", route="chat", preview_mode="off")
+    )
     types = [e["type"] for e in events]
     assert types == ["start", "delta", "delta", "validation", "done"]
     assert events[0]["model"] == "gemma-4b"

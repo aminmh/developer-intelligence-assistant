@@ -56,6 +56,9 @@ class Settings(BaseModel):
     temperature: float = float(os.getenv("LLM_TEMPERATURE", "0.7"))
     top_p: float = float(os.getenv("LLM_TOP_P", "0.9"))
 
+    # Context-window preview toggle: "off" | "inline" | "gate".
+    context_preview_mode: str = os.getenv("CONTEXT_PREVIEW_MODE", "off")
+
     minio_endpoint: str = os.getenv("AWS_ENDPOINT", "minio:9000")
     minio_access_key: str = os.getenv("AWS_ACCESS_KEY_ID", "minio")
     minio_secret_key: str = os.getenv("AWS_SECRET_ACCESS_KEY", "minio123")
@@ -123,6 +126,7 @@ class RuntimeSettings:
         "sandbox_jobs_root": "sandboxJobsRoot",
         "temperature": "temperature",
         "top_p": "topP",
+        "context_preview_mode": "contextPreviewMode",
     }
 
     def __init__(self) -> None:

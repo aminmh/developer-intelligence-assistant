@@ -33,6 +33,7 @@ RAG_CONFIG_DEFAULTS: Dict[str, Any] = {
     "docStrictMode": False,
     "docContext7TimeoutS": 10,
     "docGitmcpTimeoutS": 15,
+    "contextPreviewMode": "off",
     "qdrantUrl": "",
     "qdrantApiKey": "",
     "sandboxDockerHost": "",
