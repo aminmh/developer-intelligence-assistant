@@ -12,13 +12,28 @@ runtimes:
   # Shared composer-based runtime (anchor reused by every PHP-family framework).
   php: &php_runtime
     image: composer:2
+    # PHP-floor → image map (built via ../docker/php-runtime/Dockerfile and
+    # docker-load'ed into the DinD daemon). The executor reads composer.json
+    # require.php and picks the matching floor — composer:2 tracks PHP 8.5,
+    # which real projects requiring ^8.3 (+bcmath/gd) cannot boot on.
+    # A floor without an image falls back to the nearest lower one, then to
+    # `image` (honest detail in the job result).
+    php_versions:
+      "8.2": php-composer:8.2
+      "8.3": php-composer:8.3
+      "8.4": php-composer:8.4
+    # require-dev packages are needed by real projects: Telescope & co. are
+    # referenced by their own config/app.php providers, and the `tests` probe
+    # runs phpunit. A prod-only install then crashes at boot.
+    dev: true
     # Marker file locating the real app dir: uploads often wrap the project in
     # a top-level folder (Archive/…). Staging binds the whole workspace, and
     # install/probe commands run from the dir containing this marker.
     manifest: composer.json
-    # Dependency installer argv (tier 1). --no-scripts/-dev/--prefer-dist are
-    # configurable policy knobs: enabling scripts executes the repo's own
-    # composer scripts (CI semantics); disable for stricter lockdown.
+    # Dependency installer argv (tier 1). --no-scripts skips the repo's own
+    # composer scripts (post-autoload package:discover etc.) for deterministic,
+    # lockdown-by-default installs — enable scripts only when a project needs
+    # them (CI semantics).
     installer:
       - composer
       - install
@@ -26,6 +41,7 @@ runtimes:
       - --no-progress
       - --prefer-dist
       - --no-dev
+      - --no-scripts
     probes:
       routes:
         - php

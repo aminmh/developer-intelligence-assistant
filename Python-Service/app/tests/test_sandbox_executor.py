@@ -163,14 +163,21 @@ class TestInstallTier:
         assert result["status"] == "done"
         assert result["exit_code"] == 0
         fake = ex_module.DockerApi()
-        # tier-1 runs a cache-warm-and-offline-install shell wrapper
+        # tier-1 runs a serial-HTTP retry install shell wrapper
         assert any(c.startswith("run:composer:2:sh -c") for c in fake.calls)
         run_call = next(c for c in fake.calls if c.startswith("run:composer:2:sh -c"))
         assert "composer install" in run_call
-        assert "COMPOSER_DISABLE_NETWORK=1" in run_call
-        # writable bind (no :ro), runsc NOT requested for install tier
+        assert "COMPOSER_MAX_PARALLEL_HTTP=1" in run_call
+        # retry loop present (up to 4 passes), no offline-forced run
+        assert "while [ $i -lt 4 ]" in run_call
+        assert "COMPOSER_DISABLE_NETWORK" not in run_call
+        # writable bind (no :ro) + shared composer cache volume, runsc NOT
+        # requested for install tier
         hc = fake.last_run["host_config"]
-        assert hc["Binds"] == [f"{ex.jobs_root()}/proj-1/src:/app"]
+        assert hc["Binds"] == [
+            f"{ex.jobs_root()}/proj-1/src:/app",
+            f"{ex._COMPOSER_CACHE_VOLUME}:{ex._COMPOSER_CACHE_DIR}",
+        ]
         assert "Runtime" not in hc
 
     def test_install_unavailable_without_image_or_egress(self, fake_api):
@@ -189,6 +196,130 @@ class TestInstallTier:
         fake.pull_ok = True
         result = executor.install_dependencies("proj-1", "php")
         assert result["status"] == "done"  # pulled then ran
+
+
+class TestRuntimeImageResolution:
+    """PHP-floor image selection (cons A1) + dev-deps policy (cons A2)."""
+
+    VERSIONS = """
+    php_versions:
+      "8.2": php-composer:8.2
+      "8.3": php-composer:8.3
+      "8.4": php-composer:8.4
+"""
+
+    def _executor(self, tmp_path, extra: str = "") -> SandboxExecutor:
+        cfg = tmp_path / "r.yml"
+        cfg.write_text(FIXTURE_YML + "\n" + extra, encoding="utf-8")
+        return SandboxExecutor(docker_host="tcp://x:2375", runtime_config_path=str(cfg))
+
+    def _php_project(self, tmp_path, constraint: str) -> Path:
+        root = tmp_path / "projphp"
+        root.mkdir(parents=True)
+        (root / "composer.json").write_text(
+            json.dumps({"require": {"php": constraint}}), encoding="utf-8"
+        )
+        (root / "routes").mkdir()
+        (root / "routes" / "web.php").write_text("<?php\n", encoding="utf-8")
+        return root
+
+    def test_floor_parsing(self):
+        assert ex._php_constraint_floor("^8.3") == "8.3"
+        assert ex._php_constraint_floor(">=8.2.5 <8.5") == "8.2"
+        assert ex._php_constraint_floor(None) is None
+
+    def test_exact_floor_match(self, tmp_path):
+        executor = self._executor(tmp_path, self.VERSIONS)
+        root = self._php_project(tmp_path, "^8.3")
+        image, detail = executor.resolve_runtime_image("php", str(root), "")
+        assert image == "php-composer:8.3"
+        assert detail == "php 8.3"
+
+    def test_nearest_lower_floor(self, tmp_path):
+        versions = self.VERSIONS.replace('"8.4": php-composer:8.4\n', "")
+        executor = self._executor(tmp_path, versions)
+        root = self._php_project(tmp_path, "^8.4.2")
+        image, detail = executor.resolve_runtime_image("php", str(root), "")
+        assert image == "php-composer:8.3"
+        assert "8.4 required" in (detail or "")
+
+    def test_no_image_for_floor_falls_back_default(self, tmp_path):
+        executor = self._executor(tmp_path, self.VERSIONS)
+        root = self._php_project(tmp_path, "^7.4")
+        image, detail = executor.resolve_runtime_image("php", str(root), "")
+        assert image == "composer:2"
+        assert "no matching image" in (detail or "")
+
+    def test_above_all_floors_uses_nearest_lower(self, tmp_path):
+        executor = self._executor(tmp_path, self.VERSIONS)
+        root = self._php_project(tmp_path, "^9.0")
+        image, detail = executor.resolve_runtime_image("php", str(root), "")
+        assert image == "php-composer:8.4"
+        assert "9.0 required" in (detail or "")
+
+    def test_no_versions_map_returns_default(self, tmp_path):
+        executor = self._executor(tmp_path)
+        root = self._php_project(tmp_path, "^8.3")
+        image, detail = executor.resolve_runtime_image("php", str(root), "")
+        assert image == "composer:2"
+        assert detail is None
+
+    def test_nested_rel_reads_its_composer_json(self, tmp_path):
+        executor = self._executor(tmp_path, self.VERSIONS)
+        root = tmp_path / "wrapped"
+        (root / "Archive").mkdir(parents=True)
+        (root / "Archive" / "composer.json").write_text(
+            json.dumps({"require": {"php": "^8.2"}}), encoding="utf-8"
+        )
+        image, detail = executor.resolve_runtime_image(
+            "php", str(root), "Archive"
+        )
+        assert image == "php-composer:8.2"
+        assert detail == "php 8.2"
+
+    def test_dev_flag_strips_no_dev(self, fake_api, tmp_path):
+        ex_module, executor = fake_api
+        fake = ex_module.DockerApi()
+        result = executor.install_dependencies("proj-1", "php", dev=True)
+        assert result["status"] == "done"
+        run_call = next(c for c in fake.calls if c.startswith("run:composer:2:sh -c"))
+        assert "--no-dev" not in run_call
+        assert "composer install --no-interaction --prefer-dist" in run_call
+
+    def test_dev_default_from_config(self, fake_api, tmp_path):
+        ex_module, executor = fake_api
+        executor = self._executor(
+            tmp_path, "    dev: true"
+        )
+        fake = ex_module.DockerApi()
+        result = executor.install_dependencies("proj-1", "php")
+        assert result["status"] == "done"
+        run_call = next(c for c in fake.calls if c.startswith("run:composer:2:sh -c"))
+        assert "--no-dev" not in run_call
+
+    def test_analyze_propagates_resolved_image(self, fake_api, tmp_path):
+        ex_module, executor = fake_api
+        fake = ex_module.DockerApi()
+        fake.images.append("php-composer:8.3")
+        executor = self._executor(tmp_path, self.VERSIONS)
+        root = self._php_project(tmp_path, "^8.3")
+        out = executor.analyze(str(root), "proj-83", "php")
+        assert out["staged"] is True
+        assert out["runtime_image"] == "php-composer:8.3"
+        assert any(
+            c.startswith("run:php-composer:8.3:sh -c") for c in fake.calls
+        )
+        assert all(p["image"] == "php-composer:8.3" for p in out["probes"])
+
+    def test_run_command_reuses_resolved_image(self, fake_api):
+        ex_module, executor = fake_api
+        executor._runtime_images["proj-1"] = "php-composer:8.3"
+        fake = ex_module.DockerApi()
+        fake.images.append("php-composer:8.3")
+        fake.run_result = {"status": "done", "exit_code": 0, "stdout": "yes"}
+        record = executor.run_command("proj-1", "php -v", framework="php")
+        assert record["status"] == "done"
+        assert record["image"] == "php-composer:8.3"
 
 
 class TestProbeTier:
@@ -279,12 +410,16 @@ class TestShellCommand:
         run_call = next(c for c in fake.calls if c.startswith("run:composer:2:sh -c"))
         assert "php artisan app:code-parse --json" in run_call
         hc = fake.last_run["host_config"]
-        assert hc["Binds"] == [f"{ex.jobs_root()}/proj-1/src:/app"]
+        assert hc["Binds"] == [
+            f"{ex.jobs_root()}/proj-1/src:/app",
+            f"{ex._COMPOSER_CACHE_VOLUME}:{ex._COMPOSER_CACHE_DIR}",
+        ]
         assert "Runtime" not in hc
         assert hc["ReadonlyRootfs"] is False
         assert hc["CapDrop"] == ["ALL"]
         env = fake.last_run["env"]
         assert env["APP_ENV"] == "testing" and env["DB_CONNECTION"] == "sqlite"
+        assert env["COMPOSER_CACHE_DIR"] == ex._COMPOSER_CACHE_DIR
         # project-staged liveness check ran against alpine first
         assert any(c.startswith("run:alpine:3.20.3:sh -c") for c in fake.calls)
 

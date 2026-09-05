@@ -24,9 +24,8 @@ from __future__ import annotations
 import io
 import json
 import os
+import re
 import tarfile
-import urllib.error as error
-import urllib.request as request
 import urllib.error
 import urllib.request
 from pathlib import Path
@@ -40,11 +39,21 @@ CONFIG_PATH = os.getenv("SANDBOX_RUNTIMES_CONFIG", "/app/config/sandbox_runtimes
 _RUNSC_CAPS = ["ALL"]
 _RUNSC_PIDS = 256
 _RUNSC_MEM_BYTES = 1 * 1024 * 1024 * 1024  # 1g
-_RUNSC_TMPFS = {"/tmp": "rw,size=536870912,mode=1777"}  # 512m — composer cache fits
+_RUNSC_TMPFS = {"/tmp": "rw,size=536870912,mode=1777"}  # 512m scratch
+
+# Durable composer cache. Tier-1 installs warm this NAMED VOLUME (dind-storage,
+# survives across containers + jobs) with retried --dry-run passes, then
+# materialize vendor fully offline. run_command containers mount it too, so
+# interactive `composer require` retries reuse the same cache. tmpfs /tmp above
+# is NOT where the cache lives anymore (it outgrew 512m on real projects).
+_COMPOSER_CACHE_VOLUME = "phpcomposer-cache"
+_COMPOSER_CACHE_DIR = "/composer-cache"
 
 # Env injected into every probe: identical to laravel.py _runtime_routes so a
 # misbehaving artisan command can only touch an empty in-memory sqlite + array
-# drivers — never real project config or a network.
+# drivers — never real project config or a network. LOG_CHANNEL=stderr keeps
+# Monolog off the read-only /app mount (runsc probes crash on a locked
+# storage/logs file otherwise).
 _PROBE_ENV = {
     "APP_ENV": "testing",
     "APP_DEBUG": "false",
@@ -55,6 +64,7 @@ _PROBE_ENV = {
     "SESSION_DRIVER": "array",
     "QUEUE_CONNECTION": "sync",
     "MAIL_MAILER": "array",
+    "LOG_CHANNEL": "stderr",
     "COMPOSER_ALLOW_SUPERUSER": "1",
     "HOME": "/tmp",
 }
@@ -63,7 +73,7 @@ _INSTALL_ENV = {
     "COMPOSER_ALLOW_SUPERUSER": "1",
     "COMPOSER_NO_INTERACTION": "1",
     "HOME": "/tmp",
-    "COMPOSER_CACHE_DIR": "/tmp/composer-cache",
+    "COMPOSER_CACHE_DIR": _COMPOSER_CACHE_DIR,
 }
 
 # Noise dirs never staged (macOS zip cruft etc.).
@@ -72,6 +82,75 @@ _NOISE_DIRS = {"__MACOSX"}
 
 def jobs_root() -> str:
     return os.environ.get("JOBS_ROOT", "/jobs")
+
+
+# -- runtime image + installer helpers ---------------------------------------
+
+
+def _php_constraint_floor(require_php: str | None) -> str | None:
+    """First major.minor mentioned by a composer.json ``require.php``.
+
+    ``^8.3`` → ``8.3``, ``>=8.2.5`` → ``8.2``, ``<8.5`` → ``8.5``(first token).
+    Used to pick a runtime image matching the project's PHP floor — composer:2
+    currently ships PHP 8.5, which real-world Laravel projects (``^8.3`` +
+    bcmath/gd) cannot boot on.
+    """
+    if not require_php:
+        return None
+    m = re.search(r"\b(\d{1,2})\.(\d{1,2})\b", require_php)
+    return f"{m.group(1)}.{m.group(2)}" if m else None
+
+
+def _detect_php_floor(project_root: Path) -> str | None:
+    """Read composer.json require.php from a local project dir (best-effort)."""
+    try:
+        data = json.loads((project_root / "composer.json").read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    return _php_constraint_floor((data.get("require") or {}).get("php"))
+
+
+def _installer_flags(
+    installer: list[str], dev: bool
+) -> tuple[str, str, list[str]]:
+    """Split an installer argv into (cmd_name, verb, flags).
+
+    ``dev=True`` drops ``--no-dev`` (require-dev packages such as Telescope are
+    referenced by real projects' own config/providers and by the tests probe —
+    a prod-only install then crashes at boot).
+    """
+    cmd_name = installer[0] if installer else "composer"
+    verb = "install"
+    rest: list[str] = list(installer[1:])
+    if len(rest) > 0 and rest[0] in (
+        "install", "update", "require", "dump-autoload",
+    ):
+        verb, rest = rest[0], rest[1:]
+    if dev:
+        rest = [a for a in rest if a != "--no-dev"]
+    return cmd_name, verb, rest
+
+
+def _composer_retry_script(cmd_name: str, verb: str, opts: str) -> str:
+    """Nested-DinD DNS drops out under composer's parallel dist downloads (curl
+    'Resolving timed out'); composer's ``--dry-run`` never downloads dists, so
+    no warm/offline trick helps. What manual remediation proved reliable:
+
+    - HTTP strictly serial (COMPOSER_MAX_PARALLEL_HTTP=1) — single-flight
+      requests never hit the resolver storm.
+    - Plain networked install, retried up to 4x. The durable cache VOLUME
+      (phpcomposer-cache) accumulates downloaded dists across passes AND jobs,
+      so pass N+1 resumes where pass N failed — big cold sets converge.
+
+    Shared by tier-1 installs and any composer shell the executor runs.
+    """
+    return (
+        "export COMPOSER_MAX_PARALLEL_HTTP=1; "
+        "i=0; rc=1; "
+        f"while [ $i -lt 4 ]; do {cmd_name} {verb} {opts}; rc=$?; "
+        "[ $rc -eq 0 ] && break; i=$((i+1)); sleep 2; done; "
+        "exit $rc"
+    )
 
 
 def _normalize_host(docker_host: str | None) -> str:
@@ -310,6 +389,9 @@ class SandboxExecutor:
         self._config: dict[str, Any] | None = None
         # project_id -> relative app dir inside the staged source ('' = root).
         self._rel: dict[str, str] = {}
+        # project_id -> resolved runtime image (PHP-floor aware) chosen at
+        # analyze() time; run_command/run_probe reuse it for staged projects.
+        self._runtime_images: dict[str, str] = {}
         self._stage_probe_detail: dict[str, Any] | None = None
 
     # -- config -------------------------------------------------------------
@@ -325,6 +407,47 @@ class SandboxExecutor:
     def runtime_for(self, framework: str) -> dict[str, Any] | None:
         conf = self.load_runtime_config()
         return conf.get("runtimes", {}).get(framework or "php")
+
+    def resolve_runtime_image(
+        self,
+        framework: str,
+        workspace_path: str | None = None,
+        rel: str = "",
+    ) -> tuple[str, str | None]:
+        """Pick the daemon image for a framework + project.
+
+        Order: runtime ``php_versions`` map keyed by PHP floor, matched against
+        the local composer.json require.php → exact floor, else nearest lower
+        floor, else the runtime default image. ``detail`` explains the choice
+        ('' / 'php 8.3' / fallback reason) for honest job reporting.
+        """
+        rt = self.runtime_for(framework)
+        if not rt:
+            return "", None
+        image = rt.get("image", "")
+        versions = rt.get("php_versions") or {}
+        if not versions or not workspace_path:
+            return image, None
+        root = Path(workspace_path)
+        if rel:
+            root = root / rel
+        floor = _detect_php_floor(root)
+        if not floor:
+            return image, None
+        if floor in versions:
+            return versions[floor], f"php {floor}"
+        available = sorted(
+            ((tuple(int(x) for x in v.split("."))), v)
+            for v in versions
+            if v.count(".") == 1 and v != floor
+        )
+        target = tuple(int(x) for x in floor.split("."))
+        best = next(
+            (v for t, v in reversed(available) if t < target), None
+        )
+        if best:
+            return versions[best], f"php {floor} required, {best} image"
+        return image, f"php {floor} required, no matching image — default {image}"
 
     # -- staging ------------------------------------------------------------
 
@@ -362,14 +485,19 @@ class SandboxExecutor:
     # -- tier 1: dependency install -----------------------------------------
 
     def install_dependencies(
-        self, project_id: str, framework: str = "php"
+        self,
+        project_id: str,
+        framework: str = "php",
+        *,
+        dev: bool | None = None,
+        image: str | None = None,
     ) -> dict[str, Any]:
         """Networked (non-runsc) dependency install on a writable project copy.
         Uses an image the daemon already has; pulls only when egress exists."""
         rt = self.runtime_for(framework)
         if not rt:
             return {"status": "skipped", "reason": f"no runtime config for {framework!r}"}
-        image = rt.get("image", "")
+        image = image or self._runtime_images.get(project_id) or rt.get("image", "")
         if not self.api.image_exists(image) and not self.api.pull_image(image):
             return {
                 "status": "unavailable",
@@ -380,26 +508,14 @@ class SandboxExecutor:
             "composer", "install", "--no-interaction", "--no-progress",
             "--prefer-dist",
         ]
-        # Nested-DinD DNS drops out under composer's parallel dist downloads
-        # (curl 'Resolving timed out'). Warm the composer cache with retried
-        # --dry-run passes (each accumulates cached dists inside the same
-        # container), then materialize vendor fully offline — no network
-        # needed once the cache is complete.
+        # dev=None → runtime config knob (real projects need require-dev
+        # packages: Telescope etc. are referenced by their own config).
+        dev = rt.get("dev", False) if dev is None else dev
         import shlex
 
-        cmd_name = installer[0]
-        verb = installer[1] if len(installer) > 1 and installer[1] in (
-            "install", "update", "require", "dump-autoload",
-        ) else "install"
-        rest = installer[2:] if len(installer) > 1 and installer[1] == verb else installer[1:]
-        opts = " ".join(shlex.quote(a) for a in rest)
-        script = (
-            "i=0; while [ $i -lt 6 ]; do "
-            f"{cmd_name} {verb} {opts} --dry-run >/dev/null 2>&1 && break; "
-            "i=$((i+1)); done; "
-            "export COMPOSER_DISABLE_NETWORK=1; "
-            f"exec {cmd_name} {verb} {opts}"
-        )
+        cmd_name, verb, flags = _installer_flags(installer, bool(dev))
+        opts = " ".join(shlex.quote(a) for a in flags)
+        script = _composer_retry_script(cmd_name, verb, opts)
         src = f"{jobs_root()}/{project_id}/src"
         rel = self._rel.get(project_id, "")
         working_dir = "/app" if not rel else f"/app/{rel}"
@@ -409,7 +525,13 @@ class SandboxExecutor:
             working_dir=working_dir,
             env={**_INSTALL_ENV},
             host_config={
-                "Binds": [f"{src}:/app"],
+                "Binds": [
+                    f"{src}:/app",
+                    # Shared cache volume — dry-run warm passes + the offline
+                    # final install (and later run_command composer calls) all
+                    # accumulate into the same durable named volume.
+                    f"{_COMPOSER_CACHE_VOLUME}:{_COMPOSER_CACHE_DIR}",
+                ],
                 "ReadonlyRootfs": False,
                 "CapDrop": _RUNSC_CAPS,
                 "PidsLimit": _RUNSC_PIDS,
@@ -433,13 +555,14 @@ class SandboxExecutor:
         probe_name: str,
         framework: str = "php",
         argv: list[str] | None = None,
+        image: str | None = None,
     ) -> dict[str, Any]:
         """Run an artisan probe under runsc, network none, read-only mount."""
         rt = self.runtime_for(framework)
         if not rt:
             return {"name": probe_name, "status": "skipped",
                     "reason": f"no runtime config for {framework!r}"}
-        image = rt.get("image", "")
+        image = image or self._runtime_images.get(project_id) or rt.get("image", "")
         if not self.api.image_exists(image):
             return {
                 "name": probe_name,
@@ -467,7 +590,13 @@ class SandboxExecutor:
                 "CapDrop": _RUNSC_CAPS,
                 "PidsLimit": _RUNSC_PIDS,
                 "Memory": _RUNSC_MEM_BYTES,
-                "Tmpfs": dict(_RUNSC_TMPFS),
+                # Laravel boots into a read-only /app and still writes package
+                # manifests (bootstrap/cache/packages.php + services.php) —
+                # overlay a writable tmpfs there or every probe dies.
+                "Tmpfs": {
+                    "/tmp": "rw,size=536870912,mode=1777",
+                    "/app/bootstrap/cache": "rw,size=67108864,mode=1777",
+                },
             },
         )
         record["name"] = probe_name
@@ -526,6 +655,7 @@ class SandboxExecutor:
         *,
         framework: str = "php",
         cwd: str | None = None,
+        image: str | None = None,
     ) -> dict[str, Any]:
         """Run an arbitrary shell command against the staged project — the
         "terminal like docker" path.
@@ -543,7 +673,7 @@ class SandboxExecutor:
                 "status": "skipped",
                 "reason": f"no runtime config for {framework!r}",
             }
-        image = rt.get("image", "")
+        image = image or self._runtime_images.get(project_id) or rt.get("image", "")
         if not self.api.image_exists(image):
             return {
                 "status": "unavailable",
@@ -581,9 +711,12 @@ class SandboxExecutor:
             image=image,
             argv=["sh", "-c", script],
             working_dir=working_dir,
-            env={**_PROBE_ENV, "COMPOSER_CACHE_DIR": "/tmp/composer-cache"},
+            env={**_PROBE_ENV, "COMPOSER_CACHE_DIR": _COMPOSER_CACHE_DIR},
             host_config={
-                "Binds": [f"{src}:/app"],
+                "Binds": [
+                    f"{src}:/app",
+                    f"{_COMPOSER_CACHE_VOLUME}:{_COMPOSER_CACHE_DIR}",
+                ],
                 "ReadonlyRootfs": False,
                 "CapDrop": _RUNSC_CAPS,
                 "PidsLimit": _RUNSC_PIDS,
@@ -605,6 +738,8 @@ class SandboxExecutor:
         project_id: str,
         framework: str = "php",
         probes: list[str] | None = None,
+        *,
+        install_dev: bool | None = None,
     ) -> dict[str, Any]:
         """stage → install → probes. One call, partial-failure tolerant.
 
@@ -629,7 +764,14 @@ class SandboxExecutor:
                 return out
             self._rel[project_id] = rel
         else:
-            self._rel[project_id] = ""
+            rel = ""
+            self._rel[project_id] = rel
+        # Choose the daemon image up-front (composer.json require.php floor →
+        # runtime php_versions map) so install + probes + later shell commands
+        # all run the SAME PHP.
+        image, _detail = self.resolve_runtime_image(framework, workspace_path, rel)
+        if image:
+            self._runtime_images[project_id] = image
         try:
             src = self.stage_project(workspace_path, project_id)
             out["staged"] = True
@@ -639,14 +781,17 @@ class SandboxExecutor:
             out["install"] = {"status": "failed", "error": f"stage: {exc}"[:400]}
             return out
 
-        install = self.install_dependencies(project_id, framework)
+        install = self.install_dependencies(
+            project_id, framework, dev=install_dev, image=image
+        )
         out["install"] = install
-        rt = self.runtime_for(framework) or {}
-        out["runtime_image"] = rt.get("image")
+        out["runtime_image"] = image or (rt or {}).get("image")
 
         if install.get("status") == "done" and install.get("exit_code") == 0:
             for name in probes or list((rt.get("probes") or {}).keys()):
-                out["probes"].append(self.run_probe(project_id, name, framework))
+                out["probes"].append(
+                    self.run_probe(project_id, name, framework, image=image)
+                )
         else:
             reason = install.get("reason") or install.get("error") or (
                 f"install exit {install.get('exit_code')}"
