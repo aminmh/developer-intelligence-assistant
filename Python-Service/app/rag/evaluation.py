@@ -30,7 +30,7 @@ from ragas.metrics import (
     Faithfulness,
 )
 
-from settings import settings
+from infra.settings import settings
 
 # Reference-free metrics only — context_recall needs ground truth and lives in
 # the offline suite, not here. (display_name, metric) pairs; the metric's
@@ -65,7 +65,7 @@ def _get_llm() -> LangchainLLMWrapper:
 
 
 def _get_embeddings() -> LangchainEmbeddingsWrapper:
-    from embeddings import get_langchain_embeddings
+    from index.embeddings import get_langchain_embeddings
 
     return LangchainEmbeddingsWrapper(get_langchain_embeddings())
 

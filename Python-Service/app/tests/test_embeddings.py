@@ -1,10 +1,11 @@
 """Embedding client dispatch tests — Ollama native vs OpenAI-compatible."""
 
 import json
-import urllib.error
+import urllib.error as error
+import urllib.request as request
 import urllib.request
 
-import embeddings
+import index.embeddings as embeddings
 
 
 class _FakeResponse:

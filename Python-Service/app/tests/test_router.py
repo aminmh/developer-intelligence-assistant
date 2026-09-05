@@ -3,7 +3,8 @@ import uuid
 
 import pytest
 
-import router as rt
+import rag.router as rt
+import urllib.request
 
 
 class _FakeEncoder:

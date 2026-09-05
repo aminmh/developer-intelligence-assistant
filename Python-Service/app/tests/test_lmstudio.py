@@ -1,8 +1,11 @@
 """LM Studio client tests — model listing + load against a mocked server."""
 
 import json
+import urllib.request
+import unittest
+import urllib.request
 
-import lmstudio
+import runtime.lmstudio as lmstudio
 
 
 class _FakeResponse:
@@ -20,12 +23,12 @@ class _FakeResponse:
 
 
 def _fake_urlopen(payload):
-    import urllib.request
+    import urllib.request as request
 
     def opener(request, timeout=None):
         return _FakeResponse(payload)
 
-    import unittest.mock
+    import unittest.mock as mock
 
     return unittest.mock.patch.object(urllib.request, "urlopen", opener)
 
@@ -86,8 +89,8 @@ def test_models_parse_embedding_entry(monkeypatch):
 
 
 def test_models_falls_back_to_v1(monkeypatch):
-    import urllib.error
-    import urllib.request
+    import urllib.error as error
+    import urllib.request as request
 
     calls = []
 
@@ -132,8 +135,8 @@ def test_models_no_base_url():
 
 
 def test_models_unreachable(monkeypatch):
-    import urllib.error
-    import urllib.request
+    import urllib.error as error
+    import urllib.request as request
 
     def fail(request, timeout=None):
         raise urllib.error.URLError("connection refused")
@@ -153,7 +156,7 @@ def test_models_strips_v1_and_trailing_slash(monkeypatch):
         captured["url"] = request.full_url
         return _FakeResponse({"object": "list", "data": []})
 
-    import urllib.request
+    import urllib.request as request
 
     monkeypatch.setattr(urllib.request, "urlopen", capture)
 
@@ -181,7 +184,7 @@ def test_load_success(monkeypatch):
             }
         )
 
-    import urllib.request
+    import urllib.request as request
 
     monkeypatch.setattr(urllib.request, "urlopen", capture)
 
@@ -204,8 +207,8 @@ def test_load_missing_model():
 
 
 def test_load_server_error(monkeypatch):
-    import urllib.error
-    import urllib.request
+    import urllib.error as error
+    import urllib.request as request
 
     def fail(request, timeout=None):
         raise urllib.error.URLError("model not found")

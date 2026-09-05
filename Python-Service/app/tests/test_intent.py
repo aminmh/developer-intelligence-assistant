@@ -1,6 +1,6 @@
 import pytest
 
-import intent as it
+import rag.intent as it
 
 
 def test_extract_intent_valid(monkeypatch):
@@ -57,13 +57,13 @@ def test_extract_intent_empty_prompt():
 
 
 def test_build_query_filter_none():
-    from llamaindex_layer import _build_query_filter
+    from index.llamaindex_layer import _build_query_filter
 
     assert _build_query_filter() is None
 
 
 def test_build_query_filter_class_only():
-    from llamaindex_layer import _build_query_filter
+    from index.llamaindex_layer import _build_query_filter
 
     f = _build_query_filter(class_name="Invoice")
     assert f is not None
@@ -72,7 +72,7 @@ def test_build_query_filter_class_only():
 
 
 def test_build_query_filter_both():
-    from llamaindex_layer import _build_query_filter
+    from index.llamaindex_layer import _build_query_filter
 
     f = _build_query_filter(class_name="Invoice", file="Invoice.php")
     assert f is not None

@@ -1,7 +1,7 @@
 import pandas as pd
 import pytest
 
-import evaluation
+import rag.evaluation as evaluation
 
 
 def test_tier_boundaries():

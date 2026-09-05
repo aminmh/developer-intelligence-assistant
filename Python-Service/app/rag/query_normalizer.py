@@ -19,11 +19,12 @@ import unicodedata
 from pathlib import Path
 from typing import Dict, List, Optional, Set, Tuple
 
-from settings import settings
-from domain_dictionary import DICTIONARY_PATH, generate_domain_dictionary
+from infra.settings import settings
+from rag.domain_dictionary import DICTIONARY_PATH, generate_domain_dictionary
+import urllib.request
 
 # Path to the domain jargon dict (relative to this module's directory).
-_DOMAIN_TERMS_PATH = Path(__file__).parent / "config" / "domain_terms.json"
+_DOMAIN_TERMS_PATH = Path(__file__).parent.parent / "config" / "domain_terms.json"
 
 # Characters stripped from the leading/trailing edges of the query. '?' and '!'
 # are deliberately preserved (sentence-transformer embeddings tolerate them).

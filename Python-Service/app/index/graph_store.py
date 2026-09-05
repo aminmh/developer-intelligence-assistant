@@ -1,7 +1,7 @@
 from collections import defaultdict
 from typing import Dict, List, Optional, Tuple
 
-from models import EdgeModel, SymbolModel
+from index.models import EdgeModel, SymbolModel
 
 
 class InMemoryCodeGraph:

@@ -19,7 +19,7 @@ from lsp.base import (
     is_truncated,
     validate_with_lsp,
 )
-from settings import settings
+from infra.settings import settings
 
 # Messages that reference symbols outside the snippet (legitimate in
 # snippet-local validation) — demoted from error to warning.

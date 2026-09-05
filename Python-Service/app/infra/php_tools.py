@@ -20,8 +20,8 @@ import zipfile
 from pathlib import Path
 from typing import Any, Optional
 
-from exception_logger import get_exception_logger
-from settings import settings
+from infra.exception_logger import get_exception_logger
+from infra.settings import settings
 
 PHP_CLI_BIN = "code-parse"
 PHP_STRUCTURE_BIN = "project-export-structure"

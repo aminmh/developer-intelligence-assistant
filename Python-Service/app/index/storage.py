@@ -17,8 +17,8 @@ from typing import Any, Optional
 from minio import Minio
 from minio.commonconfig import CopySource
 
-from settings import settings
-from settings_store import settings_store
+from infra.settings import settings
+from infra.settings_store import settings_store
 
 RAG_UPLOADS_PREFIX = "rag-uploads"
 

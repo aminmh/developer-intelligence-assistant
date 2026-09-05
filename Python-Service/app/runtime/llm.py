@@ -10,7 +10,7 @@ from typing import Any, List, Optional, Tuple
 import instructor
 from openai import OpenAI
 
-from settings import settings
+from infra.settings import settings
 
 _openai_client: Optional[Tuple[str, OpenAI]] = None
 _extract_client_state: Optional[Tuple[str, OpenAI]] = None

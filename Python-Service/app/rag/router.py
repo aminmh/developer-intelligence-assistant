@@ -20,8 +20,8 @@ from semantic_router.layer import RouteLayer
 from qdrant_client import QdrantClient
 from qdrant_client.models import Distance, VectorParams, PointStruct
 
-from settings import settings
-from query_normalizer import normalize_query
+from infra.settings import settings
+from rag.query_normalizer import normalize_query
 
 # Feedback collection holds user-submitted corrections: query vector -> route.
 FEEDBACK_COLLECTION = "route_feedback"
@@ -45,7 +45,7 @@ class OllamaEncoder(BaseEncoder):
         super().__init__(name=name)
 
     def __call__(self, docs: List[str]) -> List[List[float]]:
-        from embeddings import embed_texts
+        from index.embeddings import embed_texts
 
         return embed_texts([normalize_query(doc) for doc in docs])
 

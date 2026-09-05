@@ -5,10 +5,10 @@ from llama_index.core import Document, Settings, VectorStoreIndex
 from llama_index.vector_stores.qdrant import QdrantVectorStore
 from qdrant_client import QdrantClient
 
-from embeddings import get_llamaindex_embed_model
-from graph_store import InMemoryCodeGraph
-from models import EdgeModel, ParameterModel, SymbolModel
-from settings import settings
+from index.embeddings import get_llamaindex_embed_model
+from index.graph_store import InMemoryCodeGraph
+from index.models import EdgeModel, ParameterModel, SymbolModel
+from infra.settings import settings
 
 # Embeddings come from the configured embedding server (Ollama by default, or
 # an OpenAI-compatible endpoint like LM Studio when embeddingBaseUrl is set).

@@ -17,12 +17,12 @@ from __future__ import annotations
 
 import os
 import re
-import urllib.error
-import urllib.parse
+import urllib.error as error
+import urllib.parse as parse
 import urllib.request
 from typing import Any
 
-from settings import settings
+from infra.settings import settings
 
 CONTEXT7_SEARCH_URL = "https://context7.com/api/v2/libs/search"
 CONTEXT7_DOCS_URL = "https://context7.com/api/v2/context"

@@ -2,8 +2,8 @@
 
 import json
 
-import dependencies
-import doc_retrieval
+import projects.dependencies as dependencies
+import rag.doc_retrieval as doc_retrieval
 
 # ─── dependency scanner ──────────────────────────────────────────────────────
 

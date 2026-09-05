@@ -14,15 +14,15 @@ import os
 import re
 import threading
 import time
-import urllib.parse
+import urllib.parse as parse
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable
 
 import requests
 import yaml
-from settings import settings
-from exception_logger import get_exception_logger
+from infra.settings import settings
+from infra.exception_logger import get_exception_logger
 
 try:
     from llama_index.core import Settings
@@ -144,81 +144,22 @@ class Orchestrator:
             return self._jobs.get(job_id)
 
     def _build_steps(self, route: dict[str, Any]) -> list[dict[str, Any]]:
-        steps: list[dict[str, Any]] = [
-            {"key": "extracting", "label": "Extracting project files", "status": "pending"},
-        ]
-        tool_name = route.get("tool")
-        if tool_name in (None, "", "auto") or route.get("llamaindex", True):
-            steps.append({"key": "routing", "label": "Routing with LlamaIndex", "status": "pending"})
-        if tool_name not in (None, "", "auto"):
-            steps.append({"key": "tool", "label": f"Running {tool_name}", "status": "pending"})
-        elif route.get("llamaindex", True):
-            steps.append({"key": "tool", "label": "Running selected tool", "status": "pending"})
-        if route.get("doc_retrieval"):
-            steps.append({"key": "doc_retrieval", "label": "Fetching Library Docs", "status": "pending"})
-        for action in route.get("post_process", []) or []:
-            action_name = action.get("action") if isinstance(action, dict) else str(action)
-            steps.append({"key": f"post_{action_name}", "label": action_name.replace("_", " ").title(), "status": "pending"})
-        return steps
+        # UI plan listing (conditions/labels identical to historical output);
+        # actual execution order lives in pipelines.steps.STEPS.
+        from pipelines.steps import build_steps
+
+        return build_steps(route)
 
     def _run_job(self, ctx: JobContext) -> None:
         workspace_path: str | None = None
         try:
-            self._update_step(ctx.job_id, "extracting", "running")
-            ws = self._call(
-                f"{DEFAULT_PYTHON_API_URL.rstrip('/')}/api/workspace/prepare",
-                method="POST",
-                json_body={"filename": ctx.filename},
-            ) or {}
-            workspace_path = ws.get("extracted_path") if isinstance(ws, dict) else None
-            file_count = ws.get("file_count") if isinstance(ws, dict) else None
-            self._update_step(ctx.job_id, "extracting", "done", file_count=file_count if file_count is not None else "Skipped")
+            # The pipeline is an explicit step plan (pipelines.steps.STEPS) —
+            # this method only executes the plan against a fresh shared state.
+            # Each step owns its progress markers, guards and artifact writes.
+            from pipelines.steps import SharedState, run_plan
 
-            tool_name = self._select_tool(ctx)
-            self._update_step(ctx.job_id, "routing", "done")
-            tool_result: dict[str, Any] | None = None
-            if tool_name:
-                self._update_step(ctx.job_id, "tool", "running")
-                tool_result = self._call_php_tool(tool_name, workspace_path)
-                if not tool_result or tool_result.get("success") is False:
-                    error_message = None if not tool_result else tool_result.get("error")
-                    raise RuntimeError(error_message or f"PHP tool failed: {tool_name}")
-                self._update_step(ctx.job_id, "tool", "done")
-
-            raw_output = self._extract_tool_output(tool_result) if tool_result else ctx.prompt
-            post_process_result, collection_name = self._run_post_process_pipeline(
-                ctx,
-                raw_output,
-                tool_name=tool_name,
-                tool_result=tool_result,
-            )
-            # Documentation grounding: when the route opts in (doc_retrieval:
-            # true) scan the workspace's dependency files and fetch version-aware
-            # docs (Context7 → GitMCP). Chunks ride alongside the job so the web
-            # answer step can inject them as grounded extra_context.
-            if (ctx.route or {}).get("doc_retrieval"):
-                self._update_step(ctx.job_id, "doc_retrieval", "running")
-            doc_context = self._collect_doc_context(ctx, workspace_path, post_process_result)
-            if (ctx.route or {}).get("doc_retrieval"):
-                detail = "docs fetched" if doc_context and doc_context.get("chunks") else ("unavailable" if doc_context else "skipped")
-                self._update_step(ctx.job_id, "doc_retrieval", "done", detail=detail)
-            synthesized_output = self._synthesize_with_llamaindex(
-                ctx=ctx,
-                tool_name=tool_name,
-                tool_result=tool_result,
-                post_process_result=post_process_result,
-            )
-            final_output = synthesized_output or post_process_result or raw_output
-
-            self._save_outputs(
-                ctx.job_id,
-                output=final_output,
-                tool_name=tool_name,
-                collection_name=collection_name,
-                tool_result=tool_result,
-                tool_output=post_process_result,
-                doc_context=doc_context,
-            )
+            shared = run_plan(self, ctx, SharedState())
+            workspace_path = shared.workspace_path
         except Exception as exc:
             self._save_error(ctx.job_id, str(exc))
             get_exception_logger().error(
@@ -237,6 +178,20 @@ class Orchestrator:
             if not keep:
                 self._cleanup_workspace(workspace_path)
 
+    def _prepare_workspace(self, ctx: JobContext) -> tuple[str | None, int | None]:
+        """Extract the uploaded zip into a scratch workspace via the HTTP API.
+
+        Returns ``(workspace_path, file_count)``; the HTTP error propagates so
+        a failed extraction fails the job exactly as the inline pipeline did."""
+        ws = self._call(
+            f"{DEFAULT_PYTHON_API_URL.rstrip('/')}/api/workspace/prepare",
+            method="POST",
+            json_body={"filename": ctx.filename},
+        ) or {}
+        workspace_path = ws.get("extracted_path") if isinstance(ws, dict) else None
+        file_count = ws.get("file_count") if isinstance(ws, dict) else None
+        return workspace_path, file_count
+
     def _cleanup_workspace(self, workspace_path: str | None) -> None:
         """Delete an extracted workspace dir — only if it lives safely inside
         the configured workspace root (never the root itself)."""
@@ -247,7 +202,7 @@ class Orchestrator:
             target = os.path.realpath(workspace_path)
             if target == root or not target.startswith(root.rstrip("/") + os.sep):
                 return  # safety: never remove the workspace root or outside it
-            from php_tools import safe_rmtree
+            from infra.php_tools import safe_rmtree
 
             safe_rmtree(target)
         except Exception as exc:  # noqa: BLE001
@@ -433,8 +388,8 @@ class Orchestrator:
         if not workspace_path or not os.path.isdir(workspace_path):
             return None
         try:
-            from dependencies import scan_dependencies
-            from doc_retrieval import retrieve_documentation
+            from projects.dependencies import scan_dependencies
+            from rag.doc_retrieval import retrieve_documentation
 
             dep_map = scan_dependencies(workspace_path)
             packages = dep_map.get("packages") or {}
@@ -464,6 +419,115 @@ class Orchestrator:
                 exc_info=True,
             )
         return None
+
+    def _collect_project_profile(
+        self, ctx: JobContext, workspace_path: str | None
+    ) -> dict[str, Any] | None:
+        """Framework-aware project profile (routes/models/controllers).
+
+        Returns None unless the route opts in via ``framework_aware: true`` and
+        a framework is confidently detected. Best-effort — failures degrade to
+        None and never fail the job.
+        """
+        if not (ctx.route or {}).get("framework_aware"):
+            return None
+        if not workspace_path or not os.path.isdir(workspace_path):
+            return None
+        try:
+            from projects.project_profile import build_project_profile
+            from projects.knowledge_cache import put as cache_put
+
+            profile = build_project_profile(workspace_path)
+            if profile:
+                cache_put(ctx.filename, profile)
+            return profile
+        except Exception:
+            get_exception_logger().error(
+                "Framework profile failed for job %s (route=%s)",
+                ctx.job_id,
+                ctx.route_name,
+                exc_info=True,
+            )
+        return None
+
+    def _safe_project_id(self, filename: str) -> str:
+        """Filesystem-safe project id (must also be safe as a DinD path seg)."""
+        stem = Path(filename).stem if filename else "project"
+        cleaned = re.sub(r"[^A-Za-z0-9_.-]", "_", stem)
+        return cleaned.strip(".") or "project"
+
+    def _run_sandbox_analysis(
+        self,
+        ctx: JobContext,
+        workspace_path: str | None,
+        project_profile: dict[str, Any] | None,
+    ) -> dict[str, Any] | None:
+        """Stage + install + probe the project inside the nested sandbox.
+
+        Best-effort: every failure is captured as a structured record (honest
+        status/reason) — a missing backend, image or egress never fails the job.
+        """
+        if not (ctx.route or {}).get("sandbox"):
+            return None
+        if not workspace_path or not os.path.isdir(workspace_path):
+            return {"status": "failed", "error": "workspace missing"}
+        try:
+            from sandbox.executor import default_executor
+
+            executor = default_executor()
+            if executor is None:
+                return {"status": "skipped", "reason": "sandbox backend unavailable"}
+            framework = (project_profile or {}).get("framework")
+            probes = ctx.route.get("sandbox_probes") or None
+            return executor.analyze(
+                workspace_path,
+                project_id=self._safe_project_id(ctx.filename),
+                framework=str(framework) if framework else "php",
+                probes=list(probes) if isinstance(probes, list) else None,
+            )
+        except Exception as exc:
+            get_exception_logger().error(
+                "Sandbox analysis failed for job %s: %s", ctx.job_id, exc, exc_info=exc
+            )
+            return {"status": "failed", "error": str(exc)[:500]}
+
+    def _persist_result_bundle(
+        self,
+        ctx: JobContext,
+        doc_context: dict[str, Any] | None,
+        project_profile: dict[str, Any] | None,
+        sandbox_result: dict[str, Any] | None,
+    ) -> None:
+        """Write the DURABLE per-job result bundle.
+
+        Orchestrator status files live in an ephemeral dir and are never
+        re-read — the bundle under ANALYSES_DIR/jobs/<job_id>/ survives restarts
+        and is the source a later "Save analysis" rehydrates from. Best-effort.
+        """
+        try:
+            from analysis.analysis_service import bundle_path, write_bundle
+
+            job = self.get_job(ctx.job_id) or {}
+            write_bundle(
+                ctx.job_id,
+                {
+                    "job_id": ctx.job_id,
+                    "route_name": ctx.route_name,
+                    "filename": ctx.filename,
+                    "prompt": ctx.prompt,
+                    "collection_name": job.get("collection_name"),
+                    "status": job.get("status"),
+                    "created_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+                    "output": job.get("output"),
+                    "doc_context": doc_context,
+                    "project_profile": project_profile,
+                    "sandbox": sandbox_result,
+                },
+            )
+        except Exception as exc:
+            get_exception_logger().error(
+                "Result bundle write failed for job %s: %s", ctx.job_id, exc
+            )
 
     def _act_extract_json(
         self,
@@ -643,7 +707,7 @@ class Orchestrator:
                 "chunk_count": len(result),
             }
 
-        from llamaindex_layer import CodePropertyGraph
+        from index.llamaindex_layer import CodePropertyGraph
 
         return CodePropertyGraph().ingest(result, collection_name)
 
@@ -726,7 +790,7 @@ class Orchestrator:
         if not workspace_path or not os.path.isdir(workspace_path):
             return {"success": False, "error": f"Workspace not found: {workspace_path}"}
 
-        from php_tools import run_code_parse
+        from infra.php_tools import run_code_parse
 
         chunks = run_code_parse(workspace_path)
         return {
@@ -740,7 +804,7 @@ class Orchestrator:
         if not workspace_path or not os.path.isdir(workspace_path):
             return {"success": False, "error": f"Workspace not found: {workspace_path}"}
 
-        from php_tools import cap_structure, run_export_structure
+        from infra.php_tools import cap_structure, run_export_structure
 
         depth = int(args.get("depth", 4) or 4)
         markdown = run_export_structure(workspace_path, depth=depth)
@@ -823,6 +887,8 @@ class Orchestrator:
                 "collection_name": job.get("collection_name"),
                 "tool_output": job.get("tool_output"),
                 "doc_context": job.get("doc_context"),
+                "project_profile": job.get("project_profile"),
+                "sandbox": job.get("sandbox"),
                 "entities": job.get("entities"),
                 "error": job.get("error"),
             }
@@ -837,6 +903,8 @@ class Orchestrator:
         tool_result: dict[str, Any] | None = None,
         tool_output: Any = None,
         doc_context: dict[str, Any] | None = None,
+        project_profile: dict[str, Any] | None = None,
+        sandbox: dict[str, Any] | None = None,
     ) -> None:
         with self._lock:
             job = self._jobs.get(job_id)
@@ -849,6 +917,8 @@ class Orchestrator:
             job["tool_output"] = tool_output
             job["output"] = output
             job["doc_context"] = doc_context
+            job["project_profile"] = project_profile
+            job["sandbox"] = sandbox
             job["updated_at"] = time.time()
         self._write_status(job_id)
 
@@ -861,5 +931,5 @@ class Orchestrator:
         self._write_status(job_id)
 
 
-_config_path = Path(__file__).parent / "config" / "orchestrator.yml"
+_config_path = Path(__file__).parent.parent / "config" / "orchestrator.yml"
 orchestrator = Orchestrator(str(_config_path))

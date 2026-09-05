@@ -6,7 +6,7 @@ preserving the DOCKER_HOST env fallback for existing callers.
 
 import pytest
 
-import sandbox_runtime
+import runtime.sandbox_runtime as sandbox_runtime
 
 
 @pytest.fixture
@@ -83,7 +83,7 @@ def test_unsupported_host_raises_but_available_reports_false(no_docker_host, mon
 
 def test_sandbox_keys_in_config_defaults_and_round_trip(tmp_path):
     """sandboxDockerHost / sandboxJobsRoot are UI-editable, persisted keys."""
-    from settings_store import RAG_CONFIG_DEFAULTS, SettingsStore, build_config
+    from infra.settings_store import RAG_CONFIG_DEFAULTS, SettingsStore, build_config
 
     assert "sandboxDockerHost" in RAG_CONFIG_DEFAULTS
     assert "sandboxJobsRoot" in RAG_CONFIG_DEFAULTS

@@ -3,7 +3,7 @@
 The language server and LLM are mocked so the suite runs offline.
 """
 
-import llm
+import runtime.llm as llm
 from lsp.adapters.php import Adapter
 
 

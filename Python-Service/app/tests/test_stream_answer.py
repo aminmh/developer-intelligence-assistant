@@ -2,8 +2,8 @@
 
 import pytest
 
-import answer
-import llm
+import rag.answer as answer
+import runtime.llm as llm
 
 
 @pytest.fixture(autouse=True)

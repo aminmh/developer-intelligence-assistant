@@ -21,7 +21,7 @@ import uuid
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
-from exception_logger import get_exception_logger
+from infra.exception_logger import get_exception_logger
 
 
 class LspConnectionError(Exception):

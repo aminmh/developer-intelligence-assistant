@@ -3,17 +3,17 @@ from typing import Annotated, Optional
 from fastapi import FastAPI, HTTPException, Header, Query, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, StreamingResponse
-from indexer import CodeIntelligenceIndex
-from sandbox_runtime import sandbox_available
-from settings import settings
-from lmstudio import lmstudio_load, lmstudio_models
-import llm as llm_module
-from router import classify as semantic_classify
-from router import submit_feedback as router_submit_feedback
-from intent import extract_intent
-from orchestrator import orchestrator
-from exception_logger import get_exception_logger, install_exception_hooks
-from settings_store import (
+from index.indexer import CodeIntelligenceIndex
+from runtime.sandbox_runtime import sandbox_available
+from infra.settings import settings
+from runtime.lmstudio import lmstudio_load, lmstudio_models
+import runtime.llm as llm_module
+from rag.router import classify as semantic_classify
+from rag.router import submit_feedback as router_submit_feedback
+from rag.intent import extract_intent
+from pipelines.orchestrator import orchestrator
+from infra.exception_logger import get_exception_logger, install_exception_hooks
+from infra.settings_store import (
     RAG_CONFIG_DEFAULTS,
     SECRET_KEYS,
     MASKED_VALUE,
@@ -21,7 +21,7 @@ from settings_store import (
     mask_config,
     settings_store,
 )
-from models import (
+from index.models import (
     HealthResponse,
     RebuildResponse,
     SearchResponse,
@@ -38,6 +38,7 @@ import json
 import base64
 import logging
 import threading
+import urllib.request as request
 import urllib.request
 from datetime import datetime, timezone, timedelta
 from pathlib import Path
@@ -118,7 +119,7 @@ def index_code_chunks_background(download_id: str, filename: str,
     write_status(download_id, "embedding", len(chunks_list), 0, collection_name)
 
     try:
-        from llamaindex_layer import CodePropertyGraph
+        from index.llamaindex_layer import CodePropertyGraph
 
         result = CodePropertyGraph().ingest(chunks_list, collection_name)
         ingested = int(result.get("ingested", 0) or 0)
@@ -434,6 +435,53 @@ def sandbox_status():
     return {"success": True, **result}
 
 
+@app.post(
+    "/sandbox/command",
+    tags=["Sandbox"],
+    summary="Run a Shell Command in the Project Sandbox",
+    description=(
+        "Runs an arbitrary shell command against the staged copy of an uploaded "
+        "project inside the sandbox backend — the 'terminal like docker' path. "
+        "Executes `sh -c <command>` in a networked, writable container with the "
+        "project mounted at /app, so file changes persist for later commands. "
+        "The project must have been analyzed first (staging + vendor install). "
+        "Non-interactive only: no TTY, so long-running apps (e.g. artisan serve) "
+        "are not supported."
+    ),
+)
+def sandbox_command(body: dict):
+    """Run a free-form shell command in the staged project sandbox."""
+    import re as _re
+
+    from sandbox.executor import default_executor
+
+    filename = body.get("filename", "")
+    command = body.get("command", "")
+    if not isinstance(command, str) or not command.strip():
+        return {"success": False, "error": "Missing command"}
+    if len(command) > 4000 or "\x00" in command:
+        return {"success": False, "error": "Command too long or contains NUL"}
+    if not filename:
+        return {"success": False, "error": "Missing filename"}
+    # Project dir on the daemon is keyed by the zip stem (matches the
+    # orchestrator's staging id), not the full filename.
+    stem = filename.rsplit(".", 1)[0] if "." in filename else filename
+    pid = _re.sub(r"[^A-Za-z0-9_.-]", "_", stem).strip("._") or "project"
+    try:
+        executor = default_executor()
+    except ValueError as exc:
+        return {"success": False, "error": f"sandbox backend unavailable: {exc}"}
+    framework = body.get("framework") or "php"
+    result = executor.run_command(
+        pid,
+        command,
+        framework=framework,
+        cwd=body.get("cwd"),
+    )
+    return {"success": result.get("status") == "done", **result}
+
+
+
 @app.get(
     "/lmstudio/models",
     tags=["LM Studio"],
@@ -481,7 +529,7 @@ def lmstudio_load_endpoint(body: dict):
 )
 def docretrieval_deps(workspace: str = ""):
     """Scan a workspace for its installed dependencies."""
-    from dependencies import scan_dependencies
+    from projects.dependencies import scan_dependencies
 
     path = workspace or settings.workspace_root
     result = scan_dependencies(path)
@@ -501,7 +549,7 @@ def docretrieval_deps(workspace: str = ""):
 )
 def docretrieval_test(body: dict):
     """Probe the doc-retrieval pipeline for a package/query."""
-    from doc_retrieval import retrieve_documentation
+    from rag.doc_retrieval import retrieve_documentation
 
     package = (body.get("package") or "laravel/framework").strip()
     query = (body.get("query") or "routing basics").strip()
@@ -799,7 +847,7 @@ def _extract_workspace(workspace_id: str, zip_data: bytes) -> str:
     """Extract a project ZIP into a fresh workspace dir, returning its path."""
     import shutil
 
-    from php_tools import extract_zip_safely
+    from infra.php_tools import extract_zip_safely
 
     workspace_dir = Path(settings.workspace_root) / workspace_id
     if workspace_dir.exists():
@@ -818,7 +866,7 @@ def _parse_and_index(download_id: str, filename: str, zip_data: bytes,
     """Extract a ZIP, parse PHP via the CLI, and index chunks in the background."""
     import shutil
 
-    from php_tools import extract_zip_safely, run_code_parse
+    from infra.php_tools import extract_zip_safely, run_code_parse
 
     workdir = Path(settings.download_dir) / f"parse_{download_id}"
     try:
@@ -848,7 +896,7 @@ def _parse_and_index(download_id: str, filename: str, zip_data: bytes,
     ),
 )
 def workspace_prepare(body: dict):
-    from storage import storage
+    from index.storage import storage
 
     filename = body.get("filename")
     session_id = body.get("upload_session_id")
@@ -860,7 +908,7 @@ def workspace_prepare(body: dict):
 
     data = storage.get_rag_file_bytes(filename, session_id)
     if data is None:
-        raise HTTPException(status_code=500, detail="Failed to read file from storage.")
+        raise HTTPException(status_code=500, detail="Failed to read file from index.storage.")
 
     workspace_id = str(uuid.uuid4())
     try:
@@ -887,7 +935,7 @@ def workspace_prepare(body: dict):
     description="Removes an extracted workspace directory.",
 )
 def workspace_destroy(workspace_id: str):
-    from php_tools import safe_rmtree
+    from infra.php_tools import safe_rmtree
 
     workspace_dir = Path(settings.workspace_root) / workspace_id
     if workspace_dir.exists():
@@ -902,7 +950,7 @@ def workspace_destroy(workspace_id: str):
     description="Lists RAG uploads stored in MinIO (rag-uploads prefix).",
 )
 def rag_files():
-    from storage import storage
+    from index.storage import storage
 
     return {"files": storage.list_rag_files()}
 
@@ -914,7 +962,7 @@ def rag_files():
     description="Deletes a file from MinIO rag-uploads by filename and optional session.",
 )
 def rag_files_delete(body: dict):
-    from storage import storage
+    from index.storage import storage
 
     filename = body.get("filename")
     if not filename:
@@ -941,7 +989,7 @@ def rag_files_delete(body: dict):
     ),
 )
 def rag_upload(body: dict):
-    from storage import storage
+    from index.storage import storage
 
     filename = body.get("filename")
     content = body.get("content")
@@ -1018,7 +1066,7 @@ def rag_upload(body: dict):
     ),
 )
 def rag_parse_code(body: dict):
-    from storage import storage
+    from index.storage import storage
 
     filename = body.get("filename")
     session_id = body.get("upload_session_id")
@@ -1035,7 +1083,7 @@ def rag_parse_code(body: dict):
 
     data = storage.get_rag_file_bytes(filename, session_id)
     if data is None:
-        raise HTTPException(status_code=500, detail="Failed to read file from storage.")
+        raise HTTPException(status_code=500, detail="Failed to read file from index.storage.")
 
     collection_name = sanitize_collection_name(filename)
     already = collection_exists(collection_name)
@@ -1076,7 +1124,7 @@ def rag_parse_code(body: dict):
     ),
 )
 def tusd_hook(body: dict):
-    from storage import RAG_UPLOADS_PREFIX, storage
+    from index.storage import RAG_UPLOADS_PREFIX, storage
 
     if body.get("Type") != "post-finish":
         return {"ok": True, "handled": False}
@@ -1167,7 +1215,7 @@ def retrieval_insights(
 ):
     if x_internal_secret != settings.internal_secret:
         raise HTTPException(status_code=401, detail="Unauthorized")
-    from llamaindex_layer import get_retrieval_trace
+    from index.llamaindex_layer import get_retrieval_trace
 
     trace = get_retrieval_trace(trace_id)
     if not trace:
@@ -1184,8 +1232,8 @@ def _answer_context(
     project structure from the `knowledge` route) grounds the answer directly;
     otherwise Qdrant is searched via CodePropertyGraph.hybrid_retrieve.
     """
-    from llamaindex_layer import CodePropertyGraph
-    from llamaindex_layer import record_retrieval_trace
+    from index.llamaindex_layer import CodePropertyGraph
+    from index.llamaindex_layer import record_retrieval_trace
 
     collection = body.get("collection")
     class_name = body.get("class_name")
@@ -1224,6 +1272,38 @@ def _answer_context(
     return results, contexts, None
 
 
+_PROJECT_QUESTION_HINTS = re.compile(
+    r"api|endpoint|route|router|payment|checkout|stripe|mollie|table|column|"
+    r"schema|migration|model|eloquent|controller|middleware|auth|login|register|"
+    r"config|mail|queue|provider|binding|service container|db|database|"
+    r"which .* (does|handles|store|has)|how .* (works|is .* wired|stored)",
+    re.IGNORECASE,
+)
+
+
+def _resolve_project_profile(body: dict, query: str) -> dict | None:
+    """Auto-inject framework knowledge for project-aware questions.
+
+    Priority: explicit ``project_profile`` in the request body, else the
+    per-project knowledge cache keyed by the Qdrant collection. Only attached
+    when the query looks project-knowledge oriented (auto-detect intent — no
+    UI mode needed) and the collection/profile belongs to an analyzed upload.
+    """
+    explicit = body.get("project_profile")
+    if isinstance(explicit, dict) and explicit.get("framework"):
+        return explicit
+    query_text = str(query or "")
+    if not _PROJECT_QUESTION_HINTS.search(query_text):
+        return None
+    try:
+        from projects.knowledge_cache import get_for_collection
+
+        collection = body.get("collection") or body.get("collection_name")
+        return get_for_collection(str(collection)) if collection else None
+    except Exception:  # noqa: BLE001 — best-effort enrichment
+        return None
+
+
 @app.post(
     "/answer",
     tags=["LLM"],
@@ -1255,12 +1335,13 @@ def answer_prompt(
         doc_chunks = [c for c in doc_chunks if isinstance(c, str) and c.strip()]
     else:
         doc_chunks = None
+    project_profile = _resolve_project_profile(body, query)
     # Default to the remote OpenAI-compatible model when the field is omitted;
     # falls back to the local Ollama model automatically when none is configured.
     use_remote = body.get("use_remote", True) is True
     route = body.get("route", "chat")
 
-    from answer import generate_answer
+    from rag.answer import generate_answer
 
     results, contexts, extra_context = _answer_context(body, query, x_rag_trace_id)
 
@@ -1272,6 +1353,7 @@ def answer_prompt(
         top_p=top_p,
         extra_context=extra_context,
         doc_chunks=doc_chunks,
+        project_profile=project_profile,
         use_remote=use_remote,
         route=route,
     )
@@ -1337,10 +1419,11 @@ def answer_stream(
         doc_chunks = [c for c in doc_chunks if isinstance(c, str) and c.strip()]
     else:
         doc_chunks = None
+    project_profile = _resolve_project_profile(body, query)
 
     results, contexts, extra_context = _answer_context(body, query, x_rag_trace_id)
 
-    from answer import generate_answer_stream
+    from rag.answer import generate_answer_stream
 
     def _sse():
         try:
@@ -1352,6 +1435,7 @@ def answer_stream(
                 top_p=top_p,
                 extra_context=extra_context,
                 doc_chunks=doc_chunks,
+                project_profile=project_profile,
                 use_remote=use_remote,
                 route=route,
             ):
@@ -1411,7 +1495,7 @@ def evaluate_prompt(body: dict):
     if cache_key in _eval_cache:
         return {"success": True, "metrics": _eval_cache[cache_key]}
 
-    from evaluation import evaluate_response
+    from rag.evaluation import evaluate_response
 
     try:
         metrics = evaluate_response(query, answer, contexts)
@@ -1523,6 +1607,112 @@ def orchestration_status(job_id: str):
     return job
 
 
+@app.post(
+    "/project/analyze",
+    tags=["Analysis"],
+    summary="Start Sandbox Analysis",
+    description=(
+        "Launches a sandbox_analyze orchestration job: framework profile, "
+        "dependency install + runsc probes inside the gVisor backend, and a "
+        "durable result bundle. Returns a job_id for polling."
+    ),
+)
+def start_project_analyze(body: dict):
+    filename = body.get("filename", "")
+    prompt = body.get("prompt", "")
+    skip_index = bool(body.get("skip_index", False))
+    if not filename:
+        raise HTTPException(status_code=400, detail="Missing filename")
+    job_id = str(uuid.uuid4())
+    orchestrator.start_job(
+        job_id,
+        "sandbox_analyze",
+        filename,
+        prompt or "Analyze this project in the sandbox.",
+        skip_index=skip_index,
+        entities=body.get("entities") or {},
+    )
+    return {"job_id": job_id}
+
+
+@app.post(
+    "/analysis",
+    tags=["Analysis"],
+    summary="Save an Analysis Run",
+    description=(
+        "Persists a finished orchestration run (by its durable job bundle) as "
+        "a saved analysis: knowledge chunks → proj_knowledge_<stem> collection "
+        "(Qdrant + Neo4j), session row + artifacts in the analysis store."
+    ),
+)
+def save_analysis(body: dict):
+    job_id = body.get("job_id", "")
+    label = body.get("label", "")
+    if not job_id:
+        raise HTTPException(status_code=400, detail="Missing job_id")
+    try:
+        from analysis.analysis_service import persist_analysis
+
+        row = persist_analysis(str(job_id), label=str(label or ""))
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"Save failed: {exc}") from exc
+    if row is None:
+        raise HTTPException(status_code=404, detail="No durable bundle for job_id")
+    return {"success": True, "analysis": row}
+
+
+@app.get(
+    "/analysis",
+    tags=["Analysis"],
+    summary="List Saved Analyses",
+    description="Returns saved analyses, newest first.",
+)
+def list_analyses(limit: int = Query(100, ge=1, le=500)):
+    try:
+        from analysis.analysis_store import analysis_store
+
+        rows = analysis_store.list(limit=limit)
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"List failed: {exc}") from exc
+    return {"analyses": rows}
+
+
+@app.get(
+    "/analysis/{analysis_id}",
+    tags=["Analysis"],
+    summary="Get Saved Analysis",
+    description="Returns one saved analysis with its full profile/grounding.",
+)
+def get_analysis(analysis_id: str):
+    try:
+        from analysis.analysis_store import analysis_store
+
+        row = analysis_store.get(analysis_id)
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"Get failed: {exc}") from exc
+    if row is None:
+        raise HTTPException(status_code=404, detail="Analysis not found")
+    return row
+
+
+@app.delete(
+    "/analysis/{analysis_id}",
+    tags=["Analysis"],
+    summary="Delete Saved Analysis",
+    description="Removes the session row + its artifact files.",
+)
+def delete_analysis(analysis_id: str):
+    try:
+        from analysis.analysis_store import analysis_store
+
+        deleted = analysis_store.delete(analysis_id)
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"Delete failed: {exc}") from exc
+    if not deleted:
+        raise HTTPException(status_code=404, detail="Analysis not found")
+    return {"success": True}
+
+
 @app.get(
     "/templates/{name}",
     tags=["Code Intelligence"],
@@ -1589,7 +1779,7 @@ def search_all(body: dict):
     if not query:
         raise HTTPException(status_code=400, detail="Missing query")
 
-    from llamaindex_layer import CodePropertyGraph
+    from index.llamaindex_layer import CodePropertyGraph
 
     return CodePropertyGraph().hybrid_retrieve(
         query=query,

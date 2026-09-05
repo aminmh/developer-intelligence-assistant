@@ -1,7 +1,7 @@
 from pydantic import BaseModel
 import os
 
-from settings_store import settings_store
+from infra.settings_store import settings_store
 
 
 class Settings(BaseModel):
@@ -76,6 +76,13 @@ class Settings(BaseModel):
 
     enable_typo_correction: bool = os.getenv(
         "ENABLE_TYPO_CORRECTION", "false"
+    ).strip().lower() in ("1", "true", "yes", "on")
+
+    # LLM-assisted framework detection: one-shot fallback probe run only when
+    # no static plugin detects the project confidently (env-only flag — the
+    # probe never keeps state; context is freed when the call returns).
+    llm_detect_enabled: bool = os.getenv(
+        "LLM_DETECT_ENABLED", "true"
     ).strip().lower() in ("1", "true", "yes", "on")
 
     download_dir: str = os.getenv("DOWNLOAD_DIR", "/app/downloads")

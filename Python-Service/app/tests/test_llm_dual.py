@@ -2,7 +2,7 @@
 
 import pytest
 
-import llm
+import runtime.llm as llm
 
 
 class _StubMessage:

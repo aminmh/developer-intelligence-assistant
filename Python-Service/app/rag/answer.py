@@ -3,6 +3,11 @@
 Replaces the web Node server's answer path (RAGService.query). Retrieval is done
 by the caller (CodePropertyGraph.hybrid_retrieve); this module only assembles the
 prompt and calls the local Ollama chat model.
+
+Framework/language resolution does NOT live here:
+  * project-profile grounding  -> project_knowledge.build_grounding()
+  * LSP post-validation of code -> code_validation.validate_answer()
+This module stays generic — it knows neither frameworks nor language adapters.
 """
 
 from __future__ import annotations
@@ -11,9 +16,11 @@ import time
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
-from exception_logger import get_exception_logger
-from llm import complete_with_model, stream_complete_with_model
-from settings import settings
+from rag.code_validation import validate_answer
+from infra.exception_logger import get_exception_logger
+from runtime.llm import complete_with_model, stream_complete_with_model
+from projects.project_knowledge import build_grounding
+from infra.settings import settings
 
 SYSTEM_PROMPT = (
     "You are an expert developer assistant RAG system. Answer the user's coding "
@@ -48,12 +55,21 @@ def build_user_prompt(
     entities: Optional[Dict[str, Any]] = None,
     extra_context: Optional[str] = None,
     doc_chunks: Optional[List[str]] = None,
+    project_profile: Optional[Dict[str, Any]] = None,
 ) -> str:
-    """Assemble the user-facing prompt: docs + tool context + code + entities + question."""
+    """Assemble the user-facing prompt: project + docs + tool context + code."""
     sections: List[str] = []
 
     if extra_context:
         sections.append(_cap(extra_context, MAX_CONTEXT_CHARS))
+
+    project_block = build_grounding(project_profile, question)
+    if project_block:
+        sections.append(
+            "Analyzed project (framework-aware context — answer using these "
+            "facts; if the routes above contain no match, say so):\n\n"
+            + project_block
+        )
 
     if doc_chunks:
         docs = []
@@ -129,12 +145,15 @@ def generate_answer(
     top_p: Optional[float] = None,
     extra_context: Optional[str] = None,
     doc_chunks: Optional[List[str]] = None,
+    project_profile: Optional[Dict[str, Any]] = None,
     use_remote: bool = False,
     route: str = "chat",
 ) -> Dict[str, Any]:
     """Generate an answer from retrieved code context + entities."""
     contexts = contexts or []
-    prompt = build_user_prompt(question, contexts, entities, extra_context, doc_chunks)
+    prompt = build_user_prompt(
+        question, contexts, entities, extra_context, doc_chunks, project_profile
+    )
 
     temp = settings.temperature if temperature is None else temperature
     topp = settings.top_p if top_p is None else top_p
@@ -161,7 +180,7 @@ def generate_answer(
         provider_used = "local"
     duration_ms = int((time.time() - started) * 1000)
 
-    answer, validation = _validate_answer(answer, question, route)
+    answer, validation = validate_answer(answer, question, route)
 
     return {
         "answer": answer,
@@ -180,6 +199,7 @@ def generate_answer_stream(
     top_p: Optional[float] = None,
     extra_context: Optional[str] = None,
     doc_chunks: Optional[List[str]] = None,
+    project_profile: Optional[Dict[str, Any]] = None,
     use_remote: bool = False,
     route: str = "chat",
 ) -> Any:
@@ -190,7 +210,9 @@ def generate_answer_stream(
     duration_ms).
     """
     contexts = contexts or []
-    prompt = build_user_prompt(question, contexts, entities, extra_context, doc_chunks)
+    prompt = build_user_prompt(
+        question, contexts, entities, extra_context, doc_chunks, project_profile
+    )
 
     temp = settings.temperature if temperature is None else temperature
     topp = settings.top_p if top_p is None else top_p
@@ -235,7 +257,7 @@ def generate_answer_stream(
         return
 
     answer = "".join(buffer)
-    answer, validation = _validate_answer(answer, question, route)
+    answer, validation = validate_answer(answer, question, route)
     yield {"type": "validation", "code_validation": validation}
     yield {
         "type": "done",
@@ -246,39 +268,3 @@ def generate_answer_stream(
         "truncated": False,
         "code_validation": validation,
     }
-
-
-def _validate_answer(answer: str, question: str, route: str) -> tuple[str, List[Dict[str, Any]]]:
-    """Run post-generation LSP validation; skipped for chat/knowledge routes.
-
-    Returns (possibly rewritten answer, validation list).
-    """
-    # Chat and knowledge answers are free-form prose — validating their code
-    # blocks against a language server adds latency without signal.
-    if route in ("chat", "knowledge"):
-        return answer, []
-    if not getattr(settings, "lsp_validation_enabled", True):
-        return answer, []
-    try:
-        from lsp import build_note, validate_markdown
-
-        new_answer, summary = validate_markdown(
-            answer,
-            question,
-            max_retries=getattr(settings, "lsp_max_retries", 2),
-        )
-        if summary:
-            validation = [
-                {
-                    "language": s["language"],
-                    "index": s["index"],
-                    "status": s["status"],
-                    "errors": s["errors"],
-                    "warnings": s["warnings"],
-                }
-                for s in summary
-            ]
-            return new_answer + "\n\n" + build_note(summary), validation
-    except Exception as exc:  # noqa: BLE001 — validation is best-effort; never fail the answer over it
-        get_exception_logger().warning("LSP validation skipped: %s", exc)
-    return answer, []

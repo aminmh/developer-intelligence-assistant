@@ -15,10 +15,11 @@ for the ingestion and evaluation pipelines.
 from __future__ import annotations
 
 import json
+import urllib.request as request
 import urllib.request
 from typing import Any
 
-from settings import settings
+from infra.settings import settings
 
 
 def embedding_base_url() -> str:

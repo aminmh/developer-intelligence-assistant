@@ -22,7 +22,7 @@ import time
 import uuid
 from typing import Any, Dict, List, Optional
 
-from embeddings import get_llamaindex_embed_model
+from index.embeddings import get_llamaindex_embed_model
 from qdrant_client import QdrantClient
 from qdrant_client.models import (
     Distance,
@@ -34,9 +34,9 @@ from qdrant_client.models import (
     VectorParams,
 )
 
-from settings import settings
-from settings_store import settings_store
-from exception_logger import get_exception_logger
+from infra.settings import settings
+from infra.settings_store import settings_store
+from infra.exception_logger import get_exception_logger
 
 # Heavy raw attributes kept out of LLM-visible metadata (token bloat), but still
 # available for relationship generation during ingestion.
@@ -140,6 +140,26 @@ def _point_id_for(node_id: str) -> str:
     SHA-1 hex string cannot be used directly as a point id.
     """
     return str(uuid.uuid5(uuid.NAMESPACE_URL, node_id))
+
+
+# Collection that carries PERSISTED analysis knowledge (routes/tables/… facts
+# saved from sandbox analyses). Lives as a sibling of the project's ephemeral
+# chunk_code_<stem> collection — never merged into it (re-indexing wipes
+# chunk_code_* wholesale, knowledge must survive).
+_KNOWLEDGE_PREFIX = "proj_knowledge_"
+_CODE_PREFIX = "chunk_code_"
+
+
+def knowledge_collection_for(stem: str) -> str:
+    """proj_knowledge_<stem> for a project stem ('' safe)."""
+    return f"{_KNOWLEDGE_PREFIX}{stem or 'unnamed'}"
+
+
+def knowledge_sibling(collection_name: Optional[str]) -> Optional[str]:
+    """Map a project's code collection to its knowledge sibling (or None)."""
+    if not collection_name or not collection_name.startswith(_CODE_PREFIX):
+        return None
+    return f"{_KNOWLEDGE_PREFIX}{collection_name[len(_CODE_PREFIX):]}"
 
 
 def _flatten_params(parameters: Any) -> str:
@@ -338,7 +358,7 @@ class CodePropertyGraph:
         # class/method names become correctable (best-effort).
         if ingested:
             try:
-                from query_normalizer import regenerate_domain_dictionary
+                from rag.query_normalizer import regenerate_domain_dictionary
 
                 regenerate_domain_dictionary(settings.qdrant_url)
             except Exception:
@@ -528,13 +548,22 @@ class CodePropertyGraph:
             record_retrieval_trace(trace_id or "", trace)
             return {"results": [], "searched_collections": []}
 
+        collection_names = {c.name for c in collections}
         target_collections: List[str] = []
-        for col in collections:
-            if col.name in ("code_symbols", "developer_assistant_rag"):
-                continue
-            if collection_name and col.name != collection_name:
-                continue
-            target_collections.append(col.name)
+        if collection_name:
+            if collection_name in collection_names:
+                target_collections.append(collection_name)
+            # Persisted analysis knowledge rides in a SIBLING collection
+            # (proj_knowledge_<stem>) — join it whenever the pinned collection
+            # is the project's chunk_code_<stem>.
+            sibling = knowledge_sibling(collection_name)
+            if sibling and sibling in collection_names and sibling not in target_collections:
+                target_collections.append(sibling)
+        else:
+            for col in collections:
+                if col.name in ("code_symbols", "developer_assistant_rag"):
+                    continue
+                target_collections.append(col.name)
         trace["searched_collections"] = target_collections
 
         if not target_collections:

@@ -1,6 +1,6 @@
 import json
 
-import llamaindex_layer as layer
+import index.llamaindex_layer as layer
 
 
 def test_retrieval_trace_is_cached_and_written(monkeypatch, tmp_path):

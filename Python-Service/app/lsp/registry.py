@@ -16,10 +16,10 @@ from typing import Any, Dict, List, Optional
 
 import yaml
 
-from exception_logger import get_exception_logger
+from infra.exception_logger import get_exception_logger
 from lsp.base import build_validation_note, flatten_summary, validate_and_repair_blocks
 from lsp.client import LspClient
-from settings import settings
+from infra.settings import settings
 
 _WARMUP_SNIPPETS: Dict[str, str] = {
     "php": "<?php\nclass __Warmup {}\n",

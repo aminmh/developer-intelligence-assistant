@@ -15,8 +15,8 @@ from typing import Set
 
 from qdrant_client import QdrantClient
 
-DOMAIN_TERMS_PATH = Path(__file__).parent / "config" / "domain_terms.json"
-DICTIONARY_PATH = Path(__file__).parent / "config" / "domain_dictionary.txt"
+DOMAIN_TERMS_PATH = Path(__file__).parent.parent / "config" / "domain_terms.json"
+DICTIONARY_PATH = Path(__file__).parent.parent / "config" / "domain_dictionary.txt"
 
 # Metadata fields on each code chunk that carry domain vocabulary.
 META_FIELDS = ("class", "name", "class_fqn", "namespace")

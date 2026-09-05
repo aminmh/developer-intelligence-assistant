@@ -1,4 +1,4 @@
-import answer
+import rag.answer as answer
 
 
 def test_build_user_prompt_includes_contexts_and_entities():

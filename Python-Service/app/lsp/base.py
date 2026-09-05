@@ -11,7 +11,7 @@ from __future__ import annotations
 import re
 from typing import Any, Dict, List, Optional, Protocol, Tuple
 
-from exception_logger import get_exception_logger
+from infra.exception_logger import get_exception_logger
 
 _FENCE_RE = re.compile(
     r"(?ms)^(?P<fence>`{3,}|~{3,})(?P<lang>[a-zA-Z0-9_+-]*)[ \t]*\n"
@@ -217,7 +217,7 @@ def validate_and_repair_blocks(
     via the LLM. Returns (new_text, summary) where summary is a per-block list
     of {language, index, status: ok|repaired|warning|failed, errors, warnings}.
     """
-    from llm import complete
+    from runtime.llm import complete
 
     blocks = adapter.extract_blocks(text)
     if not blocks:

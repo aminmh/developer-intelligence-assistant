@@ -4,7 +4,7 @@ import json
 
 import pytest
 
-import answer
+import rag.answer as answer
 
 
 def test_generate_answer_routes_remote_when_opted_in(monkeypatch):

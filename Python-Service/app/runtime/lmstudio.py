@@ -17,7 +17,7 @@ from __future__ import annotations
 
 import json
 import time
-import urllib.error
+import urllib.error as error
 import urllib.request
 from typing import Any
 

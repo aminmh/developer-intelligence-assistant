@@ -13,7 +13,7 @@ import threading
 from logging.handlers import RotatingFileHandler
 from pathlib import Path
 
-from settings import settings
+from infra.settings import settings
 
 EXCEPTION_LOGGER_NAME = "exceptions"
 

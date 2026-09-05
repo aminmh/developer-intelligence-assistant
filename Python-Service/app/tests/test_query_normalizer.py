@@ -2,9 +2,10 @@ import json
 import sys
 import types
 
-import query_normalizer
-import router
-import embeddings
+import rag.query_normalizer as query_normalizer
+import rag.router as router
+import index.embeddings as embeddings
+import urllib.request
 
 
 def test_nfkc_unicode_normalization():
