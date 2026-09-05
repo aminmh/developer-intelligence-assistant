@@ -31,6 +31,12 @@ let ragConfig: RAGConfig = {
   llmRemoteModel: '',
   llmRemoteApiKey: '',
   runpodApiKey: '',
+  docRetrievalEnabled: true,
+  docContext7Enabled: true,
+  docGitmcpEnabled: true,
+  docStrictMode: false,
+  docContext7TimeoutS: 10,
+  docGitmcpTimeoutS: 15,
   temperature: 0.7,
   topP: 0.9,
 };

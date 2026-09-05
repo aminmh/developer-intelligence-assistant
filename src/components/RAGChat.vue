@@ -94,6 +94,25 @@ const onFeedback = (query: string | undefined, route: string, id: string) => {
   feedbackDoneId.value = id;
 };
 
+// One-line project knowledge chip from an orchestration status payload.
+const profileSummary = (orch: any): string | null => {
+  const p = orch?.project_profile;
+  if (!p || typeof p !== 'object') return null;
+  const bits: string[] = [];
+  if (p.framework) bits.push(String(p.framework) + (p.version ? ` ${p.version}` : ''));
+  const routes = Array.isArray(p.routes) ? p.routes.length : 0;
+  const models = Array.isArray(p.models) ? p.models.length : 0;
+  if (routes) bits.push(`${routes} routes`);
+  if (models) bits.push(`${models} models`);
+  const gateways = p.packages?.payment_gateways;
+  if (Array.isArray(gateways) && gateways.length) {
+    bits.push('payment: ' + gateways.map((g: any) => g.gateway || '?').join(', '));
+  } else if (p.packages?.payment_absent?.length) {
+    bits.push('no payment SDK');
+  }
+  return bits.length ? bits.join(' · ') : null;
+};
+
 // Steps shown during loading: orchestration steps + a trailing "Generating answer"
 // step while the web server runs the final LLM call.
 const displaySteps = computed<PipelineStep[]>(() => {
@@ -187,6 +206,11 @@ const toggleMatchExpansion = (id: string) => {
               <div class="text-[10px] text-emerald-400 font-mono flex items-center gap-1 mb-1">
                 <Database class="w-3 h-3" />
                 Orchestration — {{ msg.orchestration.route || 'tools' }}
+              </div>
+              <div v-if="profileSummary(msg.orchestration)" class="text-[10px] font-mono mt-1 inline-flex items-center gap-1.5 flex-wrap">
+                <span class="text-amber-300/90 bg-amber-400/5 border border-amber-400/20 rounded px-1.5 py-0.5">
+                  {{ profileSummary(msg.orchestration) }}
+                </span>
               </div>
               <div v-for="(out, tool) in msg.orchestration.outputs" :key="tool"
                 class="text-[10px] text-slate-500 font-mono mt-1">
