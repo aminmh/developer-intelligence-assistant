@@ -39,6 +39,7 @@ let ragConfig: RAGConfig = {
   docGitmcpTimeoutS: 15,
   temperature: 0.7,
   topP: 0.9,
+  contextPreviewMode: 'off',
 };
 
 // In-memory file tracking loaded from disk if it exists.

@@ -20,6 +20,7 @@ export interface RAGConfig {
   docGitmcpTimeoutS: number;
   temperature: number;
   topP: number;
+  contextPreviewMode: 'off' | 'inline' | 'gate';
 }
 
 export interface OllamaImportFile {

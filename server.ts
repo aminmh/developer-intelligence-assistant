@@ -976,7 +976,14 @@ async function startServer() {
             'Content-Type': 'application/json',
             'X-RAG-Trace-Id': queryId,
           },
-          body: JSON.stringify({ query, use_remote: !!use_remote, route: classification.route }),
+          // Forward the client body verbatim (so preview/preview_mode ride
+          // along) while pinning the computed query/route/use_remote fields.
+          body: JSON.stringify({
+            ...req.body,
+            query,
+            use_remote: !!use_remote,
+            route: classification.route,
+          }),
         });
         if (aRes.ok) {
           const answer = await aRes.json();
@@ -1033,7 +1040,10 @@ async function startServer() {
           'Content-Type': 'application/json',
           'X-RAG-Trace-Id': queryId,
         },
+        // Forward the client body verbatim (so preview/preview_mode and any
+        // other keys ride along) while pinning computed fields below.
         body: JSON.stringify({
+          ...req.body,
           query,
           use_remote: !!use_remote,
           route: routeName,
@@ -1121,8 +1131,17 @@ async function startServer() {
       };
 
       if (isDone) {
-        // Dedupe: only generate answer once per job
-        if (answerCache.has(job_id)) {
+        // Gate preview support: the client may ask for the context window
+        // WITHOUT running the model by sending `preview: true` (+ optional
+        // `preview_mode`). Such preview-only responses are never cached so a
+        // later confirmed poll generates the real answer through the normal path.
+        const previewRequested = req.body?.preview === true;
+        const previewModeParam = typeof req.body?.preview_mode === 'string'
+          ? req.body.preview_mode
+          : undefined;
+
+        // Dedupe: only generate answer once per job (never for a preview request)
+        if (!previewRequested && answerCache.has(job_id)) {
           const cached = answerCache.get(job_id);
           // Also return steps so frontend can show progress
           return res.json({ success: true, phase: 'done', job_id, steps: status.steps || [], ...cached });
@@ -1138,7 +1157,9 @@ async function startServer() {
           : undefined;
 
         // Cache BEFORE answer call to prevent concurrent duplicates
-        answerCache.set(job_id, { answer: '', pending: true });
+        if (!previewRequested) {
+          answerCache.set(job_id, { answer: '', pending: true });
+        }
 
         const aRes = await fetch(`${pythonUrl}/answer`, {
           method: 'POST',
@@ -1159,6 +1180,8 @@ async function startServer() {
             project_profile: (status as any).project_profile ?? undefined,
             use_remote: wantRemote,
             route: status.route_name || 'explain',
+            ...(previewRequested ? { preview: true } : {}),
+            ...(previewModeParam ? { preview_mode: previewModeParam } : {}),
           }),
         });
         if (!aRes.ok) {
@@ -1172,6 +1195,15 @@ async function startServer() {
         result.matches = answer.matches;
         result.llmUsed = answer.llmUsed;
         result.durationMs = answer.durationMs;
+        result.context_preview = answer.context_preview;
+        result.preview_only = answer.preview_only;
+        result.preview_mode = answer.preview_mode;
+
+        if (previewRequested) {
+          // Never cache a preview-only response; return it straight to the
+          // client so it can render the gate confirmation.
+          return res.json({ success: true, phase: 'done', job_id, steps: status.steps || [], ...result });
+        }
 
         // Attach the final answer to the evaluation cache.
         const queryId = jobToQueryId.get(job_id);
@@ -1189,6 +1221,9 @@ async function startServer() {
           matches: result.matches,
           llmUsed: result.llmUsed,
           durationMs: result.durationMs,
+          context_preview: result.context_preview,
+          preview_only: result.preview_only,
+          preview_mode: result.preview_mode,
           steps: result.steps,
           status: result.status,
           route_name: result.route_name,

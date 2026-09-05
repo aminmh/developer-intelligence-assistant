@@ -7,6 +7,7 @@ import ExternalModelCard from './config/ExternalModelCard.vue';
 import VectorStoreCard from './config/VectorStoreCard.vue';
 import ModelImportCard from './config/ModelImportCard.vue';
 import DocRetrievalCard from './config/DocRetrievalCard.vue';
+import PreviewCard from './config/PreviewCard.vue';
 import SandboxRunnerCard from './config/SandboxRunnerCard.vue';
 
 const props = defineProps<{
@@ -42,6 +43,7 @@ const updateField = <K extends keyof RAGConfig>(key: K, value: RAGConfig[K]) => 
       <VectorStoreCard :config="config" :update-field="updateField" />
       <ModelImportCard :config="config" :update-field="updateField" />
       <DocRetrievalCard :config="config" :update-field="updateField" />
+      <PreviewCard :config="config" :update-field="updateField" />
       <SandboxRunnerCard :config="config" :update-field="updateField" />
 
       <!-- Action Footer -->

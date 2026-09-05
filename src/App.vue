@@ -47,6 +47,7 @@ const config = ref<RAGConfig>({
   docGitmcpTimeoutS: 15,
   temperature: 0.7,
   topP: 0.9,
+  contextPreviewMode: 'off',
 });
 
 // Route chat answers to the remote GPU LLM instead of the local Ollama model.
@@ -98,6 +99,7 @@ interface Message {
   routeName?: string;
   streaming?: boolean;
   code_validation?: any[];
+  contextPreview?: string;
 }
 
 const ROUTES = ['code_explain', 'code_refactor', 'debug', 'search', 'knowledge', 'chat'];
@@ -400,12 +402,351 @@ const selectAttachment = (fileName: string) => {
   activeFileName.value = fileName;
 };
 
-const sendMessage = async (text: string) => {
-  if (!text.trim() || loading.value) return;
+const scrollToBottom = () => {
+  setTimeout(() => {
+    const el = document.getElementById('chat-scroll-container');
+    if (el) el.scrollTop = el.scrollHeight;
+  }, 50);
+};
 
-  const userMessageId = `msg_${Date.now()}`;
+// Keep the loading state visible for at least MIN_LOADING_MS.
+const ensureMinLoading = async () => {
+  const remaining = MIN_LOADING_MS - (Date.now() - loadingStartedAt);
+  if (remaining > 0) await new Promise((r) => setTimeout(r, remaining));
+};
+
+const resetPollTimer = () => {
+  if (pollTimerId) { clearTimeout(pollTimerId); pollTimerId = null; }
+};
+
+// ===== Context-window preview (inline / gate modes) =======================
+
+// A question that has produced a context window and is now WAITING for the
+// user to confirm (gate mode). Until confirmed/cancelled the model is never
+// called. `jobId` is set when the window came from an orchestrated project.
+interface GateTurn {
+  text: string;
+  markdown: string;
+  jobId: string | null;
+  queryId?: string;
+}
+const gatePreview = ref<GateTurn | null>(null);
+
+// Stream an answer via SSE (no orchestration job, no polling). The leading
+// `context` event (emitted whenever preview mode != off) is captured so the
+// answer message can carry the collapsible context window disclosure.
+const streamAnswer = async (text: string) => {
+  const msgId = `assistant_${Date.now()}`;
   messages.value.push({
-    id: userMessageId,
+    id: msgId,
+    role: 'assistant',
+    content: '',
+    timestamp: new Date().toLocaleTimeString(),
+    query: text,
+    streaming: true,
+  });
+  scrollToBottom();
+
+  let llmUsed = '';
+  let deltas = 0;
+  try {
+    const res = await makeRequest('/api/query/stream', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ query: text, use_remote: useRemote.value }),
+    });
+    if (!res.ok || !res.body) {
+      throw new Error(`Stream unavailable (${res.status})`);
+    }
+
+    const reader = res.body.getReader();
+    const decoder = new TextDecoder();
+    let buf = '';
+    for (;;) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      buf += decoder.decode(value, { stream: true });
+      let idx: number;
+      while ((idx = buf.indexOf('\n\n')) >= 0) {
+        const raw = buf.slice(0, idx);
+        buf = buf.slice(idx + 2);
+        const line = raw.split('\n').find((l) => l.startsWith('data: '));
+        if (!line) continue;
+        let evt: any;
+        try {
+          evt = JSON.parse(line.slice(6));
+        } catch {
+          continue;
+        }
+        const m = messages.value.find((x) => x.id === msgId);
+        if (!m) return;
+        if (evt.type === 'start') {
+          llmUsed = evt.provider === 'remote'
+            ? `Remote GPU LLM (${evt.model})`
+            : `Local LLM (${evt.model})`;
+        } else if (evt.type === 'context') {
+          if (typeof evt.preview === 'string') m.contextPreview = evt.preview;
+        } else if (evt.type === 'delta') {
+          m.content += evt.text;
+          if (++deltas % 8 === 0) scrollToBottom();
+        } else if (evt.type === 'validation') {
+          m.code_validation = evt.code_validation || [];
+        } else if (evt.type === 'error') {
+          if (!m.content) m.content = `❌ **Error:** ${evt.detail}`;
+        } else if (evt.type === 'done') {
+          m.content = evt.answer || m.content;
+          m.llmUsed = llmUsed;
+          m.durationMs = evt.duration_ms;
+          m.streaming = false;
+        }
+      }
+    }
+    const m = messages.value.find((x) => x.id === msgId);
+    if (m) {
+      m.streaming = false;
+      if (!m.content) m.content = '_(empty response)_';
+    }
+  } catch (err: any) {
+    const m = messages.value.find((x) => x.id === msgId);
+    if (m) {
+      m.content = m.content || `❌ **Stream error:** ${err.message}`;
+      m.streaming = false;
+    }
+  }
+};
+
+// Push a finished assistant bubble from an /api/query/result payload.
+const pushJobAnswer = (rData: any, queryId: string | undefined, text: string) => {
+  messages.value.push({
+    id: `assistant_${Date.now()}`,
+    role: 'assistant',
+    content: rData.answer,
+    timestamp: new Date().toLocaleTimeString(),
+    matches: rData.matches,
+    llmUsed: rData.llmUsed || undefined,
+    durationMs: rData.durationMs,
+    contextPreview: rData.context_preview,
+    orchestration: rData,
+    query: text,
+    queryId,
+    routeName: rData.route_name || null,
+  });
+};
+
+// GATE, no project attached: POST the question with preview:true to the
+// single-shot JSON endpoint (python /answer). The model is skipped; only the
+// assembled context window comes back.
+const gatePreviewDirect = async (text: string) => {
+  try {
+    const res = await makeRequest('/api/query', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        query: text,
+        use_remote: useRemote.value,
+        preview: true,
+        preview_mode: 'gate',
+      }),
+    });
+    const data = await res.json();
+    if (data && data.context_preview && data.preview_only) {
+      gatePreview.value = { text, markdown: data.context_preview, jobId: null };
+    } else if (data && data.answer) {
+      // Backend ignored the preview flag (mode drifted to off) — surface answer.
+      await ensureMinLoading();
+      messages.value.push({
+        id: `assistant_${Date.now()}`,
+        role: 'assistant',
+        content: data.answer,
+        timestamp: new Date().toLocaleTimeString(),
+        matches: data.matches,
+        llmUsed: data.llmUsed || undefined,
+        durationMs: data.durationMs,
+        contextPreview: data.context_preview,
+        query: text,
+        queryId: data.query_id,
+      });
+    } else {
+      messages.value.push({
+        id: `assistant_${Date.now()}`,
+        role: 'assistant',
+        content: `❌ **Error:** ${data.error || 'Context preview unavailable.'}`,
+        timestamp: new Date().toLocaleTimeString(),
+      });
+    }
+  } catch (err: any) {
+    messages.value.push({
+      id: `assistant_${Date.now()}`,
+      role: 'assistant',
+      content: `❌ **Connection failure:** Failed to build the context window.
+
+Details: ${err.message}`,
+      timestamp: new Date().toLocaleTimeString(),
+    });
+  }
+  loading.value = false;
+  orchestrationSteps.value = [];
+  generatingAnswer.value = false;
+  scrollToBottom();
+};
+
+// GATE, project attached: orchestration runs first (retrieval/indexing — no
+// model call); once the job is done, ask python for a preview-only answer.
+const gatePreviewJob = async (jobId: string, queryId: string | undefined, text: string) => {
+  let stopped = false;
+
+  const poll = async () => {
+    if (stopped) return;
+    try {
+      const rRes = await makeRequest('/api/query/result', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          job_id: jobId,
+          user_query: text,
+          use_remote: useRemote.value,
+          preview: true,
+          preview_mode: 'gate',
+        }),
+      });
+      const rData = await rRes.json();
+
+      if (rData.steps && rData.steps.length > 0) {
+        orchestrationSteps.value = mapSteps(rData.steps);
+      }
+
+      if (rData.phase === 'done') {
+        stopped = true;
+        resetPollTimer();
+        await ensureMinLoading();
+        orchestrationSteps.value = [];
+        generatingAnswer.value = false;
+        if (rData.context_preview && rData.preview_only) {
+          gatePreview.value = { text, markdown: rData.context_preview, jobId, queryId };
+        } else if (rData.answer) {
+          // Real answer instead of preview (server mode off) — surface normally.
+          pushJobAnswer(rData, queryId, text);
+        } else {
+          messages.value.push({
+            id: `assistant_${Date.now()}`,
+            role: 'assistant',
+            content: `❌ **Error:** ${rData.error || 'Context preview unavailable.'}`,
+            timestamp: new Date().toLocaleTimeString(),
+          });
+        }
+        loading.value = false;
+        scrollToBottom();
+        return;
+      }
+    } catch {
+      // Polling error — keep trying
+    }
+    if (!stopped) {
+      pollTimerId = setTimeout(poll, 1000);
+    }
+  };
+
+  pollTimerId = setTimeout(poll, 1000);
+
+  // Safety timeout after 5 minutes
+  setTimeout(() => {
+    stopped = true;
+    resetPollTimer();
+    if (loading.value) {
+      loading.value = false;
+      orchestrationSteps.value = [];
+      generatingAnswer.value = false;
+      triggerToast('Context preview timed out.', false);
+    }
+  }, 300000);
+};
+
+// GATE confirm for an orchestrated project: re-poll the SAME job without the
+// preview flag so python runs the model now.
+const generateAnswerForJob = async (turn: GateTurn) => {
+  const { jobId, queryId, text } = turn;
+  if (!jobId) return;
+  loading.value = true;
+  generatingAnswer.value = true;
+  loadingStartedAt = Date.now();
+  orchestrationSteps.value = [];
+  scrollToBottom();
+
+  let stopped = false;
+  const poll = async () => {
+    if (stopped) return;
+    try {
+      const rRes = await makeRequest('/api/query/result', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ job_id: jobId, user_query: text, use_remote: useRemote.value }),
+      });
+      const rData = await rRes.json();
+
+      if (rData.phase === 'done' && rData.answer) {
+        stopped = true;
+        resetPollTimer();
+        await ensureMinLoading();
+        pushJobAnswer(rData, queryId, text);
+        loading.value = false;
+        generatingAnswer.value = false;
+        scrollToBottom();
+        return;
+      }
+    } catch {
+      // Polling error — keep trying
+    }
+    if (!stopped) {
+      pollTimerId = setTimeout(poll, 1000);
+    }
+  };
+
+  pollTimerId = setTimeout(poll, 1000);
+
+  // Safety timeout after 5 minutes
+  setTimeout(() => {
+    stopped = true;
+    resetPollTimer();
+    if (loading.value) {
+      loading.value = false;
+      generatingAnswer.value = false;
+      triggerToast('Answer generation timed out.', false);
+    }
+  }, 300000);
+};
+
+// User clicked "Send to model" on a gate preview — release the turn through the
+// normal send machinery (stream for direct chat, job poll for projects).
+const confirmGateSend = async () => {
+  const turn = gatePreview.value;
+  if (!turn) return;
+  gatePreview.value = null;
+  scrollToBottom();
+  if (turn.jobId) {
+    await generateAnswerForJob(turn);
+  } else {
+    loading.value = true;
+    loadingStartedAt = Date.now();
+    orchestrationSteps.value = [];
+    generatingAnswer.value = false;
+    await streamAnswer(turn.text);
+    loading.value = false;
+    generatingAnswer.value = false;
+    scrollToBottom();
+  }
+};
+
+// User dismissed the gate preview — the model is never called.
+const cancelGateSend = () => {
+  gatePreview.value = null;
+  triggerToast('Preview cancelled — no model request was sent.');
+};
+
+const sendMessage = async (text: string) => {
+  if (!text.trim() || loading.value || gatePreview.value) return;
+
+  messages.value.push({
+    id: `msg_${Date.now()}`,
     role: 'user',
     content: text,
     timestamp: new Date().toLocaleTimeString(),
@@ -415,108 +756,53 @@ const sendMessage = async (text: string) => {
   loadingStartedAt = Date.now();
   orchestrationSteps.value = [];
   generatingAnswer.value = false;
-  if (pollTimerId) { clearTimeout(pollTimerId); pollTimerId = null; }
-
-  const scrollToBottom = () => {
-    setTimeout(() => {
-      const el = document.getElementById('chat-scroll-container');
-      if (el) el.scrollTop = el.scrollHeight;
-    }, 50);
-  };
+  resetPollTimer();
   scrollToBottom();
 
-  // Keep the loading state visible for at least MIN_LOADING_MS.
-  const ensureMinLoading = async () => {
-    const remaining = MIN_LOADING_MS - (Date.now() - loadingStartedAt);
-    if (remaining > 0) await new Promise((r) => setTimeout(r, remaining));
-  };
+  const previewMode: RAGConfig['contextPreviewMode'] = config.value.contextPreviewMode || 'off';
 
-  // Stream an answer via SSE (no orchestration job, no polling).
-  const streamAnswer = async (text: string) => {
-    const msgId = `assistant_${Date.now()}`;
-    messages.value.push({
-      id: msgId,
-      role: 'assistant',
-      content: '',
-      timestamp: new Date().toLocaleTimeString(),
-      query: text,
-      streaming: true,
-    });
-    scrollToBottom();
-
-    let llmUsed = '';
-    let deltas = 0;
+  // ---- GATE + attached project: orchestrate (retrieval, no model call) then
+  // ask python for the context window before any model runs.
+  if (previewMode === 'gate' && activeFileName.value) {
     try {
-      const res = await makeRequest('/api/query/stream', {
+      const res = await makeRequest('/api/query', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ query: text, use_remote: useRemote.value }),
+        body: JSON.stringify({
+          query: text,
+          limit: 4,
+          filename: activeFileName.value,
+          use_remote: useRemote.value,
+        }),
       });
-      if (!res.ok || !res.body) {
-        throw new Error(`Stream unavailable (${res.status})`);
+      const data = await res.json();
+      if (data.phase === 'orchestrating' && data.job_id) {
+        await gatePreviewJob(data.job_id, data.query_id, text);
+        return;
       }
-
-      const reader = res.body.getReader();
-      const decoder = new TextDecoder();
-      let buf = '';
-      for (;;) {
-        const { done, value } = await reader.read();
-        if (done) break;
-        buf += decoder.decode(value, { stream: true });
-        let idx: number;
-        while ((idx = buf.indexOf('\n\n')) >= 0) {
-          const raw = buf.slice(0, idx);
-          buf = buf.slice(idx + 2);
-          const line = raw.split('\n').find((l) => l.startsWith('data: '));
-          if (!line) continue;
-          let evt: any;
-          try {
-            evt = JSON.parse(line.slice(6));
-          } catch {
-            continue;
-          }
-          const m = messages.value.find((x) => x.id === msgId);
-          if (!m) return;
-          if (evt.type === 'start') {
-            llmUsed = evt.provider === 'remote'
-              ? `Remote GPU LLM (${evt.model})`
-              : `Local LLM (${evt.model})`;
-          } else if (evt.type === 'delta') {
-            m.content += evt.text;
-            if (++deltas % 8 === 0) scrollToBottom();
-          } else if (evt.type === 'validation') {
-            m.code_validation = evt.code_validation || [];
-          } else if (evt.type === 'error') {
-            if (!m.content) m.content = `❌ **Error:** ${evt.detail}`;
-          } else if (evt.type === 'done') {
-            m.content = evt.answer || m.content;
-            m.llmUsed = llmUsed;
-            m.durationMs = evt.duration_ms;
-            m.streaming = false;
-          }
-        }
-      }
-      const m = messages.value.find((x) => x.id === msgId);
-      if (m) {
-        m.streaming = false;
-        if (!m.content) m.content = '_(empty response)_';
-      }
-    } catch (err: any) {
-      const m = messages.value.find((x) => x.id === msgId);
-      if (m) {
-        m.content = m.content || `❌ **Stream error:** ${err.message}`;
-        m.streaming = false;
-      }
+      // Orchestration did not start — fall through to the JSON preview path.
+    } catch {
+      // Request failed — fall through; the normal flow reports the error.
     }
-  };
+  }
+
+  // ---- GATE, no project attached: single-shot JSON preview (model skipped).
+  if (previewMode === 'gate' && !activeFileName.value) {
+    await gatePreviewDirect(text);
+    return;
+  }
+
+  // ---- off / inline — existing send flow (inline additionally captures the
+  // `context` SSE event / context_preview JSON field onto the answer bubble).
+  if (!activeFileName.value) {
+    await streamAnswer(text);
+    loading.value = false;
+    generatingAnswer.value = false;
+    scrollToBottom();
+    return;
+  }
 
   try {
-    // No attached project — stream the answer straight from the LLM.
-    if (!activeFileName.value) {
-      await streamAnswer(text);
-      return;
-    }
-
     const res = await makeRequest('/api/query', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
@@ -535,8 +821,7 @@ const sendMessage = async (text: string) => {
       const jobId = data.job_id;
       const queryId = data.query_id;
 
-      // Clear any previous poll timer
-      if (pollTimerId) { clearTimeout(pollTimerId); pollTimerId = null; }
+      resetPollTimer();
 
       let stopped = false;
 
@@ -559,6 +844,7 @@ const sendMessage = async (text: string) => {
           // Done — show answer
           if (rData.phase === 'done' && rData.answer) {
             stopped = true;
+            resetPollTimer();
             await ensureMinLoading();
             messages.value.push({
               id: `assistant_${Date.now()}`,
@@ -568,6 +854,7 @@ const sendMessage = async (text: string) => {
               matches: rData.matches,
               llmUsed: rData.llmUsed || 'Gemini 3.5',
               durationMs: rData.durationMs,
+              contextPreview: rData.context_preview,
               orchestration: rData,
               query: text,
               queryId,
@@ -595,7 +882,7 @@ const sendMessage = async (text: string) => {
       // Safety timeout after 5 minutes
       setTimeout(() => {
         stopped = true;
-        if (pollTimerId) { clearTimeout(pollTimerId); pollTimerId = null; }
+        resetPollTimer();
         if (loading.value) {
           loading.value = false;
           orchestrationSteps.value = [];
@@ -614,6 +901,7 @@ const sendMessage = async (text: string) => {
         matches: data.matches,
         llmUsed: data.llmUsed || 'Gemini 3.5',
         durationMs: data.durationMs,
+        contextPreview: data.context_preview,
         query: text,
         queryId: data.query_id,
       });
@@ -785,6 +1073,10 @@ onMounted(async () => {
         @feedback="submitFeedback"
         :useRemote="useRemote"
         @update:useRemote="useRemote = $event"
+        :previewMode="config.contextPreviewMode"
+        :gatePreview="gatePreview"
+        @confirmSend="confirmGateSend"
+        @cancelSend="cancelGateSend"
       />
 
       <RAGFiles

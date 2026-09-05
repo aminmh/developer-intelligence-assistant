@@ -1,16 +1,18 @@
 <script setup lang="ts">
 import { ref, computed, onMounted } from 'vue';
 import MarkdownIt from 'markdown-it';
-import { 
-  Send, 
-  Cpu, 
-  Database, 
-  Info, 
-  ChevronDown, 
+import {
+  Send,
+  Cpu,
+  Database,
+  Info,
+  ChevronDown,
   ChevronUp,
   Paperclip,
   FolderOpen,
   Gauge,
+  Eye,
+  ShieldCheck,
   X,
 } from 'lucide-vue-next';
 import { SearchMatch, UploadedFile } from '../types';
@@ -33,6 +35,9 @@ interface Message {
   query?: string;
   queryId?: string;
   routeName?: string;
+  streaming?: boolean;
+  code_validation?: any[];
+  contextPreview?: string;
 }
 
 const props = defineProps<{
@@ -44,6 +49,8 @@ const props = defineProps<{
   orchestrationSteps: PipelineStep[];
   generatingAnswer: boolean;
   useRemote: boolean;
+  previewMode: 'off' | 'inline' | 'gate';
+  gatePreview: { text: string; markdown: string } | null;
 }>();
 
 const emit = defineEmits<{
@@ -53,6 +60,8 @@ const emit = defineEmits<{
   (e: 'clearAttach'): void;
   (e: 'feedback', query: string, route: string): void;
   (e: 'update:useRemote', value: boolean): void;
+  (e: 'confirmSend'): void;
+  (e: 'cancelSend'): void;
 }>();
 
 const ROUTES = ['code_explain', 'code_refactor', 'debug', 'search', 'knowledge', 'chat'];
@@ -137,7 +146,7 @@ onMounted(() => {
 });
 
 const onSubmit = () => {
-  if (chatInput.value.trim() && !props.loading) {
+  if (chatInput.value.trim() && !chatLocked.value) {
     emit('sendMessage', chatInput.value.trim());
     chatInput.value = '';
     scrollToBottom();
@@ -164,6 +173,16 @@ const expandedMessageId = ref<string | null>(null);
 const toggleMatchExpansion = (id: string) => {
   expandedMessageId.value = expandedMessageId.value === id ? null : id;
 };
+
+// Toggle for showing the "context window sent to model" disclosure on answers.
+const expandedPreviewId = ref<string | null>(null);
+const togglePreviewExpansion = (id: string) => {
+  expandedPreviewId.value = expandedPreviewId.value === id ? null : id;
+};
+
+// While a gate preview awaits confirmation the model must NOT run, so further
+// sends are locked (same visual state as loading).
+const chatLocked = computed(() => props.loading || !!props.gatePreview);
 </script>
 
 <template>
@@ -260,6 +279,27 @@ const toggleMatchExpansion = (id: string) => {
             </div>
           </div>
 
+          <!-- Context window disclosure (inline/gate: what the model saw) -->
+          <button
+            v-if="msg.role === 'assistant' && msg.contextPreview"
+            @click="togglePreviewExpansion(msg.id)"
+            class="mt-1 text-[10px] text-violet-400 hover:text-violet-300 flex items-center gap-1 font-mono transition-all"
+          >
+            <Eye class="w-3 h-3" />
+            <span>{{ expandedPreviewId === msg.id ? 'Hide' : 'Show' }} Context Window (sent to model)</span>
+            <ChevronDown v-if="expandedPreviewId !== msg.id" class="w-3 h-3" />
+            <ChevronUp v-else class="w-3 h-3" />
+          </button>
+
+          <div
+            v-if="expandedPreviewId === msg.id && msg.contextPreview"
+            class="mt-2 max-w-3xl w-full"
+          >
+            <div class="bg-[#0a0e1a] border border-violet-500/20 rounded-xl max-h-[60vh] overflow-y-auto">
+              <div class="prose prose-invert prose-sm max-w-none text-left p-3" v-html="renderMarkdown(msg.contextPreview)"></div>
+            </div>
+          </div>
+
           <RetrievalInsights
             v-if="msg.role === 'assistant' && msg.queryId"
             :queryId="msg.queryId"
@@ -301,6 +341,44 @@ const toggleMatchExpansion = (id: string) => {
               </p>
             </div>
           </div>
+        </div>
+      </div>
+
+      <!-- Gate preview awaiting confirmation: the model has NOT been called -->
+      <div v-if="gatePreview" class="flex flex-col items-start max-w-4xl mx-auto">
+        <div class="rounded-2xl px-5 py-4 max-w-3xl bg-slate-900/60 border border-amber-500/25 text-slate-300 rounded-tl-none w-full">
+          <div class="flex items-center gap-2 text-[10px] text-amber-300 font-mono uppercase tracking-wider border-b border-slate-800 pb-2 mb-3">
+            <ShieldCheck class="w-3.5 h-3.5" />
+            Context window preview
+            <span class="ml-auto normal-case tracking-normal text-[9px] bg-amber-500/10 border border-amber-500/25 rounded px-1.5 py-0.5">
+              model not called yet
+            </span>
+          </div>
+
+          <div class="bg-[#0a0e1a] border border-slate-800 rounded-xl max-h-[60vh] overflow-y-auto">
+            <div class="prose prose-invert prose-sm max-w-none text-left p-3" v-html="renderMarkdown(gatePreview.markdown)"></div>
+          </div>
+
+          <div class="mt-3 pt-3 border-t border-slate-800 flex items-center justify-end gap-2">
+            <button
+              type="button"
+              @click="emit('cancelSend')"
+              class="px-3.5 py-1.5 rounded-lg border border-slate-700 text-[11px] font-mono text-slate-400 hover:text-white hover:border-slate-500 transition-all"
+            >
+              Cancel
+            </button>
+            <button
+              type="button"
+              @click="emit('confirmSend')"
+              class="px-3.5 py-1.5 rounded-lg bg-indigo-600 hover:bg-indigo-700 text-white text-[11px] font-mono inline-flex items-center gap-1.5 transition-all shadow-md shadow-indigo-600/20"
+            >
+              <Send class="w-3 h-3" />
+              Send to model
+            </button>
+          </div>
+          <p class="text-[9px] text-slate-500 mt-2">
+            This is the exact markdown that will be sent to the model. Nothing has been generated yet.
+          </p>
         </div>
       </div>
 
@@ -352,12 +430,12 @@ const toggleMatchExpansion = (id: string) => {
             type="text"
             :placeholder="activeFileName ? 'Ask about your project code...' : 'Ask me about APIs, code snippets, or configurations of your indexed files...'"
             class="w-full bg-[#11162d] border border-slate-800 rounded-xl py-4 pl-5 pr-14 text-sm focus:outline-none focus:border-indigo-500 focus:ring-1 focus:ring-indigo-500 transition-all font-mono placeholder-slate-500 text-slate-100"
-            :disabled="loading"
+            :disabled="chatLocked"
           />
           <button
             type="submit"
             class="absolute right-3.5 top-3.5 p-1.5 rounded-lg bg-indigo-600 hover:bg-indigo-700 text-white transition-all disabled:opacity-50 disabled:cursor-not-allowed"
-            :disabled="!chatInput.trim() || loading"
+            :disabled="!chatInput.trim() || chatLocked"
           >
             <Send class="w-4 h-4" />
           </button>
@@ -369,7 +447,7 @@ const toggleMatchExpansion = (id: string) => {
               @click="emit('update:useRemote', !useRemote)"
               :class="useRemote ? 'bg-indigo-600/20 border-indigo-500/40 text-indigo-300' : 'bg-[#11162d] border-slate-800 text-slate-400 hover:text-white'"
               class="px-2.5 py-1 rounded-lg border text-[10px] font-mono inline-flex items-center gap-1 transition-all"
-              :disabled="loading"
+              :disabled="chatLocked"
               title="Route this answer to the external OpenAI-compatible model"
               aria-label="Toggle external model"
             >
@@ -394,7 +472,10 @@ const toggleMatchExpansion = (id: string) => {
               </select>
             </div>
           </div>
-          <span class="font-mono shrink-0">Press Enter to send.</span>
+          <span v-if="gatePreview" class="font-mono shrink-0 text-amber-400/90">Confirm or cancel the preview above.</span>
+          <span v-else-if="previewMode === 'gate'" class="font-mono shrink-0 text-amber-400/70">Gate mode — you review the context window before the model runs.</span>
+          <span v-else-if="previewMode === 'inline'" class="font-mono shrink-0 text-violet-400/70">Inline — each answer carries a “Context Window” disclosure.</span>
+          <span v-else class="font-mono shrink-0">Press Enter to send.</span>
         </div>
       </div>
     </div>
