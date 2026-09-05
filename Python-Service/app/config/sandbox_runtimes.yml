@@ -53,6 +53,12 @@ runtimes:
         - artisan
         - schedule:list
       tests:
+        # OPT-IN probe: phpunit needs dev deps (installed — dev: true) AND a
+        # provisioned database. Real projects require migrations/factories +
+        # seeds; run `php artisan migrate:fresh --seed` (sqlite via _PROBE_ENV)
+        # in a run_command prep step first. The default sandbox_analyze route
+        # ships probes [routes, schedule] only; enable tests per project when
+        # DB preconditions are known to hold.
         - ./vendor/bin/phpunit
         - --no-coverage
 

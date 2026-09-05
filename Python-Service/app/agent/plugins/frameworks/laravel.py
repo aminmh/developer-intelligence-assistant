@@ -220,9 +220,14 @@ class LaravelFrameworkPlugin(FrameworkPlugin):
                 methods = re.findall(
                     r"public\s+function\s+(\w+)\s*\(", src
                 )
+                cls_name = cls.group(1) if cls else c.stem
+                # Laravel's abstract base Controller carries no routes; drop
+                # the boilerplate so inventories list real endpoints only.
+                if cls_name == "Controller" and not methods:
+                    continue
                 controllers.append(
                     {
-                        "name": cls.group(1) if cls else c.stem,
+                        "name": cls_name,
                         "file": str(c.relative_to(root)),
                         "methods": methods,
                     }
@@ -442,6 +447,7 @@ def _runtime_routes(laravel_root: Path) -> list[dict] | None:
             capture_output=True,
             text=True,
             timeout=45,
+            check=False,
             env={
                 **__import__("os").environ,
                 "APP_ENV": "testing",

@@ -27,11 +27,30 @@ import re
 from typing import Any
 
 _CREATE_RE = re.compile(
-    r"Schema::create\s*\(\s*['\"](?P<table>[A-Za-z0-9_.]+)['\"]\s*,\s*function\s*\([^)]*\)\s*\{",
+    r"Schema::create\s*\(\s*['\"](?P<table>[A-Za-z0-9_.]+)['\"]\s*,\s*function\s*\([^)]*\)[^{]*\{",
 )
 _DROP_RE = re.compile(
     r"Schema::(?:dropIfExists|drop)\s*\(\s*['\"](?P<table>[A-Za-z0-9_.]+)['\"]\s*\)"
 )
+# Schema::create OR Schema::table in source order (one alternation → ordered
+# matches). Table-additions extend an existing table; body ops are captured by
+# table so renames/drops apply to the right state.
+_BLOCK_RE = re.compile(
+    r"Schema::(?P<kind>create|table)\s*\(\s*['\"](?P<table>[A-Za-z0-9_.]+)['\"]"
+    r"\s*,\s*function\s*\([^)]*\)[^{]*\{"
+)
+_RENAME_COL_RE = re.compile(
+    r"->\s*renameColumn\s*\(\s*['\"]([^'\"]+)['\"]\s*,\s*['\"]([^'\"]+)['\"]\s*\)"
+)
+_DROP_COL_RE = re.compile(
+    r"->\s*dropColumn\s*\(\s*(?P<body>.*?)\)", re.DOTALL
+)
+_UP_METHOD_RE = re.compile(r"function\s+up\s*\(")
+_NUMERIC_TYPES = {
+    "int", "mediumint", "smallint", "tinyint", "bigint",
+    "int unsigned", "bigint unsigned", "tinyint unsigned",
+    "decimal", "float", "double",
+}
 _COLUMN_CALL_RE = re.compile(
     r"\$table\s*->\s*(?P<col>[_A-Za-z][_A-Za-z0-9]*)\s*\((?P<body>[^;]*?)\)",
 )
@@ -116,33 +135,121 @@ def _default_value(tail: str) -> Any:
     return None
 
 
+def _coerce_default(value: Any, col_type: str | None) -> Any:
+    """Type-aware default coercion.
+
+    Blueprint defaults are PHP literals; quoted ``'2'`` on an integer column
+    should surface as ``2`` (not a string). Boolean columns coerce
+    ``'0'/'1'/'true'/'false'``. Enum/string/text defaults stay untouched.
+    """
+    if value is None or not isinstance(value, str):
+        return value
+    if col_type == "boolean":
+        low = value.lower()
+        return {"true": True, "false": False, "1": True, "0": False}.get(low, value)
+    if col_type in _NUMERIC_TYPES:
+        try:
+            return int(value)
+        except ValueError:
+            try:
+                return float(value)
+            except ValueError:
+                return value
+    return value
+
+
+def _method_up(source: str) -> str:
+    """Slice the body of ``up()`` — ``down()`` reverses migrations and its
+    ``Schema::table`` calls must never contribute schema state."""
+    m = _UP_METHOD_RE.search(source)
+    if not m:
+        return source  # legacy flat migration (pre-8 closure style)
+    brace = source.find("{", m.end())
+    if brace == -1:
+        return source
+    close = _match_brace(source, brace)
+    return source[brace + 1 : close] if close > brace else source
+
+
+def _match_brace(code: str, open_idx: int) -> int:
+    """Balanced ``{ }`` scanner (parens too, both at depth)."""
+    depth = 0
+    in_s = in_d = False
+    i = open_idx
+    while i < len(code):
+        ch = code[i]
+        if in_d and ch == "\\":
+            i += 2
+            continue
+        if in_s and ch == "\\":
+            i += 2
+            continue
+        if ch == "'" and not in_d:
+            in_s = not in_s
+        elif ch == '"' and not in_s:
+            in_d = not in_d
+        elif not in_s and not in_d:
+            if ch in "{(":
+                depth += 1
+            elif ch in "})":
+                depth -= 1
+                if depth == 0:
+                    return i
+        i += 1
+    return -1
+
+
+def _drop_column_names(args_raw: str) -> list[str]:
+    """``dropColumn(['a', 'b'])`` / ``dropColumn('a')`` → names."""
+    return re.findall(r"['\"]([^'\"]+)['\"]", args_raw)
+
+
+def _block_ops(body: str, table: str) -> tuple[list[tuple[str, str]], list[str]]:
+    """Column renames/drops declared in one Schema block (scoped to table)."""
+    renames = [(table, old, new) for old, new in _RENAME_COL_RE.findall(body)]
+    drops = []
+    for dm in _DROP_COL_RE.finditer(body):
+        drops.extend(_drop_column_names(dm.group("body")))
+    return renames, drops
+
+
 def parse_migration(source: str, name: str = "") -> dict[str, Any]:
-    """Parse a single migration file's source into schema intent."""
+    """Parse a single migration file's source into schema intent.
+
+    Only the ``up()`` method contributes state (``down()`` reverses it). Column
+    renames/drops inside Schema blocks are reported so the collapser can apply
+    them against earlier state — a renamed column is never a new column.
+    """
+    up_src = _method_up(source)
     created: dict[str, Any] = {}
     drops: list[str] = []
-    for m in _CREATE_RE.finditer(source):
-        table = m.group("table")
-        body = source[m.end() :]
-        # body ends at the matching '}' — approximate: slice up to '});'
-        end = body.find("});")
-        body = body[: end if end != -1 else 1200]
-        created[table] = _parse_create_body(body, table)
-    for m in _DROP_RE.finditer(source):
+    renames: list[tuple[str, str, str]] = []
+    drop_columns: list[tuple[str, str]] = []
+    for m in _DROP_RE.finditer(up_src):
         drops.append(m.group("table"))
-    # Schema::table additions to an existing table
-    for m in re.finditer(
-        r"Schema::table\s*\(\s*['\"]([A-Za-z0-9_.]+)['\"]\s*,\s*function\s*\([^)]*\)\s*\{",
-        source,
-    ):
-        table = m.group(1)
-        body = source[m.end() :]
+    for m in _BLOCK_RE.finditer(up_src):
+        table = m.group("table")
+        body = up_src[m.end() :]
         end = body.find("});")
         body = body[: end if end != -1 else 1200]
-        created.setdefault(table, {"columns": []})
-        cols = _parse_create_body(body, table)["columns"]
-        created[table]["columns"].extend(cols)
+        renames += _block_ops(body, table)[0]
+        drop_columns += [(table, col) for col in _block_ops(body, table)[1]]
+        if m.group("kind") == "create":
+            cols = _parse_create_body(body, table)["columns"]
+            if cols:
+                created[table] = {"columns": cols}
+        else:
+            created.setdefault(table, {"columns": []})
+            cols = _parse_create_body(body, table)["columns"]
+            created[table]["columns"].extend(cols)
 
-    return {"migration": name, "created": created, "drops": drops}
+    return {
+        "migration": name,
+        "created": created,
+        "drops": drops,
+        "renames": renames,
+        "drop_columns": drop_columns,
+    }
 
 
 def _parse_create_body(body: str, table: str) -> dict[str, Any]:
@@ -195,17 +302,14 @@ def _parse_create_body(body: str, table: str) -> dict[str, Any]:
             name = args[0].strip().strip("'\"") if args else None
             if not name:
                 continue
-        if col_method in ("foreignId", "foreignUuid"):
-            plain = name
-            if plain.endswith("_id"):
-                plain = plain[:-3]
-            elif plain.endswith("Id"):
-                plain = plain[:-2]
-            name = plain
+        # The DB column name is exactly what the Blueprint call declares
+        # (foreignId('user_id') → user_id). Only the default FK *table* guess
+        # strips the trailing suffix (handled inside _default_fk_table).
 
         # foreign key resolution
         foreign = None
-        fk_refs = _CONSTRAINED_RE.search(tail) or _REFERENCES_RE.search(tail)
+        constrained = _CONSTRAINED_RE.search(tail)
+        fk_refs = constrained or _REFERENCES_RE.search(tail)
         if fk_refs:
             arg_table = _CONSTRAINED_RE.search(tail)
             ftable = arg_table.group(1) if arg_table and arg_table.group(1) else _default_fk_table(name)
@@ -213,9 +317,14 @@ def _parse_create_body(body: str, table: str) -> dict[str, Any]:
             refs = _REFERENCES_RE.search(tail)
             if refs:
                 fcol = refs.group(1)
+            elif constrained:
+                # constrained() references the primary key by convention.
+                fcol = "id"
             on = _ON_RE.search(tail)
             if on and not ftable:
                 ftable = on.group(1)
+            if not fcol and on:
+                fcol = "id"
             foreign = {"table": ftable, "column": fcol}
 
         columns.append(_mk(name, base_type, tail, foreign=foreign))
@@ -244,7 +353,7 @@ def _mk(
 ) -> dict[str, Any]:
     if not force_ts:
         nullable = bool(_NULLABLE_RE.search(tail)) or nullable
-        default = _default_value(tail)
+        default = _coerce_default(_default_value(tail), col_type)
     return {
         "name": name,
         "type": col_type,
@@ -267,7 +376,7 @@ def _attach_foreign(columns: list[dict[str, Any]], args_raw: str, tail: str) -> 
     on = _ON_RE.search(tail)
     foreign = {
         "table": on.group(1) if on else None,
-        "column": refs.group(1) if refs else None,
+        "column": refs.group(1) if refs else ("id" if on else None),
     }
     for c in columns:
         if c["name"] == col_name:
@@ -360,19 +469,37 @@ def collapse_migrations(migrations: list[dict[str, Any]]) -> list[dict[str, Any]
     ``created``/``Schema::table`` add or extend columns. Eloquent boilerplate
     columns are dropped here (framework convention), not by the renderer.
     """
-    tables: dict[str, list[dict[str, Any]]] = {}
+    tables: dict[str, dict[str, dict[str, Any]]] = {}
     order: list[str] = []
     for mig in migrations or []:
         for tname in mig.get("drops") or []:
             if tname in tables:
                 del tables[tname]
                 order.remove(tname)
+        # Reversible column ops from THIS migration, applied to earlier state:
+        # drops first, then renames, then column (re)definitions.
+        for tname, col in mig.get("drop_columns") or []:
+            if tname in tables:
+                tables[tname].pop(col, None)
+        for tname, old, new in mig.get("renames") or []:
+            if tname not in tables or old not in tables[tname]:
+                continue
+            entry = tables[tname].pop(old)
+            entry["name"] = new
+            tables[tname][new] = entry
         for tname, info in (mig.get("created") or {}).items():
+            cols = [c for c in info.get("columns") or [] if (c.get("name") or "?") not in _BOILERPLATE_COLS]
+            if not cols:
+                continue
             if tname not in tables:
-                tables[tname] = []
+                tables[tname] = {}
                 order.append(tname)
-            for col in info.get("columns") or []:
-                if (col.get("name") or "?") in _BOILERPLATE_COLS:
-                    continue
-                tables[tname].append(col)
-    return [{"table": name, "columns": tables[name]} for name in order]
+            # Last definition of a column wins (update/->change() migrations
+            # re-declare existing columns).
+            for col in cols:
+                tables[tname][col["name"]] = col
+    return [
+        {"table": name, "columns": list(tables[name].values())}
+        for name in order
+        if tables[name]
+    ]
