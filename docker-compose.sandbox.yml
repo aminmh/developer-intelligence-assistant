@@ -30,6 +30,12 @@ services:
       - dind-storage:/var/lib/docker
     networks:
       - sandbox-internal
+      # Durable egress for the dependency-resolution tier (docker pull +
+      # composer install need packagist reach). Inner runsc probe containers
+      # still run --network=none; only the DinD daemon itself has internet.
+      # Requires the main stack (api/docker-compose.yml) to be up first so the
+      # external network exists.
+      - app-egress
 
   # orchestrator — once the reproduce pipeline container exists, give it
   # DOCKER_HOST=tcp://sandbox-runner:2375 and JOBS_ROOT=/jobs and join this
@@ -49,3 +55,6 @@ volumes:
 networks:
   sandbox-internal:
     internal: true
+  app-egress:
+    external: true
+    name: api_default

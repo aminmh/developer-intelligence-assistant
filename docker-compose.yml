@@ -23,6 +23,12 @@ services:
       AWS_SECRET_ACCESS_KEY: ${MINIO_ROOT_PASSWORD}
       AWS_TUS_BUCKET: tus-uploads
       PHP_CLI_ROOT: /opt/php-cli
+      # Nested gVisor sandbox backend (docker-compose.sandbox.yml): python-api
+      # joins the sandbox's internal network so sandbox_available() can probe
+      # the runsc-capable DinD daemon. Ephemeral container networking is NOT
+      # enough — a stack recreate must keep the endpoint reachable.
+      DOCKER_HOST: tcp://sandbox-runner:2375
+      JOBS_ROOT: /jobs
     ports:
       - 9002:9002
     volumes:
@@ -36,6 +42,7 @@ services:
     networks:
       - default
       - devassistant_net
+      - sandbox-internal
 
   # tusd config note: -hooks-enabled-events is intentionally set to post-finish
   # only. The hook is handled by python-api, which verifies the upload session's
@@ -154,3 +161,8 @@ networks:
   default: {}
   devassistant_net:
     external: true
+  # Defined by docker-compose.sandbox.yml (project dev-assistant-sandbox) —
+  # python-api joins it to reach the runsc DinD daemon at tcp://sandbox-runner:2375.
+  sandbox-internal:
+    external: true
+    name: dev-assistant-sandbox_sandbox-internal
