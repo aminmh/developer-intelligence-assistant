@@ -34,6 +34,7 @@ services:
     volumes:
       - "./Python-Service/app/:/app"
       - "./Python-Service/logs/:/app/logs"
+      - "./Python-Service/php/:/opt/php-cli"
     depends_on:
       minio:
         condition: service_healthy
