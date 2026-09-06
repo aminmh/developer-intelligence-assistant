@@ -1300,53 +1300,258 @@ def retrieval_insights(
     return trace
 
 
+def _index_plan_for(body: dict, query: str, route: str) -> dict:
+    """Resolve the index-aware grounding plan for an answer request.
+
+    Lazy import of ``rag.context_plan.build_index_plan`` stays behind this tiny
+    total helper: anything unexpected degrades to an off/empty plan dict, never
+    a raise into ``_answer_context``.
+    """
+    try:
+        from rag.context_plan import build_index_plan
+
+        plan = build_index_plan(
+            route=route,
+            filename=body.get("filename"),
+            collection=body.get("collection"),
+        )
+        if not isinstance(plan, dict):
+            raise TypeError(f"build_index_plan returned {type(plan).__name__}")
+        return plan
+    except Exception:  # noqa: BLE001 — planning must never raise
+        return {
+            "mode": "off",
+            "route": route,
+            "stem": None,
+            "collections": [],
+            "saved_kinds": [],
+            "has_sym": False,
+            "notes": ["plan error"],
+        }
+
+
+def _merge_plan_results(outputs: list[dict]) -> tuple[list, list[str]]:
+    """Merge per-collection hybrid retrievals, dedup by identity keeping score.
+
+    The same code symbol can surface from two plan collections (a chunk and its
+    knowledge sibling); a payload is deduped on its stable identity — the Qdrant
+    ``node_id`` for vector/rehydrated rows and the ``graph_key`` attached by
+    ``llamaindex_layer`` to graph-evidence rows (sym evidence and metadata-only
+    rehydration fallbacks carry no node id) — so identical evidence returned by
+    two per-collection calls collapses instead of surviving as duplicates. A
+    row wins only when a later hit scores higher.
+    Returns (results sorted by score desc, union of searched collections).
+    """
+    best: dict[object, dict] = {}
+    searched: set[str] = set()
+    for out in outputs:
+        searched.update(out.get("searched_collections") or [])
+        for r in out.get("results") or []:
+            payload = r.get("payload") or {}
+            key = (
+                payload.get("node_id")
+                or payload.get("graph_key")
+                or ("unkeyed", id(r))
+            )
+            current = best.get(key)
+            if current is None or (r.get("score") or 0.0) > (current.get("score") or 0.0):
+                best[key] = r
+    merged = sorted(best.values(), key=lambda r: r.get("score") or 0.0, reverse=True)
+    return merged, sorted(searched)
+
+
 def _answer_context(
     body: dict, query: str, x_rag_trace_id: str | None
 ) -> tuple[list, list, str | None]:
     """Resolve retrieval contexts for an answer request.
 
     Returns (results, contexts, extra_context). An explicit tool context (e.g.
-    project structure from the `knowledge` route) grounds the answer directly;
-    otherwise Qdrant is searched via CodePropertyGraph.hybrid_retrieve.
+    project structure from the `knowledge` route) with NO project context
+    grounds the answer directly (legacy byte-identical short circuit). When a
+    project context (filename and/or collection) is present and the route is
+    not chat, the persisted-index plan decides which Qdrant collections are
+    searched — structure/tool text still flows through ``extra_context`` so
+    both retrieval and structure evidence reach the model. Chat never grounds
+    from the PLANNED project indexes.
+
+    Pinned-collection nuance (legacy client safety): a pinned ``collection`` on
+    a chat or unknown route is retrieved exactly like the pre-plan /answer path
+    (one ``hybrid_retrieve`` call, default graph legs, no plan) — a route label
+    that is missing, defaults to ``chat``, or names a route the planner does
+    not know can never silently zero-out a pinned retrieval. Chat only blocks
+    NEW index use (the no-pin project path); an unknown route with a filename
+    (no pinned collection) still runs plan discovery because the filename is
+    the caller's project-grounding decision.
     """
     from index.llamaindex_layer import CodePropertyGraph
     from index.llamaindex_layer import record_retrieval_trace
+    from rag.context_plan import PROJECT_ROUTES
 
     collection = body.get("collection")
     class_name = body.get("class_name")
     file = body.get("file")
     extra_context = body.get("extra_context")
+    filename = body.get("filename")
+    raw_route = body.get("route")
+    route = (
+        raw_route.strip()
+        if isinstance(raw_route, str) and raw_route.strip()
+        else "chat"
+    )
 
-    if extra_context and isinstance(extra_context, str) and extra_context.strip():
-        record_retrieval_trace(
-            x_rag_trace_id or "",
+    # Legacy type guard: only STRING extra_context is honoured (short-circuit /
+    # evidence). A non-string truthy value (list/dict/…) was ignored before
+    # Phase 3 and stays ignored — never forwarded to the model.
+    if extra_context is not None and not isinstance(extra_context, str):
+        extra_context = None
+
+    has_extra_context = isinstance(extra_context, str) and bool(extra_context.strip())
+    has_project_context = bool(filename or collection)
+    pinned = isinstance(collection, str) and bool(collection.strip())
+
+    def _trace(payload: dict) -> None:
+        record_retrieval_trace(x_rag_trace_id or "", payload)
+
+    def _query_hash() -> str:
+        return __import__("hashlib").sha1(
+            query.encode("utf-8")
+        ).hexdigest()[:12]
+
+    def _sources_for(results: list) -> list[dict]:
+        return [
             {
-                "query_hash": __import__("hashlib").sha1(query.encode("utf-8")).hexdigest()[:12],
-                "mode": "explicit_context",
-                "collection": collection,
-                "searched_collections": [],
-                "vector_result_count": 0,
-                "graph_neighbor_count": 0,
-                "graph_context_count": 0,
-                "graph_context_with_code_count": 0,
-                "graph_available": False,
-                "graph_fallback": False,
-                "sources": [],
-            },
-        )
+                "file": (r.get("payload") or {}).get("file", ""),
+                "class_name": (
+                    (r.get("payload") or {}).get("class")
+                    or (r.get("payload") or {}).get("class_fqn", "")
+                ),
+                "name": (r.get("payload") or {}).get("name", ""),
+                "via_graph": bool(r.get("via_graph")),
+                "score": round(float(r.get("score", 0.0)), 4),
+            }
+            for r in results
+        ]
+
+    def _empty_trace(mode: str, searched: list) -> dict:
+        return {
+            "query_hash": _query_hash(),
+            "mode": mode,
+            "collection": collection,
+            "searched_collections": list(searched),
+            "vector_result_count": 0,
+            "graph_neighbor_count": 0,
+            "graph_context_count": 0,
+            "graph_context_with_code_count": 0,
+            "graph_available": False,
+            "graph_fallback": False,
+            "sources": [],
+        }
+
+    # Legacy explicit-context grounding: tool/structure text with NO project
+    # context short-circuits exactly as it did before Phase 3.
+    if has_extra_context and not has_project_context:
+        _trace(_empty_trace("explicit_context", []))
         return [], [], extra_context
 
-    result = CodePropertyGraph().hybrid_retrieve(
-        query=query,
-        collection_name=collection,
-        limit=10,
-        class_name=class_name,
-        file=file,
-        trace_id=x_rag_trace_id,
+    is_project_route = route in PROJECT_ROUTES
+
+    # Chat + filename only (no pinned collection): chat never grounds from the
+    # planned project indexes — structure text still flows through.
+    if route == "chat" and not pinned and has_project_context:
+        _trace(_empty_trace("chat_no_index", []))
+        return [], [], extra_context
+
+    # Legacy pinned retrieval: a pinned collection on a chat or unknown
+    # (non-project) route is retrieved exactly like the pre-plan /answer path —
+    # ONE call, default graph legs, no plan. Keeps old /answer clients that pin
+    # a collection (even with a default/unknown route label) from getting a
+    # silent empty result.
+    if pinned and not is_project_route:
+        result = CodePropertyGraph().hybrid_retrieve(
+            query=query,
+            collection_name=collection,
+            limit=10,
+            class_name=class_name,
+            file=file,
+            trace_id=x_rag_trace_id,
+        )
+        results = result.get("results", []) or []
+        contexts = [(r.get("payload") or {}) for r in results]
+        return results, contexts, extra_context
+
+    # No project context at all — legacy retrieval semantics unchanged.
+    if not has_project_context:
+        result = CodePropertyGraph().hybrid_retrieve(
+            query=query,
+            collection_name=collection,
+            limit=10,
+            class_name=class_name,
+            file=file,
+            trace_id=x_rag_trace_id,
+        )
+        results = result.get("results", []) or []
+        contexts = [(r.get("payload") or {}) for r in results]
+        return results, contexts, extra_context
+
+    # Project context + non-chat route: ground from the persisted indexes the
+    # plan resolves (Qdrant collections; sym graph leg when it exists). Each
+    # plan collection is searched ONCE: ``join_sibling=False`` disables
+    # hybrid_retrieve's internal knowledge-sibling join because the planner
+    # already enumerated the sibling as its own collection — otherwise a
+    # two-collection plan would scan the knowledge collection twice.
+    plan = _index_plan_for(body, query, route)
+    plan_collections = plan.get("collections") or []
+    if not plan_collections:
+        # Honest no-persisted-indexes case: nothing to search. extra_context is
+        # still honoured so structure text never disappears.
+        _trace(_empty_trace("no_index", []))
+        return [], [], extra_context
+
+    graph_legs = ["calls", "has_knowledge"]
+    if plan.get("has_sym") and plan.get("stem"):
+        graph_legs.append("sym")
+
+    outputs = []
+    for col in plan_collections:
+        outputs.append(
+            CodePropertyGraph().hybrid_retrieve(
+                query=query,
+                collection_name=col,
+                limit=10,
+                class_name=class_name,
+                file=file,
+                trace_id=x_rag_trace_id,
+                graph_legs=list(graph_legs),
+                join_sibling=False,
+            )
+        )
+    results, searched = _merge_plan_results(outputs)
+    vector_count = sum(1 for r in results if not r.get("via_graph"))
+    graph_count = len(results) - vector_count
+    with_code = sum(
+        1 for r in results if r.get("via_graph") and (r.get("payload") or {}).get("code")
     )
-    results = result.get("results", []) or []
+    _trace(
+        {
+            "query_hash": _query_hash(),
+            "mode": "project",
+            "route": route,
+            "collection": collection,
+            "stem": plan.get("stem"),
+            "has_sym": bool(plan.get("has_sym")),
+            "plan_notes": plan.get("notes") or [],
+            "searched_collections": searched,
+            "vector_result_count": vector_count,
+            "graph_neighbor_count": graph_count,
+            "graph_context_count": graph_count,
+            "graph_context_with_code_count": with_code,
+            "graph_available": any(bool(r.get("via_graph")) for r in results),
+            "graph_fallback": False,
+            "sources": _sources_for(results),
+        }
+    )
     contexts = [(r.get("payload") or {}) for r in results]
-    return results, contexts, None
+    return results, contexts, extra_context
 
 
 _PROJECT_QUESTION_HINTS = re.compile(
@@ -1423,6 +1628,9 @@ def _resolve_preview_mode(body: dict) -> str:
     description=(
         "Generate a final answer from retrieved code context, optional "
         "metadata filters (class_name/file) and extracted entities. "
+        "An optional `filename` anchors the request to a project's persisted "
+        "indexes (Qdrant + Neo4j); `extra_context` structure/tool text is "
+        "always honoured alongside retrieval. "
         "Context-window preview is optional: the request may send "
         "`preview_mode` (\"off\"|\"inline\"|\"gate\") and `preview`: true. "
         "When previewing, the response carries `context_preview`/`preview_only` "
@@ -1536,7 +1744,8 @@ def answer_prompt(
     summary="Streaming Answer (SSE)",
     description=(
         "Generate an answer and stream it as Server-Sent Events: start, delta, "
-        "validation and done events. Same retrieval semantics as /answer. When "
+        "validation and done events. Same retrieval semantics as /answer "
+        "(an optional `filename` anchors project-index grounding). When "
         "context preview is enabled (preview_mode inline/gate) a leading "
         "\"context\" event carrying the rendered context window precedes the "
         "stream; gate-preview requests emit only the context event followed by "

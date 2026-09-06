@@ -243,6 +243,22 @@ class AnalysisStore:
             finally:
                 conn.close()
 
+    def list_by_filename(self, filename: str, limit: int = 100) -> list[dict[str, Any]]:
+        """Saved-session rows for one exact filename (case-sensitive), newest
+        first. Mirrors ``list`` ordering (created_at DESC, rowid tie-break)."""
+        with self._lock:
+            conn = self._connect()
+            try:
+                rows = conn.execute(
+                    "SELECT * FROM analysis_sessions "
+                    "WHERE filename = ? "
+                    "ORDER BY created_at DESC, rowid DESC LIMIT ?",
+                    (filename, max(1, min(limit, 500))),
+                ).fetchall()
+                return [self._row_to_dict(dict(r)) for r in rows]
+            finally:
+                conn.close()
+
     def delete(self, session_id: str) -> bool:
         """Remove the row and the per-session artifact dir."""
         with self._lock:

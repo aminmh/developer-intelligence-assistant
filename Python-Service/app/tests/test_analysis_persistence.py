@@ -163,6 +163,24 @@ class TestAnalysisStore:
         ids = [r["id"] for r in store.list()]
         assert ids == ["newer", "older"]  # newest first
 
+    def test_list_by_filename_filters_and_orders(self, tmp_path):
+        store = self._store(tmp_path)
+        store.save("k1", "job-k", "x.zip", kind="structure", label="older")
+        store.save("k2", "job-k2", "x.zip", kind="code_index", label="newer")
+        store.save("other-case", "job-c", "X.zip", kind="analysis")
+        store.save("other-file", "job-y", "y.zip", kind="analysis")
+        rows = store.list_by_filename("x.zip")
+        assert [r["id"] for r in rows] == ["k2", "k1"]  # newest first
+        assert [r["kind"] for r in rows] == ["code_index", "structure"]
+        # exact case-sensitive filename match only
+        assert all(r["filename"] == "x.zip" for r in rows)
+
+    def test_list_by_filename_empty_when_no_match(self, tmp_path):
+        store = self._store(tmp_path)
+        store.save("k1", "job-k", "x.zip", kind="structure")
+        assert store.list_by_filename("missing.zip") == []
+
+
     def test_delete_removes_row_and_artifacts(self, tmp_path):
         store = self._store(tmp_path)
         store.save("s1", "job-1", "a.zip", profile=SAMPLE)
