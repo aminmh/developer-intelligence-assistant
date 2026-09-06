@@ -1211,6 +1211,7 @@ async function startServer() {
           body: JSON.stringify({
             query: actualQuery,
             collection: targetCollection || undefined,
+            filename: (status as any).filename || undefined,
             class_name: entities.class_name || undefined,
             file: entities.target_file || undefined,
             entities,
