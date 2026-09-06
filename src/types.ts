@@ -128,6 +128,9 @@ export interface AnalysisSession {
   created_at: string;
   summary: string;
   grounding_md?: string;
+  // Known kinds so far; unknown values are tolerated defensively at runtime
+  // (the python service may add more kinds without a client redeploy).
+  kind?: 'structure' | 'code_index' | 'analysis';
   profile?: Record<string, any>;
   runtime?: Record<string, any>;
   counts?: Record<string, any>;

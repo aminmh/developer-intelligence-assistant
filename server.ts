@@ -48,7 +48,9 @@ const jobToQueryId = new Map<string, string>();
 //   /api/settings         GET/PUT config (masked secrets) + /api/health/*
 //   /api/sandbox/*        status, command (python /sandbox/*), project analyze,
 //                         analysis save/list/get/delete (python /project/analyze,
-//                         /analysis)
+//                         /analysis). Static structure census + code-index
+//                         preview jobs (python /structure/analyze, /code/index)
+//                         also poll via /api/project/analyze/:jobId/status
 //   /api/lmstudio/*       LM Studio model list/load (python /api/lmstudio/*)
 //   /api/ollama/*         models + GGUF import (python /api/ollama/*)
 //   /api/docretrieval/*   doc-lookup test/deps (python /api/docretrieval/*)
@@ -587,6 +589,45 @@ async function startServer() {
       res.json(await pyRes.json());
     } catch (error: any) {
       console.error('Failed to poll job status via Python:', error.message);
+      res.status(500).json({ success: false, error: error.message });
+    }
+  });
+
+  // Launch a static structure-profile job (deterministic, no sandbox) — or the
+  // full sandbox_analyze route when deep:true. Returns { job_id }.
+  app.post('/api/structure/analyze', async (req, res) => {
+    try {
+      const pyRes = await fetch(`${PYTHON_API_URL}/structure/analyze`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(req.body ?? {}),
+      });
+      if (!pyRes.ok) {
+        const body = await pyRes.json().catch(() => ({}));
+        return res.status(pyRes.status).json({ success: false, error: body.detail || body.error || 'Structure analysis failed to start.' });
+      }
+      res.json(await pyRes.json());
+    } catch (error: any) {
+      console.error('Failed to start structure analysis via Python:', error.message);
+      res.status(500).json({ success: false, error: error.message });
+    }
+  });
+
+  // Launch a parse-only code-index preview job. Returns { job_id }.
+  app.post('/api/code/index', async (req, res) => {
+    try {
+      const pyRes = await fetch(`${PYTHON_API_URL}/code/index`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(req.body ?? {}),
+      });
+      if (!pyRes.ok) {
+        const body = await pyRes.json().catch(() => ({}));
+        return res.status(pyRes.status).json({ success: false, error: body.detail || body.error || 'Code index failed to start.' });
+      }
+      res.json(await pyRes.json());
+    } catch (error: any) {
+      console.error('Failed to start code index via Python:', error.message);
       res.status(500).json({ success: false, error: error.message });
     }
   });
