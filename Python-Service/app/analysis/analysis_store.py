@@ -36,6 +36,7 @@ CREATE TABLE IF NOT EXISTS analysis_sessions (
     collection_name TEXT,
     label           TEXT,
     status          TEXT NOT NULL DEFAULT 'saved',
+    kind            TEXT NOT NULL DEFAULT 'analysis',
     created_at      TEXT,
     finished_at     TEXT,
     summary         TEXT,
@@ -45,6 +46,9 @@ CREATE TABLE IF NOT EXISTS analysis_sessions (
     counts_json     TEXT
 )
 """
+
+#: Canonical kinds for saved sessions (default analysis keeps legacy rows).
+_KIND_COLUMN = "kind"
 
 
 def _now_iso() -> str:
@@ -74,8 +78,32 @@ class AnalysisStore:
             try:
                 conn.execute(_SCHEMA)
                 conn.commit()
+                self._migrate_kind(conn)
             finally:
                 conn.close()
+
+    def _migrate_kind(self, conn: sqlite3.Connection) -> None:
+        """Add the ``kind`` column to a pre-kind legacy database (idempotent).
+
+        Existing rows keep the ``'analysis'`` default, so re-saving an old
+        analysis after an upgrade never changes its meaning. Never raises — a
+        failed migration must not break ``AnalysisStore()`` construction.
+        """
+        try:
+            columns = {row[1] for row in conn.execute("PRAGMA table_info(analysis_sessions)")}
+            if _KIND_COLUMN in columns:
+                return
+            conn.execute(
+                "ALTER TABLE analysis_sessions "
+                f"ADD COLUMN {_KIND_COLUMN} TEXT NOT NULL DEFAULT 'analysis'"
+            )
+            conn.commit()
+        except sqlite3.Error as exc:  # pragma: no cover — migration is best-effort
+            from infra.exception_logger import get_exception_logger
+
+            get_exception_logger().warning(
+                "analysis_sessions kind migration skipped: %s", exc
+            )
 
     def artifacts_dir(self, session_id: str) -> Path:
         """Per-session artifact directory (created lazily by writers)."""
@@ -96,6 +124,7 @@ class AnalysisStore:
         grounding_md: str | None = None,
         runtime: dict[str, Any] | None = None,
         counts: dict[str, Any] | None = None,
+        kind: str = "analysis",
     ) -> dict[str, Any]:
         """Upsert a session row AND write its artifact files. Idempotent per
         session_id/job_id (re-saving overwrites). Returns the session dict."""
@@ -106,6 +135,7 @@ class AnalysisStore:
             "collection_name": collection_name,
             "label": label,
             "status": "saved",
+            "kind": kind,
             "created_at": _now_iso(),
             "summary": summary,
             "profile_json": json.dumps(profile) if profile is not None else None,
@@ -126,11 +156,11 @@ class AnalysisStore:
                     """
                     INSERT INTO analysis_sessions (
                         id, job_id, filename, collection_name, label, status,
-                        created_at, summary, profile_json, grounding_md,
+                        kind, created_at, summary, profile_json, grounding_md,
                         runtime_json, counts_json
                     ) VALUES (
                         :id, :job_id, :filename, :collection_name, :label, :status,
-                        :created_at, :summary, :profile_json, :grounding_md,
+                        :kind, :created_at, :summary, :profile_json, :grounding_md,
                         :runtime_json, :counts_json
                     )
                     ON CONFLICT(id) DO UPDATE SET
@@ -139,6 +169,7 @@ class AnalysisStore:
                         collection_name=excluded.collection_name,
                         label=excluded.label,
                         status=excluded.status,
+                        kind=excluded.kind,
                         summary=excluded.summary,
                         profile_json=excluded.profile_json,
                         grounding_md=excluded.grounding_md,

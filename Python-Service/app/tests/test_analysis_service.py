@@ -264,7 +264,8 @@ class TestOrchestratorSandboxWiring:
         calls = {}
 
         class FakeExecutor:
-            def analyze(self, workspace_path, project_id, framework="php", probes=None):
+            def analyze(self, workspace_path, project_id, framework="php", probes=None,
+                        progress=None):
                 calls.update(workspace_path=workspace_path, project_id=project_id,
                              framework=framework, probes=probes)
                 return {"staged": True, "install": {"status": "done"},

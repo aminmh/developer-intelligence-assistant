@@ -242,3 +242,361 @@ def persist_analysis(job_id: str, label: str = "") -> dict[str, Any] | None:
     row["link"] = link
     row["knowledge_chunks"] = len(chunks)
     return row
+
+
+# --- structure + code-index persistence (P3) ---------------------------------
+
+
+def code_collection(filename: str) -> str:
+    """``chunk_code_<stem>`` — the sibling code collection a Save re-creates."""
+    return f"{_CODE_PREFIX}{project_stem(filename)}"
+
+
+def _fact_chunk(stem: str, name: str, text: str) -> dict[str, Any]:
+    """One deterministic structure-fact chunk (project_context._chunk shape)."""
+    fqn = f"kn:structure:{stem}"
+    return {
+        "class_fqn": fqn,
+        "class": fqn,
+        "name": (name or "unnamed")[:120],
+        "method_name": None,
+        "file": "structure",
+        "type": "structure_fact",
+        "code": text[:3000],
+        "has_docblock": False,
+        "calls": [],
+    }
+
+
+def _structure_facts(profile: dict[str, Any]) -> list[tuple[str, str]]:
+    """Deterministic ``(slug, human_text)`` facts for a structure profile.
+
+    Pure + total: only the canonical structure keys are read; absent values
+    simply produce fewer facts (never a raise). Fact count lands in the
+    ~10-20 range for a normal profile.
+    """
+    facts: list[tuple[str, str]] = []
+
+    def _list_fact(name: str, label: str, items: list[str], cap: int) -> None:
+        cleaned = [str(item) for item in items[:cap]]
+        if cleaned:
+            facts.append((name, f"{label}: {', '.join(cleaned)}"))
+
+    framework = profile.get("framework")
+    version = profile.get("version")
+    if framework:
+        slug = f"framework:{framework}" + (f":{version}" if version else "")
+        facts.append((slug, f"Framework: {framework}" + (f" {version}" if version else "")))
+
+    primary = profile.get("language")
+    if primary:
+        facts.append((f"language:{primary}", f"Primary language: {primary}"))
+
+    secondary = [
+        lang
+        for lang in profile.get("languages") or []
+        if isinstance(lang, dict)
+        and lang.get("language")
+        and lang.get("language") != primary
+    ][:6]
+    for lang in secondary:
+        facts.append(
+            (
+                f"language:{lang['language']}",
+                f"{lang['language']}: {lang.get('files') or 0} file(s)",
+            )
+        )
+
+    database = profile.get("database")
+    if database and str(database).lower() != "not determined":
+        confidence = profile.get("database_confidence") or "low"
+        facts.append(
+            (f"database:{database}", f"Database: {database} (confidence: {confidence})")
+        )
+
+    total = profile.get("total_files")
+    if isinstance(total, int) and total > 0:
+        facts.append(("project:total_files", f"Total files: {total}"))
+
+    _list_fact("architecture:top_level_dirs", "Top-level dirs",
+               profile.get("top_level_dirs") or [], 8)
+    _list_fact("architecture:entrypoints", "Entrypoints",
+               profile.get("entrypoints") or [], 8)
+    _list_fact("architecture:manifests", "Manifests",
+               profile.get("manifests") or [], 8)
+
+    dep_count = profile.get("dependency_count")
+    if isinstance(dep_count, int) and dep_count > 0:
+        facts.append(("architecture:dependencies", f"Dependency count: {dep_count}"))
+
+    summary = str(profile.get("summary") or "").strip()
+    if summary:
+        facts.append(("summary", summary[:400]))
+    return facts
+
+
+def _structure_chunks(
+    profile: dict[str, Any], stem: str
+) -> list[dict[str, Any]]:
+    """Structure-fact chunk dicts for one stem (deterministic)."""
+    return [
+        _fact_chunk(stem, name, text)
+        for name, text in _structure_facts(profile)
+    ]
+
+
+def _structure_grounding(facts: list[tuple[str, str]]) -> str:
+    """Human-readable structure-fact block appended to the grounding artifact."""
+    lines = ["## Structure facts", ""]
+    for name, text in facts:
+        lines.append(f"- **{name}**: {text}")
+    return "\n".join(lines)
+
+
+def _retained_workspace(filename: str) -> str | None:
+    """Newest registered workspace pinned to ``filename`` that still exists."""
+    try:
+        from projects.workspace_registry import list_workspaces
+
+        for entry in list_workspaces():
+            if entry.get("filename") != filename:
+                continue
+            path = entry.get("path")
+            if path and os.path.isdir(path):
+                return path
+    except Exception:  # noqa: BLE001 — retention lookup is best-effort
+        return None
+    return None
+
+
+def _prepare_workspace_http(filename: str) -> str | None:
+    """HTTP workspace prepare (mirrors orchestrator._prepare_workspace)."""
+    try:
+        import requests
+
+        base = os.environ.get("PYTHON_API_URL", "http://python-api:9002")
+        response = requests.post(
+            f"{base.rstrip('/')}/api/workspace/prepare",
+            json={"filename": filename},
+            timeout=120,
+        )
+        if response.status_code >= 400:
+            return None
+        payload = response.json()
+        return payload.get("extracted_path") if isinstance(payload, dict) else None
+    except Exception:  # noqa: BLE001 — prepare is best-effort
+        return None
+
+
+def _index_sym_graph(workspace_path: str, stem: str) -> dict[str, Any]:
+    """Best-effort PHP symbol graph (sym_<stem>); graph down → skipped dict."""
+    try:
+        from inspection.service import inspection_service
+
+        return inspection_service().index(workspace_path, stem)
+    except Exception as exc:  # noqa: BLE001 — sym graph is enhancement-only
+        get_exception_logger().warning("Sym graph index skipped: %s", exc)
+        return {"indexed": False, "error": str(exc)[:200]}
+
+
+def persist_structure(job_id: str, label: str = "") -> dict[str, Any] | None:
+    """Save a structure_analyze run: structure facts → proj_knowledge_<stem>.
+
+    Deterministic fact chunks (``kn:structure:<stem>`` namespace) ride the same
+    CodePropertyGraph ingest + Neo4j link pass as a normal knowledge save.
+    Returns the stored row or None when no durable bundle exists. Idempotent
+    per job_id.
+    """
+    bundle = load_bundle(job_id)
+    if not bundle:
+        return None
+    profile = bundle.get("structure_profile") or bundle.get("project_profile") or {}
+    filename = bundle.get("filename") or "unknown.zip"
+    collection = knowledge_collection(filename)
+    stem = project_stem(filename)
+
+    ingest: dict[str, Any] = {"ingested": 0, "skipped": "no structure profile"}
+    link: dict[str, Any] = {"linked": 0}
+    chunks: list[dict[str, Any]] = []
+    try:
+        if profile:
+            from projects.project_context import build_grounding_md
+
+            facts = _structure_facts(profile)
+            chunks = _structure_chunks(profile, stem)
+            if chunks:
+                from index.llamaindex_layer import CodePropertyGraph
+
+                ingest = CodePropertyGraph().ingest(chunks, collection) or {}
+                link = link_knowledge_to_graph(chunks, collection)
+            grounding_md = build_grounding_md(profile, runtime=None, filename=filename)
+            if facts:
+                grounding_md = f"{grounding_md}\n\n{_structure_grounding(facts)}"
+        else:
+            grounding_md = ""
+    except Exception as exc:  # noqa: BLE001 — persistence must not hard-fail the run
+        get_exception_logger().error(
+            "Structure ingest failed for analysis %s: %s", job_id, exc
+        )
+        ingest = {"ingested": 0, "error": str(exc)[:300]}
+
+    counts = build_counts(profile, None)
+    counts["structure_facts"] = len(chunks)
+    if not profile:
+        summary = str(bundle.get("output") or "")[:500]
+    else:
+        summary = str(profile.get("summary") or "")[:500]
+
+    existing = analysis_store.get_by_job(job_id)
+    session_id = (existing or {}).get("id") or str(uuid.uuid4())
+    analysis_store.save(
+        session_id=session_id,
+        job_id=job_id,
+        filename=filename,
+        collection_name=collection,
+        label=(label or "").strip()[:120],
+        summary=summary,
+        profile=profile or None,
+        grounding_md=str(grounding_md),
+        runtime=None,
+        counts=counts,
+        kind="structure",
+    )
+    row = analysis_store.get(session_id) or {}
+    row["ingest"] = ingest
+    row["link"] = link
+    row["knowledge_chunks"] = len(chunks)
+    return row
+
+
+def persist_code_index(job_id: str, label: str = "") -> dict[str, Any] | None:
+    """Save an index_code run: parsed chunks → chunk_code_<stem> (destructive).
+
+    The parse is re-produced here from the retained workspace (or a scratch
+    HTTP extract that is deleted afterwards) so the durable record always
+    matches the current source. The Qdrant collection is recreated on every
+    save (CodePropertyGraph.ingest wipes chunk_code_*), so re-saving the same
+    job is idempotent per job_id but reflects the newest source.
+    Returns the stored row or None when no durable bundle exists.
+    """
+    bundle = load_bundle(job_id)
+    if not bundle:
+        return None
+    filename = bundle.get("filename") or "unknown.zip"
+    stem = project_stem(filename)
+    collection = code_collection(filename)
+
+    workspace_path = _retained_workspace(filename)
+    scratch = workspace_path is None
+    if scratch:
+        workspace_path = _prepare_workspace_http(filename)
+
+    result: dict[str, Any] = {}
+    ingest: dict[str, Any] = {"ingested": 0, "skipped": "no chunks"}
+    sym: dict[str, Any] | None = None
+    try:
+        if not workspace_path:
+            result = {
+                "language": None,
+                "chunks": [],
+                "files": 0,
+                "producer": None,
+                "error": "workspace unavailable",
+            }
+        else:
+            from projects.lang_index import produce_chunks
+
+            result = produce_chunks(workspace_path)
+            chunks = result.get("chunks") or []
+            if chunks and not result.get("error"):
+                from index.llamaindex_layer import CodePropertyGraph
+
+                ingest = CodePropertyGraph().ingest(chunks, collection) or {}
+                if result.get("producer") == "code-parse":
+                    sym = _index_sym_graph(workspace_path, stem)
+    except Exception as exc:  # noqa: BLE001 — persistence must not hard-fail the run
+        get_exception_logger().error(
+            "Code index ingest failed for analysis %s: %s", job_id, exc
+        )
+        result = result or {
+            "language": None,
+            "chunks": [],
+            "files": 0,
+            "producer": None,
+        }
+        ingest = {"ingested": 0, "error": str(exc)[:300]}
+    finally:
+        if scratch and workspace_path:
+            from infra.php_tools import safe_rmtree
+
+            safe_rmtree(workspace_path)
+
+    chunks = result.get("chunks") or []
+    language = result.get("language")
+    producer = result.get("producer")
+    error = result.get("error")
+
+    counts: dict[str, Any] = {
+        "chunks": len(chunks),
+        "files": int(result.get("files") or 0),
+        "language": language,
+        "producer": producer,
+    }
+    for key in ("ingested", "graph_nodes", "graph_relations", "embed_fails"):
+        counts[key] = ingest.get(key, 0)
+    if sym:
+        counts["sym_nodes"] = int(sym.get("nodes") or 0)
+    if error:
+        counts["error"] = str(error)[:200]
+
+    if error:
+        summary = f"code index failed: {error}"[:500]
+    else:
+        summary = f"{len(chunks)} {language or ''} chunk(s) via {producer or '?'}".strip()[:500]
+    grounding_md = (
+        f"Code index: {len(chunks)} {language or ''} chunk(s) via {producer or '?'}.\n"
+        f"Collection: {collection}"
+    )
+    if sym and sym.get("collection"):
+        grounding_md += f"\nSymbol graph: {sym.get('collection')}"
+
+    profile = bundle.get("structure_profile") or bundle.get("project_profile")
+    existing = analysis_store.get_by_job(job_id)
+    session_id = (existing or {}).get("id") or str(uuid.uuid4())
+    analysis_store.save(
+        session_id=session_id,
+        job_id=job_id,
+        filename=filename,
+        collection_name=collection,
+        label=(label or "").strip()[:120],
+        summary=summary,
+        profile=profile,
+        grounding_md=grounding_md,
+        runtime=None,
+        counts=counts,
+        kind="code_index",
+    )
+    row = analysis_store.get(session_id) or {}
+    row["ingest"] = ingest
+    if sym is not None:
+        row["sym"] = sym
+    return row
+
+
+def persist_for_bundle(job_id: str, label: str = "") -> dict[str, Any] | None:
+    """Route-aware persist dispatcher (POST /analysis single entry point).
+
+    Chooses the persist strategy from the durable bundle's manifest route:
+    ``structure_analyze`` → structure facts, ``index_code`` → code index, every
+    other route → the legacy knowledge analysis (kind defaults to 'analysis').
+    """
+    bundle = load_bundle(job_id)
+    if not bundle:
+        return None
+    manifest = bundle.get("manifest") or {}
+    route = manifest.get("route") or bundle.get("route_name") or ""
+    if route == "structure_analyze":
+        return persist_structure(job_id, label)
+    if route == "index_code":
+        return persist_code_index(job_id, label)
+    return persist_analysis(job_id, label)

@@ -10,6 +10,7 @@ CLI instead of a remote MCP server.
 from __future__ import annotations
 
 import json
+import logging
 import os
 import re
 import threading
@@ -35,6 +36,8 @@ try:
 except Exception:  # pragma: no cover
     PromptTemplate = None  # type: ignore[assignment]
 
+
+logger = logging.getLogger(__name__)
 
 DEFAULT_STATUS_DIR = Path(os.environ.get("DOWNLOAD_DIR", "/tmp/orchestrator"))
 DEFAULT_PYTHON_API_URL = os.environ.get("PYTHON_API_URL", "http://python-api:9002")
@@ -177,7 +180,12 @@ class Orchestrator:
             keep = os.environ.get("WORKSPACE_KEEP_EXTRACTED", "").strip().lower() in ("1", "true", "yes")
             # F17: sandbox routes retain their workspace (bounded LRU) so the
             # /api/inspect Tier-2/3 file reads keep working after the job.
-            retain = keep or bool((ctx.route or {}).get("sandbox"))
+            # Code-index routes opt in via retain_workspace so a later
+            # POST /analysis persist can re-produce + ingest the chunks.
+            route_retain = bool((ctx.route or {}).get("sandbox")) or bool(
+                (ctx.route or {}).get("retain_workspace")
+            )
+            retain = keep or route_retain
             if retain and workspace_path and os.path.isdir(workspace_path):
                 try:
                     from projects.workspace_registry import register
@@ -193,6 +201,7 @@ class Orchestrator:
 
         Returns ``(workspace_path, file_count)``; the HTTP error propagates so
         a failed extraction fails the job exactly as the inline pipeline did."""
+        self._report_step_progress(ctx, "extracting", 10, "Extracting project files")
         ws = self._call(
             f"{DEFAULT_PYTHON_API_URL.rstrip('/')}/api/workspace/prepare",
             method="POST",
@@ -200,6 +209,7 @@ class Orchestrator:
         ) or {}
         workspace_path = ws.get("extracted_path") if isinstance(ws, dict) else None
         file_count = ws.get("file_count") if isinstance(ws, dict) else None
+        self._report_step_progress(ctx, "extracting", 100)
         return workspace_path, file_count
 
     def _cleanup_workspace(self, workspace_path: str | None) -> None:
@@ -366,14 +376,19 @@ class Orchestrator:
                 action_name = action.get("action")
                 action_args = action.get("args", {}) or {}
             self._update_step(ctx.job_id, f"post_{action_name}", "running")
+            self._report_step_progress(
+                ctx, f"post_{action_name}", 5, action_name.replace("_", " ").title()
+            )
             handler = self._action_handlers.get(action_name)
             if handler is None:
                 self._update_step(ctx.job_id, f"post_{action_name}", "done")
+                self._report_step_progress(ctx, f"post_{action_name}", 100)
                 continue
             result = handler(result, action_args, tool_name=tool_name, job_id=ctx.job_id, php_base_url=DEFAULT_PYTHON_API_URL)
             if isinstance(result, dict) and result.get("collection_name"):
                 collection_name = result.get("collection_name")
             self._update_step(ctx.job_id, f"post_{action_name}", "done")
+            self._report_step_progress(ctx, f"post_{action_name}", 100)
         return result, collection_name
 
     def _collect_doc_context(
@@ -405,7 +420,9 @@ class Orchestrator:
             packages = dep_map.get("packages") or {}
             if not packages:
                 return None
+            self._report_step_progress(ctx, "doc_retrieval", 20, "Fetching Library Docs")
             result = retrieve_documentation(packages, ctx.prompt)
+            self._report_step_progress(ctx, "doc_retrieval", 100)
             if result.get("ok") and result.get("chunks"):
                 return {
                     "chunks": result["chunks"],
@@ -443,13 +460,38 @@ class Orchestrator:
             return None
         if not workspace_path or not os.path.isdir(workspace_path):
             return None
+        # Profile cache is keyed by normalized filename only — safe because
+        # uploads are analyzed once per filename and later questions reuse that
+        # profile (knowledge_cache contract); sandbox runs bypass the cache so
+        # runtime probes always reflect the freshly staged source. Re-uploading
+        # a new project under the same filename serves the cached profile (same
+        # trade as the answer auto-inject path).
+        route_sandbox = bool((ctx.route or {}).get("sandbox"))
         try:
-            from projects.project_profile import build_project_profile
+            from projects.knowledge_cache import get as cache_get
             from projects.knowledge_cache import put as cache_put
+            from projects.project_profile import build_project_profile
 
+            existing = None
+            if not route_sandbox:
+                try:
+                    existing = cache_get(ctx.filename)
+                except Exception:  # noqa: BLE001 — a cache read error must never block the job
+                    existing = None
+            if isinstance(existing, dict) and existing.get("framework"):
+                logger.info(
+                    "Framework profile cached for job %s (route=%s)",
+                    ctx.job_id,
+                    ctx.route_name,
+                )
+                self._report_step_progress(ctx, "framework", 100)
+                return existing
+
+            self._report_step_progress(ctx, "framework", 20, "Building framework profile")
             profile = build_project_profile(workspace_path)
             if profile:
                 cache_put(ctx.filename, profile)
+            self._report_step_progress(ctx, "framework", 100)
             return profile
         except Exception:
             get_exception_logger().error(
@@ -459,6 +501,94 @@ class Orchestrator:
                 exc_info=True,
             )
         return None
+
+    def _collect_structure_profile(
+        self, ctx: JobContext, workspace_path: str | None
+    ) -> dict[str, Any] | None:
+        """Static multi-language structure census (framework/lang/DB/arch).
+
+        Same cache contract as ``_collect_project_profile`` but scoped to the
+        route's ``structure: true`` opt-in and driven by the pure deterministic
+        ``projects.structure_profile`` module. Best-effort — a cache read or
+        build failure degrades to None and never fails the job.
+        """
+        if not (ctx.route or {}).get("structure"):
+            return None
+        if not workspace_path or not os.path.isdir(workspace_path):
+            return None
+        try:
+            from projects.knowledge_cache import get as cache_get
+            from projects.knowledge_cache import put as cache_put
+            from projects.structure_profile import build_structure_profile
+
+            existing = None
+            if not bool((ctx.route or {}).get("sandbox")):
+                try:
+                    existing = cache_get(ctx.filename)
+                except Exception:  # noqa: BLE001 — a cache read error must never block the job
+                    existing = None
+            if isinstance(existing, dict) and existing.get("framework"):
+                logger.info(
+                    "Structure profile cached for job %s (route=%s)",
+                    ctx.job_id,
+                    ctx.route_name,
+                )
+                return existing
+
+            profile = build_structure_profile(
+                workspace_path,
+                progress=lambda pct, label: self._report_step_progress(
+                    ctx, "structure", pct, label
+                ),
+            )
+            if profile:
+                cache_put(ctx.filename, profile)
+            return profile
+        except Exception:  # noqa: BLE001 — structure profile is best-effort
+            get_exception_logger().error(
+                "Structure profile failed for job %s (route=%s)",
+                ctx.job_id,
+                ctx.route_name,
+                exc_info=True,
+            )
+        return None
+
+    def _produce_code_chunks(
+        self, ctx: JobContext, workspace_path: str | None
+    ) -> dict[str, Any]:
+        """Language-dispatched code-index parse (index_code route preview).
+
+        Pure producer wrapper: workspace guard → ``projects.lang_index
+        .produce_chunks`` (which derives the primary language from the census
+        and dispatches php/python/other). Never raises — failures degrade to a
+        truthful ``{"chunks": [], "error": ...}`` dict. Full chunk bodies are
+        returned to the step for the preview; the JOB record only ever stores
+        the compact ``code_index`` summary.
+        """
+        empty = {"language": None, "chunks": [], "files": 0, "producer": None}
+        if not workspace_path or not os.path.isdir(workspace_path):
+            return {**empty, "error": f"workspace not found: {workspace_path}"}
+        try:
+            from projects.lang_index import produce_chunks
+
+            self._report_step_progress(ctx, "index", 20, "Indexing codebase")
+            result = produce_chunks(
+                workspace_path,
+                progress=lambda pct, label: self._report_step_progress(
+                    ctx, "index", pct, label
+                ),
+            )
+            self._report_step_progress(ctx, "index", 100)
+            return result
+        except Exception as exc:  # noqa: BLE001 — produce is best-effort
+            get_exception_logger().error(
+                "Code index failed for job %s (route=%s): %s",
+                getattr(ctx, "job_id", "?"),
+                getattr(ctx, "route_name", "?"),
+                exc,
+                exc_info=exc,
+            )
+            return {**empty, "error": str(exc)[:300]}
 
     def _safe_project_id(self, filename: str) -> str:
         """Filesystem-safe project id (must also be safe as a DinD path seg)."""
@@ -494,6 +624,9 @@ class Orchestrator:
                 project_id=self._safe_project_id(ctx.filename),
                 framework=str(framework) if framework else "php",
                 probes=list(probes) if isinstance(probes, list) else None,
+                progress=lambda pct, label: self._report_step_progress(
+                    ctx, "sandbox", pct, label
+                ),
             )
         except Exception as exc:
             get_exception_logger().error(
@@ -547,6 +680,8 @@ class Orchestrator:
                     "output": job.get("output"),
                     "doc_context": doc_context,
                     "project_profile": project_profile,
+                    "structure_profile": job.get("structure_profile"),
+                    "code_index": job.get("code_index"),
                     "sandbox": sandbox_result,
                     # F15: compact run manifest — everything a downstream
                     # consumer needs without re-reading the heavy payloads.
@@ -778,7 +913,14 @@ class Orchestrator:
 
         from index.llamaindex_layer import CodePropertyGraph
 
-        return CodePropertyGraph().ingest(result, collection_name)
+        key = "post_llamaindex_ingest"
+        # Coarse, honest phase hints only — ingest batches inside llamaindex
+        # internals, so 20/60 are the only externally observable checkpoints.
+        self._report_job_progress(job_id, key, 20, "Recreating vector collection")
+        ingested = CodePropertyGraph().ingest(result, collection_name)
+        self._report_job_progress(job_id, key, 60, "Embedding chunks")
+        self._report_job_progress(job_id, key, 100)
+        return ingested
 
     def _act_llamaindex_route(
         self,
@@ -837,7 +979,9 @@ class Orchestrator:
     def _internal_secret(self) -> str:
         return str(self.config.get("internal_secret") or DEFAULT_INTERNAL_SECRET)
 
-    def _call_php_tool(self, tool_name: str, workspace_path: str | None) -> dict[str, Any] | None:
+    def _call_php_tool(
+        self, ctx: JobContext, tool_name: str, workspace_path: str | None
+    ) -> dict[str, Any] | None:
         try:
             tool_config = (self.config.get("tools") or {}).get(tool_name, {})
             args: dict[str, Any] = {}
@@ -845,10 +989,18 @@ class Orchestrator:
                 args[key] = self._resolve_env(value)
 
             if tool_name == "chunk_code":
-                return self._php_code_parse(workspace_path, args)
-            if tool_name == "export_structure":
-                return self._php_export_structure(workspace_path, args)
-            return {"success": False, "error": f"Unknown tool: {tool_name}"}
+                self._report_step_progress(ctx, "tool", 20, "Parsing code chunks")
+                result = self._php_code_parse(workspace_path, args)
+            elif tool_name == "export_structure":
+                self._report_step_progress(
+                    ctx, "tool", 20, "Exporting project structure"
+                )
+                result = self._php_export_structure(workspace_path, args)
+            else:
+                return {"success": False, "error": f"Unknown tool: {tool_name}"}
+            if isinstance(result, dict) and result.get("success") is not False:
+                self._report_step_progress(ctx, "tool", 100)
+            return result
         except Exception as exc:
             get_exception_logger().error(
                 "PHP tool call '%s' failed: %s", tool_name, exc, exc_info=exc
@@ -922,6 +1074,45 @@ class Orchestrator:
             )
             return None
 
+    def _report_step_progress(
+        self,
+        ctx: Any,
+        key: str,
+        percent: int,
+        label: str | None = None,
+    ) -> None:
+        """Record live per-step progress on the in-memory job (0..100 + label).
+
+        Memory-only by contract: progress history is never persisted, so a
+        finished run simply reports 100s. Never raises — a missing job (or a
+        bare ``__new__`` runner in tests) is a silent no-op. The status file is
+        NOT rewritten here; later ``_update_step``/``_save_outputs`` calls copy
+        the latest ``steps_progress`` through ``_write_status``.
+        """
+        self._report_job_progress(getattr(ctx, "job_id", None), key, percent, label)
+
+    def _report_job_progress(
+        self,
+        job_id: str | None,
+        key: str,
+        percent: int,
+        label: str | None = None,
+    ) -> None:
+        if not job_id:
+            return
+        jobs = getattr(self, "_jobs", None)
+        if jobs is None:
+            return
+        percent = max(0, min(100, int(percent)))
+        with self._lock:
+            job = jobs.get(job_id)
+            if not job:
+                return
+            entry = {"percent": percent}
+            if label is not None:
+                entry["label"] = label
+            job.setdefault("steps_progress", {})[key] = entry
+
     def _update_step(self, job_id: str, key: str, status: str, **extra: Any) -> None:
         with self._lock:
             job = self._jobs.get(job_id)
@@ -951,13 +1142,16 @@ class Orchestrator:
                 "started_at": job.get("started_at"),
                 "updated_at": job.get("updated_at"),
                 "steps": job.get("steps", []),
+                "steps_progress": job.get("steps_progress"),
                 "output": job.get("output"),
                 "tool_name": job.get("tool_name"),
                 "collection_name": job.get("collection_name"),
                 "tool_output": job.get("tool_output"),
                 "doc_context": job.get("doc_context"),
                 "project_profile": job.get("project_profile"),
+                "structure_profile": job.get("structure_profile"),
                 "sandbox": job.get("sandbox"),
+                "code_index": job.get("code_index"),
                 "entities": job.get("entities"),
                 "error": job.get("error"),
             }
@@ -973,7 +1167,9 @@ class Orchestrator:
         tool_output: Any = None,
         doc_context: dict[str, Any] | None = None,
         project_profile: dict[str, Any] | None = None,
+        structure_profile: dict[str, Any] | None = None,
         sandbox: dict[str, Any] | None = None,
+        code_index: dict[str, Any] | None = None,
     ) -> None:
         with self._lock:
             job = self._jobs.get(job_id)
@@ -987,7 +1183,9 @@ class Orchestrator:
             job["output"] = output
             job["doc_context"] = doc_context
             job["project_profile"] = project_profile
+            job["structure_profile"] = structure_profile
             job["sandbox"] = sandbox
+            job["code_index"] = code_index
             job["updated_at"] = time.time()
         self._write_status(job_id)
 

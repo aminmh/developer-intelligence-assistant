@@ -1833,7 +1833,7 @@ def _job_summary(job: dict | None) -> dict | None:
             )
     profile = job.get("project_profile") or {}
     output = _strip_ansi(job.get("output"))
-    return {
+    summary = {
         "job_id": job.get("job_id"),
         "status": job.get("status"),
         "error": job.get("error"),
@@ -1860,6 +1860,9 @@ def _job_summary(job: dict | None) -> dict | None:
         if output
         else None,
     }
+    if job.get("steps_progress"):
+        summary["steps_progress"] = job["steps_progress"]
+    return summary
 
 
 @app.get(
@@ -1929,13 +1932,75 @@ def start_project_analyze(body: dict):
 
 
 @app.post(
+    "/structure/analyze",
+    tags=["Analysis"],
+    summary="Analyze Project Structure",
+    description=(
+        "Launches a deterministic static structure-profile job: a multi-language "
+        "census of the extracted workspace (framework / language / database / "
+        "architecture) with no sandbox. deep=true delegates to the full "
+        "sandbox_analyze route instead. Returns a job_id for polling."
+    ),
+)
+def start_structure_analyze(body: dict):
+    filename = body.get("filename", "")
+    if not filename:
+        raise HTTPException(status_code=400, detail="Missing filename")
+    prompt = body.get("prompt", "")
+    deep = bool(body.get("deep", False))
+    job_id = str(uuid.uuid4())
+    if deep:
+        orchestrator.start_job(
+            job_id,
+            "sandbox_analyze",
+            filename,
+            prompt or "Analyze this project in the sandbox.",
+            entities=body.get("entities") or {},
+        )
+    else:
+        orchestrator.start_job(
+            job_id,
+            "structure_analyze",
+            filename,
+            prompt or "Analyze this project structure.",
+        )
+    return {"job_id": job_id}
+
+
+@app.post(
+    "/code/index",
+    tags=["Analysis"],
+    summary="Index Project Codebase",
+    description=(
+        "Launches an index_code orchestration job that parses the project "
+        "codebase (language-dispatched preview: no embedding at run time). "
+        "Returns a job_id for polling; POST /analysis later persists the "
+        "chunks into Qdrant + Neo4j."
+    ),
+)
+def start_code_index(body: dict):
+    filename = body.get("filename", "")
+    if not filename:
+        raise HTTPException(status_code=400, detail="Missing filename")
+    job_id = str(uuid.uuid4())
+    orchestrator.start_job(
+        job_id,
+        "index_code",
+        filename,
+        "Index this project codebase.",
+    )
+    return {"job_id": job_id}
+
+
+@app.post(
     "/analysis",
     tags=["Analysis"],
     summary="Save an Analysis Run",
     description=(
         "Persists a finished orchestration run (by its durable job bundle) as "
-        "a saved analysis: knowledge chunks → proj_knowledge_<stem> collection "
-        "(Qdrant + Neo4j), session row + artifacts in the analysis store."
+        "a saved analysis. Route-aware: structure_analyze → structure facts, "
+        "index_code → code index, every other route → knowledge chunks into "
+        "proj_knowledge_<stem> (Qdrant + Neo4j), session row + artifacts."
     ),
 )
 def save_analysis(body: dict):
@@ -1944,9 +2009,9 @@ def save_analysis(body: dict):
     if not job_id:
         raise HTTPException(status_code=400, detail="Missing job_id")
     try:
-        from analysis.analysis_service import persist_analysis
+        from analysis.analysis_service import persist_for_bundle
 
-        row = persist_analysis(str(job_id), label=str(label or ""))
+        row = persist_for_bundle(str(job_id), label=str(label or ""))
     except Exception as exc:
         raise HTTPException(status_code=500, detail=f"Save failed: {exc}") from exc
     if row is None:

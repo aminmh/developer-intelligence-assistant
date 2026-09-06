@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from types import SimpleNamespace
+
 from pipelines.steps import SharedState, build_steps, run_plan
 
 
@@ -30,7 +32,7 @@ class _FakeRunner:
         self.calls.append("select_tool")
         return "chunk_code"
 
-    def _call_php_tool(self, tool_name, workspace_path):
+    def _call_php_tool(self, ctx, tool_name, workspace_path):
         self.calls.append(f"tool:{tool_name}")
         return {"success": True, "chunks": []}
 
@@ -171,3 +173,65 @@ class TestOrchestratorDelegation:
         from pipelines.orchestrator import orchestrator
 
         assert orchestrator._build_steps({"tool": "chunk_code"}) == build_steps({"tool": "chunk_code"})
+
+
+class TestCollectProjectProfileCache:
+    """Real `_collect_project_profile` cache path (sandbox bypass guard)."""
+
+    @staticmethod
+    def _fresh_profile() -> dict:
+        return {"framework": "laravel", "version": "12", "routes": [], "controllers": []}
+
+    def test_non_sandbox_reuses_cached_profile(self, monkeypatch, tmp_path):
+        from pipelines.orchestrator import Orchestrator
+        from projects import knowledge_cache, project_profile
+
+        runner = Orchestrator.__new__(Orchestrator)
+        ws = tmp_path / "ws"
+        ws.mkdir()
+        store: dict[str, dict] = {}
+        monkeypatch.setattr(knowledge_cache, "get", lambda filename: store.get(filename))
+        monkeypatch.setattr(knowledge_cache, "put", lambda filename, profile: store.__setitem__(filename, profile))
+        builds: list[str] = []
+        monkeypatch.setattr(
+            project_profile,
+            "build_project_profile",
+            lambda workspace_path: builds.append(workspace_path) or self._fresh_profile(),
+        )
+        ctx = SimpleNamespace(
+            job_id="j1", route_name="chat", filename="LaravelApp.zip", route={"framework_aware": True}
+        )
+
+        first = runner._collect_project_profile(ctx, str(ws))
+        second = runner._collect_project_profile(ctx, str(ws))
+
+        assert builds == [str(ws)]  # built once; second call hit the cache
+        assert first == second == self._fresh_profile()
+        assert store["LaravelApp.zip"] == self._fresh_profile()
+
+    def test_sandbox_route_bypasses_cache(self, monkeypatch, tmp_path):
+        from pipelines.orchestrator import Orchestrator
+        from projects import knowledge_cache, project_profile
+
+        runner = Orchestrator.__new__(Orchestrator)
+        ws = tmp_path / "ws"
+        ws.mkdir()
+        stale = {"framework": "laravel", "routes": [{"method": "GET", "uri": "/old", "action": "C@old"}]}
+        monkeypatch.setattr(knowledge_cache, "get", lambda filename: stale)
+        builds: list[str] = []
+        monkeypatch.setattr(
+            project_profile,
+            "build_project_profile",
+            lambda workspace_path: builds.append(workspace_path) or self._fresh_profile(),
+        )
+        ctx = SimpleNamespace(
+            job_id="j2",
+            route_name="sandbox_analyze",
+            filename="LaravelApp.zip",
+            route={"framework_aware": True, "sandbox": True},
+        )
+
+        result = runner._collect_project_profile(ctx, str(ws))
+
+        assert builds == [str(ws)]  # sandbox always re-derives, stale cache ignored
+        assert result == self._fresh_profile()  # fresh build, not the stale cached dict

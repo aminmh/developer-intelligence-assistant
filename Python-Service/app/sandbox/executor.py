@@ -28,6 +28,7 @@ import re
 import tarfile
 import urllib.error
 import urllib.request
+from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
@@ -772,11 +773,23 @@ class SandboxExecutor:
         probes: list[str] | None = None,
         *,
         install_dev: bool | None = None,
+        progress: Callable[[int, str], None] | None = None,
     ) -> dict[str, Any]:
         """stage → install → probes. One call, partial-failure tolerant.
 
-        Returns {staged, source, install, probes:[...], runtime_image}.
+        ``progress(pct, label)`` receives coarse phase checkpoints (staging,
+        install, per-probe start, done) when the caller supplies it — omitted
+        callers behave exactly as before. Returns {staged, source, install,
+        probes:[...], runtime_image}.
         """
+        def report(pct: int, label: str) -> None:
+            if progress is None:
+                return
+            try:
+                progress(pct, label)
+            except Exception:  # noqa: BLE001 — progress reporting never raises
+                return
+
         out: dict[str, Any] = {
             "staged": False,
             "source": None,
@@ -804,23 +817,28 @@ class SandboxExecutor:
         image, _detail = self.resolve_runtime_image(framework, workspace_path, rel)
         if image:
             self._runtime_images[project_id] = image
+        report(10, "Staging project")
         try:
             src = self.stage_project(workspace_path, project_id)
             out["staged"] = True
             out["source"] = src
+            report(25, "Staged project")
         except Exception as exc:  # noqa: BLE001
             get_exception_logger().error("sandbox stage failed: %s", exc)
             out["install"] = {"status": "failed", "error": f"stage: {exc}"[:400]}
             return out
 
+        report(30, "Installing dependencies")
         install = self.install_dependencies(
             project_id, framework, dev=install_dev, image=image
         )
         out["install"] = install
         out["runtime_image"] = image or (rt or {}).get("image")
+        report(70, "Dependencies installed")
 
         if install.get("status") == "done" and install.get("exit_code") == 0:
-            for name in probes or list((rt.get("probes") or {}).keys()):
+            for index, name in enumerate(probes or list((rt.get("probes") or {}).keys())):
+                report(min(70 + index * 10, 95), f"Probe {name}")
                 # C6: one crashing probe never cancels the remaining probes.
                 try:
                     out["probes"].append(
@@ -842,6 +860,7 @@ class SandboxExecutor:
                 {"name": n, "status": "skipped", "reason": reason}
                 for n in (probes or list((rt.get("probes") or {}).keys()))
             ]
+        report(100, "done")
         return out
 
     def cleanup_staging(self, project_id: str) -> dict[str, Any]:

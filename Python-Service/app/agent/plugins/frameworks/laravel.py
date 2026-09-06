@@ -104,12 +104,16 @@ class LaravelFrameworkPlugin(FrameworkPlugin):
             confidence = 0.99
         return DetectionResult(name="laravel", confidence=confidence, version=version)
 
-    def analyze(self, workspace: Workspace) -> AnalysisResult:
+    def analyze(
+        self, workspace: Workspace, *, runtime_routes: bool = True
+    ) -> AnalysisResult:
         """Structural Laravel analysis: routes (static DSL parse), models.
 
         Runtime ``php artisan route:list`` (= Router::getRoutes()) is attempted
-        only when vendor/ is installed — uploaded zips usually ship without it,
-        so the static parser is the primary source here.
+        only when vendor/ is installed AND ``runtime_routes`` is True — uploaded
+        zips usually ship without it, so the static parser is the primary source
+        here, and offline callers (structure census) pass ``runtime_routes=False``
+        to keep the analysis subprocess-free.
         """
         scope = AnalysisScope(kind="routes", detail="Laravel route/module structure")
         findings: list[AnalysisFinding] = []
@@ -146,12 +150,13 @@ class LaravelFrameworkPlugin(FrameworkPlugin):
                 )
             )
 
-            # Runtime truth when the project is runnable (vendor + artisan + php):
-            # ``php artisan route:list`` == Router::getRoutes(). Static table is
-            # kept as fallback when execution is unavailable.
-            runtime_routes = _runtime_routes(root)
-            if runtime_routes is not None:
-                route_table = runtime_routes
+            # Runtime truth when the project is runnable AND the caller wants
+            # it (vendor + artisan + php): ``php artisan route:list`` ==
+            # Router::getRoutes(). Static table is kept as fallback when
+            # execution is unavailable or disabled (runtime_routes=False).
+            live_routes = _runtime_routes(root) if runtime_routes else None
+            if live_routes is not None:
+                route_table = live_routes
                 findings.append(
                     AnalysisFinding(
                         message=f"{len(route_table)} route(s) from artisan route:list (runtime)",

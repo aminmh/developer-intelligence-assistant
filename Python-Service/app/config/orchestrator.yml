@@ -87,4 +87,31 @@ routes:
         args: { language: text, prepend: "Project structure:\n" }
       - action: truncate
         args: { max_bytes: 8000 }
+    # Framework profile (routes/models/controllers/schema) so route/feature
+    # questions get grounded in the real Laravel surface.
+    framework_aware: true
     prompt_template: explain
+
+  structure_analyze:
+    # Static structure census: deterministic, multi-language profile
+    # (framework / language / database / architecture) from the extracted
+    # workspace — no sandbox, no runtime probes, offline.
+    description: Analyze project structure
+    tool: export_structure
+    framework_aware: false
+    structure: true
+    post_process: {}
+    prompt_template: analyze_structure
+
+  index_code:
+    # Language-dispatched code index: parses the workspace into chunks for a
+    # PREVIEW only — no llamaindex ingest runs here. POST /analysis later
+    # (persist_code_index) writes Qdrant + Neo4j from the retained workspace.
+    description: Index project codebase
+    tool: null
+    llamaindex: false
+    framework_aware: false
+    language_dispatch: true
+    retain_workspace: true
+    post_process: {}
+    prompt_template: analyze_code

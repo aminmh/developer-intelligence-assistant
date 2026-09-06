@@ -35,7 +35,12 @@ class SharedState:
     collection_name: str | None = None
     doc_context: dict[str, Any] | None = None
     project_profile: dict[str, Any] | None = None
+    structure_profile: dict[str, Any] | None = None
     sandbox_result: dict[str, Any] | None = None
+    code_chunks: list[dict[str, Any]] | None = None
+    code_language: str | None = None
+    code_producer: str | None = None
+    code_error: str | None = None
     output: Any = None
     extra: dict[str, Any] = field(default_factory=dict)
 
@@ -49,12 +54,29 @@ class Step:
     run: Callable[[Any, Any, SharedState], None]
 
 
+def _report_progress(
+    runner: Any, ctx: Any, key: str, percent: int, label: str | None = None
+) -> None:
+    """Forward a live step-progress checkpoint when the runner supports it.
+
+    The real Orchestrator owns ``_report_step_progress``; test FakeRunners that
+    omit the method are untouched (progress is an optional capability, never a
+    step requirement). Emitted right next to the running/done markers so every
+    activated step gets at least a 5 start and a 100 end.
+    """
+    report = getattr(runner, "_report_step_progress", None)
+    if report is None:
+        return
+    report(ctx, key, percent, label)
+
+
 # --- steps ---------------------------------------------------------------
 
 
 def _extract(runner: Any, ctx: Any, shared: SharedState) -> None:
     """Unzip the uploaded project into a scratch workspace."""
     runner._update_step(ctx.job_id, "extracting", "running")
+    _report_progress(runner, ctx, "extracting", 5, "Extracting project files")
     workspace_path, file_count = runner._prepare_workspace(ctx)
     shared.workspace_path = workspace_path
     shared.file_count = file_count
@@ -64,21 +86,32 @@ def _extract(runner: Any, ctx: Any, shared: SharedState) -> None:
         "done",
         file_count=file_count if file_count is not None else "Skipped",
     )
+    _report_progress(runner, ctx, "extracting", 100)
 
 
 def _route_tool(runner: Any, ctx: Any, shared: SharedState) -> None:
     """Pick the code-analysis tool (or LlamaIndex routing) and run it."""
+    route = ctx.route or {}
     tool_name = runner._select_tool(ctx)
-    runner._update_step(ctx.job_id, "routing", "done")
+    if route.get("tool") in (None, "", "auto") or route.get("llamaindex", True):
+        runner._update_step(ctx.job_id, "routing", "done")
+        _report_progress(runner, ctx, "routing", 100)
     shared.tool_name = tool_name
     if tool_name:
         runner._update_step(ctx.job_id, "tool", "running")
-        tool_result = runner._call_php_tool(tool_name, shared.workspace_path)
+        tool_label = (
+            f"Running {tool_name}"
+            if route.get("tool") not in (None, "", "auto")
+            else "Running selected tool"
+        )
+        _report_progress(runner, ctx, "tool", 5, tool_label)
+        tool_result = runner._call_php_tool(ctx, tool_name, shared.workspace_path)
         if not tool_result or tool_result.get("success") is False:
             error_message = None if not tool_result else tool_result.get("error")
             raise RuntimeError(error_message or f"PHP tool failed: {tool_name}")
         shared.tool_result = tool_result
         runner._update_step(ctx.job_id, "tool", "done")
+        _report_progress(runner, ctx, "tool", 100)
     shared.raw_output = (
         runner._extract_tool_output(shared.tool_result) if shared.tool_result else ctx.prompt
     )
@@ -100,6 +133,7 @@ def _doc_retrieval(runner: Any, ctx: Any, shared: SharedState) -> None:
     """Version-aware library docs (Context7 → GitMCP) when route opts in."""
     if (ctx.route or {}).get("doc_retrieval"):
         runner._update_step(ctx.job_id, "doc_retrieval", "running")
+        _report_progress(runner, ctx, "doc_retrieval", 5, "Fetching Library Docs")
     shared.doc_context = runner._collect_doc_context(
         ctx, shared.workspace_path, shared.post_process_result
     )
@@ -110,12 +144,14 @@ def _doc_retrieval(runner: Any, ctx: Any, shared: SharedState) -> None:
             else ("unavailable" if shared.doc_context else "skipped")
         )
         runner._update_step(ctx.job_id, "doc_retrieval", "done", detail=detail)
+        _report_progress(runner, ctx, "doc_retrieval", 100)
 
 
 def _framework(runner: Any, ctx: Any, shared: SharedState) -> None:
     """Detect the framework + statically extract project facts."""
     if (ctx.route or {}).get("framework_aware"):
         runner._update_step(ctx.job_id, "framework", "running")
+        _report_progress(runner, ctx, "framework", 5, "Analyzing Framework")
     shared.project_profile = runner._collect_project_profile(ctx, shared.workspace_path)
     if (ctx.route or {}).get("framework_aware"):
         detail = (
@@ -128,12 +164,82 @@ def _framework(runner: Any, ctx: Any, shared: SharedState) -> None:
             else "not detected"
         )
         runner._update_step(ctx.job_id, "framework", "done", detail=detail)
+        _report_progress(runner, ctx, "framework", 100)
+
+
+def _structure(runner: Any, ctx: Any, shared: SharedState) -> None:
+    """Static multi-language structure census when the route opts in."""
+    if not (ctx.route or {}).get("structure"):
+        return
+    runner._update_step(ctx.job_id, "structure", "running")
+    _report_progress(runner, ctx, "structure", 5, "Analyzing Structure")
+    if shared.workspace_path is None:
+        shared.structure_profile = None
+        runner._update_step(ctx.job_id, "structure", "done", detail="workspace missing")
+        _report_progress(runner, ctx, "structure", 100)
+        return
+    shared.structure_profile = runner._collect_structure_profile(
+        ctx, shared.workspace_path
+    )
+    profile = shared.structure_profile
+    detail = "workspace missing" if profile is None else _structure_detail(profile)
+    runner._update_step(ctx.job_id, "structure", "done", detail=detail)
+    _report_progress(runner, ctx, "structure", 100)
+
+
+def _structure_detail(profile: dict[str, Any] | None) -> str | None:
+    """One-line census summary ``fw ver · lang · DB db`` (None when nothing)."""
+    if not profile:
+        return None
+    summary = (
+        f"{profile.get('framework') or 'no framework'} "
+        f"{profile.get('version') or ''} · "
+        f"{profile.get('language') or '?'} · "
+        f"DB {profile.get('database') or 'not determined'}"
+    )
+    collapsed = " ".join(summary.split())
+    return collapsed or None
+
+
+def _dispatch_index(runner: Any, ctx: Any, shared: SharedState) -> None:
+    """Language-dispatched code-index parse (preview; Save writes stores)."""
+    if not (ctx.route or {}).get("language_dispatch"):
+        return
+    runner._update_step(ctx.job_id, "index", "running")
+    _report_progress(runner, ctx, "index", 5, "Indexing codebase")
+    if shared.workspace_path is None:
+        shared.code_error = "workspace missing"
+        runner._update_step(ctx.job_id, "index", "done", detail="workspace missing")
+        _report_progress(runner, ctx, "index", 100)
+        return
+    result = runner._produce_code_chunks(ctx, shared.workspace_path)
+    chunks = result.get("chunks") or []
+    shared.code_chunks = chunks
+    shared.code_language = result.get("language")
+    shared.code_producer = result.get("producer")
+    shared.code_error = result.get("error")
+    error = result.get("error")
+    if error:
+        runner._update_step(
+            ctx.job_id, "index", "done", detail=str(error)[:200]
+        )
+        _report_progress(runner, ctx, "index", 100)
+        return
+    producer = shared.code_producer or "?"
+    runner._update_step(
+        ctx.job_id,
+        "index",
+        "done",
+        detail=f"{producer} · {len(chunks)} chunk(s)",
+    )
+    _report_progress(runner, ctx, "index", 100)
 
 
 def _sandbox(runner: Any, ctx: Any, shared: SharedState) -> None:
     """Stage + install + probe the project in the nested sandbox backend."""
     if (ctx.route or {}).get("sandbox"):
         runner._update_step(ctx.job_id, "sandbox", "running")
+        _report_progress(runner, ctx, "sandbox", 5, "Running sandbox analysis")
     shared.sandbox_result = runner._run_sandbox_analysis(
         ctx, shared.workspace_path, shared.project_profile
     )
@@ -153,16 +259,37 @@ def _sandbox(runner: Any, ctx: Any, shared: SharedState) -> None:
         elif shared.sandbox_result is None:
             detail = "sandbox unavailable"
         runner._update_step(ctx.job_id, "sandbox", "done", detail=detail)
+        _report_progress(runner, ctx, "sandbox", 100)
 
 
 def _synthesize(runner: Any, ctx: Any, shared: SharedState) -> None:
-    """Produce the final job output (LlamaIndex summary preferred)."""
+    """Produce the final job output (LlamaIndex summary preferred).
+
+    A language-dispatch preview (index step ran) degrades to a compact
+    ``Indexed N lang chunk(s) with producer.`` summary instead of dumping the
+    raw parse output (which can be megabytes of code). An honest one-liner is
+    emitted when the dispatch itself failed.
+    """
     synthesized_output = runner._synthesize_with_llamaindex(
         ctx=ctx,
         tool_name=shared.tool_name,
         tool_result=shared.tool_result,
         post_process_result=shared.post_process_result,
     )
+    if synthesized_output:
+        shared.output = synthesized_output
+        return
+    if shared.code_error:
+        shared.output = f"No code chunks indexed: {shared.code_error}"
+        return
+    chunks = shared.code_chunks or []
+    if chunks:
+        producer = shared.code_producer or "?"
+        language = shared.code_language or ""
+        shared.output = (
+            f"Indexed {len(chunks)} {language} chunk(s) with {producer}."
+        )
+        return
     shared.output = (
         synthesized_output or shared.post_process_result or shared.raw_output
     )
@@ -170,6 +297,15 @@ def _synthesize(runner: Any, ctx: Any, shared: SharedState) -> None:
 
 def _persist(runner: Any, ctx: Any, shared: SharedState) -> None:
     """Store outputs on the job, write status + the durable result bundle."""
+    code_index: dict[str, Any] | None = None
+    if shared.code_chunks is not None or shared.code_error:
+        code_index = {
+            "language": shared.code_language,
+            "chunks": len(shared.code_chunks or []),
+            "producer": shared.code_producer,
+        }
+        if shared.code_error:
+            code_index["error"] = shared.code_error
     runner._save_outputs(
         ctx.job_id,
         output=shared.output,
@@ -179,7 +315,9 @@ def _persist(runner: Any, ctx: Any, shared: SharedState) -> None:
         tool_output=shared.post_process_result,
         doc_context=shared.doc_context,
         project_profile=shared.project_profile,
+        structure_profile=shared.structure_profile,
         sandbox=shared.sandbox_result,
+        code_index=code_index,
     )
     runner._persist_result_bundle(
         ctx, shared.doc_context, shared.project_profile, shared.sandbox_result
@@ -195,6 +333,8 @@ STEPS: tuple[Step, ...] = (
     Step("post_process", "Post-processing output", _post_process),
     Step("doc_retrieval", "Fetching Library Docs", _doc_retrieval),
     Step("framework", "Analyzing Framework", _framework),
+    Step("structure", "Analyzing Structure", _structure),
+    Step("index", "Indexing codebase", _dispatch_index),
     Step("sandbox", "Running sandbox analysis", _sandbox),
     Step("synthesize", "Synthesizing answer", _synthesize),
     Step("persist", "Saving job outputs", _persist),
@@ -229,6 +369,10 @@ def build_steps(route: dict[str, Any]) -> list[dict[str, Any]]:
         steps.append({"key": "doc_retrieval", "label": "Fetching Library Docs", "status": "pending"})
     if route.get("framework_aware"):
         steps.append({"key": "framework", "label": "Analyzing Framework", "status": "pending"})
+    if route.get("structure"):
+        steps.append({"key": "structure", "label": "Analyzing Structure", "status": "pending"})
+    if route.get("language_dispatch"):
+        steps.append({"key": "index", "label": "Indexing codebase", "status": "pending"})
     if route.get("sandbox"):
         steps.append({"key": "sandbox", "label": "Running sandbox analysis", "status": "pending"})
     for action in route.get("post_process", []) or []:

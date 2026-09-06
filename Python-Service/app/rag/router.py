@@ -1,11 +1,13 @@
 """Semantic Router — classifies user prompts using embedding similarity.
 
 Adds a feedback loop (query corrections persisted to Qdrant) and a hybrid
-LLM fallback for ambiguous/low-confidence cases. Embedding-based routing stays
-the default fast path.
+LLM fallback for ambiguous/heavy cases. Embedding-based routing stays the
+default fast path; route definitions and boundary criteria come from
+``rag.route_registry`` and the adjudicator prompt from ``rag.router_prompt``.
 """
 
 import json
+import logging
 import urllib.request
 import uuid
 from datetime import datetime, timezone
@@ -13,15 +15,24 @@ from pathlib import Path
 from typing import List, Optional, Tuple
 
 import numpy as np
-from semantic_router.encoders import BaseEncoder
-from semantic_router.route import Route
-from semantic_router.layer import RouteLayer
-
 from qdrant_client import QdrantClient
-from qdrant_client.models import Distance, VectorParams, PointStruct
+from qdrant_client.models import Distance, PointStruct, VectorParams
+from semantic_router.encoders import BaseEncoder
+from semantic_router.layer import RouteLayer
+from semantic_router.route import Route
 
 from infra.settings import settings
 from rag.query_normalizer import normalize_query
+from rag.route_registry import (
+    ROUTE_DESCRIPTIONS,  # noqa: F401 — re-exported for module API compatibility
+    ROUTE_ENTRIES,
+    ROUTE_HEAVY,
+    ROUTE_NAMES,
+    assert_route_enum,
+)
+from rag.router_prompt import build_adjudicator_prompt
+
+logger = logging.getLogger(__name__)
 
 # Feedback collection holds user-submitted corrections: query vector -> route.
 FEEDBACK_COLLECTION = "route_feedback"
@@ -35,6 +46,10 @@ FEEDBACK_OVERRIDE_THRESHOLD = 0.80
 # Ambiguity detection: top similarity below this, or top-2 within this margin.
 AMBIGUOUS_SCORE_THRESHOLD = 0.75
 AMBIGUOUS_MARGIN = 0.05
+
+# Below this embedding score a route is not worth trusting on its own; mirrors
+# orchestrator.yml defaults.min_confidence.
+MIN_CONFIDENCE = 0.35
 
 
 class OllamaEncoder(BaseEncoder):
@@ -50,117 +65,12 @@ class OllamaEncoder(BaseEncoder):
         return embed_texts([normalize_query(doc) for doc in docs])
 
 
-code_explain = Route(
-    name="code_explain",
-    utterances=[
-        "Explain this code",
-        "Summarize what this function does",
-        "Describe the logic of this file",
-        "What does this method do?",
-        "Explain this PHP class",
-        "Walk me through this function",
-        "Break down this code step by step",
-        "Tell me what this module does",
-    ],
-)
-
-code_refactor = Route(
-    name="code_refactor",
-    utterances=[
-        "Refactor this code",
-        "Improve the structure of this class",
-        "Rewrite this function to be cleaner",
-        "Optimize this code and reduce duplication",
-        "Suggest a safer refactor for this file",
-        "Make this code more maintainable",
-        "Split this method into smaller parts",
-        "Improve naming and structure here",
-        "Clean up this legacy code",
-    ],
-)
-
-debug = Route(
-    name="debug",
-    utterances=[
-        "I have an exception",
-        "This code crashes at runtime",
-        "Find the bug in this function",
-        "Debug this error",
-        "Why is this failing?",
-        "Fix this runtime issue",
-        "Why am I getting this stack trace?",
-        "Track down this bug",
-        "This throws an error",
-    ],
-)
-
-search = Route(
-    name="search",
-    utterances=[
-        "Find where this function is defined",
-        "Search for callers of this method",
-        "Locate imports of this class",
-        "Show me files related to this symbol",
-        "Search the codebase for this term",
-        "Where is this variable used?",
-        "Find references to this method",
-        "Show all usages of this class",
-        "Locate this symbol in the repo",
-    ],
-)
-
-knowledge = Route(
-    name="knowledge",
-    utterances=[
-        "Explain the project architecture",
-        "How is this system configured?",
-        "Where are the environment settings?",
-        "Show me the deployment details",
-        "What is the schema for this module?",
-        "Explain the repository structure",
-        "How does this service work?",
-        "Where are the config files?",
-        "What is the architecture of this app?",
-        "Show me the system design",
-    ],
-)
-
-chat = Route(
-    name="chat",
-    utterances=[
-        "Hello",
-        "Thanks",
-        "Goodbye",
-        "How are you?",
-        "General conversation",
-        "Hi",
-        "Hey",
-        "Thank you",
-        "Bye",
-    ],
-)
-
 encoder = OllamaEncoder()
 
 routes = [
-    code_explain,
-    code_refactor,
-    debug,
-    search,
-    knowledge,
-    chat,
+    Route(name=entry["name"], utterances=list(entry["utterances"]))
+    for entry in ROUTE_ENTRIES
 ]
-
-ROUTE_NAMES = [r.name for r in routes]
-
-ROUTE_DESCRIPTIONS = {
-    "code_explain": "Explain or summarize what code does",
-    "code_refactor": "Refactor, clean up, or improve code structure",
-    "debug": "Debug errors, crashes, or bugs",
-    "search": "Find/search symbols, references, or usages",
-    "knowledge": "Explain project architecture or configuration",
-    "chat": "General conversation or small talk",
-}
 
 try:
     router = RouteLayer(encoder=encoder, routes=routes)
@@ -267,7 +177,7 @@ def _feedback_override(query_vec: List[float]) -> Optional[str]:
     return None
 
 
-def _top_route_scores(query_vec: List[float], top_k: int = 20) -> List[Tuple[str, float]]:
+def _top_route_scores(query_vec: List[float], top_k: int = 8) -> List[Tuple[str, float]]:
     """Rank routes by their best (max) utterance cosine similarity."""
     if not _init_router():
         return []
@@ -287,34 +197,37 @@ def _top_route_scores(query_vec: List[float], top_k: int = 20) -> List[Tuple[str
 
 
 def _is_ambiguous(top1: float, ranked: List[Tuple[str, float]]) -> bool:
-    if top1 < AMBIGUOUS_SCORE_THRESHOLD:
-        return True
-    if len(ranked) >= 2 and (ranked[0][1] - ranked[1][1]) < AMBIGUOUS_MARGIN:
-        return True
-    return False
+    return top1 < AMBIGUOUS_SCORE_THRESHOLD or (
+        len(ranked) >= 2 and (ranked[0][1] - ranked[1][1]) < AMBIGUOUS_MARGIN
+    )
 
 
-def _build_selector_prompt(query: str) -> str:
-    lines = [
-        "You are a routing classifier. Choose exactly ONE route from the list "
-        "that best matches the user query.",
-        "Return only valid JSON: {\"route\": \"<route_name>\"}",
-        "",
-        "Routes:",
-    ]
+def _first_known_route(text: str) -> str | None:
+    """Return the first registered route name mentioned in raw LLM text."""
     for name in ROUTE_NAMES:
-        lines.append(f"- {name}: {ROUTE_DESCRIPTIONS.get(name, name)}")
-    lines.append("")
-    lines.append(f"Query: {query}")
-    return "\n".join(lines)
+        if name in text:
+            return name
+    return None
 
 
-def _llm_select_route(query: str) -> Optional[str]:
-    """Ask the configured Ollama chat model to pick a route for an ambiguous query."""
+def _llm_select_route(
+    query: str,
+    candidates: list[str],
+    context_note: str = "",
+) -> dict | None:
+    """Ask the configured Ollama chat model to pick a route for a hard query.
+
+    Returns a parsed, validated dict
+    ``{route, confidence, reason, needs_clarification, candidate_routes}`` or
+    None on any transport/parse/validation failure. ``confidence`` is None when
+    the model omits it (or when the route came from a prose scan) so ``classify``
+    substitutes the embedding top score; a present numeric value is clamped to
+    [0, 1].
+    """
     body = json.dumps(
         {
             "model": settings.ollama_llm_model,
-            "prompt": _build_selector_prompt(query),
+            "prompt": build_adjudicator_prompt(query, candidates, context_note),
             "stream": False,
             "format": "json",
         }
@@ -330,24 +243,59 @@ def _llm_select_route(query: str) -> Optional[str]:
     try:
         with urllib.request.urlopen(req, timeout=120) as response:
             data = json.loads(response.read().decode("utf-8"))
-    except Exception:
+    except Exception:  # noqa: BLE001 — best-effort classifier; any transport failure is a None.
         return None
 
-    text = data.get("response") or ""
+    text = data.get("response") or "" if isinstance(data, dict) else ""
     try:
         parsed = json.loads(text)
-        if isinstance(parsed, dict):
-            route = parsed.get("route")
-            if route in ROUTE_NAMES:
-                return route
-    except Exception:
-        pass
+    except Exception:  # noqa: BLE001 — the model may return prose; fall back to a text scan.
+        parsed = None
 
-    # Fallback: scan raw text for the first known route name.
-    for name in ROUTE_NAMES:
-        if name in text:
-            return name
-    return None
+    # Prose fallback: text-scan only when the model emitted no usable JSON.
+    # Valid JSON naming an unknown route is a validation failure (None) — a text
+    # scan of the raw JSON could let a route name inside `reason` win by accident.
+    if not isinstance(parsed, dict):
+        route = _first_known_route(text)
+        if route is None:
+            return None
+        return {
+            "route": route,
+            "confidence": None,
+            "reason": "",
+            "needs_clarification": False,
+            "candidate_routes": [],
+        }
+
+    route = parsed.get("route")
+    if route not in ROUTE_NAMES:
+        return None
+
+    try:
+        confidence = float(parsed.get("confidence"))
+    except (TypeError, ValueError):
+        confidence = None
+    if confidence is not None:
+        confidence = min(1.0, max(0.0, confidence))
+
+    raw_reason = parsed.get("reason")
+    reason = str(raw_reason)[:300] if raw_reason is not None else ""
+
+    raw_clarify = parsed.get("needs_clarification")
+    needs_clarification = raw_clarify if isinstance(raw_clarify, bool) else False
+
+    candidate_routes = []
+    if isinstance(parsed.get("candidate_routes"), list):
+        valid = [c for c in parsed["candidate_routes"] if c in ROUTE_NAMES]
+        candidate_routes = list(dict.fromkeys(valid))[:3]
+
+    return {
+        "route": route,
+        "confidence": confidence,
+        "reason": reason,
+        "needs_clarification": needs_clarification,
+        "candidate_routes": candidate_routes,
+    }
 
 
 def _log_fallback(
@@ -355,8 +303,10 @@ def _log_fallback(
     embedding_route: str,
     embedding_score: float,
     ranked: List[Tuple[str, float]],
-    llm_route: Optional[str],
+    llm_result: dict | None,
+    final_confidence: float,
 ) -> None:
+    """Append one JSON line for every adjudicator fallback invocation."""
     try:
         log_path = Path(settings.log_dir) / "router-fallback.log"
         log_path.parent.mkdir(parents=True, exist_ok=True)
@@ -367,8 +317,16 @@ def _log_fallback(
                 "embedding_route": embedding_route,
                 "embedding_score": embedding_score,
                 "top_routes": ranked,
-                "llm_route": llm_route,
-                "final_choice": llm_route or embedding_route,
+                "llm_route": (llm_result or {}).get("route"),
+                "llm_confidence": (llm_result or {}).get("confidence"),
+                "reason": (llm_result or {}).get("reason"),
+                "needs_clarification": (llm_result or {}).get(
+                    "needs_clarification"
+                ),
+                "candidate_routes": (llm_result or {}).get("candidate_routes"),
+                "final_confidence": final_confidence,
+                "final_choice": (llm_result or {}).get("route")
+                or embedding_route,
             },
             default=str,
         )
@@ -379,40 +337,128 @@ def _log_fallback(
 
 
 def classify(prompt: str) -> dict:
-    """Classify a user prompt and return {route, confidence, source?}."""
+    """Classify a user prompt and return a superset dict of route metadata.
+
+    Keys: ``route``, ``confidence``, ``reason``, ``needs_clarification``,
+    ``source`` (``"embedding"`` | ``"llm_fallback"`` | ``"feedback"``) and,
+    after an adjudicator call, ``candidate_routes``. Consumers must treat the
+    response as additive — new keys may be added without notice.
+    """
+    # 1) Deterministic degradation: no router, no embeddings => safe chat route.
     if not _init_router():
-        return {"route": "chat", "confidence": 0.0}
+        return {
+            "route": "chat",
+            "confidence": 0.0,
+            "reason": "router unavailable",
+            "needs_clarification": True,
+        }
 
     try:
         query_vec = encoder([prompt])[0]
-    except Exception:
-        return {"route": "chat", "confidence": 0.0}
+    except Exception:  # noqa: BLE001 — embed failures degrade to the safe chat route.
+        return {
+            "route": "chat",
+            "confidence": 0.0,
+            "reason": "router unavailable",
+            "needs_clarification": True,
+        }
 
-    # 1) Feedback override — a stored correction matches almost exactly.
+    # 2) Feedback override — a stored correction matches almost exactly.
     forced = _feedback_override(query_vec)
     if forced:
-        return {"route": forced, "confidence": 1.0, "source": "feedback"}
+        return {
+            "route": forced,
+            "confidence": 1.0,
+            "source": "feedback",
+            "reason": "user correction match",
+            "needs_clarification": False,
+        }
 
-    # 2) Normal embedding-based routing (default fast path).
+    # 3) Embedding ranking (default fast path).
     ranked = _top_route_scores(query_vec)
     if not ranked:
-        return {"route": "chat", "confidence": 0.0}
+        return {
+            "route": "chat",
+            "confidence": 0.0,
+            "reason": "no route candidates",
+            "needs_clarification": True,
+        }
 
-    route = ranked[0][0]
-    top1 = ranked[0][1]
+    top1 = ranked[0][0]
+    top_score = ranked[0][1]
+    candidates = [name for name, _score in ranked[:3]]
 
-    # 3) Ambiguity detection -> LLM fallback.
-    if _is_ambiguous(top1, ranked):
-        llm_route = _llm_select_route(prompt)
-        _log_fallback(prompt, route, top1, ranked, llm_route)
-        if llm_route:
-            return {
-                "route": llm_route,
-                "confidence": round(top1, 4),
-                "source": "llm_fallback",
-            }
+    # 4) Escalate heavy routes and ambiguous rankings to the LLM adjudicator.
+    needs_adjudication = _is_ambiguous(top_score, ranked) or any(
+        name in ROUTE_HEAVY for name in candidates
+    )
 
+    if not needs_adjudication:
+        return {
+            "route": top1,
+            "confidence": round(top_score, 4),
+            "source": "embedding",
+            "reason": None,
+            "needs_clarification": False,
+        }
+
+    # 5) LLM adjudication.
+    llm = _llm_select_route(prompt, candidates)
+    if llm:
+        final_confidence = (
+            round(llm["confidence"], 4)
+            if llm.get("confidence") is not None
+            else round(top_score, 4)
+        )
+        _log_fallback(prompt, top1, top_score, ranked, llm, final_confidence)
+        return {
+            **llm,
+            "source": "llm_fallback",
+            "confidence": final_confidence,
+            # Model echo of real candidates wins; an empty echo falls back to
+            # the embedding pre-filter so the field always reflects reality.
+            "candidate_routes": llm.get("candidate_routes") or candidates,
+        }
+
+    # 6) Adjudicator unavailable => trust the embedding only when it is strong.
+    fallback_confidence = round(top_score, 4)
+    _log_fallback(prompt, top1, top_score, ranked, llm, fallback_confidence)
     return {
-        "route": route,
-        "confidence": round(top1, 4),
+        "route": top1 if top_score >= MIN_CONFIDENCE else "chat",
+        "confidence": fallback_confidence,
+        "source": "embedding",
+        "reason": "llm adjudication unavailable",
+        "needs_clarification": top_score < 0.5,
     }
+
+
+def _check_route_enum_drift() -> None:
+    """Log a warning when classifier routes drift from orchestrator.yml keys.
+
+    Best-effort import-time parity tripwire: absent PyYAML or a missing/malformed
+    config file must never crash boot, but a genuine enum mismatch deserves a
+    loud warning even though import itself does not raise.
+    """
+    try:
+        import yaml
+    except ImportError:
+        return
+    config_path = Path(__file__).resolve().parent.parent / "config" / "orchestrator.yml"
+    try:
+        data = yaml.safe_load(config_path.read_text(encoding="utf-8")) or {}
+        keys = list((data.get("routes") or {}).keys())
+        # Orchestrator-only routes launched by dedicated endpoints (never via the
+        # chat classifier) are exempt from the ROUTE_NAMES enum.
+        assert_route_enum(
+            keys,
+            allowed_extra=frozenset(
+                {"sandbox_analyze", "structure_analyze", "index_code"}
+            ),
+        )
+    except Exception as exc:  # noqa: BLE001 — best-effort tripwire; never crash boot.
+        logger.warning("route enum drift: %s", exc)
+
+
+# Import-time tripwire: surface (never crash on) route-enum drift vs the
+# executable orchestrator config.
+_check_route_enum_drift()
