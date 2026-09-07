@@ -8,7 +8,7 @@ value), ``::class``-keyed arrays, empty array leaves, nested siblings.
 
 import pytest
 
-from agent.plugins.frameworks.laravel_config import parse_config_file
+from agent.plugins.frameworks.laravel.config import parse_config_file
 
 _MAIL = """return [
     'default' => env('MAIL_MAILER', 'smtp'),

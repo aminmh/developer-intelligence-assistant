@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from agent.plugins.frameworks.laravel_wiring import (
+from agent.plugins.frameworks.laravel.wiring import (
     extract_wiring,
     parse_bindings,
     parse_middleware,
@@ -181,7 +181,7 @@ class TestExtractWiring:
 
 # --- behaviors ---------------------------------------------------------------
 
-from agent.plugins.frameworks.laravel_behaviors import extract_behaviors
+from agent.plugins.frameworks.laravel.behaviors import extract_behaviors
 
 JOB = """<?php
 namespace App\\Jobs;
@@ -268,7 +268,7 @@ class TestBehaviors:
 
 # --- frontend ----------------------------------------------------------------
 
-from agent.plugins.frameworks.laravel_frontend import extract_frontend
+from agent.plugins.frameworks.laravel.frontend import extract_frontend
 
 CONTROLLER_AUTH = """<?php
 namespace App\\Http\\Controllers;
@@ -324,7 +324,7 @@ class TestFrontend:
 
 # --- errors ------------------------------------------------------------------
 
-from agent.plugins.frameworks.laravel_errors import extract_errors
+from agent.plugins.frameworks.laravel.errors import extract_errors
 
 CUSTOM_EXC = """<?php
 namespace App\\Exceptions;
@@ -379,7 +379,7 @@ class TestErrors:
 
 # --- packages ----------------------------------------------------------------
 
-from agent.plugins.frameworks.laravel_packages import extract_packages
+from agent.plugins.frameworks.laravel.packages import extract_packages
 
 COMPOSER_NO_PAY = """{
     "require": {

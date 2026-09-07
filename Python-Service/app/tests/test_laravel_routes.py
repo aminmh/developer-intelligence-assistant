@@ -3,7 +3,7 @@
 import json
 
 from agent.plugins.frameworks.laravel import LaravelFrameworkPlugin
-from agent.plugins.frameworks.laravel_routes import (
+from agent.plugins.frameworks.laravel.routes import (
     parse_routes_directory,
     parse_routes_from_source,
 )

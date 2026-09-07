@@ -125,7 +125,7 @@ class LaravelFrameworkPlugin(FrameworkPlugin):
 
         route_table: list[dict] = []
         if route_files:
-            from agent.plugins.frameworks.laravel_routes import (
+            from agent.plugins.frameworks.laravel.routes import (
                 parse_routes_directory,
             )
 
@@ -173,7 +173,7 @@ class LaravelFrameworkPlugin(FrameworkPlugin):
         models: list[dict] = []
         models_dir = root / "app" / "Models"
         if models_dir.is_dir():
-            from agent.plugins.frameworks.laravel_models import (
+            from agent.plugins.frameworks.laravel.models import (
                 parse_models_directory,
             )
 
@@ -194,7 +194,7 @@ class LaravelFrameworkPlugin(FrameworkPlugin):
         migrations: list[dict] = []
         mig_dir = root / "database" / "migrations"
         if mig_dir.is_dir():
-            from agent.plugins.frameworks.laravel_schema import (
+            from agent.plugins.frameworks.laravel.schema import (
                 collapse_migrations,
                 parse_migrations_directory,
             )
@@ -242,7 +242,7 @@ class LaravelFrameworkPlugin(FrameworkPlugin):
         config: dict = {}
         config_dir = root / "config"
         if config_dir.is_dir():
-            from agent.plugins.frameworks.laravel_config import (
+            from agent.plugins.frameworks.laravel.config import (
                 parse_config_directory,
             )
 
@@ -284,7 +284,7 @@ class LaravelFrameworkPlugin(FrameworkPlugin):
                 encoding="utf-8", errors="replace"
             )
 
-        from agent.plugins.frameworks.laravel_wiring import extract_wiring
+        from agent.plugins.frameworks.laravel.wiring import extract_wiring
 
         # Legacy (pre-L11) apps register providers in config/app.php — read the
         # raw source only when bootstrap/providers.php does not exist.
@@ -317,7 +317,7 @@ class LaravelFrameworkPlugin(FrameworkPlugin):
         if console_file.is_file():
             console_src = console_file.read_text(encoding="utf-8", errors="replace")
 
-        from agent.plugins.frameworks.laravel_behaviors import extract_behaviors
+        from agent.plugins.frameworks.laravel.behaviors import extract_behaviors
 
         behaviors = extract_behaviors(code_files, console_routes_src=console_src)
         data["behaviors"] = behaviors
@@ -333,7 +333,7 @@ class LaravelFrameworkPlugin(FrameworkPlugin):
             )
         )
 
-        from agent.plugins.frameworks.laravel_frontend import extract_frontend
+        from agent.plugins.frameworks.laravel.frontend import extract_frontend
 
         route_file_tuples = [
             (p.name, p.read_text(encoding="utf-8", errors="replace"))
@@ -353,7 +353,7 @@ class LaravelFrameworkPlugin(FrameworkPlugin):
                 )
             )
 
-        from agent.plugins.frameworks.laravel_errors import extract_errors
+        from agent.plugins.frameworks.laravel.errors import extract_errors
 
         errors = extract_errors(code_files, bootstrap_app_src=bootstrap_app_src)
         data["errors"] = errors
@@ -380,7 +380,7 @@ class LaravelFrameworkPlugin(FrameworkPlugin):
         if lock_file.is_file():
             composer_lock_src = lock_file.read_text(encoding="utf-8", errors="replace")
 
-        from agent.plugins.frameworks.laravel_packages import extract_packages
+        from agent.plugins.frameworks.laravel.packages import extract_packages
 
         packages = extract_packages(composer_json_src, composer_lock_src)
         data["packages"] = packages

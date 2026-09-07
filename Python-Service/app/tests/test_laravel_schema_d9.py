@@ -8,7 +8,7 @@ constrained() FKs, and quoted numeric defaults.
 
 import pytest
 
-from agent.plugins.frameworks.laravel_schema import (
+from agent.plugins.frameworks.laravel.schema import (
     collapse_migrations,
     parse_migration,
 )
