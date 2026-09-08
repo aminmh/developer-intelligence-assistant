@@ -719,7 +719,7 @@ class CodePropertyGraph:
             return qdrant.search(
                 collection_name=col_name,
                 query_vector=query_vec,
-                limit=min(5, max(1, limit)),
+                limit=max(1, limit),
                 query_filter=query_filter,
             )
         except Exception:
@@ -735,6 +735,7 @@ class CodePropertyGraph:
         trace_id: Optional[str] = None,
         graph_legs: Optional[List[str]] = None,
         join_sibling: bool = True,
+        apply_rerank: Optional[bool] = None,
     ) -> Dict[str, Any]:
         """Hybrid vector + graph retrieval with graceful vector-only fallback.
 
@@ -749,6 +750,9 @@ class CodePropertyGraph:
         knowledge vectors; index-aware callers that already enumerated the
         sibling as its own plan collection pass False so each collection is
         searched exactly once.
+
+        ``apply_rerank`` lets callers that merge multiple collection results
+        defer reranking until the complete candidate pool is available.
         """
         legs = _resolve_graph_legs(graph_legs)
         qdrant = self._get_qdrant()
@@ -764,6 +768,14 @@ class CodePropertyGraph:
             "graph_available": False,
             "graph_fallback": False,
             "sources": [],
+            "reranker": {
+                "enabled": bool(settings.reranker_enabled),
+                "model": settings.reranker_model,
+                "candidate_count": 0,
+                "reranked_count": 0,
+                "latency_ms": 0,
+                "fallback_reason": None,
+            },
         }
 
         try:
@@ -845,16 +857,25 @@ class CodePropertyGraph:
         if knowledge_active:
             trace["has_knowledge_count"] = 0
 
+        final_limit = max(1, int(limit))
+        if settings.reranker_enabled:
+            candidate_limit = min(
+                final_limit * 4,
+                max(final_limit, int(settings.reranker_max_candidates)),
+            )
+        else:
+            # Keep the pre-reranker retrieval shape unchanged when disabled.
+            candidate_limit = min(5, final_limit)
         all_results: List[Dict[str, Any]] = []
         seen_ids: set[str] = set()
         seen_sym: set[tuple[Any, ...]] = set()
         vector_hit_payloads: List[Dict[str, Any]] = []
 
         for col_name in target_collections:
-            hits = self._search(qdrant, col_name, query_vec, limit, query_filter)
+            hits = self._search(qdrant, col_name, query_vec, candidate_limit, query_filter)
             if not hits and query_filter is not None:
                 # Filtered search found nothing — fall back to unfiltered.
-                hits = self._search(qdrant, col_name, query_vec, limit, None)
+                hits = self._search(qdrant, col_name, query_vec, candidate_limit, None)
 
             vector_ids = []
             for h in hits:
@@ -922,7 +943,24 @@ class CodePropertyGraph:
                 )
                 trace["sym_count"] += len(all_results) - before
 
+        # Rerank the merged vector + graph candidate pool. The pre-rerank sort
+        # keeps the candidate cap deterministic while retaining the strongest
+        # vector/graph evidence when many graph rows are present.
         all_results.sort(key=lambda x: x["score"], reverse=True)
+        all_results = all_results[:candidate_limit]
+        should_rerank = settings.reranker_enabled if apply_rerank is None else apply_rerank
+        if should_rerank:
+            from rag.reranker import rerank
+
+            trace["reranker"] = rerank(query, all_results)
+        if trace["reranker"].get("reranked_count"):
+            all_results.sort(
+                key=lambda x: (
+                    float(x.get("rerank_score", float("-inf"))),
+                    float(x.get("score") or 0.0),
+                ),
+                reverse=True,
+            )
         if trace["graph_context_count"] > 0:
             trace["mode"] = "hybrid"
         elif trace["mode"] == "hybrid":
@@ -935,11 +973,11 @@ class CodePropertyGraph:
                 "via_graph": bool(r.get("via_graph")),
                 "score": round(float(r.get("score", 0.0)), 4),
             }
-            for r in all_results[:limit]
+            for r in all_results[:final_limit]
         ]
         record_retrieval_trace(trace_id or "", trace)
         return {
-            "results": all_results[:limit],
+            "results": all_results[:final_limit],
             "searched_collections": target_collections,
         }
 

@@ -1523,9 +1523,24 @@ def _answer_context(
                 trace_id=x_rag_trace_id,
                 graph_legs=list(graph_legs),
                 join_sibling=False,
+                apply_rerank=False,
             )
         )
     results, searched = _merge_plan_results(outputs)
+    rerank_summary = None
+    if settings.reranker_enabled and results:
+        from rag.reranker import rerank
+
+        results = results[:min(len(results), int(settings.reranker_max_candidates))]
+        rerank_summary = rerank(query, results)
+        if rerank_summary.get("reranked_count"):
+            results.sort(
+                key=lambda r: (
+                    float(r.get("rerank_score", float("-inf"))),
+                    float(r.get("score") or 0.0),
+                ),
+                reverse=True,
+            )
     vector_count = sum(1 for r in results if not r.get("via_graph"))
     graph_count = len(results) - vector_count
     with_code = sum(
@@ -1547,6 +1562,14 @@ def _answer_context(
             "graph_context_with_code_count": with_code,
             "graph_available": any(bool(r.get("via_graph")) for r in results),
             "graph_fallback": False,
+            "reranker": rerank_summary or {
+                "enabled": bool(settings.reranker_enabled),
+                "model": settings.reranker_model,
+                "candidate_count": len(results),
+                "reranked_count": 0,
+                "latency_ms": 0,
+                "fallback_reason": None,
+            },
             "sources": _sources_for(results),
         }
     )
@@ -2024,7 +2047,15 @@ def _coerce_setting(key: str, value):
             return default
     if isinstance(default, float):
         try:
-            return float(value)
+            parsed = float(value)
+            if key == "rerankerTimeoutS":
+                return max(0.1, min(120.0, parsed))
+            return parsed
+        except (TypeError, ValueError):
+            return default
+    if key == "rerankerMaxCandidates":
+        try:
+            return max(1, min(200, int(value)))
         except (TypeError, ValueError):
             return default
     if isinstance(default, bool):

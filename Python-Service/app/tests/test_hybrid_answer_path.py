@@ -67,7 +67,7 @@ class FakeGraph:
 
     def hybrid_retrieve(self, *, query, collection_name=None, limit=10,
                         class_name=None, file=None, trace_id=None,
-                        graph_legs=None, join_sibling=True):
+                        graph_legs=None, join_sibling=True, apply_rerank=None):
         self.calls.append({
             "query": query,
             "collection_name": collection_name,
@@ -77,6 +77,7 @@ class FakeGraph:
             "trace_id": trace_id,
             "graph_legs": list(graph_legs) if graph_legs is not None else None,
             "join_sibling": join_sibling,
+            "apply_rerank": apply_rerank,
         })
         results, searched = self.outcomes.get(
             collection_name, ([], ["global"] if collection_name is None else [])
@@ -593,4 +594,3 @@ class TestJobSummaryStructureFallback:
         assert summary is not None
         assert summary["profile"]["framework"] == "django"
         assert summary["profile"]["routes_source"] == "static"
-

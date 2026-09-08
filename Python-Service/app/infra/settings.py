@@ -65,6 +65,15 @@ class Settings(BaseModel):
         "DOMAIN_CONCEPTS_ENABLED", "true"
     ).strip().lower() in ("1", "true", "yes", "on")
 
+    reranker_enabled: bool = os.getenv(
+        "RERANKER_ENABLED", "false"
+    ).strip().lower() in ("1", "true", "yes", "on")
+    reranker_model: str = os.getenv(
+        "RERANKER_MODEL", "BAAI/bge-reranker-v2-m3"
+    )
+    reranker_max_candidates: int = int(os.getenv("RERANKER_MAX_CANDIDATES", "40"))
+    reranker_timeout: float = float(os.getenv("RERANKER_TIMEOUT", "10"))
+
     minio_endpoint: str = os.getenv("AWS_ENDPOINT", "minio:9000")
     minio_access_key: str = os.getenv("AWS_ACCESS_KEY_ID", "minio")
     minio_secret_key: str = os.getenv("AWS_SECRET_ACCESS_KEY", "minio123")
@@ -134,6 +143,10 @@ class RuntimeSettings:
         "top_p": "topP",
         "context_preview_mode": "contextPreviewMode",
         "domain_concepts_enabled": "domainConceptsEnabled",
+        "reranker_enabled": "rerankerEnabled",
+        "reranker_model": "rerankerModel",
+        "reranker_max_candidates": "rerankerMaxCandidates",
+        "reranker_timeout": "rerankerTimeoutS",
     }
 
     def __init__(self) -> None:
