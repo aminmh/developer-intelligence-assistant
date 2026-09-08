@@ -1,5 +1,5 @@
 from contextlib import asynccontextmanager
-from typing import Annotated, Optional
+from typing import Annotated, Any, Optional
 from fastapi import FastAPI, HTTPException, Header, Query, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, StreamingResponse
@@ -1609,6 +1609,131 @@ def _maybe_inspect_context(results: list, body: dict) -> str | None:
         return None
 
 
+def _domain_project_id(body: dict) -> str | None:
+    """Concept-store project id anchored to an answer request body.
+
+    Mirrors ``_resolve_project_profile``/``knowledge_cache`` anchoring: prefer
+    the upload ``filename`` (project_stem of the zip), else strip the known
+    Qdrant prefixes off a pinned ``collection`` name. The derived id matches
+    what ``analysis.analysis_service.index_domain_for_workspace`` writes.
+    """
+    filename = body.get("filename")
+    if isinstance(filename, str) and filename.strip():
+        try:
+            from analysis.analysis_service import project_stem
+
+            return project_stem(filename)
+        except Exception:  # noqa: BLE001 — enrichment is best-effort
+            return None
+    collection = body.get("collection") or body.get("collection_name")
+    if not isinstance(collection, str) or not collection.strip():
+        return None
+    value = collection.strip()
+    for prefix in ("chunk_code_", "proj_knowledge_", "sym_"):
+        if value.startswith(prefix):
+            value = value[len(prefix):].strip()
+            break
+    if not value:
+        return None
+    try:
+        from analysis.analysis_service import project_stem
+
+        return project_stem(value)
+    except Exception:  # noqa: BLE001 — enrichment is best-effort
+        return None
+
+
+def _render_domain_block(result: Any) -> str | None:
+    """Markdown grounding block for a RecognitionResult (or None).
+
+    Renders only recognized concepts (+ verified relationship facts when the
+    recognizer expanded any); ambiguous/rejected evidence never appears and the
+    raw query is never echoed. ``result`` is duck-typed so a recognizer-shaped
+    fake is renderable without importing the domain layer.
+    """
+    recognized = list(getattr(result, "recognized", None) or [])
+    if not recognized:
+        return None
+    lines = ["# Recognized domain concepts", ""]
+    for row in recognized[:10]:
+        if not isinstance(row, dict):
+            continue
+        canonical = str(row.get("canonical_name") or row.get("identity_key") or "?")
+        concept_type = str(row.get("concept_type") or "concept")
+        label = str(row.get("qualified_name") or row.get("normalized_name") or canonical)
+        lines.append(f"- **{canonical}** ({concept_type}) — {label}")
+
+    relationships = list(getattr(result, "relationships", None) or [])
+    if relationships:
+        lines.extend(["", "# Verified related facts", ""])
+        for edge in relationships:
+            if not isinstance(edge, dict):
+                continue
+            source = edge.get("source") or {}
+            target = edge.get("target") or {}
+            source_name = (
+                str(source.get("canonical_name") or source.get("identity_key") or "?")
+                if isinstance(source, dict)
+                else "?"
+            )
+            target_name = (
+                str(target.get("canonical_name") or target.get("identity_key") or "?")
+                if isinstance(target, dict)
+                else "?"
+            )
+            lines.append(
+                f"- {source_name} {edge.get('relation_type')} {target_name}"
+            )
+    return "\n".join(lines)
+
+
+def _domain_store_has_concepts(project_id: str) -> bool:
+    """Cheap guard: has the project been domain-indexed at all?
+
+    Avoids a pointless (and potentially network-backed) recognition attempt on
+    every project /answer when the concept store has no rows yet. Best-effort:
+    a store failure returns True so the guarded recognizer decides.
+    """
+    try:
+        from projects.domain.store import concept_store
+
+        counts = concept_store.counts(project_id) or {}
+        return int(counts.get("concepts") or 0) > 0
+    except Exception:  # noqa: BLE001 — guard degrades to the recognizer attempt
+        return True
+
+
+def _maybe_domain_context(results: list, body: dict) -> str | None:
+    """Recognized-domain-concept grounding for /answer requests.
+
+    Opt-in via ``settings.domain_concepts_enabled`` plus a project anchor
+    (``filename`` or pinned ``collection``). Runs the bounded recognizer over
+    the project's indexed domain concepts and renders a block only when at
+    least one concept is recognized. Best-effort: disabled, no anchor, an
+    unindexed project, only rejected evidence, or any failure degrades to None
+    (no block).
+    """
+    if not settings.domain_concepts_enabled:
+        return None
+    if not isinstance(body, dict):
+        return None
+    query = body.get("query")
+    if not isinstance(query, str) or not query.strip():
+        return None
+    project_id = _domain_project_id(body)
+    if not project_id or not _domain_store_has_concepts(project_id):
+        return None
+    try:
+        from projects.domain.recognizer import recognize
+
+        return _render_domain_block(recognize(query, project_id))
+    except Exception:  # noqa: BLE001 — recognition is optional enrichment
+        get_exception_logger().warning(
+            "Domain-context grounding skipped", exc_info=True
+        )
+        return None
+
+
 _PREVIEW_MODES = {"off", "inline", "gate"}
 
 
@@ -1675,6 +1800,13 @@ def answer_prompt(
             f"{extra_context}\n\n{inspection_block}"
             if isinstance(extra_context, str) and extra_context.strip()
             else inspection_block
+        )
+    domain_block = _maybe_domain_context(results, body)
+    if domain_block:
+        extra_context = (
+            f"{extra_context}\n\n{domain_block}"
+            if isinstance(extra_context, str) and extra_context.strip()
+            else domain_block
         )
 
     preview_mode = _resolve_preview_mode(body)
@@ -1780,6 +1912,13 @@ def answer_stream(
             f"{extra_context}\n\n{inspection_block}"
             if isinstance(extra_context, str) and extra_context.strip()
             else inspection_block
+        )
+    domain_block = _maybe_domain_context(results, body)
+    if domain_block:
+        extra_context = (
+            f"{extra_context}\n\n{domain_block}"
+            if isinstance(extra_context, str) and extra_context.strip()
+            else domain_block
         )
 
     # Stream mode is carried by the generator itself: a leading ``context``
@@ -2040,7 +2179,10 @@ def _job_summary(job: dict | None) -> dict | None:
                     "detail": s.get("detail"),
                 }
             )
-    profile = job.get("project_profile") or {}
+    # structure_analyze / index_code jobs store the static structure_profile
+    # (framework/version/summary/routes…) and never a project_profile — fall
+    # back to it so the summary's profile object is never a blank shape.
+    profile = job.get("project_profile") or job.get("structure_profile") or {}
     output = _strip_ansi(job.get("output"))
     summary = {
         "job_id": job.get("job_id"),
@@ -2104,6 +2246,7 @@ def orchestration_summary(job_id: str):
                 "created_at": bundle.get("created_at"),
                 "output": bundle.get("output"),
                 "project_profile": bundle.get("project_profile"),
+                "structure_profile": bundle.get("structure_profile"),
                 "sandbox": bundle.get("sandbox"),
             }
     summary = _job_summary(job)
@@ -2278,6 +2421,78 @@ def delete_analysis(analysis_id: str):
     if not deleted:
         raise HTTPException(status_code=404, detail="Analysis not found")
     return {"success": True}
+
+
+@app.get(
+    "/domain/recognize",
+    tags=["Domain Concepts"],
+    summary="Recognize Domain Concepts in a Query",
+    description=(
+        "Maps a free-form query onto a project's indexed domain concepts "
+        "(exact/alias/identity matches plus a bounded semantic search). "
+        "Returns recognized/ambiguous/rejected hints with verified related "
+        "facts. The raw query text is never persisted or logged; any reported "
+        "matched alias carries the canonical store's own stored spelling."
+    ),
+)
+def domain_recognize(
+    query: str = "",
+    project_id: str = "",
+    type_hint: str | None = None,
+    fuzzy: bool = False,
+):
+    project_id = project_id.strip() if isinstance(project_id, str) else ""
+    if not project_id:
+        raise HTTPException(status_code=400, detail="Missing project_id")
+    try:
+        from projects.domain.recognizer import recognize
+
+        result = recognize(
+            str(query or ""),
+            project_id,
+            type_hint=(
+                type_hint.strip()
+                if isinstance(type_hint, str) and type_hint.strip()
+                else None
+            ),
+            fuzzy=bool(fuzzy),
+        )
+    except Exception as exc:  # noqa: BLE001 — recognition stays total over HTTP
+        return {"success": False, "error": f"Recognition failed: {exc}"[:300]}
+    return {
+        "success": True,
+        "result": {
+            "recognized": list(result.recognized),
+            "ambiguous": list(result.ambiguous),
+            "rejected": list(result.rejected),
+            "relationships": list(result.relationships),
+            "degraded": bool(result.degraded),
+            "error": result.error,
+            "query_note": result.query_note,
+        },
+    }
+
+
+@app.post(
+    "/domain/reconcile",
+    tags=["Domain Concepts"],
+    summary="Rebuild a Project's Domain Concept Index",
+    description=(
+        "Full rebuild of one project's domain concept index from its retained "
+        "or HTTP-prepared workspace: clears index state (before the purge so "
+        "unchanged rows are re-embedded), re-extracts + upserts concepts, "
+        "removes canonical concepts absent from the fresh extraction, then "
+        "purges and re-mirrors the Qdrant collection. Never raises; failures "
+        "are reported with success:false."
+    ),
+)
+def domain_reconcile(body: dict):
+    filename = (body.get("filename") or "") if isinstance(body, dict) else ""
+    if not isinstance(filename, str) or not filename.strip():
+        raise HTTPException(status_code=400, detail="Missing filename")
+    from analysis.analysis_service import reconcile_domain_index
+
+    return reconcile_domain_index(filename.strip())
 
 
 @app.get(

@@ -8,9 +8,11 @@ never references Laravel directly.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import re
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 from agent.core.capability import Capability
 from agent.core.types import (
@@ -26,6 +28,9 @@ from agent.core.types import (
 from agent.interfaces.framework import FrameworkPlugin
 from agent.interfaces.validator import Validator
 from agent.plugins.validators import ArtisanValidator, PhpUnitValidator
+
+if TYPE_CHECKING:
+    from projects.domain.types import DomainExtraction
 
 _LARAVEL_REQUIRE = "laravel/framework"
 _VERSION_RE = re.compile(r"\^?v?(\d+)")
@@ -67,6 +72,35 @@ def _laravel_root(workspace: Workspace) -> Path | None:
         if _LARAVEL_REQUIRE in (data.get("require") or {}):
             return base
     return None
+
+
+def _php_fqn_from_rel(rel: str) -> str | None:
+    """PSR-4 style ``App\\`` guess from an ``app/.../File.php`` path.
+
+    Laravel's default autoload maps ``App\\`` to ``app/``, so the file's
+    relative path already encodes the class FQN: ``app/Models/Payment.php``
+    -> ``App\\Models\\Payment``. This is a documented heuristic (confidence is
+    set by the caller), not a read of the file's own ``namespace`` statement.
+    Returns None when no FQN can be derived.
+    """
+    if not isinstance(rel, str) or not rel.endswith(".php"):
+        return None
+    raw = rel[:-4].replace("\\", "/").split("/")
+    segments: list[str] = []
+    for part in raw:
+        segment = part.strip()
+        if not segment:
+            return None
+        segments.append(segment[:1].upper() + segment[1:])
+    if not segments:
+        return None
+    return "\\".join(segments)
+
+
+def _evidence_hash(method: str, file: str | None, label: str) -> str:
+    """Stable location hash for one evidence/source record."""
+    raw = "|".join(str(part) for part in (method, file, label))
+    return hashlib.sha1(raw.encode("utf-8")).hexdigest()
 
 
 class LaravelFrameworkPlugin(FrameworkPlugin):
@@ -179,7 +213,10 @@ class LaravelFrameworkPlugin(FrameworkPlugin):
 
             models = parse_models_directory(
                 [
-                    (p.name, p.read_text(encoding="utf-8", errors="replace"))
+                    (
+                        str(p.relative_to(root)),
+                        p.read_text(encoding="utf-8", errors="replace"),
+                    )
                     for p in sorted(models_dir.rglob("*.php"))
                 ]
             )
@@ -411,6 +448,364 @@ class LaravelFrameworkPlugin(FrameworkPlugin):
 
         summary = "; ".join(f.message for f in findings)
         return AnalysisResult(scope=scope, findings=findings, summary=summary, data=data)
+
+    def extract_domain_concepts(self, workspace: Workspace) -> DomainExtraction:
+        """Framework-level domain concepts for a Laravel workspace.
+
+        Optional member of the framework-plugin shape: the core recognizer
+        discovers it by attribute presence (``hasattr``), so it is NOT part of
+        ``agent.interfaces.framework.FrameworkPlugin`` — that protocol is left
+        untouched and stays ``runtime_checkable`` for plugins without it.
+
+        Emits ONLY framework knowledge (route + table concepts and
+        model/event/listener/job/notification enrichments keyed by the PSR-4
+        ``App\\`` path convention). The PHP symbol pass is the core's job, so
+        class/method concepts are never duplicated here — enrichments carry the
+        same identity keys the language pass produces (``App\\Models\\X`` etc.)
+        and the core's merge attaches roles/aliases to the real class concepts.
+        Enrichment via path convention is a heuristic and therefore carries
+        confidence 0.6 + a ``*-path-convention`` provenance; relations are only
+        emitted when BOTH endpoints are uniquely resolvable (never on a leaf
+        basename collision). Never raises.
+
+        v1 limitations (documented, deliberate):
+          * Controllers get no separate concept — routes carry the
+            ``Controller@method`` action metadata and the php pass already
+            indexes the controller class itself.
+          * Config-derived concepts (``config/*.php``) are not emitted.
+        """
+        from projects.domain.normalizer import ConceptNormalizer
+        from projects.domain.types import (
+            DomainAlias,
+            DomainConcept,
+            DomainExtraction,
+            DomainRelationship,
+            DomainSource,
+        )
+
+        project_id = workspace.root.name or ""
+        try:
+            analysis = self.analyze(workspace, runtime_routes=False)
+        except Exception as exc:  # noqa: BLE001 — plugin pass must not raise
+            return DomainExtraction(
+                project_id=project_id,
+                concepts=[],
+                relationships=[],
+                error=f"laravel domain extraction failed: {exc}",
+                degraded=True,
+            )
+        data = analysis.data if isinstance(getattr(analysis, "data", None), dict) else {}
+
+        normalize = ConceptNormalizer().normalize
+        concepts_by_identity: dict[str, DomainConcept] = {}
+        relationship_keys: set[tuple[str, str, str]] = set()
+        relationships: list[DomainRelationship] = []
+
+        def space_alias(text: str) -> DomainAlias:
+            tokens = [
+                t
+                for t in normalize(text).split()
+                if t
+            ]
+            return DomainAlias(
+                alias=" ".join(tokens) or text.strip(),
+                alias_type="generated",
+                confidence=0.5,
+                provenance="normalizer",
+            )
+
+        def emit(
+            identity: str,
+            canonical: str,
+            concept_type: str,
+            roles: list[str],
+            aliases: list[DomainAlias],
+            metadata: dict,
+            file: str,
+            method: str,
+            confidence: float,
+            source_metadata: dict | None = None,
+        ) -> None:
+            if identity in concepts_by_identity:
+                return
+            source = DomainSource(
+                concept_identity=identity,
+                file=file or "",
+                source_hash=_evidence_hash(method, file, canonical),
+                start_line=None,
+                end_line=None,
+                method=method,
+                confidence=confidence,
+                metadata=source_metadata,
+            )
+            concepts_by_identity[identity] = DomainConcept(
+                identity_key=identity,
+                canonical_name=canonical,
+                qualified_name=identity,
+                concept_type=concept_type,
+                roles=list(roles),
+                normalized_name=normalize(canonical),
+                description=None,
+                aliases=list(aliases),
+                sources=[source],
+                metadata=metadata,
+            )
+
+        def add_relationship(
+            relation_type: str,
+            source_identity: str,
+            target_identity: str,
+            source_file: str,
+            metadata: dict,
+        ) -> None:
+            key = (relation_type, source_identity, target_identity)
+            if key in relationship_keys:
+                return
+            relationship_keys.add(key)
+            relationships.append(
+                DomainRelationship(
+                    relation_type=relation_type,
+                    source_identity=source_identity,
+                    target_identity=target_identity,
+                    confidence=1.0,
+                    sources=[
+                        DomainSource(
+                            concept_identity=source_identity,
+                            file=source_file or "",
+                            source_hash=_evidence_hash(
+                                "laravel-plugin", source_file, target_identity
+                            ),
+                            start_line=None,
+                            end_line=None,
+                            method="laravel-plugin",
+                            confidence=1.0,
+                            metadata=None,
+                        )
+                    ],
+                    metadata=metadata,
+                )
+            )
+
+        # --- 1. route concepts ---------------------------------------------
+        for route in data.get("routes") or []:
+            if not isinstance(route, dict):
+                continue
+            raw_method = str(route.get("method") or "GET").strip().upper() or "GET"
+            method_lower = raw_method.lower()
+            uri = str(route.get("uri") or "/")
+            canonical = f"{raw_method} {uri}"
+            identity = f"route:{method_lower}:{uri}"
+            aliases = [space_alias(canonical)]
+            route_name = route.get("name")
+            if isinstance(route_name, str) and route_name.strip():
+                aliases.append(
+                    DomainAlias(
+                        alias=route_name.strip(),
+                        alias_type="route",
+                        confidence=1.0,
+                        provenance="laravel-plugin",
+                    )
+                )
+            evidence_file = None
+            source = str(route.get("source") or "static")
+            route_file = route.get("file")
+            if source == "static" and isinstance(route_file, str) and route_file:
+                evidence_file = (
+                    route_file if "/" in route_file else f"routes/{route_file}"
+                )
+            emit(
+                identity=identity,
+                canonical=canonical,
+                concept_type="route",
+                roles=["route"],
+                aliases=aliases,
+                metadata={
+                    "method": method_lower,
+                    "uri": uri,
+                    "name": route_name,
+                    "middleware": list(route.get("middleware") or []),
+                    "action": route.get("action"),
+                    "file": evidence_file,
+                    "source": source,
+                },
+                file=evidence_file,
+                method="laravel-routes",
+                confidence=1.0,
+            )
+
+        # --- 2. schema table concepts --------------------------------------
+        for table in data.get("schema") or []:
+            if not isinstance(table, dict):
+                continue
+            table_name = str(table.get("table") or "").strip()
+            if not table_name:
+                continue
+            columns = table.get("columns") or []
+            identity = f"table:{table_name}"
+            emit(
+                identity=identity,
+                canonical=table_name,
+                concept_type="table",
+                roles=["table"],
+                aliases=[space_alias(table_name)],
+                metadata={"table": table_name, "column_count": len(columns)},
+                file="",
+                method="laravel-plugin",
+                confidence=1.0,
+            )
+
+        # --- 3. app/ enrichments via the PSR-4 path convention -------------
+        # Each emits a concept keyed by its conventional FQN so the core merge
+        # attaches the role/alias to the real class concept when the php pass
+        # produced one; standalone otherwise (flagged by the path method).
+        path_methods = {
+            "model": "laravel-model-path-convention",
+            "event": "laravel-path-convention",
+            "listener": "laravel-path-convention",
+            "job": "laravel-path-convention",
+            "notification": "laravel-path-convention",
+        }
+        for model in data.get("models") or []:
+            if not isinstance(model, dict):
+                continue
+            name = str(model.get("name") or "").strip()
+            file = str(model.get("file") or "").strip()
+            identity = _php_fqn_from_rel(file) if file else None
+            if not name or identity is None:
+                continue
+            table = str(model.get("table") or "").strip() or None
+            aliases = [space_alias(name)]
+            if table:
+                aliases.append(
+                    DomainAlias(
+                        alias=table,
+                        alias_type="table",
+                        confidence=0.9,
+                        provenance="laravel-plugin",
+                    )
+                )
+            emit(
+                identity=identity,
+                canonical=name,
+                concept_type="model",
+                roles=["model"],
+                aliases=aliases,
+                metadata={"table": table, "file": file},
+                file=file,
+                method=path_methods["model"],
+                confidence=0.6,
+                source_metadata={"kind": "model"},
+            )
+
+        behaviors = data.get("behaviors")
+        if not isinstance(behaviors, dict):
+            behaviors = {}
+
+        event_leaf_map: dict[str, list[str]] = {}
+        for event in behaviors.get("events") or []:
+            if not isinstance(event, dict):
+                continue
+            name = str(event.get("name") or "").strip()
+            file = str(event.get("file") or "").strip()
+            identity = _php_fqn_from_rel(file) if file else None
+            if not name or identity is None:
+                continue
+            emit(
+                identity=identity,
+                canonical=name,
+                concept_type="event",
+                roles=["event"],
+                aliases=[space_alias(name)],
+                metadata={"file": file},
+                file=file,
+                method=path_methods["event"],
+                confidence=0.6,
+                source_metadata={"kind": "event"},
+            )
+            event_leaf_map.setdefault(name, []).append(identity)
+
+        for job in behaviors.get("jobs") or []:
+            if not isinstance(job, dict):
+                continue
+            name = str(job.get("name") or "").strip()
+            file = str(job.get("file") or "").strip()
+            identity = _php_fqn_from_rel(file) if file else None
+            if not name or identity is None:
+                continue
+            emit(
+                identity=identity,
+                canonical=name,
+                concept_type="job",
+                roles=["job"],
+                aliases=[space_alias(name)],
+                metadata={"file": file, "queueable": bool(job.get("queueable"))},
+                file=file,
+                method=path_methods["job"],
+                confidence=0.6,
+                source_metadata={"kind": "job"},
+            )
+
+        for listener in behaviors.get("listeners") or []:
+            if not isinstance(listener, dict):
+                continue
+            name = str(listener.get("name") or "").strip()
+            file = str(listener.get("file") or "").strip()
+            identity = _php_fqn_from_rel(file) if file else None
+            if not name or identity is None:
+                continue
+            emit(
+                identity=identity,
+                canonical=name,
+                concept_type="listener",
+                roles=["listener"],
+                aliases=[space_alias(name)],
+                metadata={"file": file, "handles": listener.get("handles")},
+                file=file,
+                method=path_methods["listener"],
+                confidence=0.6,
+                source_metadata={"kind": "listener"},
+            )
+            handled = str(listener.get("handles") or "").strip()
+            if not handled:
+                continue
+            matches = event_leaf_map.get(handled) or []
+            if len(matches) == 1:
+                add_relationship(
+                    "HANDLED_BY",
+                    matches[0],
+                    identity,
+                    file,
+                    {"event": handled, "listener": name},
+                )
+
+        for notification in behaviors.get("notifications") or []:
+            if not isinstance(notification, dict):
+                continue
+            name = str(notification.get("name") or "").strip()
+            file = str(notification.get("file") or "").strip()
+            identity = _php_fqn_from_rel(file) if file else None
+            if not name or identity is None:
+                continue
+            emit(
+                identity=identity,
+                canonical=name,
+                concept_type="notification",
+                roles=["notification"],
+                aliases=[space_alias(name)],
+                metadata={"file": file},
+                file=file,
+                method=path_methods["notification"],
+                confidence=0.6,
+                source_metadata={"kind": "notification"},
+            )
+
+        return DomainExtraction(
+            project_id=project_id,
+            concepts=list(concepts_by_identity.values()),
+            relationships=relationships,
+            error=None,
+            degraded=False,
+        )
 
     def inspect_runtime(self, runtime: object) -> RuntimeInspection:
         # TODO(scope-B): run `php artisan --version` against the injected

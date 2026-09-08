@@ -95,11 +95,14 @@ routes:
   structure_analyze:
     # Static structure census: deterministic, multi-language profile
     # (framework / language / database / architecture) from the extracted
-    # workspace — no sandbox, no runtime probes, offline.
+    # workspace — no sandbox, no runtime probes, offline. The workspace is
+    # retained (bounded LRU) so a later POST /analysis save can re-extract the
+    # domain concepts from the real source (index_domain_for_workspace).
     description: Analyze project structure
     tool: export_structure
     framework_aware: false
     structure: true
+    retain_workspace: true
     post_process: {}
     prompt_template: analyze_structure
 

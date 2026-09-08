@@ -528,3 +528,69 @@ def test_index_plan_for_returns_off_dict_when_planner_raises(monkeypatch):
     assert plan["saved_kinds"] == []
     assert plan["has_sym"] is False
     assert plan["notes"] == ["plan error"]
+
+
+# --- _job_summary structure-profile fallback (F2) ------------------------------
+
+
+class TestJobSummaryStructureFallback:
+    def test_structure_profile_used_when_no_project_profile(self):
+        """structure_analyze jobs store structure_profile only — summary reads it."""
+        summary = main_module._job_summary(
+            {
+                "job_id": "j-struct",
+                "status": "done",
+                "route_name": "structure_analyze",
+                "structure_profile": {
+                    "framework": "laravel",
+                    "version": "11",
+                    "summary": "laravel project; php; 42 file(s); DB sqlite",
+                    "routes": [
+                        {"method": "GET", "uri": "/orders", "action": "OrderController@index"}
+                    ],
+                },
+            }
+        )
+        assert summary is not None
+        profile = summary["profile"]
+        assert profile["framework"] == "laravel"
+        assert profile["version"] == "11"
+        assert profile["routes"] == 1
+        assert profile["summary"].startswith("laravel project")
+
+    def test_absent_profiles_are_absence_safe(self):
+        summary = main_module._job_summary(
+            {"job_id": "j-bare", "status": "running"}
+        )
+        assert summary is not None
+        assert summary["profile"] == {
+            "framework": None,
+            "version": None,
+            "routes": 0,
+            "routes_source": None,
+            "summary": None,
+        }
+
+    def test_project_profile_preferred_over_structure_profile(self):
+        summary = main_module._job_summary(
+            {
+                "job_id": "j-both",
+                "status": "done",
+                "project_profile": {
+                    "framework": "django",
+                    "version": "5",
+                    "routes": [],
+                    "routes_source": "static",
+                    "summary": "django project",
+                },
+                "structure_profile": {
+                    "framework": "laravel",
+                    "version": "11",
+                    "summary": "laravel project",
+                },
+            }
+        )
+        assert summary is not None
+        assert summary["profile"]["framework"] == "django"
+        assert summary["profile"]["routes_source"] == "static"
+

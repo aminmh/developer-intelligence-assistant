@@ -31,6 +31,7 @@ RAG_CONFIG_DEFAULTS: Dict[str, Any] = {
     "docContext7Enabled": True,
     "docGitmcpEnabled": True,
     "docStrictMode": False,
+    "domainConceptsEnabled": True,
     "docContext7TimeoutS": 10,
     "docGitmcpTimeoutS": 15,
     "contextPreviewMode": "off",

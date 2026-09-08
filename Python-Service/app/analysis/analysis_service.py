@@ -28,6 +28,7 @@ from typing import Any
 
 from analysis.analysis_store import ANALYSIS_DIR, analysis_store
 from infra.exception_logger import get_exception_logger
+from infra.settings import settings
 
 try:
     from index.llamaindex_layer import (
@@ -35,7 +36,7 @@ try:
         _KNOWLEDGE_PREFIX,
         knowledge_collection_for,
     )
-except Exception:  # pragma: no cover — heavy import kept lazy below anyway
+except Exception:  # noqa: BLE001 — pragma: no cover; heavy import kept lazy below anyway
     knowledge_collection_for = None  # type: ignore[assignment]
     _CODE_PREFIX = "chunk_code_"
     _KNOWLEDGE_PREFIX = "proj_knowledge_"
@@ -589,6 +590,9 @@ def persist_for_bundle(job_id: str, label: str = "") -> dict[str, Any] | None:
     Chooses the persist strategy from the durable bundle's manifest route:
     ``structure_analyze`` → structure facts, ``index_code`` → code index, every
     other route → the legacy knowledge analysis (kind defaults to 'analysis').
+    After the kind-save succeeds and ``settings.domain_concepts_enabled`` is
+    on, the workspace's domain concepts are best-effort extracted and mirrored
+    (auto-index); a mirror failure never fails the already-saved row.
     """
     bundle = load_bundle(job_id)
     if not bundle:
@@ -596,7 +600,163 @@ def persist_for_bundle(job_id: str, label: str = "") -> dict[str, Any] | None:
     manifest = bundle.get("manifest") or {}
     route = manifest.get("route") or bundle.get("route_name") or ""
     if route == "structure_analyze":
-        return persist_structure(job_id, label)
-    if route == "index_code":
-        return persist_code_index(job_id, label)
-    return persist_analysis(job_id, label)
+        row = persist_structure(job_id, label)
+    elif route == "index_code":
+        row = persist_code_index(job_id, label)
+    else:
+        row = persist_analysis(job_id, label)
+
+    if row is not None and settings.domain_concepts_enabled:
+        filename = bundle.get("filename") or "unknown.zip"
+        domain = index_domain_for_workspace(filename)
+        if isinstance(domain, dict):
+            row["domain_index"] = domain
+    return row
+
+
+def _recover_workspace(filename: str) -> tuple[str | None, bool]:
+    """Resolve a workspace for ``filename``; ``(path, scratch)``.
+
+    Mirrors ``persist_code_index``: prefer the retained registry entry, else
+    re-prepare from HTTP. ``scratch=True`` means the caller must delete the
+    directory afterwards (safe_rmtree).
+    """
+    workspace_path = _retained_workspace(filename)
+    scratch = workspace_path is None
+    if scratch:
+        workspace_path = _prepare_workspace_http(filename)
+    return workspace_path, scratch
+
+
+def index_domain_for_workspace(
+    filename: str, stem: str | None = None
+) -> dict[str, Any]:
+    """Best-effort auto-index of domain concepts for a saved workspace.
+
+    ``stem`` (default: ``project_stem(filename)``) is the concept project id.
+    Recovers the workspace (retained or HTTP-prepared), runs the composed
+    extraction, upserts concepts/relationships into the concept store, then
+    mirrors the canonical rows into the Qdrant domain collection. Never raises:
+    every failure returns ``{"ok": False, "error": <truncated>}`` and a
+    HTTP-prepared scratch workspace is always removed.
+    """
+    try:
+        project_id = stem or project_stem(filename)
+        if not project_id:
+            return {"ok": False, "error": "missing filename"}
+        workspace_path, scratch = _recover_workspace(filename)
+        try:
+            if not workspace_path:
+                return {
+                    "ok": False,
+                    "error": "workspace unavailable",
+                    "project_id": project_id,
+                }
+            from projects.domain.extractor import extract_for_workspace
+            from projects.domain.indexer import (
+                CONCEPT_COLLECTION,
+                ensure_collection,
+                index_project_concepts,
+            )
+            from projects.domain.store import concept_store
+
+            extraction = extract_for_workspace(project_id, workspace_path)
+            store = concept_store
+            saved = store.upsert_extraction(project_id, extraction)
+            ensure_collection(CONCEPT_COLLECTION)
+            indexed = index_project_concepts(
+                project_id,
+                store.list_concepts(project_id),
+                CONCEPT_COLLECTION,
+            )
+            note = saved.get("error")
+            if not note and isinstance(extraction.error, str) and extraction.error:
+                note = extraction.error[:300]
+            return {
+                "ok": True,
+                "project_id": project_id,
+                "concepts": int(saved.get("concepts") or 0),
+                "relationships": int(saved.get("relationships") or 0),
+                "indexed": int(indexed.get("indexed") or 0),
+                "error": note,
+            }
+        finally:
+            if scratch and workspace_path:
+                from infra.php_tools import safe_rmtree
+
+                safe_rmtree(workspace_path)
+    except Exception as exc:  # noqa: BLE001 — helper is total by contract
+        get_exception_logger().warning("Domain auto-index skipped: %s", exc)
+        return {"ok": False, "error": str(exc)[:300]}
+
+
+def reconcile_domain_index(filename: str) -> dict[str, Any]:
+    """Full rebuild of one project's domain concept index. Never raises.
+
+    The canonical SQLite store and the mirrored Qdrant collection are both
+    reconciled from a fresh extraction, not just the mirror: stale canonical
+    concepts absent from the extraction are removed after the upsert (reconcile
+    is the explicit full-rebuild path). Ordering avoids the indexer's skip trap
+    (documented in indexer.py): the store's ``index_state`` is cleared BEFORE
+    the Qdrant purge so unchanged canonical rows are re-embedded instead of
+    skipped, then stale vectors are purged and every remaining canonical row is
+    re-mirrored.
+    """
+    try:
+        project_id = project_stem(filename)
+        if not project_id:
+            return {"success": False, "error": "missing filename"}
+        workspace_path, scratch = _recover_workspace(filename)
+        try:
+            if not workspace_path:
+                return {
+                    "success": False,
+                    "project_id": project_id,
+                    "error": "workspace unavailable",
+                }
+            from projects.domain.extractor import extract_for_workspace
+            from projects.domain.indexer import (
+                CONCEPT_COLLECTION,
+                ensure_collection,
+                index_project_concepts,
+                purge_project_vectors,
+            )
+            from projects.domain.store import concept_store
+
+            store = concept_store
+            store.clear_index_states(project_id)
+            extraction = extract_for_workspace(project_id, workspace_path)
+            saved = store.upsert_extraction(project_id, extraction)
+            keep_keys = {
+                str(concept.identity_key)
+                for concept in (getattr(extraction, "concepts", None) or [])
+                if getattr(concept, "identity_key", None)
+            }
+            removed = store.remove_concepts_not_in(project_id, keep_keys)
+            purged = purge_project_vectors(project_id, CONCEPT_COLLECTION)
+            ensure_collection(CONCEPT_COLLECTION)
+            indexed = index_project_concepts(
+                project_id,
+                store.list_concepts(project_id),
+                CONCEPT_COLLECTION,
+            )
+            error = saved.get("error") or indexed.get("error")
+            if not error and isinstance(extraction.error, str) and extraction.error:
+                error = extraction.error[:300]
+            return {
+                "success": True,
+                "project_id": project_id,
+                "concepts": store.counts(project_id),
+                "removed": int(removed),
+                "indexed": int(indexed.get("indexed") or 0),
+                "purged": int(purged.get("deleted") or 0),
+                "error": error,
+            }
+        finally:
+            if scratch and workspace_path:
+                from infra.php_tools import safe_rmtree
+
+                safe_rmtree(workspace_path)
+    except Exception as exc:  # noqa: BLE001 — reconcile is total by contract
+        get_exception_logger().warning("Domain reconcile failed: %s", exc)
+        return {"success": False, "error": str(exc)[:300]}

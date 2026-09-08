@@ -59,6 +59,12 @@ class Settings(BaseModel):
     # Context-window preview toggle: "off" | "inline" | "gate".
     context_preview_mode: str = os.getenv("CONTEXT_PREVIEW_MODE", "off")
 
+    # Auto-index extracted domain concepts (concept store + Qdrant mirror) after
+    # a save, and enrich /answer prompts with recognized domain concepts.
+    domain_concepts_enabled: bool = os.getenv(
+        "DOMAIN_CONCEPTS_ENABLED", "true"
+    ).strip().lower() in ("1", "true", "yes", "on")
+
     minio_endpoint: str = os.getenv("AWS_ENDPOINT", "minio:9000")
     minio_access_key: str = os.getenv("AWS_ACCESS_KEY_ID", "minio")
     minio_secret_key: str = os.getenv("AWS_SECRET_ACCESS_KEY", "minio123")
@@ -127,6 +133,7 @@ class RuntimeSettings:
         "temperature": "temperature",
         "top_p": "topP",
         "context_preview_mode": "contextPreviewMode",
+        "domain_concepts_enabled": "domainConceptsEnabled",
     }
 
     def __init__(self) -> None:
