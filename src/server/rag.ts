@@ -37,6 +37,7 @@ let ragConfig: RAGConfig = {
   docStrictMode: false,
   docContext7TimeoutS: 10,
   docGitmcpTimeoutS: 15,
+  domainConceptsEnabled: true,
   temperature: 0.7,
   topP: 0.9,
   contextPreviewMode: 'off',

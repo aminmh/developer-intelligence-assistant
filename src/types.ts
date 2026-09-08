@@ -18,6 +18,7 @@ export interface RAGConfig {
   docStrictMode: boolean;
   docContext7TimeoutS: number;
   docGitmcpTimeoutS: number;
+  domainConceptsEnabled: boolean;
   temperature: number;
   topP: number;
   contextPreviewMode: 'off' | 'inline' | 'gate';
