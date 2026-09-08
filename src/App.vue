@@ -48,6 +48,10 @@ const config = ref<RAGConfig>({
   temperature: 0.7,
   topP: 0.9,
   contextPreviewMode: 'off',
+  rerankerEnabled: false,
+  rerankerModel: 'BAAI/bge-reranker-v2-m3',
+  rerankerMaxCandidates: 40,
+  rerankerTimeoutS: 10,
 });
 
 // Route chat answers to the remote GPU LLM instead of the local Ollama model.

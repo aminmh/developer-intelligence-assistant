@@ -114,6 +114,12 @@ const modeClasses = (mode: RetrievalInsights['mode']) => {
           Graph retrieval was unavailable, so the answer used vector search only.
         </div>
 
+        <div v-if="insights.reranker" class="mb-3 rounded-xl border border-violet-500/20 bg-violet-500/5 px-3 py-2 text-[9px] text-violet-200 font-mono">
+          <span v-if="insights.reranker.reranked_count">Reranked {{ insights.reranker.reranked_count }} candidates in {{ Math.round(insights.reranker.latency_ms) }}ms.</span>
+          <span v-else-if="insights.reranker.enabled">Reranker fallback: {{ insights.reranker.fallback_reason || 'unavailable' }}.</span>
+          <span v-else>Reranking disabled.</span>
+        </div>
+
         <div v-if="insights.sources.length" class="space-y-1.5">
           <p class="text-[9px] uppercase tracking-wider text-slate-500 font-semibold">Top sources</p>
           <div

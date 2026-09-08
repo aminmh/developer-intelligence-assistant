@@ -22,6 +22,10 @@ export interface RAGConfig {
   temperature: number;
   topP: number;
   contextPreviewMode: 'off' | 'inline' | 'gate';
+  rerankerEnabled: boolean;
+  rerankerModel: string;
+  rerankerMaxCandidates: number;
+  rerankerTimeoutS: number;
 }
 
 export interface OllamaImportFile {
@@ -87,6 +91,14 @@ export interface RetrievalInsights {
   sources: RetrievalInsightSource[];
   timestamp: string;
   available?: boolean;
+  reranker?: {
+    enabled: boolean;
+    model: string;
+    candidate_count: number;
+    reranked_count: number;
+    latency_ms: number;
+    fallback_reason?: string | null;
+  };
 }
 
 export interface QueryResponse {

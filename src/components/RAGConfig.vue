@@ -10,6 +10,7 @@ import DocRetrievalCard from './config/DocRetrievalCard.vue';
 import DomainConceptsCard from './config/DomainConceptsCard.vue';
 import PreviewCard from './config/PreviewCard.vue';
 import SandboxRunnerCard from './config/SandboxRunnerCard.vue';
+import RerankerCard from './config/RerankerCard.vue';
 
 const props = defineProps<{
   config: RAGConfig;
@@ -45,6 +46,7 @@ const updateField = <K extends keyof RAGConfig>(key: K, value: RAGConfig[K]) => 
       <ModelImportCard :config="config" :update-field="updateField" />
       <DocRetrievalCard :config="config" :update-field="updateField" />
       <DomainConceptsCard :config="config" :update-field="updateField" />
+      <RerankerCard :config="config" :update-field="updateField" />
       <PreviewCard :config="config" :update-field="updateField" />
       <SandboxRunnerCard :config="config" :update-field="updateField" />
 

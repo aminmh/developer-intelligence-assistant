@@ -41,6 +41,10 @@ let ragConfig: RAGConfig = {
   temperature: 0.7,
   topP: 0.9,
   contextPreviewMode: 'off',
+  rerankerEnabled: false,
+  rerankerModel: 'BAAI/bge-reranker-v2-m3',
+  rerankerMaxCandidates: 40,
+  rerankerTimeoutS: 10,
 };
 
 // In-memory file tracking loaded from disk if it exists.
