@@ -74,6 +74,8 @@ class Settings(BaseModel):
     reranker_max_candidates: int = int(os.getenv("RERANKER_MAX_CANDIDATES", "40"))
     reranker_timeout: float = float(os.getenv("RERANKER_TIMEOUT", "10"))
 
+    log_deletion_mode: str = os.getenv("LOG_DELETION_MODE", "soft").strip().lower()
+
     minio_endpoint: str = os.getenv("AWS_ENDPOINT", "minio:9000")
     minio_access_key: str = os.getenv("AWS_ACCESS_KEY_ID", "minio")
     minio_secret_key: str = os.getenv("AWS_SECRET_ACCESS_KEY", "minio123")
@@ -147,6 +149,7 @@ class RuntimeSettings:
         "reranker_model": "rerankerModel",
         "reranker_max_candidates": "rerankerMaxCandidates",
         "reranker_timeout": "rerankerTimeoutS",
+        "log_deletion_mode": "logDeletionMode",
     }
 
     def __init__(self) -> None:
@@ -160,7 +163,10 @@ class RuntimeSettings:
                 return value
         if name == "ollama_eval_model":
             return self.ollama_llm_model
-        return getattr(self._env, name)
+        value = getattr(self._env, name)
+        if name == "log_deletion_mode" and value not in {"soft", "hard"}:
+            return "soft"
+        return value
 
     def revision(self) -> int:
         return settings_store.revision

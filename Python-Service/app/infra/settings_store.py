@@ -39,6 +39,7 @@ RAG_CONFIG_DEFAULTS: Dict[str, Any] = {
     "rerankerModel": "BAAI/bge-reranker-v2-m3",
     "rerankerMaxCandidates": 40,
     "rerankerTimeoutS": 10,
+    "logDeletionMode": "soft",
     "qdrantUrl": "",
     "qdrantApiKey": "",
     "sandboxDockerHost": "",

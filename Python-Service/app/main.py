@@ -45,6 +45,7 @@ from datetime import datetime, timezone, timedelta
 from pathlib import Path
 from qdrant_client import QdrantClient
 from jinja2 import Template
+from infra.log_viewer import clear_logs, list_logs
 
 
 # Matches tusd's `-max-size` (2 GiB).
@@ -1300,6 +1301,84 @@ def retrieval_insights(
     return trace
 
 
+@app.get(
+    "/logs",
+    tags=["Developer Logs"],
+    summary="List developer logs",
+)
+def developer_logs(
+    search: str = "",
+    types: str = "",
+    severity: str = "",
+    start: str = "",
+    end: str = "",
+    offset: int = Query(0, ge=0),
+    limit: int = Query(50, ge=1, le=200),
+    x_internal_secret: Annotated[str | None, Header(alias="X-Internal-Secret")] = None,
+):
+    if x_internal_secret != settings.internal_secret:
+        raise HTTPException(status_code=401, detail="Unauthorized")
+    selected = [item.strip() for item in types.split(",") if item.strip()] or None
+    try:
+        return list_logs(search=search, types=selected, severity=severity,
+                        start=start, end=end, offset=offset, limit=limit)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@app.delete(
+    "/logs/{log_type}",
+    tags=["Developer Logs"],
+    summary="Clear one developer log",
+)
+def clear_developer_log(
+    log_type: str,
+    x_internal_secret: Annotated[str | None, Header(alias="X-Internal-Secret")] = None,
+):
+    if x_internal_secret != settings.internal_secret:
+        raise HTTPException(status_code=401, detail="Unauthorized")
+    try:
+        return clear_logs(log_type)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@app.delete(
+    "/logs",
+    tags=["Developer Logs"],
+    summary="Clear all developer logs",
+)
+def clear_all_developer_logs(
+    x_internal_secret: Annotated[str | None, Header(alias="X-Internal-Secret")] = None,
+):
+    if x_internal_secret != settings.internal_secret:
+        raise HTTPException(status_code=401, detail="Unauthorized")
+    return clear_logs()
+
+
+@app.get("/logs/config", tags=["Developer Logs"], summary="Get log viewer configuration")
+def get_log_config(
+    x_internal_secret: Annotated[str | None, Header(alias="X-Internal-Secret")] = None,
+):
+    if x_internal_secret != settings.internal_secret:
+        raise HTTPException(status_code=401, detail="Unauthorized")
+    return {"deletion_mode": settings.log_deletion_mode}
+
+
+@app.put("/logs/config", tags=["Developer Logs"], summary="Update log viewer configuration")
+def update_log_config(
+    body: dict,
+    x_internal_secret: Annotated[str | None, Header(alias="X-Internal-Secret")] = None,
+):
+    if x_internal_secret != settings.internal_secret:
+        raise HTTPException(status_code=401, detail="Unauthorized")
+    mode = body.get("deletion_mode") if isinstance(body, dict) else None
+    if mode not in {"soft", "hard"}:
+        raise HTTPException(status_code=400, detail="deletion_mode must be soft or hard")
+    settings_store.set("logDeletionMode", mode)
+    return {"deletion_mode": mode}
+
+
 def _index_plan_for(body: dict, query: str, route: str) -> dict:
     """Resolve the index-aware grounding plan for an answer request.
 
@@ -2040,6 +2119,8 @@ def evaluate_prompt(body: dict):
 
 def _coerce_setting(key: str, value):
     default = RAG_CONFIG_DEFAULTS.get(key)
+    if key == "logDeletionMode":
+        return value if value in {"soft", "hard"} else default
     if isinstance(default, int) and not isinstance(value, bool):
         try:
             return int(value)
