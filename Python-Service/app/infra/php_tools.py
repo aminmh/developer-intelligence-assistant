@@ -12,24 +12,20 @@ Qdrant indexing pipeline. ZipSlip-safe ZIP extraction lives here too.
 from __future__ import annotations
 
 import io
-import json
-import re
 import shutil
-import subprocess
 import zipfile
 from pathlib import Path
 from typing import Any, Optional
 
 from infra.exception_logger import get_exception_logger
-from infra.settings import settings
+from infra.php_cli import PhpCli
 
 PHP_CLI_BIN = "code-parse"
 PHP_STRUCTURE_BIN = "project-export-structure"
 
 
 def php_bin(name: str) -> str:
-    root = Path(settings.php_cli_root or "/app/php")
-    return str(root / "bin" / name)
+    return PhpCli().binary(name)
 
 
 def extract_zip_safely(zip_bytes: bytes, dest: str) -> int:
@@ -62,48 +58,15 @@ def run_code_parse(project_path: str) -> list[dict[str, Any]]:
 
     Raises RuntimeError when the CLI fails; returns [] when no PHP is found.
     """
-    cmd = [php_bin(PHP_CLI_BIN), "--path", project_path, "--output", "json"]
-    proc = subprocess.run(cmd, capture_output=True, text=True, timeout=600)
-    if proc.returncode not in (0, 2):
-        raise RuntimeError(
-            proc.stderr.strip() or proc.stdout.strip() or f"code-parse exited {proc.returncode}"
-        )
-    stdout = proc.stdout.strip()
-    if not stdout:
-        return []
     try:
-        parsed = json.loads(stdout)
-    except json.JSONDecodeError:
-        # The CLI should emit only JSON on stdout, but tolerate a stray leading
-        # diagnostic by scanning for the first top-level array.
-        match = re.search(r"\[\s*\n?\s*\{", stdout)
-        if match:
-            depth = 0
-            start = match.start()
-            for i in range(start, len(stdout)):
-                if stdout[i] == "[":
-                    depth += 1
-                elif stdout[i] == "]":
-                    depth -= 1
-                    if depth == 0:
-                        try:
-                            parsed = json.loads(stdout[start : i + 1])
-                            return parsed
-                        except json.JSONDecodeError:
-                            break
-        raise RuntimeError("code-parse produced unparseable output")
-    return parsed if isinstance(parsed, list) else []
+        return PhpCli().code_parse(project_path)
+    except RuntimeError:
+        raise
 
 
 def run_export_structure(project_path: str, depth: int = 4) -> str:
     """Run `php bin/project-export-structure` and return the Markdown blueprint."""
-    cmd = [php_bin(PHP_STRUCTURE_BIN), project_path, f"--depth={max(1, depth)}"]
-    proc = subprocess.run(cmd, capture_output=True, text=True, timeout=120)
-    if proc.returncode != 0:
-        raise RuntimeError(
-            proc.stderr.strip() or proc.stdout.strip() or f"project-export-structure exited {proc.returncode}"
-        )
-    return proc.stdout.strip()
+    return PhpCli().export_structure(project_path, depth)
 
 
 def cap_structure(markdown: str, max_bytes: int = 8000) -> str:
