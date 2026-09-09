@@ -21,6 +21,50 @@ _instructor_client: Optional[Any] = None
 _remote_client_state: Optional[Tuple[str, str, OpenAI]] = None
 
 
+class CompletionResult(tuple):
+    """Backward-compatible ``(content, model, provider)`` plus usage metadata."""
+
+    def __new__(cls, content: str, model: str, provider: str, usage: dict | None = None):
+        value = super().__new__(cls, (content, model, provider))
+        value.usage = usage
+        return value
+
+
+class StreamChunk(tuple):
+    """Backward-compatible stream tuple with optional final usage metadata."""
+
+    def __new__(cls, delta: str, model: str, provider: str, usage: dict | None = None):
+        value = super().__new__(cls, (delta, model, provider))
+        value.usage = usage
+        return value
+
+
+def _usage_value(usage: Any, name: str) -> int | None:
+    if usage is None:
+        return None
+    if isinstance(usage, dict):
+        value = usage.get(name)
+    else:
+        value = getattr(usage, name, None)
+    return int(value) if isinstance(value, (int, float)) else None
+
+
+def normalize_usage(usage: Any) -> dict | None:
+    """Normalize OpenAI-compatible usage objects into the API shape."""
+    prompt = _usage_value(usage, "prompt_tokens")
+    completion = _usage_value(usage, "completion_tokens")
+    total = _usage_value(usage, "total_tokens")
+    if prompt is None and completion is None and total is None:
+        return None
+    return {
+        "prompt_tokens": prompt,
+        "completion_tokens": completion,
+        "total_tokens": total if total is not None else (prompt or 0) + (completion or 0),
+        "estimated": False,
+        "source": "provider",
+    }
+
+
 def _get_openai_client() -> OpenAI:
     """Return a lazily-created raw OpenAI client for the LOCAL chat provider.
 
@@ -134,8 +178,8 @@ def _run_chat(
     temperature: Optional[float] = None,
     top_p: Optional[float] = None,
     max_tokens: int = 2048,
-) -> str:
-    """Run a chat completion on `client` and return the plain text content."""
+) -> tuple[str, dict | None]:
+    """Run a chat completion and return text plus normalized provider usage."""
     messages: List[dict] = []
     if system:
         messages.append({"role": "system", "content": system})
@@ -153,7 +197,7 @@ def _run_chat(
 
     response = client.chat.completions.create(**kwargs)
     content = response.choices[0].message.content if response.choices else ""
-    return content or ""
+    return content or "", normalize_usage(getattr(response, "usage", None))
 
 
 def complete_with_model(
@@ -163,7 +207,7 @@ def complete_with_model(
     top_p: Optional[float] = None,
     max_tokens: int = 2048,
     provider: str = "local",
-) -> Tuple[str, str, str]:
+) -> CompletionResult:
     """Return (content, model_used, provider_used).
 
     provider_used is "remote" only when the remote path actually succeeded,
@@ -173,7 +217,7 @@ def complete_with_model(
     if provider == "remote" and remote_configured():
         model = settings.llm_remote_model or settings.ollama_llm_model
         try:
-            content = _run_chat(
+            content, usage = _run_chat(
                 _get_remote_client(),
                 model,
                 prompt,
@@ -183,13 +227,13 @@ def complete_with_model(
                 max_tokens=max_tokens,
             )
             if content:
-                return content, model, "remote"
+                return CompletionResult(content, model, "remote", usage)
             # Empty/falsy content is a remote failure — fall through to local.
         except Exception:
             pass  # silently fall back to the local model
 
     model = settings.local_llm_model or settings.ollama_llm_model
-    content = _run_chat(
+    content, usage = _run_chat(
         _get_openai_client(),
         model,
         prompt,
@@ -198,7 +242,7 @@ def complete_with_model(
         top_p=top_p,
         max_tokens=max_tokens,
     )
-    return content, model, "local"
+    return CompletionResult(content, model, "local", usage)
 
 
 def stream_chat(
@@ -214,29 +258,47 @@ def stream_chat(
 
     Raises on transport/API failure — callers degrade gracefully.
     """
+    for delta, _usage in _stream_chat_with_usage(
+        client, model, prompt, system=system, temperature=temperature,
+        top_p=top_p, max_tokens=max_tokens,
+    ):
+        if delta:
+            yield delta
+
+
+def _stream_chat_with_usage(
+    client: OpenAI,
+    model: str,
+    prompt: str,
+    system: Optional[str] = None,
+    temperature: Optional[float] = None,
+    top_p: Optional[float] = None,
+    max_tokens: int = 2048,
+) -> Any:
+    """Yield ``(delta, usage)`` pairs, including usage-only final chunks."""
     messages: list[dict] = []
     if system:
         messages.append({"role": "system", "content": system})
     messages.append({"role": "user", "content": prompt})
-
     kwargs: dict = {
         "model": model,
         "messages": messages,
         "max_tokens": max_tokens,
         "stream": True,
+        "stream_options": {"include_usage": True},
     }
     if temperature is not None:
         kwargs["temperature"] = temperature
     if top_p is not None:
         kwargs["top_p"] = top_p
-
     response = client.chat.completions.create(**kwargs)
     for chunk in response:
+        usage = normalize_usage(getattr(chunk, "usage", None))
         if not chunk.choices:
+            if usage is not None:
+                yield "", usage
             continue
-        delta = chunk.choices[0].delta.content
-        if delta:
-            yield delta
+        yield chunk.choices[0].delta.content or "", usage
 
 
 def stream_complete_with_model(
@@ -260,23 +322,16 @@ def stream_complete_with_model(
     def _local_stream():
         model = settings.local_llm_model or settings.ollama_llm_model
         yield "", model, "local"
-        yield from (
-            (delta, model, "local")
-            for delta in stream_chat(
-                _get_openai_client(),
-                model,
-                prompt,
-                system=system,
-                temperature=temperature,
-                top_p=top_p,
-                max_tokens=max_tokens,
-            )
-        )
+        for delta, usage in _stream_chat_with_usage(
+            _get_openai_client(), model, prompt, system=system,
+            temperature=temperature, top_p=top_p, max_tokens=max_tokens,
+        ):
+            yield StreamChunk(delta, model, "local", usage)
 
     if provider == "remote" and remote_configured():
         model = settings.llm_remote_model or settings.ollama_llm_model
         try:
-            first = stream_chat(
+            first = _stream_chat_with_usage(
                 _get_remote_client(),
                 model,
                 prompt,
@@ -285,11 +340,11 @@ def stream_complete_with_model(
                 top_p=top_p,
                 max_tokens=max_tokens,
             )
-            for delta in first:
+            for delta, usage in first:
                 if not emitted:
-                    yield "", model, "remote"
+                    yield StreamChunk("", model, "remote")
                     emitted = True
-                yield delta, model, "remote"
+                yield StreamChunk(delta, model, "remote", usage)
             return
         except Exception:
             # Nothing delivered yet — fall back to the local model.  # noqa: S110, BLE001 — intentional degradation to the local path

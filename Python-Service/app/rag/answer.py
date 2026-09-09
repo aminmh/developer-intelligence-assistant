@@ -49,6 +49,35 @@ def _cap(text: str, limit: int) -> str:
     return text if len(text) <= limit else text[:limit] + "\n… (truncated)"
 
 
+def _estimate_tokens(text: str) -> int:
+    """Conservative tokenizer-free estimate for providers without usage data."""
+    return max(1, (len(text) + 3) // 4) if text else 0
+
+
+def _usage_metadata(prompt: str, answer: str, provider_usage: dict | None) -> tuple[dict, dict | None]:
+    if provider_usage:
+        usage = dict(provider_usage)
+    else:
+        usage = {
+            "prompt_tokens": _estimate_tokens(SYSTEM_PROMPT + "\n" + prompt),
+            "completion_tokens": _estimate_tokens(answer),
+            "total_tokens": _estimate_tokens(SYSTEM_PROMPT + "\n" + prompt) + _estimate_tokens(answer),
+            "estimated": True,
+            "source": "estimate",
+        }
+    limit = int(getattr(settings, "llm_context_window_tokens", 0) or 0)
+    input_tokens = usage.get("prompt_tokens")
+    context_usage = None
+    if limit > 0 and isinstance(input_tokens, int):
+        context_usage = {
+            "input_tokens": input_tokens,
+            "limit_tokens": limit,
+            "percent": round(input_tokens / limit * 100, 1),
+            "estimated": bool(usage.get("estimated")),
+        }
+    return usage, context_usage
+
+
 def render_context_window(system: str, prompt: str) -> str:
     """Render the exact context window (system + user prompt) as markdown."""
     return f"# System prompt\n\n{system}\n\n---\n\n# Context window sent to model\n\n{prompt}"
@@ -195,13 +224,15 @@ def generate_answer(
 
     started = time.time()
     try:
-        answer, model_used, provider_used = complete_with_model(
+        completion = complete_with_model(
             prompt,
             system=SYSTEM_PROMPT,
             temperature=temp,
             top_p=topp,
             provider="remote" if use_remote else "local",
         )
+        answer, model_used, provider_used = completion
+        provider_usage = getattr(completion, "usage", None)
     except Exception as exc:
         get_exception_logger().error("Answer generation failed: %s", exc)
         answer = (
@@ -211,9 +242,11 @@ def generate_answer(
         )
         model_used = settings.ollama_llm_model
         provider_used = "local"
+        provider_usage = None
     duration_ms = int((time.time() - started) * 1000)
 
     answer, validation = validate_answer(answer, question, route)
+    usage, context_usage = _usage_metadata(prompt, answer, provider_usage)
 
     return {
         "answer": answer,
@@ -222,6 +255,8 @@ def generate_answer(
         "duration_ms": duration_ms,
         "code_validation": validation,
         "context_preview": window,
+        "usage": usage,
+        "context_usage": context_usage,
     }
 
 
@@ -284,14 +319,19 @@ def generate_answer_stream(
 
     started = time.time()
     buffer: List[str] = []
+    provider_usage = None
+    model_used = settings.ollama_llm_model
+    provider_used = "local"
     try:
-        for delta, model_used, provider_used in stream_complete_with_model(
+        for chunk in stream_complete_with_model(
             prompt,
             system=SYSTEM_PROMPT,
             temperature=temp,
             top_p=topp,
             provider="remote" if use_remote else "local",
         ):
+            delta, model_used, provider_used = chunk
+            provider_usage = getattr(chunk, "usage", None) or provider_usage
             if delta:
                 buffer.append(delta)
                 yield {"type": "delta", "text": delta}
@@ -316,11 +356,14 @@ def generate_answer_stream(
             "duration_ms": int((time.time() - started) * 1000),
             "truncated": True,
             "code_validation": [],
+            "usage": _usage_metadata(prompt, answer, provider_usage)[0],
+            "context_usage": _usage_metadata(prompt, answer, provider_usage)[1],
         }
         return
 
     answer = "".join(buffer)
     answer, validation = validate_answer(answer, question, route)
+    usage, context_usage = _usage_metadata(prompt, answer, provider_usage)
     yield {"type": "validation", "code_validation": validation}
     yield {
         "type": "done",
@@ -330,4 +373,6 @@ def generate_answer_stream(
         "duration_ms": int((time.time() - started) * 1000),
         "truncated": False,
         "code_validation": validation,
+        "usage": usage,
+        "context_usage": context_usage,
     }

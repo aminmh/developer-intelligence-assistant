@@ -138,6 +138,8 @@ class AnswerService:
             "provider": generated.get("provider", "local"),
             "durationMs": generated["duration_ms"],
             "code_validation": generated.get("code_validation", []),
+            "usage": generated.get("usage"),
+            "context_usage": generated.get("context_usage"),
         }
         if not generated.get("preview_only"):
             response["answer"] = generated["answer"]
@@ -152,4 +154,3 @@ class AnswerService:
             if generated.get("preview_only"):
                 response["preview_only"] = True
         return response
-
