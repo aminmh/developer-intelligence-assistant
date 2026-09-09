@@ -8,6 +8,7 @@ from infra.settings import settings
 from rag.router import classify as semantic_classify
 from rag.router import submit_feedback as router_submit_feedback
 from rag.intent import extract_intent
+from rag.answer_service import AnswerService, InvalidAnswerRequest
 from pipelines.orchestrator import orchestrator
 from infra.exception_logger import get_exception_logger, install_exception_hooks
 from infra.settings_store import (
@@ -1474,6 +1475,19 @@ def _resolve_preview_mode(body: dict) -> str:
     return mode
 
 
+def _answer_service() -> AnswerService:
+    return AnswerService(
+        answer_context=_answer_context,
+        resolve_profile=_resolve_project_profile,
+        inspect_context=_maybe_inspect_context,
+        domain_context=_maybe_domain_context,
+        resolve_preview_mode=_resolve_preview_mode,
+        report_stream_error=lambda exc: get_exception_logger().error(
+            "SSE answer failed: %s", exc
+        ),
+    )
+
+
 @app.post(
     "/answer",
     tags=["LLM"],
@@ -1494,108 +1508,10 @@ def answer_prompt(
     body: dict,
     x_rag_trace_id: Annotated[str | None, Header(alias="X-RAG-Trace-Id")] = None,
 ):
-    query = body.get("query", "")
-    if not query or not isinstance(query, str):
-        raise HTTPException(status_code=400, detail="Missing or invalid query")
-
-    collection = body.get("collection")
-    class_name = body.get("class_name")
-    file = body.get("file")
-    entities = body.get("entities") or {}
-    temperature = body.get("temperature")
-    top_p = body.get("top_p")
-    extra_context = body.get("extra_context")
-    # Documentation grounding chunks (Context7/GitMCP) fetched by the
-    # orchestrator — injected as their own prompt section.
-    doc_chunks = body.get("doc_chunks")
-    if isinstance(doc_chunks, list):
-        doc_chunks = [c for c in doc_chunks if isinstance(c, str) and c.strip()]
-    else:
-        doc_chunks = None
-    project_profile = _resolve_project_profile(body, query)
-    # Default to the remote OpenAI-compatible model when the field is omitted;
-    # falls back to the local Ollama model automatically when none is configured.
-    use_remote = body.get("use_remote", True) is True
-    route = body.get("route", "chat")
-
-    from rag.answer import generate_answer
-
-    results, contexts, extra_context = _answer_context(body, query, x_rag_trace_id)
-
-    inspection_block = _maybe_inspect_context(results, body)
-    if inspection_block:
-        extra_context = (
-            f"{extra_context}\n\n{inspection_block}"
-            if isinstance(extra_context, str) and extra_context.strip()
-            else inspection_block
-        )
-    domain_block = _maybe_domain_context(results, body)
-    if domain_block:
-        extra_context = (
-            f"{extra_context}\n\n{domain_block}"
-            if isinstance(extra_context, str) and extra_context.strip()
-            else domain_block
-        )
-
-    preview_mode = _resolve_preview_mode(body)
-    preview_only = preview_mode == "gate" and body.get("preview") is True
-
-    gen = generate_answer(
-        query,
-        contexts=contexts,
-        entities=entities,
-        temperature=temperature,
-        top_p=top_p,
-        extra_context=extra_context,
-        doc_chunks=doc_chunks,
-        project_profile=project_profile,
-        use_remote=use_remote,
-        route=route,
-        preview_only=preview_only,
-        preview_mode=preview_mode,
-    )
-
-    matches = []
-    for i, r in enumerate(results):
-        p = r.get("payload") or {}
-        name = f"{p.get('class') or ''}::{p.get('name') or ''}".strip(":")
-        if not name.strip():
-            name = p.get("file") or "symbol"
-        matches.append(
-            {
-                "chunk": {
-                    "id": p.get("node_id") or f"c{i}",
-                    "fileId": p.get("file") or "",
-                    "fileName": name,
-                    "text": p.get("code") or "",
-                    "index": i,
-                },
-                "score": r.get("score", 0.0),
-            }
-        )
-
-    resp = {
-        "success": True,
-        "answer": None,
-        "matches": matches,
-        "llmUsed": None,
-        "provider": gen.get("provider", "local"),
-        "durationMs": gen["duration_ms"],
-        "code_validation": gen.get("code_validation", []),
-    }
-    if not gen.get("preview_only"):
-        resp["answer"] = gen["answer"]
-        resp["llmUsed"] = (
-            f"Remote GPU LLM ({gen['model']})"
-            if gen.get("provider") == "remote"
-            else f"Local LLM ({gen['model']})"
-        )
-    if preview_mode != "off":
-        resp["context_preview"] = gen.get("context_preview")
-        resp["preview_mode"] = preview_mode
-        if gen.get("preview_only"):
-            resp["preview_only"] = True
-    return resp
+    try:
+        return _answer_service().answer(body, x_rag_trace_id)
+    except InvalidAnswerRequest as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
 
 
 @app.post(
@@ -1616,72 +1532,14 @@ def answer_stream(
     body: dict,
     x_rag_trace_id: Annotated[str | None, Header(alias="X-RAG-Trace-Id")] = None,
 ):
-    query = body.get("query", "")
-    if not query or not isinstance(query, str):
+    if not isinstance(body.get("query"), str) or not body.get("query"):
         raise HTTPException(status_code=400, detail="Missing or invalid query")
-
-    entities = body.get("entities") or {}
-    temperature = body.get("temperature")
-    top_p = body.get("top_p")
-    use_remote = body.get("use_remote", True) is True
-    route = body.get("route", "chat")
-    doc_chunks = body.get("doc_chunks")
-    if isinstance(doc_chunks, list):
-        doc_chunks = [c for c in doc_chunks if isinstance(c, str) and c.strip()]
-    else:
-        doc_chunks = None
-    project_profile = _resolve_project_profile(body, query)
-
-    results, contexts, extra_context = _answer_context(body, query, x_rag_trace_id)
-
-    inspection_block = _maybe_inspect_context(results, body)
-    if inspection_block:
-        extra_context = (
-            f"{extra_context}\n\n{inspection_block}"
-            if isinstance(extra_context, str) and extra_context.strip()
-            else inspection_block
-        )
-    domain_block = _maybe_domain_context(results, body)
-    if domain_block:
-        extra_context = (
-            f"{extra_context}\n\n{domain_block}"
-            if isinstance(extra_context, str) and extra_context.strip()
-            else domain_block
-        )
-
-    # Stream mode is carried by the generator itself: a leading ``context``
-    # event is emitted only when the resolved mode is not "off", and
-    # ``preview_only`` is reflected in the terminal ``done`` event. A request
-    # only skips the model when the resolved mode is "gate" AND the client
-    # explicitly asked for a preview.
-    preview_mode = _resolve_preview_mode(body)
-    preview_only = preview_mode == "gate" and body.get("preview") is True
-
-    from rag.answer import generate_answer_stream
-
-    def _sse():
-        try:
-            for event in generate_answer_stream(
-                query,
-                contexts=contexts,
-                entities=entities,
-                temperature=temperature,
-                top_p=top_p,
-                extra_context=extra_context,
-                doc_chunks=doc_chunks,
-                project_profile=project_profile,
-                use_remote=use_remote,
-                route=route,
-                preview_only=preview_only,
-                preview_mode=preview_mode,
-            ):
-                yield f"data: {json.dumps(event)}\n\n"
-        except Exception as exc:
-            get_exception_logger().error("SSE answer failed: %s", exc)
-            yield f"data: {json.dumps({'type': 'error', 'detail': str(exc)})}\n\n"
-
+    try:
+        stream = _answer_service().stream(body, x_rag_trace_id)
+    except InvalidAnswerRequest as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
     return StreamingResponse(
-        _sse(),
+        stream,
         media_type="text/event-stream",
         headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
     )
