@@ -9,7 +9,8 @@ import {
   FlaskConical,
   X,
   CheckCircle,
-  AlertTriangle
+  AlertTriangle,
+  ScrollText
 } from 'lucide-vue-next';
 import { RAGConfig, UploadedFile, SearchMatch } from './types';
 import { uploadViaTus } from './services/tusUpload';
@@ -18,13 +19,14 @@ import RAGChat from './components/RAGChat.vue';
 import RAGFiles from './components/RAGFiles.vue';
 import RAGConfigComponent from './components/RAGConfig.vue';
 import SandboxAnalyses from './components/SandboxAnalyses.vue';
+import LogsView from './components/LogsView.vue';
 import type { PipelineStep } from './components/PipelineProgress.vue';
 
 // Files at or above this size use the resumable TUS upload path instead of the
 // inline base64/JSON POST, so a dropped connection doesn't mean starting over.
 const UPLOAD_THRESHOLD_BYTES = Number(import.meta.env.VITE_TUS_THRESHOLD_BYTES ?? 10 * 1024 * 1024);
 
-const activeTab = ref<'chat' | 'files' | 'sandbox' | 'config'>('chat');
+const activeTab = ref<'chat' | 'files' | 'sandbox' | 'config' | 'logs'>('chat');
 
 const config = ref<RAGConfig>({
   ollamaBaseUrl: 'http://host.docker.internal:11434',
@@ -1027,6 +1029,15 @@ onMounted(async () => {
           <Settings class="w-4 h-4" />
           <span>Connection & Settings</span>
         </button>
+
+        <button
+          @click="activeTab = 'logs'"
+          class="w-full flex items-center gap-3 px-4 py-3 rounded-xl text-sm font-medium transition-all"
+          :class="activeTab === 'logs' ? 'bg-indigo-600 text-white shadow-md shadow-indigo-600/20' : 'text-slate-400 hover:text-white hover:bg-slate-800/50'"
+        >
+          <ScrollText class="w-4 h-4" />
+          <span>Developer Logs</span>
+        </button>
       </nav>
 
       <!-- Footer developer banner -->
@@ -1047,6 +1058,7 @@ onMounted(async () => {
             <span v-else-if="activeTab === 'files'">Document Chunker & Vector Indexer</span>
             <span v-else-if="activeTab === 'sandbox'">Sandbox Project Analysis</span>
             <span v-else-if="activeTab === 'config'">RAG Pipeline Configurations</span>
+            <span v-else-if="activeTab === 'logs'">Developer Logs</span>
           </h2>
         </div>
         
@@ -1106,6 +1118,8 @@ onMounted(async () => {
         :config="config"
         @saveConfig="saveConfig"
       />
+
+      <LogsView v-else-if="activeTab === 'logs'" />
 
     </main>
 

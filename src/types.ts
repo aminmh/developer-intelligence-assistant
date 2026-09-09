@@ -109,6 +109,38 @@ export interface QueryResponse {
   durationMs: number;
 }
 
+export type DeveloperLogType = 'llm_prompt' | 'exception' | 'router_fallback';
+export interface DeveloperLogEvent {
+  id: string;
+  type: DeveloperLogType;
+  timestamp: string;
+  severity: 'info' | 'warning' | 'error';
+  title: string;
+  summary: string;
+  details: {
+    query?: string;
+    prompt?: string;
+    message?: string;
+    thread?: string;
+    stackTrace?: string;
+    route?: string;
+    finalChoice?: string;
+    reason?: string;
+    confidence?: number;
+    metadata?: Record<string, any>;
+    raw?: string;
+    parserWarning?: string;
+  };
+}
+export interface DeveloperLogsResponse {
+  events: DeveloperLogEvent[];
+  total: number;
+  offset: number;
+  limit: number;
+  has_more: boolean;
+  deletion_mode: 'soft' | 'hard';
+}
+
 // --- Sandbox analysis persistence (Python backend analysis_service) --------
 
 export interface SandboxProbe {

@@ -412,6 +412,75 @@ async function startServer() {
     }
   });
 
+  app.get('/api/logs', async (req, res) => {
+    try {
+      const query = new URLSearchParams();
+      for (const key of ['search', 'types', 'severity', 'start', 'end', 'offset', 'limit']) {
+        const value = req.query[key];
+        if (typeof value === 'string' && value) query.set(key, value);
+      }
+      const pyRes = await fetch(`${PYTHON_API_URL}/logs?${query.toString()}`, {
+        headers: { 'X-Internal-Secret': INTERNAL_SECRET },
+      });
+      const data = await pyRes.json().catch(() => ({ detail: 'Failed to load logs.' }));
+      return res.status(pyRes.status).json(data);
+    } catch (error: any) {
+      return res.status(500).json({ detail: error?.message || 'Failed to load logs.' });
+    }
+  });
+
+  app.delete('/api/logs', async (_req, res) => {
+    try {
+      const pyRes = await fetch(`${PYTHON_API_URL}/logs`, {
+        method: 'DELETE',
+        headers: { 'X-Internal-Secret': INTERNAL_SECRET },
+      });
+      const data = await pyRes.json().catch(() => ({ detail: 'Failed to clear logs.' }));
+      return res.status(pyRes.status).json(data);
+    } catch (error: any) {
+      return res.status(500).json({ detail: error?.message || 'Failed to clear logs.' });
+    }
+  });
+
+  app.delete('/api/logs/:type', async (req, res) => {
+    try {
+      const pyRes = await fetch(`${PYTHON_API_URL}/logs/${encodeURIComponent(req.params.type)}`, {
+        method: 'DELETE',
+        headers: { 'X-Internal-Secret': INTERNAL_SECRET },
+      });
+      const data = await pyRes.json().catch(() => ({ detail: 'Failed to clear log.' }));
+      return res.status(pyRes.status).json(data);
+    } catch (error: any) {
+      return res.status(500).json({ detail: error?.message || 'Failed to clear log.' });
+    }
+  });
+
+  app.get('/api/logs/config', async (_req, res) => {
+    try {
+      const pyRes = await fetch(`${PYTHON_API_URL}/logs/config`, {
+        headers: { 'X-Internal-Secret': INTERNAL_SECRET },
+      });
+      const data = await pyRes.json().catch(() => ({ detail: 'Failed to load log configuration.' }));
+      return res.status(pyRes.status).json(data);
+    } catch (error: any) {
+      return res.status(500).json({ detail: error?.message || 'Failed to load log configuration.' });
+    }
+  });
+
+  app.put('/api/logs/config', async (req, res) => {
+    try {
+      const pyRes = await fetch(`${PYTHON_API_URL}/logs/config`, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json', 'X-Internal-Secret': INTERNAL_SECRET },
+        body: JSON.stringify(req.body),
+      });
+      const data = await pyRes.json().catch(() => ({ detail: 'Failed to save log configuration.' }));
+      return res.status(pyRes.status).json(data);
+    } catch (error: any) {
+      return res.status(500).json({ detail: error?.message || 'Failed to save log configuration.' });
+    }
+  });
+
   // List models pulled in Ollama (for the model dropdowns)
   app.get('/api/ollama/models', async (req, res) => {
     try {
