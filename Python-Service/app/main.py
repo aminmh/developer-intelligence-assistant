@@ -12,6 +12,7 @@ from rag.answer_service import AnswerService, InvalidAnswerRequest
 from pipelines.orchestrator import orchestrator
 from infra.exception_logger import get_exception_logger, install_exception_hooks
 from index.indexing_service import indexing_service
+from index.upload_service import upload_service
 from infra.settings_store import (
     RAG_CONFIG_DEFAULTS,
     SECRET_KEYS,
@@ -35,7 +36,6 @@ import os
 import re
 import json
 import time
-import base64
 import logging
 import threading
 from datetime import datetime, timezone, timedelta
@@ -546,24 +546,6 @@ def indexing_status(download_id: str):
 
 # ─── Workspace + RAG upload pipeline (replaces php-ast) ────────────────────────
 
-def _extract_workspace(workspace_id: str, zip_data: bytes) -> str:
-    """Extract a project ZIP into a fresh workspace dir, returning its path."""
-    import shutil
-
-    from infra.php_tools import extract_zip_safely
-
-    workspace_dir = Path(settings.workspace_root) / workspace_id
-    if workspace_dir.exists():
-        shutil.rmtree(workspace_dir, ignore_errors=True)
-    workspace_dir.mkdir(parents=True, exist_ok=True)
-    try:
-        extract_zip_safely(zip_data, str(workspace_dir))
-    except Exception:
-        shutil.rmtree(workspace_dir, ignore_errors=True)
-        raise
-    return str(workspace_dir)
-
-
 @app.post(
     "/api/workspace/prepare",
     tags=["Upload & TUS"],
@@ -590,7 +572,7 @@ def workspace_prepare(body: dict):
 
     workspace_id = str(uuid.uuid4())
     try:
-        extracted_path = _extract_workspace(workspace_id, data)
+        extracted_path = upload_service.extract_workspace(workspace_id, data)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc))
     except Exception:
@@ -613,11 +595,7 @@ def workspace_prepare(body: dict):
     description="Removes an extracted workspace directory.",
 )
 def workspace_destroy(workspace_id: str):
-    from infra.php_tools import safe_rmtree
-
-    workspace_dir = Path(settings.workspace_root) / workspace_id
-    if workspace_dir.exists():
-        safe_rmtree(str(workspace_dir))
+    upload_service.destroy_workspace(workspace_id)
     try:
         from projects.workspace_registry import forget
 
@@ -726,49 +704,20 @@ def rag_upload(body: dict):
 
     # TUS session mode — no content, just filename + size
     if not content:
-        upload_session_id = str(uuid.uuid4())
-        expires_at = datetime.now(timezone.utc) + timedelta(minutes=60)
-        token = pyjwt.encode(
-            {
-                "sub": "user-123",
-                "upload_session_id": upload_session_id,
-                "filename": filename,
-                "maximum_size": size,
-                "upload_kind": "rag-document",
-                "exp": expires_at,
-            },
-            settings.upload_token_secret,
-            algorithm="HS256",
-        )
-        return {
-            "upload_session_id": upload_session_id,
-            "tus_endpoint": settings.tus_public_url,
-            "upload_token": token,
-            "expires_at": expires_at.isoformat(),
-        }
+        return upload_service.create_tus_session(filename, size)
 
     # Direct upload mode — base64 content provided
     try:
-        decoded = base64.b64decode(content, validate=True)
-    except Exception:
-        raise HTTPException(status_code=400, detail="Invalid base64 content.")
-
-    upload_session_id = str(uuid.uuid4())
-    try:
-        storage.put_rag_file(upload_session_id, filename, decoded)
+        result = upload_service.store_direct(storage, filename, content)
     except Exception as exc:
         dl_logger.error("Upload store failed: %s", exc, exc_info=True)
+        if isinstance(exc, ValueError):
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
         raise HTTPException(status_code=500, detail="Failed to store upload.")
 
     dl_logger.info("File uploaded: filename=%s session=%s size=%s",
-                   filename, upload_session_id, len(decoded))
-    return {
-        "upload_session_id": upload_session_id,
-        "filename": filename,
-        "type": "zip",
-        "text": f"Uploaded ZIP archive: {filename} (binary content, not text-indexed).",
-        "size": len(decoded),
-    }
+                   filename, result["upload_session_id"], result["size"])
+    return result
 
 
 @app.post(
