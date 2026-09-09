@@ -371,12 +371,36 @@ class CodeIntelligenceIndex:
                 continue
 
             metadata = {
+                "schema_version": c.get("schema_version", "ast-chunk-v1"),
+                "chunk_id": c.get("chunk_id"),
+                "language": c.get("language", "php"),
+                "node_type": c.get("node_type") or c.get("type", ""),
+                "symbol_name": c.get("symbol_name") or c.get("name", ""),
+                "fq_symbol_name": c.get("fq_symbol_name") or c.get("class_fqn") or c.get("name", ""),
                 "type": c.get("type", ""),
                 "name": c.get("name", ""),
                 "class": c.get("class", ""),
+                "class_fqn": c.get("class_fqn", ""),
+                "namespace": c.get("namespace", ""),
+                "method_name": c.get("method_name"),
+                "function_name": c.get("function_name"),
+                "signature": c.get("signature", ""),
+                "parent_symbol": c.get("parent_symbol"),
                 "file": c.get("file", ""),
                 "start_line": c.get("start_line", 0),
                 "end_line": c.get("end_line", 0),
+                "loc": c.get("loc", max(0, int(c.get("end_line", 0) or 0) - int(c.get("start_line", 0) or 0) + 1)),
+                "visibility": c.get("visibility"),
+                "is_static": c.get("is_static", False),
+                "imports": c.get("imports", []) or [],
+                "extends": c.get("extends", []) or [],
+                "implements": c.get("implements", []) or [],
+                "traits": c.get("traits", []) or [],
+                "called_symbols": c.get("called_symbols") or [],
+                "referenced_symbols": c.get("referenced_symbols", []) or [],
+                "framework_hints": c.get("framework_hints", []) or [],
+                "domain_tags": c.get("domain_tags", []) or [],
+                "low_information": c.get("low_information", False),
                 "code": code,
                 "collection": collection_name,
             }
@@ -410,4 +434,3 @@ class CodeIntelligenceIndex:
             "total": len(chunks),
             "collection_name": collection_name,
         }
-

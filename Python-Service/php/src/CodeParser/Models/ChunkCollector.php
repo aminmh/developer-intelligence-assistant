@@ -5,6 +5,7 @@ namespace App\CodeParser\Models;
 use PhpParser\Node;
 use PhpParser\Node\Stmt\Class_;
 use PhpParser\Node\Stmt\ClassMethod;
+use PhpParser\Node\Stmt\Enum_;
 use PhpParser\Node\Stmt\Function_;
 use PhpParser\Node\Stmt\Interface_;
 use PhpParser\Node\Stmt\Trait_;
@@ -98,7 +99,7 @@ final class ChunkCollector extends NodeVisitorAbstract
             }
         }
 
-        if ($node instanceof Class_ || $node instanceof Interface_ || $node instanceof Trait_) {
+        if ($node instanceof Class_ || $node instanceof Interface_ || $node instanceof Trait_ || $node instanceof Enum_) {
             $className = $node->name?->toString() ?? '(anonymous)';
             $this->classStack[] = $className;
 
@@ -121,7 +122,12 @@ final class ChunkCollector extends NodeVisitorAbstract
 
     public function leaveNode(Node $node): void
     {
-        if ($node instanceof Class_ || $node instanceof Interface_ || $node instanceof Trait_) {
+        if ($node instanceof Node\Stmt\Property || $node instanceof Node\Stmt\ClassConst || $node instanceof Node\Stmt\Const_) {
+            $this->chunks[] = $this->buildMemberDeclarationChunk($node);
+            return;
+        }
+        if ($node instanceof Class_ || $node instanceof Interface_ || $node instanceof Trait_ || $node instanceof Enum_) {
+            $this->chunks[] = $this->buildDeclarationChunk($node);
             array_pop($this->classStack);
             $this->constructorTypes = [];
             $this->propertyTypes   = [];
@@ -153,6 +159,9 @@ final class ChunkCollector extends NodeVisitorAbstract
         $end   = $node->getEndLine();
         $lines = explode("\n", $this->sourceCode);
         $code  = implode("\n", array_slice($lines, $start - 1, $end - $start + 1));
+        $modifiers = $this->extractModifiers($node);
+        $symbol = $classFqn ? $classFqn . '::' . $name : $name;
+        $signature = $this->buildSignature($name, $node);
 
         return new CodeChunk(
             code:        $code,
@@ -168,8 +177,173 @@ final class ChunkCollector extends NodeVisitorAbstract
             returnType:  $this->extractReturnType($node),
             calls:       $this->extractCalls($node, $className),
             docblock:    $this->extractDocblock($node),
-            modifiers:   $this->extractModifiers($node),
+            modifiers:   $modifiers,
+            nodeType:    $type,
+            symbolName:  $name,
+            fqSymbolName: $symbol,
+            signature:   $signature,
+            parentSymbol: $classFqn,
+            methodName:  $node instanceof ClassMethod ? $name : null,
+            functionName: $node instanceof Function_ ? $name : null,
+            visibility:  $this->modifierValue($modifiers),
+            isStatic:    in_array('static', $modifiers, true),
+            imports:     array_values($this->useMap),
+            referencedSymbols: $this->flattenCalls($this->extractCalls($node, $className)),
+            annotations: $this->extractAnnotations($this->extractDocblock($node)),
+            literals: $this->extractLiterals($node),
+            frameworkHints: $this->frameworkHints(),
+            lowInformation: $this->isLowInformation($name),
         );
+    }
+
+    private function buildDeclarationChunk(Class_|Interface_|Trait_|Enum_ $node): CodeChunk
+    {
+        $name = $node->name?->toString() ?? '(anonymous)';
+        $classFqn = $this->currentNamespace ? $this->currentNamespace . '\\' . $name : $name;
+        $type = $node instanceof Interface_ ? 'interface' : ($node instanceof Trait_ ? 'trait' : ($node instanceof Enum_ ? 'enum' : 'class'));
+        $modifiers = [];
+        if ($node instanceof Class_) {
+            if ($node->isAbstract()) $modifiers[] = 'abstract';
+            if ($node->isFinal()) $modifiers[] = 'final';
+        }
+        $start = $node->getStartLine();
+        $end = $node->getEndLine();
+        $code = $this->sourceSlice($start, $end);
+        $extends = [];
+        if ($node instanceof Class_ && $node->extends) $extends[] = $node->extends->toString();
+        if ($node instanceof Interface_ && $node->extends) $extends = array_map(static fn($item) => $item->toString(), $node->extends);
+        $implements = $node instanceof Class_ ? array_map(static fn($item) => $item->toString(), $node->implements) : [];
+        $traits = [];
+        foreach ($node->stmts ?? [] as $stmt) {
+            if ($stmt instanceof Node\Stmt\TraitUse) {
+                foreach ($stmt->traits as $trait) $traits[] = $trait->toString();
+            }
+        }
+        $summary = sprintf('%s %s%s%s%s', ucfirst($type), $classFqn,
+            $extends ? ' extends ' . implode(', ', $extends) : '',
+            $implements ? ' implements ' . implode(', ', $implements) : '',
+            $traits ? '; uses ' . implode(', ', $traits) : '');
+        $methods = [];
+        foreach ($node->stmts ?? [] as $stmt) {
+            if ($stmt instanceof ClassMethod) $methods[] = $stmt->name->toString();
+        }
+        if ($methods) $summary .= '. Methods: ' . implode(', ', $methods);
+        return new CodeChunk(
+            code: $code, type: $type, name: $name, className: $name, classFqn: $classFqn,
+            namespace: $this->currentNamespace, file: $this->filePath, startLine: $start, endLine: $end,
+            parameters: [], returnType: null, calls: [], docblock: $this->extractNodeDocblock($node), modifiers: $modifiers,
+            nodeType: $type, symbolName: $name, fqSymbolName: $classFqn, signature: $type . ' ' . $classFqn,
+            imports: array_values($this->useMap), extends: $extends, implements: $implements, traits: $traits,
+            summary: $summary, annotations: $this->extractAnnotations($this->extractNodeDocblock($node)),
+            frameworkHints: $this->frameworkHints(),
+        );
+    }
+
+    private function buildMemberDeclarationChunk(Node $node): CodeChunk
+    {
+        $names = [];
+        if ($node instanceof Node\Stmt\Property) {
+            foreach ($node->props as $property) $names[] = '$' . $property->name->toString();
+            $type = 'property_group';
+        } else {
+            foreach ($node->consts as $constant) $names[] = $constant->name->toString();
+            $type = $node instanceof Node\Stmt\ClassConst ? 'constant_group' : 'constant_group';
+        }
+        $name = implode(', ', $names);
+        $className = $this->classStack ? end($this->classStack) : null;
+        $classFqn = $className ? ($this->currentNamespace ? $this->currentNamespace . '\\' . $className : $className) : null;
+        $start = $node->getStartLine();
+        $end = $node->getEndLine();
+        $symbol = ($classFqn ? $classFqn . '::' : '') . $name;
+        $modifiers = [];
+        if ($node instanceof Node\Stmt\Property || $node instanceof Node\Stmt\ClassConst) {
+            $flags = $node->flags;
+            if ($flags & Class_::MODIFIER_PUBLIC) $modifiers[] = 'public';
+            if ($flags & Class_::MODIFIER_PROTECTED) $modifiers[] = 'protected';
+            if ($flags & Class_::MODIFIER_PRIVATE) $modifiers[] = 'private';
+            if ($flags & Class_::MODIFIER_STATIC) $modifiers[] = 'static';
+            if ($flags & Class_::MODIFIER_FINAL) $modifiers[] = 'final';
+        }
+        $docblock = $this->extractNodeDocblock($node);
+        return new CodeChunk(
+            code: $this->sourceSlice($start, $end), type: $type, name: $name,
+            className: $className, classFqn: $classFqn, namespace: $this->currentNamespace,
+            file: $this->filePath, startLine: $start, endLine: $end, parameters: [], returnType: null,
+            calls: [], docblock: $docblock, modifiers: $modifiers, nodeType: $type,
+            symbolName: $name, fqSymbolName: $symbol, signature: $name, parentSymbol: $classFqn,
+            visibility: $this->modifierValue($modifiers), isStatic: in_array('static', $modifiers, true),
+            imports: array_values($this->useMap), annotations: $this->extractAnnotations($docblock),
+            frameworkHints: $this->frameworkHints(), lowInformation: true,
+        );
+    }
+
+    private function sourceSlice(int $start, int $end): string
+    {
+        $lines = explode("\n", $this->sourceCode);
+        return implode("\n", array_slice($lines, max(0, $start - 1), max(0, $end - $start + 1)));
+    }
+
+    private function buildSignature(string $name, Function_|ClassMethod $node): string
+    {
+        $params = array_map(fn($p) => ($p['type'] ? $p['type'] . ' ' : '') . $p['name'], $this->extractParams($node));
+        $ret = $this->extractReturnType($node);
+        return $name . '(' . implode(', ', $params) . ')' . ($ret ? ': ' . $ret : '');
+    }
+
+    private function modifierValue(array $modifiers): ?string
+    {
+        foreach (['public', 'protected', 'private'] as $value) if (in_array($value, $modifiers, true)) return $value;
+        return null;
+    }
+
+    private function flattenCalls(array $calls): array
+    {
+        $out = [];
+        foreach ($calls as $owner => $methods) foreach ($methods as $method) $out[] = $owner . '::' . $method;
+        return array_values(array_unique($out));
+    }
+
+    private function extractAnnotations(?string $docblock): array
+    {
+        if (!$docblock) return [];
+        preg_match_all('/@(\w+)(?:\s+([^\n*]+))?/', $docblock, $matches, PREG_SET_ORDER);
+        return array_map(static fn($match) => trim('@' . $match[1] . (isset($match[2]) ? ' ' . trim($match[2]) : '')), $matches);
+    }
+
+    private function isLowInformation(string $name): bool
+    {
+        return (bool) preg_match('/^(get|set|is|has)[A-Z_]/', $name);
+    }
+
+    private function extractLiterals(Node $node): array
+    {
+        $values = [];
+        $traverser = new NodeTraverser();
+        $traverser->addVisitor(new class($values) extends NodeVisitorAbstract {
+            public function __construct(private array &$values) {}
+            public function enterNode(Node $node): void
+            {
+                if ($node instanceof Node\Scalar\String_) $this->values[] = $node->value;
+                elseif ($node instanceof Node\Scalar\LNumber || $node instanceof Node\Scalar\DNumber) $this->values[] = (string) $node->value;
+            }
+        });
+        $traverser->traverse([$node]);
+        return array_values(array_unique(array_slice($values, 0, 32)));
+    }
+
+    private function frameworkHints(): array
+    {
+        $hints = [];
+        $path = strtolower($this->filePath);
+        if (str_contains($path, 'laravel') || str_contains($path, 'app/http/controllers') || str_contains($path, 'routes/')) $hints[] = 'laravel';
+        if (str_contains($path, 'symfony')) $hints[] = 'symfony';
+        return $hints;
+    }
+
+    private function extractNodeDocblock(Node $node): ?string
+    {
+        foreach (array_reverse($node->getComments()) as $comment) if (str_starts_with(trim($comment->getText()), '/**')) return $comment->getText();
+        return null;
     }
 
     // ─── Constructor type extraction ───────────────────────────────────────────

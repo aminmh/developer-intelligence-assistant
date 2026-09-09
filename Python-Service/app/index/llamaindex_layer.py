@@ -135,6 +135,14 @@ SET r.collection = row.collection
 RETURN count(*) AS count
 """
 
+_STRUCTURE_REL_UPSERT_CYPHER = """
+UNWIND $data AS row
+MATCH (s:CodeSymbol {id: row.source_id})
+MATCH (t:CodeSymbol {id: row.target_id})
+MERGE (s)-[r:STRUCTURE {kind: row.kind, collection: row.collection}]->(t)
+RETURN count(*) AS count
+"""
+
 _NEIGHBOURS_CYPHER = """
 UNWIND $ids AS id
 MATCH (n:CodeSymbol {id: id})-[r:CALLS]-(m:CodeSymbol)
@@ -377,6 +385,21 @@ def _flatten_params(parameters: Any) -> str:
     return ", ".join(parts)
 
 
+def _flatten_call_values(calls: Any) -> List[str]:
+    """Normalize legacy call maps/lists into ``Receiver::method`` strings."""
+    if isinstance(calls, list):
+        return [str(item) for item in calls if isinstance(item, (str, int, float))]
+    if not isinstance(calls, dict):
+        return []
+    values: List[str] = []
+    for owner, methods in calls.items():
+        if isinstance(methods, list):
+            values.extend(f"{owner}::{method}" for method in methods)
+        elif isinstance(methods, str):
+            values.append(f"{owner}::{methods}")
+    return list(dict.fromkeys(values))
+
+
 def _chunk_node_id(chunk: Dict[str, Any]) -> str:
     fqn = chunk.get("class_fqn") or chunk.get("class")
     name = chunk.get("name")
@@ -386,11 +409,19 @@ def _chunk_node_id(chunk: Dict[str, Any]) -> str:
 def build_embeddable_text(chunk: Dict[str, Any]) -> str:
     """Build the LLM-facing text for a chunk (mirrors CodeChunk.toEmbeddableText)."""
     parts: List[str] = []
+    if chunk.get("file_path") or chunk.get("file"):
+        parts.append(f"File: {chunk.get('file_path') or chunk.get('file')}")
+    if chunk.get("namespace"):
+        parts.append(f"Namespace: {chunk['namespace']}")
     docblock = chunk.get("docblock")
     if docblock:
         parts.append(str(docblock))
     if chunk.get("class"):
         parts.append(f"Class: {chunk['class']}")
+    if chunk.get("method_name"):
+        parts.append(f"Method: {chunk['method_name']}")
+    elif chunk.get("function_name"):
+        parts.append(f"Function: {chunk['function_name']}")
     if chunk.get("name"):
         sig = [str(chunk["name"])]
         params = chunk.get("parameters", [])
@@ -399,6 +430,13 @@ def build_embeddable_text(chunk: Dict[str, Any]) -> str:
         if chunk.get("return_type"):
             sig.append(": " + str(chunk["return_type"]))
         parts.append("Signature: " + "".join(sig))
+    if chunk.get("signature") and not any(part.startswith("Signature:") for part in parts):
+        parts.append(f"Signature: {chunk['signature']}")
+    if chunk.get("summary"):
+        parts.append(f"Summary: {chunk['summary']}")
+    calls = chunk.get("called_symbols") or _flatten_call_values(chunk.get("calls"))
+    if calls:
+        parts.append("Calls: " + ", ".join(calls))
 
     code = chunk.get("code", "")
     if code:
@@ -421,8 +459,15 @@ def _graph_properties(chunk: Dict[str, Any], collection_name: str) -> Dict[str, 
     """Graph node properties — structure only, no code body."""
     return _strip_none(
         {
+            "schema_version": chunk.get("schema_version", "ast-chunk-v1"),
+            "chunk_id": chunk.get("chunk_id"),
+            "language": chunk.get("language", "php"),
+            "node_type": chunk.get("node_type") or chunk.get("type", ""),
+            "symbol_name": chunk.get("symbol_name") or chunk.get("name", ""),
+            "fq_symbol_name": chunk.get("fq_symbol_name") or chunk.get("class_fqn") or chunk.get("name", ""),
+            "file_path": chunk.get("file_path") or chunk.get("file", ""),
             "name": chunk.get("name", ""),
-            "method_name": chunk.get("name", ""),
+            "method_name": chunk.get("method_name"),
             "class": chunk.get("class", ""),
             "class_fqn": chunk.get("class_fqn", ""),
             "namespace": chunk.get("namespace", ""),
@@ -433,6 +478,16 @@ def _graph_properties(chunk: Dict[str, Any], collection_name: str) -> Dict[str, 
             "return_type": chunk.get("return_type", ""),
             "modifiers": chunk.get("modifiers", []) or [],
             "parameters": _flatten_params(chunk.get("parameters")),
+            "signature": chunk.get("signature", ""),
+            "parent_symbol": chunk.get("parent_symbol"),
+            "imports": chunk.get("imports", []) or [],
+            "extends": chunk.get("extends", []) or [],
+            "implements": chunk.get("implements", []) or [],
+            "traits": chunk.get("traits", []) or [],
+            "visibility": chunk.get("visibility"),
+            "is_static": chunk.get("is_static", False),
+            "loc": chunk.get("loc", max(0, int(chunk.get("end_line", 0) or 0) - int(chunk.get("start_line", 0) or 0) + 1)),
+            "summary": chunk.get("summary", ""),
             "collection": collection_name,
         }
     )
@@ -442,10 +497,17 @@ def _payload(chunk: Dict[str, Any], collection_name: str) -> Dict[str, Any]:
     """Qdrant point payload — full retrieval context including code body."""
     return _strip_none(
         {
+            "schema_version": chunk.get("schema_version", "ast-chunk-v1"),
+            "chunk_id": chunk.get("chunk_id"),
+            "language": chunk.get("language", "php"),
+            "node_type": chunk.get("node_type") or chunk.get("type", ""),
+            "symbol_name": chunk.get("symbol_name") or chunk.get("name", ""),
+            "fq_symbol_name": chunk.get("fq_symbol_name") or chunk.get("class_fqn") or chunk.get("name", ""),
+            "file_path": chunk.get("file_path") or chunk.get("file", ""),
             "node_id": _chunk_node_id(chunk),
             "type": chunk.get("type", ""),
             "name": chunk.get("name", ""),
-            "method_name": chunk.get("name", ""),
+            "method_name": chunk.get("method_name"),
             "class": chunk.get("class", ""),
             "class_fqn": chunk.get("class_fqn", ""),
             "namespace": chunk.get("namespace", ""),
@@ -454,10 +516,29 @@ def _payload(chunk: Dict[str, Any], collection_name: str) -> Dict[str, Any]:
             "end_line": chunk.get("end_line", 0),
             "modifiers": chunk.get("modifiers", []) or [],
             "parameters": _flatten_params(chunk.get("parameters")),
+            "signature": chunk.get("signature", ""),
+            "parent_symbol": chunk.get("parent_symbol"),
+            "imports": chunk.get("imports", []) or [],
+            "extends": chunk.get("extends", []) or [],
+            "implements": chunk.get("implements", []) or [],
+            "traits": chunk.get("traits", []) or [],
+            "visibility": chunk.get("visibility"),
+            "is_static": chunk.get("is_static", False),
+            "loc": chunk.get("loc", max(0, int(chunk.get("end_line", 0) or 0) - int(chunk.get("start_line", 0) or 0) + 1)),
+            "called_symbols": chunk.get("called_symbols") or _flatten_call_values(chunk.get("calls")),
+            "referenced_symbols": chunk.get("referenced_symbols", []) or [],
+            "literals": chunk.get("literals", []) or [],
+            "annotations": chunk.get("annotations", []) or [],
+            "framework_hints": chunk.get("framework_hints", []) or [],
+            "domain_tags": chunk.get("domain_tags", []) or [],
+            "low_information": chunk.get("low_information", False),
+            "summary": chunk.get("summary", ""),
             "return_type": chunk.get("return_type", ""),
             "has_docblock": chunk.get("has_docblock", False),
             "docblock": chunk.get("docblock", ""),
+            "docstring": chunk.get("docstring") or chunk.get("docblock", ""),
             "code": chunk.get("code", ""),
+            "calls": chunk.get("calls", []) or [],
             "collection": collection_name,
         }
     )
@@ -594,7 +675,12 @@ class CodePropertyGraph:
         # Resolve CALLS edges: only materialise relations whose target symbol
         # actually exists in this batch (no dangling Neo4j nodes).
         rel_rows: List[Dict[str, str]] = []
+        structure_rows: List[Dict[str, str]] = []
         seen_rels: set[tuple[str, str]] = set()
+        symbol_ids = {
+            str(c.get("fq_symbol_name") or c.get("class_fqn") or c.get("name") or ""): _chunk_node_id(c)
+            for c in chunks
+        }
         for c in chunks:
             src = _chunk_node_id(c)
             for target in c.get("calls", []) or []:
@@ -621,6 +707,20 @@ class CodePropertyGraph:
                     }
                 )
 
+            parent = c.get("parent_symbol")
+            if parent:
+                parent_name = str(parent).rsplit("\\", 1)[-1]
+                parent_id = symbol_ids.get(str(parent)) or node_id_for(str(parent), parent_name)
+                if parent_id in known_ids:
+                    structure_rows.append({"source_id": parent_id, "target_id": src, "kind": "contains", "collection": collection_name})
+
+            for field, kind in (("extends", "extends"), ("implements", "implements"), ("traits", "uses_trait")):
+                for target in c.get(field, []) or []:
+                    target_name = str(target).rsplit("\\", 1)[-1]
+                    target_id = symbol_ids.get(str(target)) or node_id_for(str(target), target_name)
+                    if target_id in known_ids and target_id != src:
+                        structure_rows.append({"source_id": src, "target_id": target_id, "kind": kind, "collection": collection_name})
+
         try:
             store.structured_query(_NODE_UPSERT_CYPHER, param_map={"data": node_rows})
         except Exception as exc:
@@ -644,7 +744,20 @@ class CodePropertyGraph:
                 )
                 return len(node_rows), 0
 
-        return len(node_rows), len(rel_rows)
+        if structure_rows:
+            try:
+                store.structured_query(
+                    _STRUCTURE_REL_UPSERT_CYPHER,
+                    param_map={"data": structure_rows},
+                )
+            except Exception as exc:
+                get_exception_logger().error(
+                    "Neo4j structure relation upsert failed for collection %s: %s",
+                    collection_name,
+                    exc,
+                )
+
+        return len(node_rows), len(rel_rows) + len(structure_rows)
 
     def _ingest_vectors(
         self, chunks: List[Dict[str, Any]], collection_name: str

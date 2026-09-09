@@ -22,6 +22,27 @@ class SymbolModel(BaseModel):
     code: str = Field(default="", description="The full source code of the symbol.")
     docblock: Optional[str] = Field(None, description="PHPDoc / docblock comment string.")
     raw: Dict[str, Any] = Field(default_factory=dict, description="Raw JSON chunk from the report payload.")
+    schema_version: str = "ast-chunk-v1"
+    chunk_id: Optional[str] = None
+    language: str = "php"
+    node_type: Optional[str] = None
+    symbol_name: Optional[str] = None
+    fq_symbol_name: Optional[str] = None
+    signature: Optional[str] = None
+    parent_symbol: Optional[str] = None
+    method_name: Optional[str] = None
+    function_name: Optional[str] = None
+    is_static: bool = False
+    imports: List[str] = Field(default_factory=list)
+    extends: List[str] = Field(default_factory=list)
+    implements: List[str] = Field(default_factory=list)
+    traits: List[str] = Field(default_factory=list)
+    referenced_symbols: List[str] = Field(default_factory=list)
+    literals: List[str] = Field(default_factory=list)
+    annotations: List[str] = Field(default_factory=list)
+    framework_hints: List[str] = Field(default_factory=list)
+    domain_tags: List[str] = Field(default_factory=list)
+    low_information: bool = False
 
 
 class EdgeModel(BaseModel):
@@ -107,6 +128,32 @@ class DownloadJobResponse(BaseModel):
 
 
 class CodeChunkModel(BaseModel):
+    schema_version: Optional[str] = None
+    chunk_id: Optional[str] = None
+    language: Optional[str] = None
+    node_type: Optional[str] = None
+    file_path: Optional[str] = None
+    symbol_name: Optional[str] = None
+    fq_symbol_name: Optional[str] = None
+    signature: Optional[str] = None
+    parent_symbol: Optional[str] = None
+    method_name: Optional[str] = None
+    function_name: Optional[str] = None
+    visibility: Optional[str] = None
+    is_static: Optional[bool] = None
+    imports: Optional[List[str]] = None
+    extends: Optional[List[str]] = None
+    implements: Optional[List[str]] = None
+    traits: Optional[List[str]] = None
+    loc: Optional[int] = None
+    called_symbols: Optional[List[str]] = None
+    referenced_symbols: Optional[List[str]] = None
+    literals: Optional[List[str]] = None
+    annotations: Optional[List[str]] = None
+    framework_hints: Optional[List[str]] = None
+    domain_tags: Optional[List[str]] = None
+    low_information: Optional[bool] = None
+    summary: Optional[str] = None
     type: str = Field(description="Chunk type: function, method, closure.")
     name: str = Field(description="Function or method name.")
     class_: Optional[str] = Field(None, alias="class", description="Fully-qualified class name.")
