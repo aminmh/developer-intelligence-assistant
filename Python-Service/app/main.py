@@ -11,6 +11,7 @@ from rag.intent import extract_intent
 from rag.answer_service import AnswerService, InvalidAnswerRequest
 from pipelines.orchestrator import orchestrator
 from infra.exception_logger import get_exception_logger, install_exception_hooks
+from index.indexing_service import indexing_service
 from infra.settings_store import (
     RAG_CONFIG_DEFAULTS,
     SECRET_KEYS,
@@ -91,49 +92,6 @@ def setup_logger(name: str, filename: str) -> logging.Logger:
 
 
 dl_logger = setup_logger("download_jobs", "download-jobs.log")
-
-
-def write_status(download_id: str, status: str, total: int, indexed: int,
-                 collection_name: str = "") -> None:
-    """Write indexing progress to a status file for frontend polling."""
-    try:
-        status_path = Path(settings.download_dir) / f"{download_id}.status.json"
-        status_path.write_text(json.dumps({
-            "status": status,
-            "total": total,
-            "indexed": indexed,
-            "collection_name": collection_name,
-        }))
-    except Exception:
-        pass  # status file is best-effort — don't fail the job
-
-
-def index_code_chunks_background(download_id: str, filename: str,
-                                 chunks_list: list[dict], collection_name: str) -> None:
-    """Index code chunks through the property-graph pipeline in a background thread."""
-    dl_logger.info("Background indexing started: collection=%s count=%s",
-                   collection_name, len(chunks_list))
-    write_status(download_id, "embedding", len(chunks_list), 0, collection_name)
-
-    try:
-        from index.llamaindex_layer import CodePropertyGraph
-
-        result = CodePropertyGraph().ingest(chunks_list, collection_name)
-        ingested = int(result.get("ingested", 0) or 0)
-        dl_logger.info(
-            "Background indexing complete: collection=%s ingested=%s graph_nodes=%s relations=%s",
-            collection_name,
-            ingested,
-            result.get("graph_nodes", 0),
-            result.get("graph_relations", 0),
-        )
-        write_status(download_id, "done", len(chunks_list),
-                     ingested, collection_name)
-
-    except Exception as e:
-        dl_logger.error("Background indexing failed for '%s': %s",
-                        collection_name, e, exc_info=True)
-        write_status(download_id, "error", len(chunks_list), 0, collection_name)
 
 
 service = CodeIntelligenceIndex()
@@ -516,7 +474,7 @@ def create_download_job(
                                collection_name, len(chunks_list))
 
                 thread = threading.Thread(
-                    target=index_code_chunks_background,
+                    target=indexing_service.index_chunks_background,
                     args=(download_id, filename, chunks_list, collection_name),
                     daemon=True,
                 )
@@ -604,31 +562,6 @@ def _extract_workspace(workspace_id: str, zip_data: bytes) -> str:
         shutil.rmtree(workspace_dir, ignore_errors=True)
         raise
     return str(workspace_dir)
-
-
-def _parse_and_index(download_id: str, filename: str, zip_data: bytes,
-                     collection_name: str) -> None:
-    """Extract a ZIP, parse PHP via the CLI, and index chunks in the background."""
-    import shutil
-
-    from infra.php_tools import extract_zip_safely, run_code_parse
-
-    workdir = Path(settings.download_dir) / f"parse_{download_id}"
-    try:
-        write_status(download_id, "embedding", 0, 0, collection_name)
-        file_count = extract_zip_safely(zip_data, str(workdir))
-        dl_logger.info("Parse extracted %s files: %s", file_count, collection_name)
-        chunks = run_code_parse(str(workdir))
-        if not chunks:
-            dl_logger.warning("No PHP chunks produced: %s", collection_name)
-            write_status(download_id, "error", 0, 0, collection_name)
-            return
-        index_code_chunks_background(download_id, filename, chunks, collection_name)
-    except Exception as exc:
-        dl_logger.error("Parse failed for '%s': %s", collection_name, exc, exc_info=True)
-        write_status(download_id, "error", 0, 0, collection_name)
-    finally:
-        shutil.rmtree(workdir, ignore_errors=True)
 
 
 @app.post(
@@ -887,7 +820,7 @@ def rag_parse_code(body: dict):
         return response
 
     thread = threading.Thread(
-        target=_parse_and_index,
+        target=indexing_service.parse_and_index,
         args=(download_id, filename, data, collection_name),
         daemon=True,
     )
