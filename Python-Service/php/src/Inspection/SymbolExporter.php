@@ -4,14 +4,13 @@ declare(strict_types=1);
 
 namespace App\Inspection;
 
-use PhpParser\Error;
+use App\CodeParser\PhpAstParser;
 use PhpParser\Node;
 use PhpParser\Node\Expr;
 use PhpParser\Node\Name;
 use PhpParser\Node\Stmt;
 use PhpParser\NodeTraverser;
 use PhpParser\NodeVisitorAbstract;
-use PhpParser\ParserFactory;
 
 /**
  * Tier-4 project-wide symbol exporter.
@@ -38,16 +37,16 @@ use PhpParser\ParserFactory;
  */
 final class SymbolExporter
 {
-    private \PhpParser\Parser $parser;
+    private PhpAstParser $astParser;
 
     private const SKIP_DIRS = [
         'vendor', 'node_modules', '.git', '__MACOSX', '.idea', '.vscode',
         'dist', 'build', 'coverage', '.venv', 'var/cache', 'bootstrap/cache',
     ];
 
-    public function __construct()
+    public function __construct(?PhpAstParser $astParser = null)
     {
-        $this->parser = (new ParserFactory())->createForNewestSupportedVersion();
+        $this->astParser = $astParser ?? new PhpAstParser();
     }
 
     /** @param list<string> $exclude extra relative dir segments to skip */
@@ -620,17 +619,7 @@ final class SymbolExporter
         if ($source === false) {
             return null;
         }
-        try {
-            $ast = $this->parser->parse($source) ?? [];
-        } catch (Error $e) {
-            return null;
-        }
-        if ($ast === []) {
-            return $ast;
-        }
-        $resolver = new NodeTraverser();
-        $resolver->addVisitor(new \PhpParser\NodeVisitor\NameResolver());
-        $resolver->traverse($ast);
-        return $ast;
+        $result = $this->astParser->parse($source);
+        return $result->isSuccessful() ? $result->nodes : null;
     }
 }

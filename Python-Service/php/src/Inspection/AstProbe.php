@@ -4,12 +4,11 @@ declare(strict_types=1);
 
 namespace App\Inspection;
 
-use PhpParser\Error;
+use App\CodeParser\PhpAstParser;
 use PhpParser\Node;
 use PhpParser\Node\Stmt;
 use PhpParser\NodeTraverser;
 use PhpParser\NodeVisitorAbstract;
-use PhpParser\ParserFactory;
 use PhpParser\PrettyPrinter\Standard as PrettyPrinter;
 
 /**
@@ -25,12 +24,12 @@ use PhpParser\PrettyPrinter\Standard as PrettyPrinter;
  */
 final class AstProbe
 {
-    private \PhpParser\Parser $parser;
+    private PhpAstParser $astParser;
     private PrettyPrinter $printer;
 
-    public function __construct()
+    public function __construct(?PhpAstParser $astParser = null)
     {
-        $this->parser = (new ParserFactory())->createForNewestSupportedVersion();
+        $this->astParser = $astParser ?? new PhpAstParser();
         $this->printer = new PrettyPrinter();
     }
 
@@ -127,7 +126,6 @@ final class AstProbe
         };
 
         $traverser = new NodeTraverser();
-        $traverser->addVisitor(new \PhpParser\NodeVisitor\NameResolver());
         $traverser->addVisitor($probe);
         $traverser->traverse($ast);
 
@@ -221,7 +219,6 @@ final class AstProbe
         };
 
         $traverser = new NodeTraverser();
-        $traverser->addVisitor(new \PhpParser\NodeVisitor\NameResolver());
         $traverser->addVisitor($probe);
         $traverser->traverse($ast);
 
@@ -233,10 +230,6 @@ final class AstProbe
 
     private function parse(string $source): array
     {
-        try {
-            return $this->parser->parse($source) ?? [];
-        } catch (Error $e) {
-            return [];
-        }
+        return $this->astParser->parse($source)->nodes;
     }
 }
