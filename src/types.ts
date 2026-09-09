@@ -107,6 +107,23 @@ export interface QueryResponse {
   sourceFiles: string[];
   llmUsed: string;
   durationMs: number;
+  usage?: LLMUsage | null;
+  context_usage?: ContextUsage | null;
+}
+
+export interface LLMUsage {
+  prompt_tokens: number | null;
+  completion_tokens: number | null;
+  total_tokens: number | null;
+  estimated: boolean;
+  source: 'provider' | 'estimate';
+}
+
+export interface ContextUsage {
+  input_tokens: number;
+  limit_tokens: number;
+  percent: number;
+  estimated: boolean;
 }
 
 export type DeveloperLogType = 'llm_prompt' | 'exception' | 'router_fallback';

@@ -12,7 +12,7 @@ import {
   AlertTriangle,
   ScrollText
 } from 'lucide-vue-next';
-import { RAGConfig, SearchMatch } from './types';
+import { RAGConfig, SearchMatch, LLMUsage, ContextUsage } from './types';
 import { makeRequest } from './ui/makeRequest';
 import { useProjectFiles } from './composables/useProjectFiles';
 
@@ -87,6 +87,8 @@ interface Message {
   matches?: SearchMatch[];
   llmUsed?: string;
   durationMs?: number;
+  usage?: LLMUsage | null;
+  context_usage?: ContextUsage | null;
   orchestration?: any;
   query?: string;
   queryId?: string;
@@ -282,6 +284,8 @@ const streamAnswer = async (text: string) => {
           m.content = evt.answer || m.content;
           m.llmUsed = llmUsed;
           m.durationMs = evt.duration_ms;
+          m.usage = evt.usage || null;
+          m.context_usage = evt.context_usage || null;
           m.streaming = false;
         }
       }
@@ -310,6 +314,8 @@ const pushJobAnswer = (rData: any, queryId: string | undefined, text: string) =>
     matches: rData.matches,
     llmUsed: rData.llmUsed || undefined,
     durationMs: rData.durationMs,
+    usage: rData.usage || null,
+    context_usage: rData.context_usage || null,
     contextPreview: rData.context_preview,
     orchestration: rData,
     query: text,
@@ -347,6 +353,8 @@ const gatePreviewDirect = async (text: string) => {
         matches: data.matches,
         llmUsed: data.llmUsed || undefined,
         durationMs: data.durationMs,
+        usage: data.usage || null,
+        context_usage: data.context_usage || null,
         contextPreview: data.context_preview,
         query: text,
         queryId: data.query_id,
@@ -639,6 +647,8 @@ const sendMessage = async (text: string) => {
               matches: rData.matches,
               llmUsed: rData.llmUsed || 'Gemini 3.5',
               durationMs: rData.durationMs,
+              usage: rData.usage || null,
+              context_usage: rData.context_usage || null,
               contextPreview: rData.context_preview,
               orchestration: rData,
               query: text,
@@ -686,6 +696,8 @@ const sendMessage = async (text: string) => {
         matches: data.matches,
         llmUsed: data.llmUsed || 'Gemini 3.5',
         durationMs: data.durationMs,
+        usage: data.usage || null,
+        context_usage: data.context_usage || null,
         contextPreview: data.context_preview,
         query: text,
         queryId: data.query_id,

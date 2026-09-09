@@ -1306,6 +1306,8 @@ async function startServer() {
         result.matches = answer.matches;
         result.llmUsed = answer.llmUsed;
         result.durationMs = answer.durationMs;
+        result.usage = answer.usage;
+        result.context_usage = answer.context_usage;
         result.context_preview = answer.context_preview;
         result.preview_only = answer.preview_only;
         result.preview_mode = answer.preview_mode;
@@ -1332,6 +1334,8 @@ async function startServer() {
           matches: result.matches,
           llmUsed: result.llmUsed,
           durationMs: result.durationMs,
+          usage: result.usage,
+          context_usage: result.context_usage,
           context_preview: result.context_preview,
           preview_only: result.preview_only,
           preview_mode: result.preview_mode,

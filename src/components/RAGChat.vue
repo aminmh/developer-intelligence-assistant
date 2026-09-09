@@ -15,7 +15,7 @@ import {
   ShieldCheck,
   X,
 } from 'lucide-vue-next';
-import { SearchMatch, UploadedFile } from '../types';
+import { SearchMatch, UploadedFile, LLMUsage, ContextUsage } from '../types';
 import PipelineProgress from './PipelineProgress.vue';
 import ChatLoading from './ChatLoading.vue';
 import EvaluationModal from './EvaluationModal.vue';
@@ -31,6 +31,8 @@ interface Message {
   matches?: SearchMatch[];
   llmUsed?: string;
   durationMs?: number;
+  usage?: LLMUsage | null;
+  context_usage?: ContextUsage | null;
   orchestration?: any;
   query?: string;
   queryId?: string;
@@ -180,6 +182,16 @@ const togglePreviewExpansion = (id: string) => {
   expandedPreviewId.value = expandedPreviewId.value === id ? null : id;
 };
 
+const expandedUsageId = ref<string | null>(null);
+const toggleUsageExpansion = (id: string) => {
+  expandedUsageId.value = expandedUsageId.value === id ? null : id;
+};
+
+const formatTokens = (value: number | null | undefined, estimated = false): string => {
+  if (value === null || value === undefined) return '—';
+  return `${estimated ? '~' : ''}${value.toLocaleString()}`;
+};
+
 // While a gate preview awaits confirmation the model must NOT run, so further
 // sends are locked (same visual state as loading).
 const chatLocked = computed(() => props.loading || !!props.gatePreview);
@@ -218,6 +230,37 @@ const chatLocked = computed(() => props.loading || !!props.gatePreview);
                 {{ msg.llmUsed }}
               </span>
               <span v-if="msg.durationMs">{{ msg.durationMs }}ms</span>
+            </div>
+
+            <button
+              v-if="msg.role === 'assistant' && (msg.usage || msg.context_usage)"
+              @click="toggleUsageExpansion(msg.id)"
+              class="mt-2 text-[10px] text-cyan-400/80 hover:text-cyan-300 flex items-center gap-1 font-mono transition-colors"
+            >
+              <Gauge class="w-3 h-3" />
+              <span>{{ expandedUsageId === msg.id ? 'Hide' : 'Show' }} token usage</span>
+              <span v-if="msg.usage">· {{ formatTokens(msg.usage.total_tokens, msg.usage.estimated) }} total</span>
+              <ChevronDown v-if="expandedUsageId !== msg.id" class="w-3 h-3" />
+              <ChevronUp v-else class="w-3 h-3" />
+            </button>
+
+            <div
+              v-if="expandedUsageId === msg.id && (msg.usage || msg.context_usage)"
+              class="mt-2 rounded-lg border border-cyan-500/15 bg-cyan-950/10 px-3 py-2 text-[10px] font-mono text-slate-400"
+            >
+              <div v-if="msg.usage" class="grid grid-cols-3 gap-2">
+                <span>Input {{ formatTokens(msg.usage.prompt_tokens, msg.usage.estimated) }}</span>
+                <span>Output {{ formatTokens(msg.usage.completion_tokens, msg.usage.estimated) }}</span>
+                <span>Total {{ formatTokens(msg.usage.total_tokens, msg.usage.estimated) }}</span>
+              </div>
+              <div v-if="msg.context_usage" class="mt-1 text-cyan-300/80">
+                Context {{ msg.context_usage.percent.toLocaleString() }}%
+                ({{ formatTokens(msg.context_usage.input_tokens, msg.context_usage.estimated) }} /
+                {{ msg.context_usage.limit_tokens.toLocaleString() }})
+              </div>
+              <div v-if="msg.usage?.estimated || msg.context_usage?.estimated" class="mt-1 text-slate-500">
+                ~ estimated; provider usage was unavailable
+              </div>
             </div>
 
             <!-- Orchestration info -->
