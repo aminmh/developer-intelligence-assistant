@@ -4,7 +4,6 @@ from fastapi import FastAPI, HTTPException, Header, Query, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, StreamingResponse
 from index.indexer import CodeIntelligenceIndex
-from runtime.sandbox_runtime import sandbox_available
 from infra.settings import settings
 from runtime.lmstudio import lmstudio_load, lmstudio_models
 import runtime.llm as llm_module
@@ -45,7 +44,6 @@ from datetime import datetime, timezone, timedelta
 from pathlib import Path
 from qdrant_client import QdrantClient
 from jinja2 import Template
-from infra.log_viewer import clear_logs, list_logs
 
 
 # Matches tusd's `-max-size` (2 GiB).
@@ -211,8 +209,12 @@ app = FastAPI(
 )
 
 from inspection.http import router as inspection_router  # noqa: E402 — after app exists
+from routers.developer_logs import router as developer_logs_router  # noqa: E402 — after app exists
+from routers.sandbox import router as sandbox_router  # noqa: E402 — after app exists
 
 app.include_router(inspection_router)
+app.include_router(developer_logs_router)
+app.include_router(sandbox_router)
 
 app.add_middleware(
     CORSMiddleware,
@@ -419,107 +421,6 @@ def runpod_test_connection():
 def remote_test_connection():
     """Test the configured external OpenAI-compatible endpoint."""
     return llm_module.test_remote()
-
-
-@app.get(
-    "/sandbox/status",
-    tags=["Sandbox"],
-    summary="Sandbox Runner Status",
-    description=(
-        "Probes the configured sandbox runner daemon (sandboxDockerHost, falling "
-        "back to DOCKER_HOST or the host socket) and reports whether the runsc "
-        "runtime is registered. Includes the effective Docker host and jobs root "
-        "so logs can say which backend answered."
-    ),
-)
-def sandbox_status():
-    """Report sandbox backend availability for the configured runner."""
-    host = settings.sandbox_docker_host or None
-    result = sandbox_available(docker_host=host)
-    result["dockerHost"] = host or "(default — host daemon socket)"
-    result["jobsRoot"] = settings.sandbox_jobs_root or "/jobs"
-    return {"success": True, **result}
-
-
-@app.post(
-    "/sandbox/command",
-    tags=["Sandbox"],
-    summary="Run a Shell Command in the Project Sandbox",
-    description=(
-        "Runs an arbitrary shell command against the staged copy of an uploaded "
-        "project inside the sandbox backend — the 'terminal like docker' path. "
-        "Executes `sh -c <command>` in a networked, writable container with the "
-        "project mounted at /app, so file changes persist for later commands. "
-        "The project must have been analyzed first (staging + vendor install). "
-        "Non-interactive only: no TTY, so long-running apps (e.g. artisan serve) "
-        "are not supported."
-    ),
-)
-def sandbox_command(body: dict):
-    """Run a free-form shell command in the staged project sandbox."""
-    import re as _re
-
-    from sandbox.executor import default_executor
-
-    filename = body.get("filename", "")
-    command = body.get("command", "")
-    if not isinstance(command, str) or not command.strip():
-        return {"success": False, "error": "Missing command"}
-    if len(command) > 4000 or "\x00" in command:
-        return {"success": False, "error": "Command too long or contains NUL"}
-    if not filename:
-        return {"success": False, "error": "Missing filename"}
-    # Project dir on the daemon is keyed by the zip stem (matches the
-    # orchestrator's staging id), not the full filename.
-    stem = filename.rsplit(".", 1)[0] if "." in filename else filename
-    pid = _re.sub(r"[^A-Za-z0-9_.-]", "_", stem).strip("._") or "project"
-    try:
-        executor = default_executor()
-    except ValueError as exc:
-        return {"success": False, "error": f"sandbox backend unavailable: {exc}"}
-    framework = body.get("framework") or "php"
-    result = executor.run_command(
-        pid,
-        command,
-        framework=framework,
-        cwd=body.get("cwd"),
-    )
-    return {"success": result.get("status") == "done", **result}
-
-
-def _project_stem(filename: str) -> str:
-    """zip stem → daemon project id (matches orchestrator staging keys)."""
-    import re as _re
-
-    stem = filename.rsplit(".", 1)[0] if "." in filename else filename
-    return _re.sub(r"[^A-Za-z0-9_.-]", "_", stem).strip("._") or "project"
-
-
-@app.post(
-    "/sandbox/clean",
-    tags=["Sandbox"],
-    summary="Remove a Staged Project from the Sandbox Daemon",
-    description=(
-        "Deletes the staged copy (/jobs/<stem>/src) of an analyzed project from "
-        "the sandbox daemon volume, reclaiming disk. Safe id validation only — "
-        "the path is derived from the zip filename. Running analyses are "
-        "unaffected (per-run staging dirs)."
-    ),
-)
-def sandbox_clean(body: dict):
-    from sandbox.executor import default_executor
-
-    filename = body.get("filename", "")
-    if not isinstance(filename, str) or not filename:
-        return {"success": False, "error": "Missing filename"}
-    pid = _project_stem(filename)
-    try:
-        executor = default_executor()
-    except ValueError as exc:
-        return {"success": False, "error": f"sandbox backend unavailable: {exc}"}
-    result = executor.cleanup_staging(pid)
-    return {"success": result.get("status") == "done", **result}
-
 
 
 @app.get(
@@ -1299,84 +1200,6 @@ def retrieval_insights(
     if not trace:
         raise HTTPException(status_code=404, detail="Retrieval trace not found")
     return trace
-
-
-@app.get(
-    "/logs",
-    tags=["Developer Logs"],
-    summary="List developer logs",
-)
-def developer_logs(
-    search: str = "",
-    types: str = "",
-    severity: str = "",
-    start: str = "",
-    end: str = "",
-    offset: int = Query(0, ge=0),
-    limit: int = Query(50, ge=1, le=200),
-    x_internal_secret: Annotated[str | None, Header(alias="X-Internal-Secret")] = None,
-):
-    if x_internal_secret != settings.internal_secret:
-        raise HTTPException(status_code=401, detail="Unauthorized")
-    selected = [item.strip() for item in types.split(",") if item.strip()] or None
-    try:
-        return list_logs(search=search, types=selected, severity=severity,
-                        start=start, end=end, offset=offset, limit=limit)
-    except ValueError as exc:
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
-
-
-@app.delete(
-    "/logs/{log_type}",
-    tags=["Developer Logs"],
-    summary="Clear one developer log",
-)
-def clear_developer_log(
-    log_type: str,
-    x_internal_secret: Annotated[str | None, Header(alias="X-Internal-Secret")] = None,
-):
-    if x_internal_secret != settings.internal_secret:
-        raise HTTPException(status_code=401, detail="Unauthorized")
-    try:
-        return clear_logs(log_type)
-    except ValueError as exc:
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
-
-
-@app.delete(
-    "/logs",
-    tags=["Developer Logs"],
-    summary="Clear all developer logs",
-)
-def clear_all_developer_logs(
-    x_internal_secret: Annotated[str | None, Header(alias="X-Internal-Secret")] = None,
-):
-    if x_internal_secret != settings.internal_secret:
-        raise HTTPException(status_code=401, detail="Unauthorized")
-    return clear_logs()
-
-
-@app.get("/logs/config", tags=["Developer Logs"], summary="Get log viewer configuration")
-def get_log_config(
-    x_internal_secret: Annotated[str | None, Header(alias="X-Internal-Secret")] = None,
-):
-    if x_internal_secret != settings.internal_secret:
-        raise HTTPException(status_code=401, detail="Unauthorized")
-    return {"deletion_mode": settings.log_deletion_mode}
-
-
-@app.put("/logs/config", tags=["Developer Logs"], summary="Update log viewer configuration")
-def update_log_config(
-    body: dict,
-    x_internal_secret: Annotated[str | None, Header(alias="X-Internal-Secret")] = None,
-):
-    if x_internal_secret != settings.internal_secret:
-        raise HTTPException(status_code=401, detail="Unauthorized")
-    mode = body.get("deletion_mode") if isinstance(body, dict) else None
-    if mode not in {"soft", "hard"}:
-        raise HTTPException(status_code=400, detail="deletion_mode must be soft or hard")
-    settings_store.set("logDeletionMode", mode)
-    return {"deletion_mode": mode}
 
 
 def _index_plan_for(body: dict, query: str, route: str) -> dict:
