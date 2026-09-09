@@ -4,11 +4,6 @@ declare(strict_types=1);
 
 namespace App\Console;
 
-use App\CodeParser\CodeChunker;
-use App\CodeParser\Models\CodeChunk;
-use App\CodeParser\WorkspaceTypeScanner;
-use Throwable;
-
 /**
  * Pure-PHP replacement for the former Laravel `code:parse` artisan command.
  *
@@ -23,91 +18,51 @@ use Throwable;
  */
 final class CodeParseCommand
 {
-    private int $totalChunks  = 0;
-    private int $totalFiles   = 0;
-    private int $skippedFiles = 0;
-    private array $errors     = [];
+    private const USAGE = 'Usage: php bin/code-parse --path=<path> [--output=json|text|summary|none] [--type-map-file=FILE]';
 
     public function run(array $argv): int
     {
-        $opts = $this->parseArgs($argv);
-
-        $path = $opts['path'] ?? null;
-        if ($path === null || trim($path) === '') {
-            fwrite(STDERR, "Error: --path=<dir-or-file> is required.\n");
-            fwrite(STDERR, "Usage: php bin/code-parse --path=<path> [--output=json|text|summary|none] [--type-map-file=FILE]\n");
+        $options = CodeParseOptions::fromArgv($argv);
+        if ($options->path === null || trim($options->path) === '') {
+            $this->error('Error: --path=<dir-or-file> is required.');
+            $this->error(self::USAGE);
             return 1;
         }
 
-        $real = realpath($path);
-        if ($real === false || !file_exists($real)) {
-            fwrite(STDERR, "Error: path does not exist: {$path}\n");
+        $input = CodeParseInput::resolve($options->path);
+        if ($input === null) {
+            $this->error("Error: path does not exist: {$options->path}");
             return 1;
         }
 
-        $output = $opts['output'] ?? 'json';
-        if (!in_array($output, ['json', 'text', 'summary', 'none'], true)) {
-            fwrite(STDERR, "Error: --output must be json, text, summary, or none (got: {$output}).\n");
+        if (!$options->hasValidOutput()) {
+            $this->error("Error: --output must be json, text, summary, or none (got: {$options->output}).");
             return 1;
         }
 
-        // External type map (from a prior WorkspaceTypeScanner pass), if given.
-        $typeMap = [];
-        if (isset($opts['type-map-file'])) {
-            $file = $opts['type-map-file'];
-            if (is_file($file)) {
-                $typeMap = json_decode((string) file_get_contents($file), true) ?: [];
-            }
+        $typeMapResult = $input->loadTypeMap($options->typeMapFile);
+        if ($typeMapResult['warning'] !== null) {
+            $this->error($typeMapResult['warning']);
         }
 
-        $chunker = new CodeChunker();
-
-        // When scanning a whole workspace, build the type map from it directly
-        // so Eloquent magic properties / @property annotations resolve cleanly.
-        if (is_dir($real) && empty($typeMap)) {
-            try {
-                $typeMap = (new WorkspaceTypeScanner())->scan($real);
-            } catch (Throwable $e) {
-                fwrite(STDERR, "Warning: type scanner failed: " . $e->getMessage() . "\n");
-            }
-        }
-
-        $chunks = is_file($real)
-            ? $this->chunkSingleFile($chunker, $real, basename($real), $typeMap)
-            : $this->chunkDirectory($chunker, $real, $typeMap);
+        $scan = (new CodeParseScanner(new \App\CodeParser\CodeChunker()))->scan($input, $typeMapResult['map']);
+        $chunks = $scan['chunks'];
+        $report = $scan['report'];
 
         if (empty($chunks)) {
-            if ($output === 'json') {
+            if ($options->output === 'json') {
                 echo "[]\n";
             }
-            fwrite(STDERR, "No chunks produced for: {$real}\n");
+            $this->error("No chunks produced for: {$input->path}");
             return 1;
         }
 
-        switch ($output) {
-            case 'json':
-                $data = array_map(fn(CodeChunk $c) => $c->toMetadata(), $chunks);
-                echo json_encode($data, JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE);
-                echo "\n";
-                break;
+        echo (new CodeParseRenderer())->render($options->output, $chunks);
 
-            case 'text':
-                $this->renderText($chunks);
-                break;
-
-            case 'summary':
-                $this->renderSummary($chunks);
-                break;
-
-            case 'none':
-            default:
-                break;
-        }
-
-        if (!empty($this->errors)) {
-            fwrite(STDERR, count($this->errors) . " file(s) had parse errors:\n");
-            foreach ($this->errors as $err) {
-                fwrite(STDERR, "  {$err['file']}: {$err['message']}\n");
+        if ($report->hasErrors()) {
+            $this->error(count($report->errors()) . ' file(s) had parse errors:');
+            foreach ($report->errors() as $error) {
+                $this->error("  {$error['file']}: {$error['message']}");
             }
             return 2;
         }
@@ -115,105 +70,8 @@ final class CodeParseCommand
         return 0;
     }
 
-    /** @return CodeChunk[] */
-    private function chunkDirectory(CodeChunker $chunker, string $directory, array $typeMap): array
+    private function error(string $message): void
     {
-        $files = $this->collectPhpFiles($directory);
-        $chunks = [];
-        foreach ($files as $file) {
-            $relative = ltrim(str_replace($directory, '', $file), DIRECTORY_SEPARATOR);
-            $chunks = array_merge($chunks, $this->chunkSingleFile($chunker, $file, $relative, $typeMap));
-        }
-        return $chunks;
-    }
-
-    /** @return CodeChunk[] */
-    private function chunkSingleFile(CodeChunker $chunker, string $absolute, string $relative, array $typeMap): array
-    {
-        try {
-            $chunks = $chunker->chunkFile($absolute, $relative, $typeMap);
-            $this->totalFiles++;
-            $this->totalChunks += count($chunks);
-            return $chunks;
-        } catch (Throwable $e) {
-            $this->skippedFiles++;
-            $this->errors[] = ['file' => $relative ?: basename($absolute), 'message' => $e->getMessage()];
-            return [];
-        }
-    }
-
-    /** @return string[] */
-    private function collectPhpFiles(string $directory): array
-    {
-        $iterator = new \RecursiveIteratorIterator(
-            new \RecursiveDirectoryIterator($directory, \FilesystemIterator::SKIP_DOTS)
-        );
-
-        $files = [];
-        foreach ($iterator as $file) {
-            if ($file->getExtension() === 'php') {
-                $files[] = $file->getPathname();
-            }
-        }
-
-        sort($files);
-        return $files;
-    }
-
-    /** @param CodeChunk[] $chunks */
-    private function renderText(array $chunks): void
-    {
-        $total = count($chunks);
-        foreach ($chunks as $index => $chunk) {
-            $position = $index + 1;
-            $label = $chunk->className
-                ? "{$chunk->className}::{$chunk->name}()"
-                : "{$chunk->name}()";
-            $location = "{$chunk->file}:{$chunk->startLine}";
-
-            echo str_repeat('=', 64) . "\n";
-            echo "[{$position}/{$total}] {$label}  •  {$location}\n";
-            echo str_repeat('=', 64) . "\n";
-            echo $chunk->toEmbeddableText() . "\n\n";
-        }
-    }
-
-    /** @param CodeChunk[] $chunks */
-    private function renderSummary(array $chunks): void
-    {
-        $byType = array_count_values(array_map(fn($c) => $c->type, $chunks));
-        $byClass = [];
-        foreach ($chunks as $c) {
-            if ($c->className) {
-                $byClass[$c->className] = ($byClass[$c->className] ?? 0) + 1;
-            }
-        }
-        arsort($byClass);
-
-        echo "Chunks by type:\n";
-        foreach ($byType as $type => $count) {
-            echo "  {$type}: {$count}\n";
-        }
-        echo "\nTop classes by chunk count:\n";
-        foreach (array_slice($byClass, 0, 10, true) as $class => $count) {
-            echo "  {$class}: {$count}\n";
-        }
-    }
-
-    private function parseArgs(array $argv): array
-    {
-        $opts = [];
-        $args = array_slice($argv, 1);
-        for ($i = 0; $i < count($args); $i++) {
-            $arg = $args[$i];
-            if (str_starts_with($arg, '--') && str_contains($arg, '=')) {
-                [$key, $value] = explode('=', $arg, 2);
-                $opts[substr($key, 2)] = $value;
-            } elseif (str_starts_with($arg, '--') && isset($args[$i + 1])) {
-                // Support `--path <value>` as well as `--path=<value>`.
-                $opts[substr($arg, 2)] = $args[++$i];
-            }
-        }
-        return $opts;
+        fwrite(STDERR, $message . "\n");
     }
 }

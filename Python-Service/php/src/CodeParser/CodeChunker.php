@@ -18,10 +18,6 @@ declare(strict_types=1);
 namespace App\CodeParser;
 
 use App\CodeParser\Models\CodeChunk;
-use PhpParser\Error;
-use PhpParser\NodeTraverser;
-use PhpParser\NodeVisitor\NameResolver;
-use PhpParser\ParserFactory;
 use PhpParser\PrettyPrinter\Standard as PrettyPrinter;
 
 // ─── Data shape ────────────────────────────────────────────────────────────────
@@ -33,12 +29,12 @@ use PhpParser\PrettyPrinter\Standard as PrettyPrinter;
 
 final readonly class CodeChunker
 {
-    private \PhpParser\Parser $parser;
+    private PhpAstParser $astParser;
     private PrettyPrinter $printer;
 
-    public function __construct()
+    public function __construct(?PhpAstParser $astParser = null)
     {
-        $this->parser = (new ParserFactory())->createForNewestSupportedVersion();
+        $this->astParser = $astParser ?? new PhpAstParser();
         $this->printer = new PrettyPrinter();
     }
 
@@ -64,18 +60,16 @@ final readonly class CodeChunker
      */
     public function chunkSource(string $source, string $filePath = '', array $typeMap = []): array
     {
-        try {
-            $ast = $this->parser->parse($source);
-        } catch (Error $e) {
-            // Syntax error — return empty; log upstream if needed
+        $parseResult = $this->astParser->parse($source);
+        if (!$parseResult->isSuccessful()) {
+            // Syntax error — return empty; log upstream if needed.
             return [];
         }
 
         $collector = new \App\CodeParser\Models\ChunkCollector($source, $filePath, $this->printer, $typeMap);
-        $traverser = new NodeTraverser();
-        $traverser->addVisitor(new NameResolver());
+        $traverser = new \PhpParser\NodeTraverser();
         $traverser->addVisitor($collector);
-        $traverser->traverse($ast);
+        $traverser->traverse($parseResult->nodes);
 
         return $collector->chunks;
     }
