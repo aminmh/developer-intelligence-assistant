@@ -3,7 +3,7 @@ from __future__ import annotations
 import pytest
 from fastapi import HTTPException
 
-from routers import developer_logs, sandbox
+from routers import developer_logs, sandbox, system
 
 
 def test_sandbox_project_stem_is_safe_and_stable():
@@ -29,3 +29,11 @@ def test_sandbox_command_validates_input_before_constructing_executor(monkeypatc
         "success": False,
         "error": "Missing filename",
     }
+
+
+def test_system_probes_report_unconfigured_optional_services(monkeypatch):
+    monkeypatch.setattr(system.settings, "runpod_api_key", "")
+    monkeypatch.setattr(system.settings, "llm_remote_base_url", "")
+    assert system._probe_runpod()["configured"] is False
+    assert system._probe_remote_llm()["configured"] is False
+    assert system.runpod_list_endpoints()["ok"] is False

@@ -5,8 +5,6 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, StreamingResponse
 from index.indexer import CodeIntelligenceIndex
 from infra.settings import settings
-from runtime.lmstudio import lmstudio_load, lmstudio_models
-import runtime.llm as llm_module
 from rag.router import classify as semantic_classify
 from rag.router import submit_feedback as router_submit_feedback
 from rag.intent import extract_intent
@@ -38,8 +36,6 @@ import time
 import base64
 import logging
 import threading
-import urllib.request as request
-import urllib.request
 from datetime import datetime, timezone, timedelta
 from pathlib import Path
 from qdrant_client import QdrantClient
@@ -211,10 +207,12 @@ app = FastAPI(
 from inspection.http import router as inspection_router  # noqa: E402 — after app exists
 from routers.developer_logs import router as developer_logs_router  # noqa: E402 — after app exists
 from routers.sandbox import router as sandbox_router  # noqa: E402 — after app exists
+from routers.system import router as system_router  # noqa: E402 — after app exists
 
 app.include_router(inspection_router)
 app.include_router(developer_logs_router)
 app.include_router(sandbox_router)
+app.include_router(system_router)
 
 app.add_middleware(
     CORSMiddleware,
@@ -261,201 +259,6 @@ def health():
         unresolved_edges=service.unresolved_edges_count,
         collection=settings.qdrant_collection,
     )
-
-
-def _probe_local_llm() -> dict:
-    """Probe the local Ollama server; never raises."""
-    try:
-        req = urllib.request.Request(
-            f"{settings.ollama_base_url.rstrip('/')}/api/tags",
-            headers={"Content-Type": "application/json"},
-        )
-        with urllib.request.urlopen(req, timeout=2.0) as resp:
-            data = json.loads(resp.read().decode("utf-8"))
-        models = data.get("models") or []
-        return {"configured": True, "reachable": True, "models": len(models)}
-    except Exception as exc:
-        logging.getLogger(__name__).warning(
-            "Local LLM health probe failed: %s", exc
-        )
-        return {"configured": True, "reachable": False, "models": None}
-
-
-def _probe_remote_llm() -> dict:
-    """Probe the optional remote vLLM server; never raises."""
-    base_url = (settings.llm_remote_base_url or "").strip()
-    if not base_url:
-        return {"configured": False, "reachable": False, "model": None, "error": None}
-    try:
-        headers = {"Accept": "application/json"}
-        api_key = (settings.llm_remote_api_key or "").strip()
-        if api_key:
-            headers["Authorization"] = f"Bearer {api_key}"
-        req = urllib.request.Request(
-            f"{base_url.rstrip('/')}/v1/models",
-            headers=headers,
-        )
-        with urllib.request.urlopen(req, timeout=2.0) as resp:
-            data = json.loads(resp.read().decode("utf-8"))
-        items = data.get("data") or []
-        model = items[0].get("id") if items else None
-        return {"configured": True, "reachable": True, "model": model, "error": None}
-    except Exception as exc:
-        return {"configured": True, "reachable": False, "model": None, "error": str(exc)}
-
-
-_RUNPOD_API = "https://rest.runpod.io/v1"
-
-
-def _probe_runpod() -> dict:
-    """Probe the RunPod REST API (list endpoints) with the stored key; never raises."""
-    api_key = (settings.runpod_api_key or "").strip()
-    if not api_key:
-        return {"configured": False, "reachable": False, "endpoint_count": 0, "error": None}
-    try:
-        req = urllib.request.Request(
-            f"{_RUNPOD_API}/endpoints",
-            headers={"Authorization": f"Bearer {api_key}", "Accept": "application/json"},
-        )
-        with urllib.request.urlopen(req, timeout=5.0) as resp:
-            data = json.loads(resp.read().decode("utf-8"))
-        count = len(data) if isinstance(data, list) else 0
-        return {"configured": True, "reachable": True, "endpoint_count": count, "error": None}
-    except Exception as exc:
-        return {"configured": True, "reachable": False, "endpoint_count": 0, "error": str(exc)}
-
-
-@app.get(
-    "/health/llm",
-    tags=["Health & System"],
-    summary="LLM Provider Health",
-    description=(
-        "Checks reachability of the local Ollama, optional remote vLLM LLM "
-        "providers, and the RunPod serverless account. Never raises — each "
-        "provider reports its own status."
-    ),
-)
-def health_llm():
-    """LLM provider health: local Ollama + optional remote vLLM + RunPod."""
-    return {
-        "local": _probe_local_llm(),
-        "remote": _probe_remote_llm(),
-        "runpod": _probe_runpod(),
-    }
-
-
-@app.get(
-    "/api/runpod/endpoints",
-    tags=["RunPod Serverless"],
-    summary="List RunPod Endpoints",
-    description=(
-        "Lists the account's RunPod serverless endpoints via the RunPod REST "
-        "API. Returns {ok, endpoints, error}; never raises."
-    ),
-)
-def runpod_list_endpoints():
-    """List RunPod serverless endpoints for the stored account key."""
-    api_key = (settings.runpod_api_key or "").strip()
-    if not api_key:
-        return {"ok": False, "endpoints": [], "error": "not configured (no RunPod API key)"}
-    try:
-        req = urllib.request.Request(
-            f"{_RUNPOD_API}/endpoints",
-            headers={"Authorization": f"Bearer {api_key}", "Accept": "application/json"},
-        )
-        with urllib.request.urlopen(req, timeout=8.0) as resp:
-            data = json.loads(resp.read().decode("utf-8"))
-        endpoints = data if isinstance(data, list) else []
-        return {"ok": True, "endpoints": endpoints, "error": None}
-    except Exception as exc:
-        return {"ok": False, "endpoints": [], "error": str(exc)}
-
-
-@app.post(
-    "/health/test/runpod",
-    tags=["RunPod Serverless"],
-    summary="Test RunPod Connection",
-    description=(
-        "Validates the stored RunPod API key by calling the RunPod REST API "
-        "list-endpoints endpoint. Returns a uniform {ok, latency_ms, detail} "
-        "result; never raises."
-    ),
-)
-def runpod_test_connection():
-    """Test the stored RunPod key; uniform {ok, latency_ms, detail} response."""
-    import time as _t
-
-    api_key = (settings.runpod_api_key or "").strip()
-    t0 = _t.monotonic()
-    if not api_key:
-        return {"ok": False, "latency_ms": 0, "detail": "not configured (no RunPod API key)"}
-    try:
-        req = urllib.request.Request(
-            f"{_RUNPOD_API}/endpoints",
-            headers={"Authorization": f"Bearer {api_key}", "Accept": "application/json"},
-        )
-        with urllib.request.urlopen(req, timeout=8.0) as resp:
-            data = json.loads(resp.read().decode("utf-8"))
-        count = len(data) if isinstance(data, list) else 0
-        latency_ms = round((_t.monotonic() - t0) * 1000)
-        return {
-            "ok": True,
-            "latency_ms": latency_ms,
-            "detail": f"authenticated · {count} endpoint(s) on account",
-        }
-    except Exception as exc:
-        latency_ms = round((_t.monotonic() - t0) * 1000)
-        return {"ok": False, "latency_ms": latency_ms, "detail": str(exc)[:300]}
-
-
-@app.post(
-    "/health/test/remote",
-    tags=["LLM Providers"],
-    summary="Test External OpenAI-Compatible Connection",
-    description=(
-        "Probes the configured external OpenAI-compatible endpoint (llmRemoteBaseUrl) "
-        "with a tiny chat completion. Returns a uniform {ok, latency_ms, detail, model} "
-        "result; never raises."
-    ),
-)
-def remote_test_connection():
-    """Test the configured external OpenAI-compatible endpoint."""
-    return llm_module.test_remote()
-
-
-@app.get(
-    "/lmstudio/models",
-    tags=["LM Studio"],
-    summary="List LM Studio Models",
-    description=(
-        "Lists models available on the configured LM Studio server (the "
-        "llmRemoteBaseUrl setting). Each entry reports id, engine (mlx / "
-        "llama.cpp) and quantization so the UI can show which models run on "
-        "the MLX engine."
-    ),
-)
-def lmstudio_models_endpoint(base_url: Optional[str] = None):
-    """List models from the configured LM Studio server."""
-    host = base_url or settings.llm_remote_base_url or ""
-    result = lmstudio_models(host)
-    return {"success": result.pop("ok"), **result}
-
-
-@app.post(
-    "/lmstudio/load",
-    tags=["LM Studio"],
-    summary="Load Model into LM Studio",
-    description=(
-        "Loads the given model id into the LM Studio engine (MLX for "
-        "mlx-format models) on the configured server."
-    ),
-)
-def lmstudio_load_endpoint(body: dict):
-    """Load a model into the LM Studio engine."""
-    model_id = (body.get("model") or "").strip()
-    base_url = body.get("base_url") or settings.llm_remote_base_url or ""
-    result = lmstudio_load(base_url, model_id)
-    return {"success": result.pop("ok"), **result}
 
 
 @app.get(
