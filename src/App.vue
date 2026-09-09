@@ -14,6 +14,7 @@ import {
 } from 'lucide-vue-next';
 import { RAGConfig, UploadedFile, SearchMatch } from './types';
 import { uploadViaTus } from './services/tusUpload';
+import { makeRequest } from './ui/makeRequest';
 
 import RAGChat from './components/RAGChat.vue';
 import RAGFiles from './components/RAGFiles.vue';
@@ -133,14 +134,6 @@ const triggerToast = (msg: string, isSuccess = true) => {
     showErrorToast.value = true;
     setTimeout(() => { showErrorToast.value = false; }, 4000);
   }
-};
-
-const apiBaseUrl = import.meta.env.VITE_API_URL || '';
-
-const makeRequest = async (path: string, options: RequestInit = {}) => {
-  const base = apiBaseUrl.replace(/\/+$/, '');
-  const url = base ? `${base}${path}` : path;
-  return fetch(url, options);
 };
 
 const mapSteps = (raw: any[]): PipelineStep[] =>

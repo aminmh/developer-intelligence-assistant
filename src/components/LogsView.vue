@@ -3,6 +3,7 @@ import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue';
 import { AlertTriangle, ChevronDown, ChevronUp, CircleAlert, RefreshCw, ScrollText, Trash2 } from 'lucide-vue-next';
 import ConfirmModal from './ConfirmModal.vue';
 import type { DeveloperLogEvent, DeveloperLogType, DeveloperLogsResponse } from '../types';
+import { makeRequest } from '../ui/makeRequest';
 
 const events = ref<DeveloperLogEvent[]>([]);
 const loading = ref(false); const error = ref(''); const search = ref('');
@@ -17,7 +18,7 @@ const load = async (append = false) => {
   const query = new URLSearchParams({ offset: String(append ? offset.value : 0), limit: '50' });
   if (search.value.trim()) query.set('search', search.value.trim()); if (type.value) query.set('types', type.value); if (severity.value) query.set('severity', severity.value);
   if (from.value) query.set('start', new Date(from.value).toISOString()); if (to.value) query.set('end', new Date(to.value).toISOString());
-  try { const response = await fetch(`/api/logs?${query}`); const data = await response.json() as DeveloperLogsResponse & { detail?: string }; if (!response.ok) throw new Error(data.detail || 'Logs unavailable.');
+  try { const response = await makeRequest(`/api/logs?${query}`); const data = await response.json() as DeveloperLogsResponse & { detail?: string }; if (!response.ok) throw new Error(data.detail || 'Logs unavailable.');
     events.value = append ? [...events.value, ...data.events] : data.events; total.value = data.total; offset.value = events.value.length; hasMore.value = data.has_more; deletionMode.value = data.deletion_mode || 'soft';
   } catch (cause: any) { error.value = cause?.message || 'Logs unavailable.'; } finally { loading.value = false; }
 };
@@ -25,8 +26,8 @@ watch([search, type, severity, from, to], () => { if (debounceTimer) clearTimeou
 watch(autoRefresh, (enabled) => { if (refreshTimer) clearInterval(refreshTimer); refreshTimer = enabled ? setInterval(() => load(false), 10000) : null; });
 onMounted(() => load()); onBeforeUnmount(() => { if (refreshTimer) clearInterval(refreshTimer); if (debounceTimer) clearTimeout(debounceTimer); });
 const toggle = (id: string) => { const next = new Set(expanded.value); next.has(id) ? next.delete(id) : next.add(id); expanded.value = next; };
-const clearConfirmed = async () => { if (!clearTarget.value) return; const target = clearTarget.value; const response = await fetch(target === 'all' ? '/api/logs' : `/api/logs/${target}`, { method: 'DELETE' }); if (!response.ok) { error.value = 'Failed to clear logs.'; return; } clearTarget.value = null; await load(false); };
-const saveMode = async () => { savingMode.value = true; try { const response = await fetch('/api/logs/config', { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ deletion_mode: deletionMode.value }) }); if (!response.ok) throw new Error('Failed to save clear mode.'); } catch (cause: any) { error.value = cause?.message || 'Failed to save clear mode.'; } finally { savingMode.value = false; } };
+const clearConfirmed = async () => { if (!clearTarget.value) return; const target = clearTarget.value; const response = await makeRequest(target === 'all' ? '/api/logs' : `/api/logs/${target}`, { method: 'DELETE' }); if (!response.ok) { error.value = 'Failed to clear logs.'; return; } clearTarget.value = null; await load(false); };
+const saveMode = async () => { savingMode.value = true; try { const response = await makeRequest('/api/logs/config', { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ deletion_mode: deletionMode.value }) }); if (!response.ok) throw new Error('Failed to save clear mode.'); } catch (cause: any) { error.value = cause?.message || 'Failed to save clear mode.'; } finally { savingMode.value = false; } };
 const formatTime = (value: string) => new Date(value).toLocaleString();
 const detailText = (event: DeveloperLogEvent) => event.type === 'llm_prompt' ? event.details.prompt : event.type === 'exception' ? event.details.stackTrace || event.details.message : JSON.stringify(event.details.metadata || {}, null, 2);
 const clearMessage = computed(() => `This will ${deletionMode.value === 'hard' ? 'remove the active log and rotated backups' : 'truncate only the active log'}${clearTarget.value === 'all' ? ' for all log types' : ` for ${labels[clearTarget.value as DeveloperLogType]}`}.`);

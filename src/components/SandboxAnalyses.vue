@@ -22,14 +22,9 @@ import {
 } from 'lucide-vue-next';
 import { UploadedFile, AnalysisSession, SandboxProbe, SandboxResult } from '../types';
 import PipelineProgress, { PipelineStep } from './PipelineProgress.vue';
+import { makeRequest } from '../ui/makeRequest';
 
 const props = defineProps<{ files: UploadedFile[] }>();
-
-const apiBaseUrl = import.meta.env.VITE_API_URL || '';
-const makeRequest = async (path: string, options: RequestInit = {}) => {
-  const base = apiBaseUrl.replace(/\/+$/, '');
-  return fetch(base ? `${base}${path}` : path, options);
-};
 
 // --- Sandbox runner status chip -------------------------------------------
 

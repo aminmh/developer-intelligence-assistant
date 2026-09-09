@@ -2,6 +2,7 @@
 import { ref } from 'vue';
 import { BookOpen, RefreshCw } from 'lucide-vue-next';
 import { RAGConfig } from '../../types';
+import { makeRequest } from '../../ui/makeRequest';
 
 const { config, updateField } = defineProps<{
   config: RAGConfig;
@@ -20,7 +21,7 @@ const testDocRetrieval = async () => {
   testingDocRetrieval.value = true;
   docRetrievalTest.value = null;
   try {
-    const res = await fetch('/api/docretrieval/test', {
+    const res = await makeRequest('/api/docretrieval/test', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({

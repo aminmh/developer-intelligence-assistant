@@ -10,6 +10,7 @@ import {
   ChevronUp,
   Server,
 } from 'lucide-vue-next';
+import { makeRequest } from '../ui/makeRequest';
 
 const stats = ref<any>({ online: false });
 const expanded = ref(true);
@@ -34,14 +35,6 @@ const barColor = (v: number): string => {
   if (v < 50) return 'bg-emerald-500 shadow-[0_0_12px] shadow-emerald-500/50';
   if (v < 80) return 'bg-amber-500 shadow-[0_0_12px] shadow-amber-500/50';
   return 'bg-rose-500 shadow-[0_0_12px] shadow-rose-500/50';
-};
-
-const apiBaseUrl = import.meta.env.VITE_API_URL || '';
-
-const makeRequest = async (path: string, options: RequestInit = {}) => {
-  const base = apiBaseUrl.replace(/\/+$/, '');
-  const url = base ? `${base}${path}` : path;
-  return fetch(url, options);
 };
 
 const load = async () => {
