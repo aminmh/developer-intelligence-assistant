@@ -11,7 +11,8 @@ import {
   CheckCircle,
   AlertTriangle,
   ScrollText,
-  Code2
+  Code2,
+  Database
 } from 'lucide-vue-next';
 import { RAGConfig, SearchMatch, LLMUsage, ContextUsage } from './types';
 import { makeRequest } from './ui/makeRequest';
@@ -23,9 +24,10 @@ import RAGConfigComponent from './components/RAGConfig.vue';
 import SandboxAnalyses from './components/SandboxAnalyses.vue';
 import LogsView from './components/LogsView.vue';
 import DefinitionsView from './components/DefinitionsView.vue';
+import DatabaseSchemaView from './components/DatabaseSchemaView.vue';
 import type { PipelineStep } from './components/PipelineProgress.vue';
 
-const activeTab = ref<'chat' | 'files' | 'sandbox' | 'config' | 'logs' | 'definitions'>('chat');
+const activeTab = ref<'chat' | 'files' | 'sandbox' | 'config' | 'logs' | 'definitions' | 'schema'>('chat');
 
 const config = ref<RAGConfig>({
   ollamaBaseUrl: 'http://host.docker.internal:11434',
@@ -840,6 +842,15 @@ onMounted(async () => {
           <Code2 class="w-4 h-4" />
           <span>Extracted Definitions</span>
         </button>
+
+        <button
+          @click="activeTab = 'schema'"
+          class="w-full flex items-center gap-3 px-4 py-3 rounded-xl text-sm font-medium transition-all"
+          :class="activeTab === 'schema' ? 'bg-indigo-600 text-white shadow-md shadow-indigo-600/20' : 'text-slate-400 hover:text-white hover:bg-slate-800/50'"
+        >
+          <Database class="w-4 h-4" />
+          <span>Database Schema</span>
+        </button>
       </nav>
 
       <!-- Footer developer banner -->
@@ -862,6 +873,7 @@ onMounted(async () => {
             <span v-else-if="activeTab === 'config'">RAG Pipeline Configurations</span>
             <span v-else-if="activeTab === 'logs'">Developer Logs</span>
             <span v-else-if="activeTab === 'definitions'">Extracted Definitions</span>
+            <span v-else-if="activeTab === 'schema'">Database Schema</span>
           </h2>
         </div>
         
@@ -925,6 +937,8 @@ onMounted(async () => {
       <LogsView v-else-if="activeTab === 'logs'" />
 
       <DefinitionsView v-else-if="activeTab === 'definitions'" />
+
+      <DatabaseSchemaView v-else-if="activeTab === 'schema'" />
 
     </main>
 

@@ -778,6 +778,18 @@ async function startServer() {
     }
   });
 
+  // Regenerate a deterministic schema graph from a saved Laravel analysis.
+  app.get('/api/analysis/:id/schema-visualization', async (req, res) => {
+    try {
+      const pyRes = await fetch(`${PYTHON_API_URL}/analysis/${encodeURIComponent(req.params.id)}/schema-visualization`);
+      const data = await pyRes.json().catch(() => ({ detail: 'Failed to build schema visualization.' }));
+      return res.status(pyRes.status).json(data);
+    } catch (error: any) {
+      console.error('Failed to fetch schema visualization via Python:', error.message);
+      return res.status(500).json({ detail: error?.message || 'Failed to build schema visualization.' });
+    }
+  });
+
   // Delete a saved analysis (row + artifact files).
   app.delete('/api/analysis/:id', async (req, res) => {
     try {

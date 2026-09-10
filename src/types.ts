@@ -230,3 +230,60 @@ export interface AnalysisSession {
   link?: { linked?: number; reason?: string };
   knowledge_chunks?: number;
 }
+
+export interface SchemaVisualizationColumn {
+  name: string;
+  type: string;
+  primaryKey: boolean;
+  foreignKey: boolean;
+  nullable: boolean;
+  default: unknown;
+  unique: boolean;
+  indexed: boolean;
+  references: { table: string; column: string } | null;
+}
+
+export interface SchemaVisualizationNode {
+  id: string;
+  type: 'databaseTable' | string;
+  position: { x: number; y: number };
+  data: {
+    table: string;
+    columns: SchemaVisualizationColumn[];
+    searchText?: string;
+  };
+}
+
+export interface SchemaVisualizationEdge {
+  id: string;
+  source: string;
+  target: string;
+  columns: Array<{ source: string; target: string }>;
+  cardinality: '1:1' | '1:N' | 'N:M' | string;
+  description: string;
+  provenance?: string;
+}
+
+export interface SchemaVisualizationWarning {
+  code: string;
+  message: string;
+  table?: string;
+  column?: string;
+  target?: string;
+  source?: string;
+}
+
+export interface SchemaVisualizationResponse {
+  nodes: SchemaVisualizationNode[];
+  edges: SchemaVisualizationEdge[];
+  warnings: SchemaVisualizationWarning[];
+  source: {
+    framework: string | null;
+    analysisId: string;
+    migrationProvenance: string;
+    modelProvenance: string;
+    migrationTableCount: number;
+    modelCount: number;
+    generatedAt: string;
+  };
+}
