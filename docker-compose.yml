@@ -33,7 +33,15 @@ services:
     command:
       - sh
       - -c
-      - if [ ! -x /workspace/node_modules/.bin/tsx ] || [ ! -d /workspace/node_modules/tsx/node_modules/@esbuild/linux-arm64 ]; then find /workspace/node_modules -mindepth 1 -maxdepth 1 -exec rm -rf {} +; (cd /app/node_modules && tar cf - .) | (cd /workspace/node_modules && tar xf -); fi; rm -rf /workspace/node_modules/@esbuild/darwin-* /workspace/node_modules/tsx/node_modules/@esbuild/darwin-*; exec npm run dev
+      - >-
+        lock_hash="$$(sha256sum /app/package-lock.json | cut -d ' ' -f1)";
+        if [ ! -f /workspace/node_modules/.deps-lock.sha256 ] || [ "$${lock_hash}" != "$$(cat /workspace/node_modules/.deps-lock.sha256 2>/dev/null)" ]; then
+        find /workspace/node_modules -mindepth 1 -maxdepth 1 -exec rm -rf {} +;
+        (cd /app/node_modules && tar cf - .) | (cd /workspace/node_modules && tar xf -);
+        printf '%s' "$${lock_hash}" > /workspace/node_modules/.deps-lock.sha256;
+        fi;
+        rm -rf /workspace/node_modules/@esbuild/darwin-* /workspace/node_modules/tsx/node_modules/@esbuild/darwin-*;
+        exec npm run dev
     env_file:
       - .env
     environment:
