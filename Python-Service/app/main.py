@@ -1886,6 +1886,34 @@ def get_analysis(analysis_id: str):
     return row
 
 
+@app.get(
+    "/analysis/{analysis_id}/schema-visualization",
+    tags=["Analysis"],
+    summary="Build Laravel Database Schema Visualization",
+    description=(
+        "Regenerates a deterministic database schema graph from the saved "
+        "analysis profile. Migration-derived schema is authoritative; Eloquent "
+        "relationships are optional enrichment. No live database is queried."
+    ),
+)
+def get_schema_visualization(analysis_id: str):
+    try:
+        from analysis.analysis_store import analysis_store
+
+        row = analysis_store.get(analysis_id)
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"Get failed: {exc}") from exc
+    if row is None:
+        raise HTTPException(status_code=404, detail="Analysis not found")
+
+    from agent.plugins.frameworks.laravel.schema_visualization import (
+        build_schema_visualization,
+    )
+
+    profile = row.get("profile") if isinstance(row, dict) else None
+    return build_schema_visualization(profile, analysis_id)
+
+
 @app.delete(
     "/analysis/{analysis_id}",
     tags=["Analysis"],

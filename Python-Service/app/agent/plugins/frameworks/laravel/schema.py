@@ -106,6 +106,7 @@ _CONSTRAINED_RE = re.compile(r"->\s*constrained\s*(?:\(\s*['\"]([^'\"]+)['\"]\s*
 _REFERENCES_RE = re.compile(r"->\s*references\s*\(\s*['\"]([^'\"]+)['\"]\s*\)")
 _ON_RE = re.compile(r"->\s*on\s*\(\s*['\"]([^'\"]+)['\"]\s*\)")
 _INDEX_RE = re.compile(r"->\s*(?:unique|index|fullText|spatialIndex)\s*\(")
+_PRIMARY_RE = re.compile(r"->\s*primary\s*\(")
 _NULLABLE_RE = re.compile(r"->\s*nullable\s*\(")
 _DEFAULT_STR_RE = re.compile(r"->\s*default\s*\(\s*['\"]([^'\"]*)['\"]\s*\)")
 _DEFAULT_LIT_RE = re.compile(r"->\s*default\s*\(\s*(\w+)\s*\)")
@@ -321,7 +322,10 @@ def _parse_create_body(body: str, table: str) -> dict[str, Any]:
                 # constrained() references the primary key by convention.
                 fcol = "id"
             on = _ON_RE.search(tail)
-            if on and not ftable:
+            # ``references(...)->on(...)`` is explicit migration truth.  The
+            # convention-based table guess is only a fallback for
+            # ``constrained()`` without an argument.
+            if on:
                 ftable = on.group(1)
             if not fcol and on:
                 fcol = "id"
@@ -361,6 +365,7 @@ def _mk(
         "default": default,
         "unique": bool(re.search(r"->\s*unique\s*\(", tail)),
         "indexed": bool(re.search(r"->\s*(?:index|fullText|spatialIndex)\s*\(", tail)),
+        "primary": bool(_PRIMARY_RE.search(tail)) or name == "id",
         "foreign": foreign,
     }
 
