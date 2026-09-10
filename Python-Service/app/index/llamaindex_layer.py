@@ -67,6 +67,11 @@ _SYM_MAX_EVIDENCE = 12
 
 _MAX_CODE_CHARS = 2000
 _MAX_TEXT_CHARS = 4000
+# Qdrant rejects HTTP payloads larger than its configured request limit (32 MiB
+# in the service image). Keep a conservative batch cap so large projects are
+# ingested through several durable upserts instead of losing the whole index.
+_QDRANT_UPSERT_MAX_POINTS = 64
+_QDRANT_UPSERT_MAX_BYTES = 8 * 1024 * 1024
 _TRACE_LOCK = threading.Lock()
 _TRACE_CACHE: Dict[str, Dict[str, Any]] = {}
 _TRACE_CACHE_LIMIT = 200
@@ -341,6 +346,26 @@ def list_qdrant_collections() -> list[str]:
         return []
 
 
+def qdrant_collection_has_points(collection_name: str) -> bool:
+    """True only when a collection exists and contains indexed points."""
+    if not collection_name:
+        return False
+    try:
+        kwargs = {"url": settings.qdrant_url}
+        if settings.qdrant_api_key:
+            kwargs["api_key"] = settings.qdrant_api_key
+        client = QdrantClient(**kwargs)
+        count = client.count(collection_name=collection_name, exact=True)
+        return int(getattr(count, "count", 0) or 0) > 0
+    except Exception as exc:  # noqa: BLE001 — readiness is a best-effort probe
+        _LOGGER.warning(
+            "Qdrant collection readiness probe failed for %s: %s",
+            collection_name,
+            exc,
+        )
+        return False
+
+
 def sym_collection_exists(stem: str) -> bool:
     """True when the graph holds a PhpSymbol for ``sym_<stem>``.
 
@@ -406,6 +431,90 @@ def _chunk_node_id(chunk: Dict[str, Any]) -> str:
     return node_id_for(fqn, name)
 
 
+def enrich_chunks_with_symbol_index(
+    chunks: List[dict],
+    definitions: List[Dict[str, Any]],
+    references: List[Dict[str, Any]],
+) -> List[dict]:
+    """Attach precise exporter facts to their owning AST chunks.
+
+    The exporter uses ``scope`` for the definition that owns a reference. A
+    chunk keeps its original shape and source code; only normalized retrieval
+    metadata is added. Unresolved rows are retained as evidence metadata and
+    are never converted into graph edges here.
+    """
+    if not definitions and not references:
+        return chunks
+
+    definitions_by_fqn: Dict[str, Dict[str, Any]] = {}
+    for definition in definitions:
+        if not isinstance(definition, dict):
+            continue
+        fqn = str(definition.get("fqn") or "").strip().lstrip("\\")
+        if fqn and fqn not in definitions_by_fqn:
+            definitions_by_fqn[fqn] = definition
+
+    references_by_scope: Dict[str, List[Dict[str, Any]]] = {}
+    for reference in references:
+        if not isinstance(reference, dict):
+            continue
+        scope = str(reference.get("scope") or "").strip().lstrip("\\")
+        if scope:
+            references_by_scope.setdefault(scope, []).append(reference)
+
+    enriched: List[dict] = []
+    for original in chunks:
+        if not isinstance(original, dict):
+            continue
+        chunk = dict(original)
+        identity = str(
+            chunk.get("fq_symbol_name")
+            or chunk.get("class_fqn")
+            or chunk.get("name")
+            or ""
+        ).strip().lstrip("\\")
+        definition = definitions_by_fqn.get(identity)
+        if definition:
+            chunk["symbol_identity"] = identity
+            chunk["definition_kind"] = definition.get("kind")
+
+        scoped_refs = references_by_scope.get(identity, [])
+        referenced = list(chunk.get("referenced_symbols") or [])
+        reference_kinds = set(chunk.get("reference_kinds") or [])
+        evidence = list(chunk.get("reference_evidence") or [])
+        unresolved = int(chunk.get("unresolved_reference_count") or 0)
+        for reference in scoped_refs:
+            kind = str(reference.get("kind") or "").strip()
+            if kind:
+                reference_kinds.add(kind)
+            if reference.get("unresolved"):
+                unresolved += 1
+            to_fqn = str(reference.get("to_fqn") or "").strip().lstrip("\\")
+            member = str(reference.get("to_member") or "").strip()
+            target = f"{to_fqn}::{member}" if to_fqn and member else to_fqn
+            if target and target not in referenced:
+                referenced.append(target)
+            evidence.append(
+                {
+                    "kind": kind,
+                    "file": reference.get("file"),
+                    "line": reference.get("line"),
+                    "to_fqn": reference.get("to_fqn"),
+                    "to_member": reference.get("to_member"),
+                    "unresolved": bool(reference.get("unresolved")),
+                    "via": reference.get("via"),
+                }
+            )
+
+        chunk["referenced_symbols"] = referenced
+        chunk["reference_kinds"] = sorted(reference_kinds)
+        chunk["reference_evidence"] = evidence
+        chunk["unresolved_reference_count"] = unresolved
+        enriched.append(chunk)
+
+    return enriched
+
+
 def build_embeddable_text(chunk: Dict[str, Any]) -> str:
     """Build the LLM-facing text for a chunk (mirrors CodeChunk.toEmbeddableText)."""
     parts: List[str] = []
@@ -437,6 +546,9 @@ def build_embeddable_text(chunk: Dict[str, Any]) -> str:
     calls = chunk.get("called_symbols") or _flatten_call_values(chunk.get("calls"))
     if calls:
         parts.append("Calls: " + ", ".join(calls))
+    references = chunk.get("referenced_symbols") or []
+    if references:
+        parts.append("References: " + ", ".join(str(item) for item in references))
 
     code = chunk.get("code", "")
     if code:
@@ -488,6 +600,10 @@ def _graph_properties(chunk: Dict[str, Any], collection_name: str) -> Dict[str, 
             "is_static": chunk.get("is_static", False),
             "loc": chunk.get("loc", max(0, int(chunk.get("end_line", 0) or 0) - int(chunk.get("start_line", 0) or 0) + 1)),
             "summary": chunk.get("summary", ""),
+            "symbol_identity": chunk.get("symbol_identity"),
+            "definition_kind": chunk.get("definition_kind"),
+            "reference_kinds": chunk.get("reference_kinds", []) or [],
+            "unresolved_reference_count": chunk.get("unresolved_reference_count", 0),
             "collection": collection_name,
         }
     )
@@ -527,6 +643,11 @@ def _payload(chunk: Dict[str, Any], collection_name: str) -> Dict[str, Any]:
             "loc": chunk.get("loc", max(0, int(chunk.get("end_line", 0) or 0) - int(chunk.get("start_line", 0) or 0) + 1)),
             "called_symbols": chunk.get("called_symbols") or _flatten_call_values(chunk.get("calls")),
             "referenced_symbols": chunk.get("referenced_symbols", []) or [],
+            "reference_kinds": chunk.get("reference_kinds", []) or [],
+            "reference_evidence": chunk.get("reference_evidence", []) or [],
+            "unresolved_reference_count": chunk.get("unresolved_reference_count", 0),
+            "symbol_identity": chunk.get("symbol_identity"),
+            "definition_kind": chunk.get("definition_kind"),
             "literals": chunk.get("literals", []) or [],
             "annotations": chunk.get("annotations", []) or [],
             "framework_hints": chunk.get("framework_hints", []) or [],
@@ -610,10 +731,27 @@ class CodePropertyGraph:
 
     # --- ingestion ----------------------------------------------------------
 
-    def ingest(self, chunks: List[dict], collection_name: str) -> Dict[str, Any]:
-        """Ingest code chunks into the Neo4j graph and Qdrant vectors."""
+    def ingest(
+        self,
+        chunks: List[dict],
+        collection_name: str,
+        symbol_definitions: Optional[List[Dict[str, Any]]] = None,
+        symbol_references: Optional[List[Dict[str, Any]]] = None,
+    ) -> Dict[str, Any]:
+        """Ingest code chunks into the Neo4j graph and Qdrant vectors.
+
+        ``symbol_definitions`` and ``symbol_references`` are optional facts
+        from the precise PHP exporter. They enrich chunk payloads without
+        taking ownership of source code or embeddings away from AST chunks.
+        """
         if not isinstance(chunks, list):
             chunks = []
+
+        chunks = enrich_chunks_with_symbol_index(
+            chunks,
+            symbol_definitions or [],
+            symbol_references or [],
+        )
 
         # Dedup by deterministic node id (idempotent re-runs).
         unique: Dict[str, Dict[str, Any]] = {}
@@ -653,6 +791,8 @@ class CodePropertyGraph:
             "graph_nodes": graph_nodes,
             "graph_relations": graph_relations,
             "embed_fails": embed_fails,
+            "symbol_definitions": len(symbol_definitions or []),
+            "symbol_references": len(symbol_references or []),
         }
 
     def _ingest_graph(
@@ -806,15 +946,46 @@ class CodePropertyGraph:
             )
 
         if points:
-            try:
-                qdrant.upsert(collection_name=collection_name, wait=True, points=points)
-            except Exception as exc:
-                get_exception_logger().error(
-                    "Qdrant upsert failed for collection %s: %s",
-                    collection_name,
-                    exc,
-                )
-                return 0, embed_fails
+            ingested = 0
+            batch: List[PointStruct] = []
+            batch_bytes = 0
+
+            def flush_batch() -> bool:
+                nonlocal ingested, batch, batch_bytes
+                if not batch:
+                    return True
+                try:
+                    qdrant.upsert(collection_name=collection_name, wait=True, points=batch)
+                except Exception as exc:
+                    get_exception_logger().error(
+                        "Qdrant upsert failed for collection %s (batch_size=%s): %s",
+                        collection_name,
+                        len(batch),
+                        exc,
+                    )
+                    return False
+                ingested += len(batch)
+                batch = []
+                batch_bytes = 0
+                return True
+
+            for point in points:
+                # Payload size dominates these requests; the vector estimate
+                # keeps the cap safe without depending on pydantic internals.
+                point_bytes = len(json.dumps(point.payload or {}, ensure_ascii=False, default=str).encode("utf-8"))
+                point_bytes += len(point.vector) * 8 + 512
+                if batch and (
+                    len(batch) >= _QDRANT_UPSERT_MAX_POINTS
+                    or batch_bytes + point_bytes > _QDRANT_UPSERT_MAX_BYTES
+                ):
+                    if not flush_batch():
+                        return ingested, embed_fails
+                batch.append(point)
+                batch_bytes += point_bytes
+
+            if not flush_batch():
+                return ingested, embed_fails
+            return ingested, embed_fails
 
         return len(points), embed_fails
 

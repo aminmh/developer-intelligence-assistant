@@ -46,6 +46,7 @@ final class SymbolDefinitionVisitor extends NodeVisitorAbstract
     /** @var list<array<string,mixed>> */
     private array $defs = [];
     private ?string $classFqn = null;
+    private ?string $namespace = null;
 
     public function __construct(private readonly string $file)
     {
@@ -59,6 +60,10 @@ final class SymbolDefinitionVisitor extends NodeVisitorAbstract
 
     public function enterNode(Node $node): mixed
     {
+        if ($node instanceof Stmt\Namespace_) {
+            $this->namespace = $node->name?->toString();
+            return null;
+        }
         if ($node instanceof Stmt\ClassLike) {
             $fqn = $this->fqn($node);
             $this->defs[] = [
@@ -157,7 +162,9 @@ final class SymbolDefinitionVisitor extends NodeVisitorAbstract
                 $this->defs[] = [
                     'kind' => 'const',
                     'name' => $constant->name->toString(),
-                    'fqn' => $this->nsName($node) . '\\' . $constant->name->toString(),
+                    'fqn' => $this->namespace
+                        ? $this->namespace . '\\' . $constant->name->toString()
+                        : $constant->name->toString(),
                     'file' => $this->file,
                     'line' => $constant->getStartLine(),
                     'end_line' => $constant->getEndLine(),
@@ -176,6 +183,9 @@ final class SymbolDefinitionVisitor extends NodeVisitorAbstract
     {
         if ($node instanceof Stmt\ClassLike) {
             $this->classFqn = null;
+        }
+        if ($node instanceof Stmt\Namespace_) {
+            $this->namespace = null;
         }
         return null;
     }
@@ -211,11 +221,6 @@ final class SymbolDefinitionVisitor extends NodeVisitorAbstract
     }
 
     private function fqn(Stmt\ClassLike|Stmt\Function_ $node): string
-    {
-        return $node->namespacedName?->toString() ?? '';
-    }
-
-    private function nsName(Node $node): string
     {
         return $node->namespacedName?->toString() ?? '';
     }

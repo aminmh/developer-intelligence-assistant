@@ -17,6 +17,7 @@ use App\Inspection\SymbolExporter;
  *   php bin/project-inspect method <file> <method>
  *   php bin/project-inspect symbols <dir> [exclude_csv]
  *   php bin/project-inspect references <dir> [exclude_csv]
+ *   php bin/project-inspect index <dir> [exclude_csv]
  *
  * exclude_csv: comma-separated relative dir segments to skip (e.g.
  * tests,coverage). Built-ins (vendor, node_modules, .git, …) always skip.
@@ -62,7 +63,10 @@ final class InspectCommand
                 'references' => $this->dirPath($path)
                     ? $this->emit((new SymbolExporter())->exportReferences(realpath($path), $this->excludes($argv)))
                     : $this->usage("references <dir> [exclude_csv]"),
-                default => $this->usage('<skeleton|attributes|method|symbols|references> …'),
+                'index' => $this->dirPath($path)
+                    ? $this->emit((new SymbolExporter())->exportIndex(realpath($path), $this->excludes($argv)))
+                    : $this->usage("index <dir> [exclude_csv]"),
+                default => $this->usage('<skeleton|attributes|method|symbols|references|index> …'),
             };
         } catch (\Throwable $e) {
             fwrite(STDERR, 'Error: ' . $e->getMessage() . "\n");

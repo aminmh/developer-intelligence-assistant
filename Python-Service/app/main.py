@@ -57,11 +57,14 @@ def sanitize_collection_name(filename: str) -> str:
 
 
 def collection_exists(collection_name: str) -> bool:
-    """Check whether a Qdrant collection already exists (skip re-indexing)."""
+    """Check whether a Qdrant collection exists and contains indexed points."""
     try:
         qdrant = QdrantClient(url=settings.qdrant_url)
         existing = qdrant.get_collections().collections
-        return any(c.name == collection_name for c in existing)
+        if not any(c.name == collection_name for c in existing):
+            return False
+        count = qdrant.count(collection_name=collection_name, exact=True)
+        return int(getattr(count, "count", 0) or 0) > 0
     except Exception:
         return False
 

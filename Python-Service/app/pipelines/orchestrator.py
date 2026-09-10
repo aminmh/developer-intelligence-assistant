@@ -894,6 +894,13 @@ class Orchestrator:
                         try: result = json.loads(result[idx:end + 1]); break
                         except json.JSONDecodeError: pass
 
+        symbol_definitions: list[dict[str, Any]] = []
+        symbol_references: list[dict[str, Any]] = []
+        if isinstance(result, dict) and isinstance(result.get("chunks"), list):
+            symbol_definitions = result.get("definitions") or []
+            symbol_references = result.get("references") or []
+            result = result["chunks"]
+
         if not isinstance(result, list) or len(result) == 0:
             return {"error": "No chunk list to ingest"}
 
@@ -903,7 +910,7 @@ class Orchestrator:
         # Session-scoped dedup: if this project was already indexed, skip the
         # (expensive) re-embedding. Still return the collection name so retrieval
         # can search the existing vectors.
-        if job.get("skip_index"):
+        if job.get("skip_index") and self._qdrant_collection_exists(collection_name):
             return {
                 "collection_name": collection_name,
                 "already_indexed": True,
@@ -917,10 +924,29 @@ class Orchestrator:
         # Coarse, honest phase hints only — ingest batches inside llamaindex
         # internals, so 20/60 are the only externally observable checkpoints.
         self._report_job_progress(job_id, key, 20, "Recreating vector collection")
-        ingested = CodePropertyGraph().ingest(result, collection_name)
+        ingested = CodePropertyGraph().ingest(
+            result,
+            collection_name,
+            symbol_definitions=symbol_definitions,
+            symbol_references=symbol_references,
+        )
         self._report_job_progress(job_id, key, 60, "Embedding chunks")
         self._report_job_progress(job_id, key, 100)
         return ingested
+
+    @staticmethod
+    def _qdrant_collection_exists(collection_name: str) -> bool:
+        """Only honor session skip-index for a non-empty code collection."""
+        if not collection_name:
+            return False
+        try:
+            from index.llamaindex_layer import qdrant_collection_has_points
+
+            return qdrant_collection_has_points(collection_name)
+        except Exception:
+            # A failed probe must not turn a missing collection into a silent
+            # skip; re-ingest is the safe, recoverable behavior.
+            return False
 
     def _act_llamaindex_route(
         self,
@@ -987,6 +1013,7 @@ class Orchestrator:
             args: dict[str, Any] = {}
             for key, value in (tool_config.get("args") or {}).items():
                 args[key] = self._resolve_env(value)
+            args.setdefault("filename", ctx.filename)
 
             if tool_name == "chunk_code":
                 self._report_step_progress(ctx, "tool", 20, "Parsing code chunks")
@@ -1011,14 +1038,45 @@ class Orchestrator:
         if not workspace_path or not os.path.isdir(workspace_path):
             return {"success": False, "error": f"Workspace not found: {workspace_path}"}
 
-        from infra.php_tools import run_code_parse
+        from infra.php_tools import run_code_index
 
-        chunks = run_code_parse(workspace_path)
+        index = run_code_index(workspace_path)
+        definitions = index.get("definitions", [])
+        references = index.get("references", [])
+        symbol_index: dict[str, Any] = {
+            "indexed": False,
+            "definitions": len(definitions),
+            "references": len(references),
+        }
+        try:
+            from inspection.service import inspection_service
+
+            stem = Path(str(args.get("filename") or "project")).stem or "unnamed"
+            symbol_index = inspection_service().index(
+                workspace_path,
+                stem,
+                exported={
+                    "definitions": definitions,
+                    "references": references,
+                },
+            )
+        except Exception as exc:  # noqa: BLE001 — symbol graph is best-effort
+            get_exception_logger().warning(
+                "Symbol graph indexing failed for %s: %s", args.get("filename"), exc
+            )
         return {
             "success": True,
             "status": "done",
             "exit_code": 0,
-            "stdout": json.dumps(chunks, ensure_ascii=False),
+            "stdout": json.dumps(
+                {
+                    "chunks": index.get("chunks", []),
+                    "definitions": definitions,
+                    "references": references,
+                    "symbol_index": symbol_index,
+                },
+                ensure_ascii=False,
+            ),
         }
 
     def _php_export_structure(self, workspace_path: str | None, args: dict[str, Any]) -> dict[str, Any]:

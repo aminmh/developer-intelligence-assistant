@@ -84,6 +84,33 @@ def inspect_symbol(payload: dict) -> list[dict[str, Any]]:
     return _service().resolve_symbol(collection, symbol)
 
 
+@router.get("/projects", summary="List indexed symbol projects")
+def inspect_projects() -> list[dict[str, Any]]:
+    return _service().list_projects()
+
+
+@router.get("/definitions", summary="List extracted definitions")
+def inspect_definitions(
+    stem: str | None = None,
+    collection: str | None = None,
+    search: str = "",
+    kind: str = "",
+    file: str = "",
+    offset: int = 0,
+    limit: int = 100,
+) -> dict[str, Any]:
+    payload = {"stem": stem, "collection": collection}
+    resolved = _collection(payload)
+    return _service().list_definitions(
+        resolved,
+        search=search,
+        kind=kind,
+        file=file,
+        offset=offset,
+        limit=limit,
+    )
+
+
 @router.post("/implementations", summary="Tier-4 concrete implementations of a type")
 def inspect_implementations(payload: dict) -> list[dict[str, Any]]:
     collection = _collection(payload)

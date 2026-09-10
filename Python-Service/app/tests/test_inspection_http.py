@@ -53,8 +53,31 @@ class FakeInspection:
         self.calls.append(("hier", collection, fqn))
         return {"callees": [], "callers": []}
 
+    def list_projects(self) -> list[dict]:
+        self.calls.append(("projects",))
+        return [{"collection": "sym_Shop", "stem": "Shop", "definitions": 8}]
+
+    def list_definitions(self, collection: str, **filters) -> dict:
+        self.calls.append(("definitions", collection, filters))
+        return {"items": [], "total": 0, "offset": filters.get("offset", 0), "limit": filters.get("limit", 100)}
+
 
 class TestHttpEndpoints:
+    def test_projects_and_definitions(self, monkeypatch):
+        fake = FakeInspection()
+        monkeypatch.setattr(http_mod, "_service", lambda: fake)
+        inspect_projects = http_mod.inspect_projects()
+        assert inspect_projects
+        assert inspect_projects[0]["stem"] == "Shop"
+        result = http_mod.inspect_definitions(
+            stem="Shop", search="comment", kind="class", file="Services", offset=20, limit=50
+        )
+        assert result["total"] == 0
+        assert fake.calls[-1] == (
+            "definitions", "sym_Shop",
+            {"search": "comment", "kind": "class", "file": "Services", "offset": 20, "limit": 50},
+        )
+
     def test_index_validates(self, monkeypatch):
         fake = FakeInspection()
         monkeypatch.setattr(http_mod, "_service", lambda: fake)

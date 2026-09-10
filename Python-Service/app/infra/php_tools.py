@@ -64,6 +64,20 @@ def run_code_parse(project_path: str) -> list[dict[str, Any]]:
         raise
 
 
+def run_code_index(
+    project_path: str,
+    exclude: list[str] | None = None,
+) -> dict[str, list[dict[str, Any]]]:
+    """Return AST chunks plus the project-wide PHP symbol/reference export."""
+    chunks = run_code_parse(project_path)
+    index = PhpCli().inspect_index(project_path, exclude=exclude)
+    return {
+        "chunks": chunks,
+        "definitions": index.get("definitions", []),
+        "references": index.get("references", []),
+    }
+
+
 def run_export_structure(project_path: str, depth: int = 4) -> str:
     """Run `php bin/project-export-structure` and return the Markdown blueprint."""
     return PhpCli().export_structure(project_path, depth)

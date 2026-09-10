@@ -23,6 +23,7 @@ from semantic_router.route import Route
 
 from infra.settings import settings
 from rag.query_normalizer import normalize_query
+from rag.code_query_signals import specific_symbol_route
 from rag.route_registry import (
     ROUTE_DESCRIPTIONS,  # noqa: F401 — re-exported for module API compatibility
     ROUTE_ENTRIES,
@@ -50,7 +51,6 @@ AMBIGUOUS_MARGIN = 0.05
 # Below this embedding score a route is not worth trusting on its own; mirrors
 # orchestrator.yml defaults.min_confidence.
 MIN_CONFIDENCE = 0.35
-
 
 class OllamaEncoder(BaseEncoder):
     type: str = "ollama"
@@ -371,6 +371,20 @@ def classify(prompt: str) -> dict:
             "confidence": 1.0,
             "source": "feedback",
             "reason": "user correction match",
+            "needs_clarification": False,
+        }
+
+    # A concrete symbol name is stronger evidence than the generic phrase
+    # "how ... works" that otherwise tends to embed near knowledge examples.
+    # Keep this after feedback so an explicit user correction remains the
+    # highest-priority owner of routing.
+    specific_route = specific_symbol_route(prompt)
+    if specific_route:
+        return {
+            "route": specific_route,
+            "confidence": 1.0,
+            "source": "deterministic_symbol",
+            "reason": "named code symbol boundary",
             "needs_clarification": False,
         }
 

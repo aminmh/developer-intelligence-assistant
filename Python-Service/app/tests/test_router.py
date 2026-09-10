@@ -483,6 +483,17 @@ def test_classify_feedback_override_shape(monkeypatch):
     assert result["needs_clarification"] is False
 
 
+def test_classify_named_service_uses_code_explain_boundary(monkeypatch):
+    _prepare_classify(monkeypatch, [("knowledge", 0.70), ("code_explain", 0.54)])
+    monkeypatch.setattr(rt, "_llm_select_route", lambda *a, **k: None)
+
+    result = rt.classify("how CommentService works?")
+
+    assert result["route"] == "code_explain"
+    assert result["source"] == "deterministic_symbol"
+    assert result["confidence"] == 1.0
+
+
 def test_log_fallback_writes_contract_fields(tmp_path, monkeypatch):
     # Real disk write: pin the JSON line contract — final_confidence arrives as
     # the 6th positional arg and llm_confidence/final_confidence both serialize.

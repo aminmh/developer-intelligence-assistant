@@ -3,8 +3,21 @@
 from __future__ import annotations
 
 from types import SimpleNamespace
+from pathlib import Path
+
+import yaml
 
 from pipelines.steps import SharedState, build_steps, run_plan
+
+
+def test_documentation_retrieval_is_limited_to_code_changes():
+    config_path = Path(__file__).resolve().parents[1] / "config" / "orchestrator.yml"
+    routes = yaml.safe_load(config_path.read_text(encoding="utf-8"))["routes"]
+
+    assert routes["code_refactor"]["doc_retrieval"] is True
+    assert routes["code_explain"].get("doc_retrieval", False) is False
+    assert routes["knowledge"].get("doc_retrieval", False) is False
+    assert routes["debug"].get("doc_retrieval", False) is False
 
 
 class _FakeRunner:

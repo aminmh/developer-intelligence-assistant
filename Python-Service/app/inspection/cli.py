@@ -12,6 +12,7 @@ into Python structures. Each kind has a fixed JSON contract:
                                          relations: [{kind, target}]|null}]
     references    dir               -> [{kind, file, line, scope, to_fqn,
                                          to_member, unresolved}]
+    index         dir               -> {definitions: [...], references: [...]}
 
 The exporter is stateless and emits one JSON array/object per run — there is
 no daemon, cache or lock to manage here.
@@ -128,3 +129,19 @@ def inspect_references(project_dir: str, exclude: list[str] | None = None) -> li
         args.append(",".join(e for e in exclude if e))
     data = run_inspect("references", *args)
     return data if isinstance(data, list) else []
+
+
+def inspect_index(project_dir: str, exclude: list[str] | None = None) -> dict[str, list[dict[str, Any]]]:
+    """Tier-4 combined export used by the code-indexing pipeline."""
+    args = [project_dir]
+    if exclude:
+        args.append(",".join(e for e in exclude if e))
+    data = run_inspect("index", *args)
+    if not isinstance(data, dict):
+        return {"definitions": [], "references": []}
+    definitions = data.get("definitions")
+    references = data.get("references")
+    return {
+        "definitions": definitions if isinstance(definitions, list) else [],
+        "references": references if isinstance(references, list) else [],
+    }

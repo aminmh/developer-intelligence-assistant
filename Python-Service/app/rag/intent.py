@@ -13,6 +13,7 @@ from pydantic import BaseModel, Field
 
 from infra.exception_logger import get_exception_logger
 from runtime.llm import extract
+from rag.code_query_signals import infer_code_query
 
 ROUTE_INTENTS = {
     "explain",
@@ -46,6 +47,15 @@ _INTENT_SYNONYMS = {
     "conversation": "chat",
     "greet": "chat",
 }
+
+def _infer_from_prompt(prompt: str) -> PromptIntent:
+    """Recover high-value entities when the structured extractor is offline."""
+    inferred = infer_code_query(prompt)
+    return PromptIntent(
+        intent=str(inferred["intent"]),
+        target_file=inferred["target_file"],
+        class_name=inferred["class_name"],
+    )
 
 
 class PromptIntent(BaseModel):
@@ -101,17 +111,26 @@ def extract_intent(prompt: str) -> PromptIntent:
     try:
         result = extract(PromptIntent, _EXTRACTION_PROMPT.format(prompt=prompt))
         if isinstance(result, PromptIntent):
-            return _normalize(result)
+            return _normalize(result, prompt)
     except Exception as exc:
         get_exception_logger().warning("Intent extraction failed: %s", exc)
 
-    return PromptIntent(intent="chat")
+    return _infer_from_prompt(prompt)
 
 
-def _normalize(intent: PromptIntent) -> PromptIntent:
+def _normalize(intent: PromptIntent, prompt: str = "") -> PromptIntent:
     value = (intent.intent or "").strip().lower()
     if value in ROUTE_INTENTS:
         intent.intent = value
     else:
         intent.intent = _INTENT_SYNONYMS.get(value, "chat")
+    inferred = _infer_from_prompt(prompt) if prompt else PromptIntent(intent="chat")
+    if not intent.class_name and inferred.class_name:
+        intent.class_name = inferred.class_name
+    if not intent.target_file and inferred.target_file:
+        intent.target_file = inferred.target_file
+    # A named symbol is a stronger boundary than a generic model answer of
+    # "knowledge" or "chat" for questions such as "how CommentService works?".
+    if inferred.class_name and intent.intent in {"chat", "knowledge"}:
+        intent.intent = inferred.intent
     return intent

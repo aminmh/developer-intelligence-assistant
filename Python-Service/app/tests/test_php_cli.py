@@ -33,6 +33,22 @@ def test_code_parse_reports_nonzero_process(monkeypatch):
         PhpCli("/php").code_parse("/workspace")
 
 
+def test_inspect_index_decodes_definitions_and_references(monkeypatch):
+    def fake_run(*args, **kwargs):
+        return subprocess.CompletedProcess(
+            args=args[0],
+            returncode=0,
+            stdout='{"definitions":[{"fqn":"App\\\\CommentService"}],"references":[{"kind":"new"}]}',
+            stderr="",
+        )
+
+    monkeypatch.setattr("infra.php_cli.subprocess.run", fake_run)
+    result = PhpCli("/php").inspect_index("/workspace", exclude=["tests"])
+
+    assert result["definitions"][0]["fqn"] == "App\\CommentService"
+    assert result["references"] == [{"kind": "new"}]
+
+
 def test_run_translates_start_and_timeout_errors(monkeypatch):
     def missing(*args, **kwargs):
         raise OSError("missing php")

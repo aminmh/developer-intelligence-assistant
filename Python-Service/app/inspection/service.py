@@ -62,6 +62,7 @@ class InspectionService:
         project_dir: str,
         stem: str,
         exclude: list[str] | None = None,
+        exported: dict[str, list[dict[str, Any]]] | None = None,
     ) -> dict[str, Any]:
         """Export defs + refs and materialize the sym_<stem> symbol graph.
 
@@ -73,8 +74,21 @@ class InspectionService:
         already happened — re-callable once the store is back).
         """
         collection = sym_collection_for(stem)
-        defs = php_cli.inspect_symbols(project_dir, exclude)
-        refs = php_cli.inspect_references(project_dir, exclude)
+        if exported is not None:
+            payload = exported
+        else:
+            try:
+                payload = php_cli.inspect_index(project_dir, exclude)
+            except Exception:
+                # Keep the older two-command boundary as a compatibility
+                # fallback for older PHP images and hermetic callers that
+                # provide the legacy exporters directly.
+                payload = {
+                    "definitions": php_cli.inspect_symbols(project_dir, exclude),
+                    "references": php_cli.inspect_references(project_dir, exclude),
+                }
+        defs = payload.get("definitions", [])
+        refs = payload.get("references", [])
 
         nodes = [self._def_node(d, collection) for d in defs]
         node_rows = [n for n in nodes if n is not None]
@@ -163,6 +177,12 @@ class InspectionService:
         if rows:
             return rows
         return self._query.resolve_by_name(collection, symbol.strip())
+
+    def list_projects(self) -> list[dict[str, Any]]:
+        return self._query.list_projects()
+
+    def list_definitions(self, collection: str, **filters: Any) -> dict[str, Any]:
+        return self._query.list_definitions(collection, **filters)
 
     def find_implementations(self, collection: str, fqn: str) -> list[dict[str, Any]]:
         return self._query.find_implementations(collection, fqn)

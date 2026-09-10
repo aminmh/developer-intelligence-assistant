@@ -43,4 +43,24 @@ final class SymbolExporter
     {
         return $this->references->export($this->phpFiles($rootPath, $exclude));
     }
+
+    /**
+     * Export the complete project symbol index in one CLI invocation.
+     *
+     * The definitions and references remain separate streams so callers can
+     * apply different resolution/retention policies, while sharing discovery
+     * and the command boundary used by the indexing pipeline.
+     *
+     * @param list<string> $exclude
+     * @return array{definitions: list<array<string,mixed>>, references: list<array<string,mixed>>}
+     */
+    public function exportIndex(string $rootPath, array $exclude = []): array
+    {
+        $files = $this->phpFiles($rootPath, $exclude);
+
+        return [
+            'definitions' => $this->definitions->export($files),
+            'references' => $this->references->export($files),
+        ];
+    }
 }

@@ -52,6 +52,31 @@ def test_extract_intent_fallback_on_failure(monkeypatch):
     assert r.constraints == []
 
 
+def test_extract_intent_fallback_recovers_named_service(monkeypatch):
+    def offline(*_args, **_kwargs):
+        raise RuntimeError("offline")
+
+    monkeypatch.setattr(it, "extract", offline)
+
+    r = it.extract_intent("how CommentService works?")
+
+    assert r.intent == "explain"
+    assert r.class_name == "CommentService"
+
+
+def test_extract_intent_overrides_generic_model_route_for_named_service(monkeypatch):
+    monkeypatch.setattr(
+        it,
+        "extract",
+        lambda model, prompt: it.PromptIntent(intent="knowledge"),
+    )
+
+    r = it.extract_intent("how CommentService works?")
+
+    assert r.intent == "explain"
+    assert r.class_name == "CommentService"
+
+
 def test_extract_intent_empty_prompt():
     assert it.extract_intent("").intent == "chat"
 

@@ -70,6 +70,41 @@ RETURN c AS n, r.kind AS rkind, r.file AS file, r.line AS line,
 ORDER BY c.file, r.line
 """
 
+_LIST_PROJECTS = """
+MATCH (s:PhpSymbol)
+WHERE s.collection STARTS WITH 'sym_'
+RETURN s.collection AS collection, count(s) AS definitions
+ORDER BY s.collection
+"""
+
+_COUNT_DEFINITIONS = """
+MATCH (s:PhpSymbol {collection: $collection})
+WHERE ($search = '' OR toLower(coalesce(s.name, '')) CONTAINS $search
+       OR toLower(coalesce(s.fqn, '')) CONTAINS $search
+       OR toLower(coalesce(s.owner, '')) CONTAINS $search
+       OR toLower(coalesce(s.file, '')) CONTAINS $search)
+  AND ($kind = '' OR s.kind = $kind)
+  AND ($file = '' OR toLower(coalesce(s.file, '')) CONTAINS $file)
+RETURN count(s) AS total
+"""
+
+_LIST_DEFINITIONS = """
+MATCH (s:PhpSymbol {collection: $collection})
+WHERE ($search = '' OR toLower(coalesce(s.name, '')) CONTAINS $search
+       OR toLower(coalesce(s.fqn, '')) CONTAINS $search
+       OR toLower(coalesce(s.owner, '')) CONTAINS $search
+       OR toLower(coalesce(s.file, '')) CONTAINS $search)
+  AND ($kind = '' OR s.kind = $kind)
+  AND ($file = '' OR toLower(coalesce(s.file, '')) CONTAINS $file)
+RETURN s AS n
+ORDER BY s.file, s.line,
+         CASE s.kind WHEN 'class' THEN 0 WHEN 'interface' THEN 1
+         WHEN 'trait' THEN 2 WHEN 'enum' THEN 3 WHEN 'function' THEN 4
+         WHEN 'method' THEN 5 WHEN 'property' THEN 6
+         WHEN 'class_const' THEN 7 ELSE 8 END, s.name
+SKIP $offset LIMIT $limit
+"""
+
 
 def _props(obj: Any) -> dict[str, Any]:
     """Neo4j Node/Relationship → plain dict across driver/library shapes."""
@@ -138,6 +173,45 @@ class SymbolGraphQuery:
     def resolve_by_fqn(self, collection: str, fqn: str) -> list[dict[str, Any]]:
         rows = self._run(_MATCH_NODE_BY_FQN, {"collection": collection, "fqn": fqn})
         return [_node_row(row["n"]) for row in rows if row.get("n")]
+
+    def list_projects(self) -> list[dict[str, Any]]:
+        rows = self._run(_LIST_PROJECTS, {})
+        return [
+            {
+                "collection": row.get("collection", ""),
+                "stem": str(row.get("collection", "")).removeprefix("sym_"),
+                "definitions": int(row.get("definitions", 0) or 0),
+            }
+            for row in rows
+            if row.get("collection")
+        ]
+
+    def list_definitions(
+        self,
+        collection: str,
+        *,
+        search: str = "",
+        kind: str = "",
+        file: str = "",
+        offset: int = 0,
+        limit: int = 100,
+    ) -> dict[str, Any]:
+        params = {
+            "collection": collection,
+            "search": search.strip().lower(),
+            "kind": kind.strip(),
+            "file": file.strip().lower(),
+            "offset": max(0, int(offset)),
+            "limit": min(200, max(1, int(limit))),
+        }
+        total_rows = self._run(_COUNT_DEFINITIONS, params)
+        rows = self._run(_LIST_DEFINITIONS, params)
+        return {
+            "items": [_node_row(row.get("n") or {}) for row in rows if row.get("n")],
+            "total": int((total_rows[0] if total_rows else {}).get("total", 0) or 0),
+            "offset": params["offset"],
+            "limit": params["limit"],
+        }
 
     def resolve_by_name(self, collection: str, name: str) -> list[dict[str, Any]]:
         rows = self._run(_MATCH_NODE_BY_NAME, {"collection": collection, "name": name})

@@ -28,7 +28,9 @@ routes:
       no_index: false
     post_process:
       - action: llamaindex_ingest
-    doc_retrieval: true
+    # Explanations must use the project's indexed code/symbol context. External
+    # library docs are reserved for code-changing responses.
+    doc_retrieval: false
     framework_aware: true
     prompt_template: explain
 
@@ -65,7 +67,7 @@ routes:
       no_index: false
     post_process:
       - action: llamaindex_ingest
-    doc_retrieval: true
+    doc_retrieval: false
     framework_aware: true
     prompt_template: debug
 
