@@ -481,6 +481,35 @@ async function startServer() {
     }
   });
 
+  app.get('/api/inspect/projects', async (_req, res) => {
+    try {
+      const pyRes = await fetch(`${PYTHON_API_URL}/api/inspect/projects`, {
+        headers: { 'X-Internal-Secret': INTERNAL_SECRET },
+      });
+      const data = await pyRes.json().catch(() => ({ detail: 'Failed to load indexed projects.' }));
+      return res.status(pyRes.status).json(data);
+    } catch (error: any) {
+      return res.status(500).json({ detail: error?.message || 'Failed to load indexed projects.' });
+    }
+  });
+
+  app.get('/api/inspect/definitions', async (req, res) => {
+    try {
+      const query = new URLSearchParams();
+      for (const key of ['stem', 'collection', 'search', 'kind', 'file', 'offset', 'limit']) {
+        const value = req.query[key];
+        if (typeof value === 'string' && value) query.set(key, value);
+      }
+      const pyRes = await fetch(`${PYTHON_API_URL}/api/inspect/definitions?${query.toString()}`, {
+        headers: { 'X-Internal-Secret': INTERNAL_SECRET },
+      });
+      const data = await pyRes.json().catch(() => ({ detail: 'Failed to load extracted definitions.' }));
+      return res.status(pyRes.status).json(data);
+    } catch (error: any) {
+      return res.status(500).json({ detail: error?.message || 'Failed to load extracted definitions.' });
+    }
+  });
+
   // List models pulled in Ollama (for the model dropdowns)
   app.get('/api/ollama/models', async (req, res) => {
     try {
@@ -1226,7 +1255,10 @@ async function startServer() {
 
       // Once a project's orchestration completes, remember it so subsequent
       // queries in this session skip re-indexing.
-      if (isDone && status.filename) {
+      // A structure-only route (for example `knowledge`) has no code
+      // collection. Do not mark it indexed, otherwise a later code question
+      // will incorrectly pass skip_index=true and never create the collection.
+      if (isDone && status.filename && status.collection_name) {
         indexedProjects.add(status.filename);
       }
 

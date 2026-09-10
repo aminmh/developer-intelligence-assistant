@@ -10,7 +10,8 @@ import {
   X,
   CheckCircle,
   AlertTriangle,
-  ScrollText
+  ScrollText,
+  Code2
 } from 'lucide-vue-next';
 import { RAGConfig, SearchMatch, LLMUsage, ContextUsage } from './types';
 import { makeRequest } from './ui/makeRequest';
@@ -21,9 +22,10 @@ import RAGFiles from './components/RAGFiles.vue';
 import RAGConfigComponent from './components/RAGConfig.vue';
 import SandboxAnalyses from './components/SandboxAnalyses.vue';
 import LogsView from './components/LogsView.vue';
+import DefinitionsView from './components/DefinitionsView.vue';
 import type { PipelineStep } from './components/PipelineProgress.vue';
 
-const activeTab = ref<'chat' | 'files' | 'sandbox' | 'config' | 'logs'>('chat');
+const activeTab = ref<'chat' | 'files' | 'sandbox' | 'config' | 'logs' | 'definitions'>('chat');
 
 const config = ref<RAGConfig>({
   ollamaBaseUrl: 'http://host.docker.internal:11434',
@@ -829,6 +831,15 @@ onMounted(async () => {
           <ScrollText class="w-4 h-4" />
           <span>Developer Logs</span>
         </button>
+
+        <button
+          @click="activeTab = 'definitions'"
+          class="w-full flex items-center gap-3 px-4 py-3 rounded-xl text-sm font-medium transition-all"
+          :class="activeTab === 'definitions' ? 'bg-indigo-600 text-white shadow-md shadow-indigo-600/20' : 'text-slate-400 hover:text-white hover:bg-slate-800/50'"
+        >
+          <Code2 class="w-4 h-4" />
+          <span>Extracted Definitions</span>
+        </button>
       </nav>
 
       <!-- Footer developer banner -->
@@ -850,6 +861,7 @@ onMounted(async () => {
             <span v-else-if="activeTab === 'sandbox'">Sandbox Project Analysis</span>
             <span v-else-if="activeTab === 'config'">RAG Pipeline Configurations</span>
             <span v-else-if="activeTab === 'logs'">Developer Logs</span>
+            <span v-else-if="activeTab === 'definitions'">Extracted Definitions</span>
           </h2>
         </div>
         
@@ -911,6 +923,8 @@ onMounted(async () => {
       />
 
       <LogsView v-else-if="activeTab === 'logs'" />
+
+      <DefinitionsView v-else-if="activeTab === 'definitions'" />
 
     </main>
 

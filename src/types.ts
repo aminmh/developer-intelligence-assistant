@@ -158,6 +158,36 @@ export interface DeveloperLogsResponse {
   deletion_mode: 'soft' | 'hard';
 }
 
+export type DefinitionKind =
+  | 'class' | 'interface' | 'trait' | 'enum' | 'method'
+  | 'property' | 'class_const' | 'function' | 'const';
+
+export interface IndexedSymbolProject {
+  collection: string;
+  stem: string;
+  definitions: number;
+}
+
+export interface ExtractedDefinition {
+  kind: DefinitionKind | string;
+  name: string;
+  fqn: string;
+  file: string;
+  line?: number | null;
+  end_line?: number | null;
+  visibility?: string | null;
+  static?: boolean | null;
+  abstract?: boolean | null;
+  owner?: string | null;
+}
+
+export interface ExtractedDefinitionsResponse {
+  items: ExtractedDefinition[];
+  total: number;
+  offset: number;
+  limit: number;
+}
+
 // --- Sandbox analysis persistence (Python backend analysis_service) --------
 
 export interface SandboxProbe {
