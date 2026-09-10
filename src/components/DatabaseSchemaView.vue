@@ -1,11 +1,12 @@
 <script setup lang="ts">
 import { computed, nextTick, onMounted, ref, watch } from 'vue';
-import { AlertTriangle, ChevronDown, ChevronRight, Database, Focus, KeyRound, Link2, Maximize2, Minus, PanelRightClose, PanelRightOpen, Plus, RefreshCw, Search, X } from 'lucide-vue-next';
+import { AlertTriangle, ChevronDown, ChevronRight, Database, Focus, KeyRound, Link2, Maximize2, Minus, PanelRightClose, PanelRightOpen, Plus, RefreshCw, Search, Trash2, X } from 'lucide-vue-next';
 import { Handle, Position, VueFlow, useVueFlow, type Edge, type Node } from '@vue-flow/core';
 import '@vue-flow/core/dist/style.css';
 import '@vue-flow/core/dist/theme-default.css';
 import { makeRequest } from '../ui/makeRequest';
 import type { AnalysisSession, SchemaVisualizationEdge, SchemaVisualizationNode, SchemaVisualizationResponse } from '../types';
+import ConfirmModal from './ConfirmModal.vue';
 import MovableSchemaEdge from './MovableSchemaEdge.vue';
 
 type EdgeStyle = 'default' | 'straight' | 'step' | 'smoothstep' | 'movable';
@@ -24,6 +25,8 @@ const rightPanelOpen = ref(true);
 const warningsExpanded = ref(true);
 const edgeStyle = ref<EdgeStyle>('default');
 const edgeControlPoints = ref<Record<string, ControlPoint>>({});
+const deleteTarget = ref<AnalysisSession | null>(null);
+const deletingAnalysis = ref(false);
 
 const { fitView, screenToFlowCoordinate, zoomIn, zoomOut } = useVueFlow('database-schema');
 const visibleNodes = computed(() => {
@@ -33,6 +36,7 @@ const visibleNodes = computed(() => {
 });
 const matchingNodeIds = computed(() => new Set(visibleNodes.value.map((node) => node.id)));
 const visibleEdges = computed(() => (graph.value?.edges || []).filter((edge) => matchingNodeIds.value.has(`table:${edge.source}`) && matchingNodeIds.value.has(`table:${edge.target}`)));
+const selectedAnalysis = computed(() => analyses.value.find((analysis) => analysis.id === selectedAnalysisId.value) || null);
 const flowNodes = computed<Node[]>(() => visibleNodes.value.map((node) => ({ ...node, class: selectedTableId.value === node.id ? 'schema-node-selected' : '' })));
 const flowEdges = computed<Edge[]>(() => visibleEdges.value.map((edge) => ({
   id: edge.id,
@@ -58,7 +62,9 @@ const loadAnalyses = async () => {
     const data = await response.json();
     if (!response.ok) throw new Error(data.detail || data.error || 'Failed to load saved analyses.');
     analyses.value = (data.analyses || []).filter((item: AnalysisSession) => item.kind !== 'code_index');
-    if (!selectedAnalysisId.value && analyses.value.length) selectedAnalysisId.value = analyses.value[0].id;
+    if (!analyses.value.some((analysis) => analysis.id === selectedAnalysisId.value)) {
+      selectedAnalysisId.value = analyses.value[0]?.id || '';
+    }
   } catch (cause: any) {
     error.value = cause?.message || 'Failed to load saved analyses.';
   } finally {
@@ -94,6 +100,27 @@ const updateControlPoint = (edgeId: string, clientX: number, clientY: number) =>
   edgeControlPoints.value = { ...edgeControlPoints.value, [edgeId]: point };
 };
 const resetEdgeRouting = () => { edgeControlPoints.value = {}; };
+const requestDeleteAnalysis = () => {
+  if (selectedAnalysis.value) deleteTarget.value = selectedAnalysis.value;
+};
+const deleteAnalysis = async () => {
+  const target = deleteTarget.value;
+  if (!target || deletingAnalysis.value) return;
+  deletingAnalysis.value = true;
+  error.value = '';
+  try {
+    const response = await makeRequest(`/api/analysis/${encodeURIComponent(target.id)}`, { method: 'DELETE' });
+    const data = await response.json().catch(() => ({}));
+    if (!response.ok || !data.success) throw new Error(data.error || data.detail || 'Failed to delete saved analysis.');
+    if (selectedAnalysisId.value === target.id) selectedAnalysisId.value = '';
+    deleteTarget.value = null;
+    await loadAnalyses();
+  } catch (cause: any) {
+    error.value = cause?.message || 'Failed to delete saved analysis.';
+  } finally {
+    deletingAnalysis.value = false;
+  }
+};
 const selectNode = (node: SchemaVisualizationNode) => { selectedTableId.value = node.id; selectedEdgeId.value = ''; };
 const selectEdge = (edge: SchemaVisualizationEdge) => { selectedEdgeId.value = edge.id; selectedTableId.value = ''; };
 const formatDefault = (value: unknown) => value === null || value === undefined ? '—' : String(value);
@@ -105,7 +132,7 @@ onMounted(loadAnalyses);
 <template>
   <section class="flex-1 min-h-0 overflow-hidden p-5 flex flex-col gap-4">
     <div class="flex flex-wrap items-center justify-between gap-3"><div><h3 class="text-lg font-bold text-white flex items-center gap-2"><Database class="w-5 h-5 text-indigo-400" /> Database Schema</h3><p class="text-xs text-slate-500 mt-1">Deterministic Laravel migration graph with optional Eloquent relationship enrichment.</p></div><button @click="loadAnalyses" class="px-3 py-2 rounded-xl border border-slate-700 text-xs text-slate-300 hover:bg-slate-800"><RefreshCw :class="loadingAnalyses ? 'animate-spin' : ''" class="w-3.5 h-3.5 inline mr-1" />Refresh</button></div>
-    <div class="grid grid-cols-1 lg:grid-cols-[250px_1fr_auto] gap-2 rounded-2xl border border-slate-800 bg-slate-900/30 p-3"><select v-model="selectedAnalysisId" class="bg-[#11162d] border border-slate-800 rounded-xl px-3 py-2 text-xs text-slate-300"><option value="">Select saved analysis</option><option v-for="analysis in analyses" :key="analysis.id" :value="analysis.id">{{ analysis.label || analysis.filename }} · {{ analysis.created_at }}</option></select><div class="relative"><Search class="absolute left-3 top-2.5 w-3.5 h-3.5 text-slate-500" /><input v-model="search" placeholder="Search table or column…" class="w-full bg-[#11162d] border border-slate-800 rounded-xl pl-9 pr-3 py-2 text-xs text-slate-200" /></div><div class="flex flex-wrap items-center justify-end gap-1"><label class="sr-only" for="schema-edge-style">Edge style</label><select id="schema-edge-style" v-model="edgeStyle" title="Edge style" class="bg-[#11162d] border border-slate-800 rounded-lg px-2 py-2 text-[11px] text-slate-300"><option value="default">Curve</option><option value="straight">Straight</option><option value="step">Step</option><option value="smoothstep">Smooth step</option><option value="movable">Movable curve</option></select><button v-if="edgeStyle === 'movable'" @click="resetEdgeRouting" title="Reset edge control points" class="px-2 py-2 rounded-lg border border-slate-700 text-[11px] text-slate-300 hover:bg-slate-800">Reset routes</button><button @click="fitView({ padding: 0.2 })" title="Fit to view" class="p-2 rounded-lg border border-slate-700 text-slate-300 hover:bg-slate-800"><Maximize2 class="w-3.5 h-3.5" /></button><button @click="zoomIn" title="Zoom in" class="p-2 rounded-lg border border-slate-700 text-slate-300 hover:bg-slate-800"><Plus class="w-3.5 h-3.5" /></button><button @click="zoomOut" title="Zoom out" class="p-2 rounded-lg border border-slate-700 text-slate-300 hover:bg-slate-800"><Minus class="w-3.5 h-3.5" /></button><button @click="resetLayout" title="Reset layout" class="p-2 rounded-lg border border-slate-700 text-slate-300 hover:bg-slate-800"><Focus class="w-3.5 h-3.5" /></button></div></div>
+    <div class="grid grid-cols-1 lg:grid-cols-[250px_1fr_auto] gap-2 rounded-2xl border border-slate-800 bg-slate-900/30 p-3"><div class="flex min-w-0 gap-1"><select v-model="selectedAnalysisId" class="min-w-0 flex-1 bg-[#11162d] border border-slate-800 rounded-xl px-3 py-2 text-xs text-slate-300"><option value="">Select saved analysis</option><option v-for="analysis in analyses" :key="analysis.id" :value="analysis.id">{{ analysis.label || analysis.filename }} · {{ analysis.created_at }}</option></select><button v-if="selectedAnalysis" @click="requestDeleteAnalysis" :disabled="deletingAnalysis" title="Remove selected analyzed project" class="shrink-0 rounded-xl border border-rose-500/30 px-2.5 py-2 text-rose-300 hover:bg-rose-500/10 disabled:opacity-50"><Trash2 class="h-3.5 w-3.5" /></button></div><div class="relative"><Search class="absolute left-3 top-2.5 w-3.5 h-3.5 text-slate-500" /><input v-model="search" placeholder="Search table or column…" class="w-full bg-[#11162d] border border-slate-800 rounded-xl pl-9 pr-3 py-2 text-xs text-slate-200" /></div><div class="flex flex-wrap items-center justify-end gap-1"><label class="sr-only" for="schema-edge-style">Edge style</label><select id="schema-edge-style" v-model="edgeStyle" title="Edge style" class="bg-[#11162d] border border-slate-800 rounded-lg px-2 py-2 text-[11px] text-slate-300"><option value="default">Curve</option><option value="straight">Straight</option><option value="step">Step</option><option value="smoothstep">Smooth step</option><option value="movable">Movable curve</option></select><button v-if="edgeStyle === 'movable'" @click="resetEdgeRouting" title="Reset edge control points" class="px-2 py-2 rounded-lg border border-slate-700 text-[11px] text-slate-300 hover:bg-slate-800">Reset routes</button><button @click="fitView({ padding: 0.2 })" title="Fit to view" class="p-2 rounded-lg border border-slate-700 text-slate-300 hover:bg-slate-800"><Maximize2 class="w-3.5 h-3.5" /></button><button @click="zoomIn" title="Zoom in" class="p-2 rounded-lg border border-slate-700 text-slate-300 hover:bg-slate-800"><Plus class="w-3.5 h-3.5" /></button><button @click="zoomOut" title="Zoom out" class="p-2 rounded-lg border border-slate-700 text-slate-300 hover:bg-slate-800"><Minus class="w-3.5 h-3.5" /></button><button @click="resetLayout" title="Reset layout" class="p-2 rounded-lg border border-slate-700 text-slate-300 hover:bg-slate-800"><Focus class="w-3.5 h-3.5" /></button></div></div>
     <div v-if="error" class="rounded-xl border border-rose-500/30 bg-rose-950/20 p-4 text-xs text-rose-300">{{ error }}</div><div v-else-if="!selectedAnalysisId" class="flex-1 rounded-2xl border border-dashed border-slate-700 p-10 text-center text-sm text-slate-500 flex items-center justify-center">Choose a saved analysis to inspect its database schema.</div><div v-else-if="loading" class="flex-1 rounded-2xl border border-slate-800 bg-slate-900/30 flex items-center justify-center text-sm text-slate-500">Loading schema graph…</div><div v-else-if="graph && !graph.nodes.length" class="flex-1 rounded-2xl border border-dashed border-slate-700 p-10 text-center text-sm text-slate-500 flex items-center justify-center">{{ graph.source.framework?.toLowerCase() === 'laravel' ? 'This Laravel analysis contains no migration-derived tables.' : 'Schema visualization is available for Laravel analyses with migrations.' }}</div>
     <div v-else-if="graph" class="flex-1 min-h-0 grid grid-cols-1 xl:grid-cols-[minmax(0,1fr)_var(--schema-rail)] gap-3" :style="{ '--schema-rail': rightPanelOpen ? '320px' : '48px' }">
       <div class="min-h-0 rounded-2xl border border-slate-800 bg-[#0b1020] overflow-hidden relative">
@@ -177,6 +204,15 @@ onMounted(loadAnalyses);
         </div>
       </aside>
     </div>
+    <ConfirmModal
+      :show="!!deleteTarget"
+      title="Remove analyzed project?"
+      :message="deleteTarget ? `This removes ${deleteTarget.label || deleteTarget.filename} and its saved analysis artifacts. This cannot be undone.` : ''"
+      confirm-label="Remove project"
+      :cancel-label="deletingAnalysis ? 'Please wait…' : 'Cancel'"
+      @confirm="deleteAnalysis"
+      @cancel="deleteTarget = null"
+    />
   </section>
 </template>
 
