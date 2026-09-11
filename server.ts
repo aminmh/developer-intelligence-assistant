@@ -790,6 +790,58 @@ async function startServer() {
     }
   });
 
+  // Read-only domain knowledge browsing for a saved analysis.
+  app.get('/api/analysis/:id/domain-concepts', async (req, res) => {
+    try {
+      const params = new URLSearchParams();
+      for (const key of ['search', 'concept_type', 'type', 'offset', 'limit']) {
+        const value = req.query?.[key];
+        if (typeof value === 'string' && value) params.set(key, value);
+      }
+      const suffix = params.toString() ? `?${params.toString()}` : '';
+      const pyRes = await fetch(`${PYTHON_API_URL}/analysis/${encodeURIComponent(req.params.id)}/domain-concepts${suffix}`);
+      const data = await pyRes.json().catch(() => ({ detail: 'Failed to load domain concepts.' }));
+      return res.status(pyRes.status).json(data);
+    } catch (error: any) {
+      console.error('Failed to fetch domain concepts via Python:', error.message);
+      return res.status(500).json({ detail: error?.message || 'Failed to load domain concepts.' });
+    }
+  });
+
+  app.get('/api/analysis/:id/domain-context', async (req, res) => {
+    try {
+      const params = new URLSearchParams();
+      for (const key of ['query', 'concept_id']) {
+        const value = req.query?.[key];
+        if (typeof value === 'string' && value) params.set(key, value);
+      }
+      const suffix = params.toString() ? `?${params.toString()}` : '';
+      const pyRes = await fetch(`${PYTHON_API_URL}/analysis/${encodeURIComponent(req.params.id)}/domain-context${suffix}`);
+      const data = await pyRes.json().catch(() => ({ detail: 'Failed to load domain context.' }));
+      return res.status(pyRes.status).json(data);
+    } catch (error: any) {
+      console.error('Failed to fetch domain context via Python:', error.message);
+      return res.status(500).json({ detail: error?.message || 'Failed to load domain context.' });
+    }
+  });
+
+  app.get('/api/domain/dictionary', async (req, res) => {
+    try {
+      const params = new URLSearchParams();
+      for (const key of ['search', 'offset', 'limit']) {
+        const value = req.query?.[key];
+        if (typeof value === 'string' && value) params.set(key, value);
+      }
+      const suffix = params.toString() ? `?${params.toString()}` : '';
+      const pyRes = await fetch(`${PYTHON_API_URL}/domain/dictionary${suffix}`);
+      const data = await pyRes.json().catch(() => ({ detail: 'Failed to load domain dictionary.' }));
+      return res.status(pyRes.status).json(data);
+    } catch (error: any) {
+      console.error('Failed to fetch domain dictionary via Python:', error.message);
+      return res.status(500).json({ detail: error?.message || 'Failed to load domain dictionary.' });
+    }
+  });
+
   // Delete a saved analysis (row + artifact files).
   app.delete('/api/analysis/:id', async (req, res) => {
     try {
@@ -1335,6 +1387,15 @@ async function startServer() {
             project_profile: (status as any).project_profile ?? undefined,
             use_remote: wantRemote,
             route: status.route_name || 'explain',
+            ...(typeof req.body?.domain_context_mode === 'string'
+              ? { domain_context_mode: req.body.domain_context_mode }
+              : {}),
+            ...(typeof req.body?.domain_concept_id === 'string'
+              ? { domain_concept_id: req.body.domain_concept_id }
+              : {}),
+            ...(typeof req.body?.domain_analysis_id === 'string'
+              ? { domain_analysis_id: req.body.domain_analysis_id }
+              : {}),
             ...(previewRequested ? { preview: true } : {}),
             ...(previewModeParam ? { preview_mode: previewModeParam } : {}),
           }),

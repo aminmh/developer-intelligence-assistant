@@ -231,6 +231,103 @@ export interface AnalysisSession {
   knowledge_chunks?: number;
 }
 
+export interface DomainConceptSource {
+  concept_identity?: string;
+  file: string;
+  source_file?: string;
+  source_hash?: string;
+  start_line?: number | null;
+  end_line?: number | null;
+  method?: string;
+  confidence?: number;
+  metadata?: Record<string, unknown> | null;
+}
+
+export interface DomainConcept {
+  id?: string;
+  identity_key: string;
+  concept_type: string;
+  canonical_name: string;
+  qualified_name?: string | null;
+  normalized_name?: string;
+  description?: string | null;
+  roles?: string[];
+  aliases?: Array<{ alias: string; alias_type?: string; confidence?: number; provenance?: string }>;
+  sources?: DomainConceptSource[];
+  metadata?: Record<string, unknown>;
+  relationship_count?: number;
+  distance?: number;
+  final_score?: number;
+  match_kinds?: string[];
+  matched_alias?: string | null;
+}
+
+export interface DomainRelationship {
+  id?: string;
+  relation_type: string;
+  source_identity: string;
+  target_identity: string;
+  source?: Record<string, unknown>;
+  target?: Record<string, unknown>;
+  confidence?: number;
+  metadata?: Record<string, unknown>;
+}
+
+export interface DomainContextEvidence {
+  kind: string;
+  name?: string;
+  file?: string;
+  start_line?: number | null;
+  end_line?: number | null;
+  score?: number | null;
+  excerpt?: string | null;
+  source?: string;
+}
+
+export interface DomainKnowledgeSource {
+  analysis_id: string;
+  filename: string;
+  project_id: string;
+  framework?: string;
+  provenance?: string[];
+  generated_at?: string;
+}
+
+export interface DomainConceptsResponse {
+  success: boolean;
+  source: DomainKnowledgeSource;
+  items: DomainConcept[];
+  total: number;
+  offset: number;
+  limit: number;
+  warnings?: string[];
+}
+
+export interface DomainContextResponse {
+  success: boolean;
+  source: DomainKnowledgeSource;
+  recognized: DomainConcept[];
+  ambiguous: DomainConcept[];
+  rejected: DomainConcept[];
+  relationships: DomainRelationship[];
+  evidence: DomainContextEvidence[];
+  warnings: string[];
+  truncated: boolean;
+  degraded: boolean;
+  analysis_context?: string | null;
+}
+
+export interface DomainDictionaryResponse {
+  success: boolean;
+  source: 'domain_dictionary.txt' | string;
+  scope: 'global' | string;
+  semantic_context_available?: boolean;
+  items: Array<{ term: string; count: number }>;
+  total: number;
+  offset: number;
+  limit: number;
+}
+
 export interface SchemaVisualizationColumn {
   name: string;
   type: string;

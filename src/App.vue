@@ -12,7 +12,8 @@ import {
   AlertTriangle,
   ScrollText,
   Code2,
-  Database
+  Database,
+  Network
 } from 'lucide-vue-next';
 import { RAGConfig, SearchMatch, LLMUsage, ContextUsage } from './types';
 import { makeRequest } from './ui/makeRequest';
@@ -25,9 +26,11 @@ import SandboxAnalyses from './components/SandboxAnalyses.vue';
 import LogsView from './components/LogsView.vue';
 import DefinitionsView from './components/DefinitionsView.vue';
 import DatabaseSchemaView from './components/DatabaseSchemaView.vue';
+import DomainKnowledgeView from './components/DomainKnowledgeView.vue';
+import type { DomainConcept, AnalysisSession } from './types';
 import type { PipelineStep } from './components/PipelineProgress.vue';
 
-const activeTab = ref<'chat' | 'files' | 'sandbox' | 'config' | 'logs' | 'definitions' | 'schema'>('chat');
+const activeTab = ref<'chat' | 'files' | 'sandbox' | 'config' | 'logs' | 'definitions' | 'schema' | 'domain'>('chat');
 
 const config = ref<RAGConfig>({
   ollamaBaseUrl: 'http://host.docker.internal:11434',
@@ -220,13 +223,29 @@ interface GateTurn {
   markdown: string;
   jobId: string | null;
   queryId?: string;
+  domainRequest?: DomainContextRequest;
 }
 const gatePreview = ref<GateTurn | null>(null);
+
+interface DomainContextRequest {
+  filename: string;
+  conceptId: string;
+  analysisId: string;
+}
+
+const domainRequestFields = (request?: DomainContextRequest) => request
+  ? {
+      filename: request.filename,
+      domain_context_mode: 'expanded',
+      domain_concept_id: request.conceptId,
+      domain_analysis_id: request.analysisId,
+    }
+  : {};
 
 // Stream an answer via SSE (no orchestration job, no polling). The leading
 // `context` event (emitted whenever preview mode != off) is captured so the
 // answer message can carry the collapsible context window disclosure.
-const streamAnswer = async (text: string) => {
+const streamAnswer = async (text: string, domainRequest?: DomainContextRequest) => {
   const msgId = `assistant_${Date.now()}`;
   messages.value.push({
     id: msgId,
@@ -244,7 +263,7 @@ const streamAnswer = async (text: string) => {
     const res = await makeRequest('/api/query/stream', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ query: text, use_remote: useRemote.value }),
+      body: JSON.stringify({ query: text, use_remote: useRemote.value, ...domainRequestFields(domainRequest) }),
     });
     if (!res.ok || !res.body) {
       throw new Error(`Stream unavailable (${res.status})`);
@@ -389,7 +408,7 @@ Details: ${err.message}`,
 
 // GATE, project attached: orchestration runs first (retrieval/indexing — no
 // model call); once the job is done, ask python for a preview-only answer.
-const gatePreviewJob = async (jobId: string, queryId: string | undefined, text: string) => {
+const gatePreviewJob = async (jobId: string, queryId: string | undefined, text: string, domainRequest?: DomainContextRequest) => {
   let stopped = false;
 
   const poll = async () => {
@@ -404,6 +423,7 @@ const gatePreviewJob = async (jobId: string, queryId: string | undefined, text: 
           use_remote: useRemote.value,
           preview: true,
           preview_mode: 'gate',
+          ...domainRequestFields(domainRequest),
         }),
       });
       const rData = await rRes.json();
@@ -419,7 +439,7 @@ const gatePreviewJob = async (jobId: string, queryId: string | undefined, text: 
         orchestrationSteps.value = [];
         generatingAnswer.value = false;
         if (rData.context_preview && rData.preview_only) {
-          gatePreview.value = { text, markdown: rData.context_preview, jobId, queryId };
+          gatePreview.value = { text, markdown: rData.context_preview, jobId, queryId, domainRequest };
         } else if (rData.answer) {
           // Real answer instead of preview (server mode off) — surface normally.
           pushJobAnswer(rData, queryId, text);
@@ -461,7 +481,7 @@ const gatePreviewJob = async (jobId: string, queryId: string | undefined, text: 
 // GATE confirm for an orchestrated project: re-poll the SAME job without the
 // preview flag so python runs the model now.
 const generateAnswerForJob = async (turn: GateTurn) => {
-  const { jobId, queryId, text } = turn;
+  const { jobId, queryId, text, domainRequest } = turn;
   if (!jobId) return;
   loading.value = true;
   generatingAnswer.value = true;
@@ -476,7 +496,7 @@ const generateAnswerForJob = async (turn: GateTurn) => {
       const rRes = await makeRequest('/api/query/result', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ job_id: jobId, user_query: text, use_remote: useRemote.value }),
+        body: JSON.stringify({ job_id: jobId, user_query: text, use_remote: useRemote.value, ...domainRequestFields(domainRequest) }),
       });
       const rData = await rRes.json();
 
@@ -526,7 +546,7 @@ const confirmGateSend = async () => {
     loadingStartedAt = Date.now();
     orchestrationSteps.value = [];
     generatingAnswer.value = false;
-    await streamAnswer(turn.text);
+    await streamAnswer(turn.text, turn.domainRequest);
     loading.value = false;
     generatingAnswer.value = false;
     scrollToBottom();
@@ -539,7 +559,15 @@ const cancelGateSend = () => {
   triggerToast('Preview cancelled — no model request was sent.');
 };
 
-const sendMessage = async (text: string) => {
+const askAboutDomainConcept = (concept: DomainConcept, analysis: AnalysisSession) => {
+  activeTab.value = 'chat';
+  void sendMessage(
+    `Explain the domain concept "${concept.canonical_name}" and how it is used in this project.`,
+    { filename: analysis.filename, conceptId: concept.identity_key, analysisId: analysis.id },
+  );
+};
+
+const sendMessage = async (text: string, domainRequest?: DomainContextRequest) => {
   if (!text.trim() || loading.value || gatePreview.value) return;
 
   messages.value.push({
@@ -557,10 +585,11 @@ const sendMessage = async (text: string) => {
   scrollToBottom();
 
   const previewMode: RAGConfig['contextPreviewMode'] = config.value.contextPreviewMode || 'off';
+  const requestFilename = domainRequest?.filename || activeFileName.value;
 
   // ---- GATE + attached project: orchestrate (retrieval, no model call) then
   // ask python for the context window before any model runs.
-  if (previewMode === 'gate' && activeFileName.value) {
+  if (previewMode === 'gate' && requestFilename) {
     try {
       const res = await makeRequest('/api/query', {
         method: 'POST',
@@ -568,13 +597,14 @@ const sendMessage = async (text: string) => {
         body: JSON.stringify({
           query: text,
           limit: 4,
-          filename: activeFileName.value,
+          filename: requestFilename,
           use_remote: useRemote.value,
+          ...domainRequestFields(domainRequest),
         }),
       });
       const data = await res.json();
       if (data.phase === 'orchestrating' && data.job_id) {
-        await gatePreviewJob(data.job_id, data.query_id, text);
+        await gatePreviewJob(data.job_id, data.query_id, text, domainRequest);
         return;
       }
       // Orchestration did not start — fall through to the JSON preview path.
@@ -584,15 +614,15 @@ const sendMessage = async (text: string) => {
   }
 
   // ---- GATE, no project attached: single-shot JSON preview (model skipped).
-  if (previewMode === 'gate' && !activeFileName.value) {
+  if (previewMode === 'gate' && !requestFilename) {
     await gatePreviewDirect(text);
     return;
   }
 
   // ---- off / inline — existing send flow (inline additionally captures the
   // `context` SSE event / context_preview JSON field onto the answer bubble).
-  if (!activeFileName.value) {
-    await streamAnswer(text);
+  if (!requestFilename) {
+    await streamAnswer(text, domainRequest);
     loading.value = false;
     generatingAnswer.value = false;
     scrollToBottom();
@@ -606,8 +636,9 @@ const sendMessage = async (text: string) => {
       body: JSON.stringify({
         query: text,
         limit: 4,
-        filename: activeFileName.value || undefined,
+        filename: requestFilename || undefined,
         use_remote: useRemote.value,
+        ...domainRequestFields(domainRequest),
       }),
     });
 
@@ -628,7 +659,12 @@ const sendMessage = async (text: string) => {
           const rRes = await makeRequest('/api/query/result', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ job_id: jobId, user_query: text, use_remote: useRemote.value }),
+            body: JSON.stringify({
+              job_id: jobId,
+              user_query: text,
+              use_remote: useRemote.value,
+              ...domainRequestFields(domainRequest),
+            }),
           });
 
           const rData = await rRes.json();
@@ -851,6 +887,15 @@ onMounted(async () => {
           <Database class="w-4 h-4" />
           <span>Database Schema</span>
         </button>
+
+        <button
+          @click="activeTab = 'domain'"
+          class="w-full flex items-center gap-3 px-4 py-3 rounded-xl text-sm font-medium transition-all"
+          :class="activeTab === 'domain' ? 'bg-indigo-600 text-white shadow-md shadow-indigo-600/20' : 'text-slate-400 hover:text-white hover:bg-slate-800/50'"
+        >
+          <Network class="w-4 h-4" />
+          <span>Domain Knowledge</span>
+        </button>
       </nav>
 
       <!-- Footer developer banner -->
@@ -874,6 +919,7 @@ onMounted(async () => {
             <span v-else-if="activeTab === 'logs'">Developer Logs</span>
             <span v-else-if="activeTab === 'definitions'">Extracted Definitions</span>
             <span v-else-if="activeTab === 'schema'">Database Schema</span>
+            <span v-else-if="activeTab === 'domain'">Domain Knowledge</span>
           </h2>
         </div>
         
@@ -939,6 +985,8 @@ onMounted(async () => {
       <DefinitionsView v-else-if="activeTab === 'definitions'" />
 
       <DatabaseSchemaView v-else-if="activeTab === 'schema'" />
+
+      <DomainKnowledgeView v-else-if="activeTab === 'domain'" @ask-about-concept="askAboutDomainConcept" />
 
     </main>
 
