@@ -133,7 +133,18 @@ const loadDictionary = async () => {
     const response = await makeRequest(`/api/domain/dictionary?${params.toString()}`);
     const data = await response.json() as DomainDictionaryResponse & { detail?: string };
     if (!response.ok) throw new Error(data.detail || 'Failed to load domain vocabulary.');
-    dictionary.value = data.items || [];
+    const rawItems = (data as any).items;
+    const normalizedItems = Array.isArray(rawItems)
+      ? rawItems
+      : rawItems && typeof rawItems === 'object'
+        ? Object.entries(rawItems).map(([term, count]) => ({ term, count }))
+        : [];
+    dictionary.value = normalizedItems
+      .map((item: any) => ({
+        term: typeof item === 'string' ? item : String(item?.term ?? item?.name ?? ''),
+        count: Number(item?.count ?? item?.frequency ?? 0) || 0,
+      }))
+      .filter((item) => item.term);
   } catch {
     dictionary.value = [];
   }
