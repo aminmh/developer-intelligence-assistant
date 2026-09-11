@@ -302,6 +302,15 @@ class ConceptStore:
             ).fetchone()
             return self._concept_dict(row) if row else None
 
+    def find_by_id(self, project_id: str, concept_id: str) -> dict[str, Any] | None:
+        """Find one canonical concept by its project-scoped row id."""
+        with self._transaction() as conn:
+            row = conn.execute(
+                "SELECT * FROM concepts WHERE project_id=? AND id=?",
+                (project_id, concept_id),
+            ).fetchone()
+            return self._concept_dict(row) if row else None
+
     def find_by_identity_prefix(
         self, project_id: str, prefix: str, limit: int = 50
     ) -> list[dict[str, Any]]:
@@ -373,16 +382,82 @@ class ConceptStore:
             return results
 
     def list_concepts(
-        self, project_id: str, limit: int = 1000
+        self,
+        project_id: str,
+        limit: int = 1000,
+        *,
+        search: str | None = None,
+        concept_type: str | None = None,
+        offset: int = 0,
     ) -> list[dict[str, Any]]:
+        """List canonical concepts with bounded, deterministic filtering.
+
+        The optional filters are intentionally read-only query concerns. The
+        legacy call shape remains unchanged for index/reconcile callers.
+        """
         limit = max(1, min(int(limit), 10000))
+        offset = max(0, int(offset))
+        clauses = ["project_id=?"]
+        params: list[Any] = [project_id]
+        if search and str(search).strip():
+            needle = f"%{_like_literal(str(search).strip())}%"
+            clauses.append(
+                "(canonical_name LIKE ? ESCAPE '\\' "
+                "OR qualified_name LIKE ? ESCAPE '\\' "
+                "OR normalized_name LIKE ? ESCAPE '\\' "
+                "OR identity_key LIKE ? ESCAPE '\\')"
+            )
+            params.extend([needle] * 4)
+        if concept_type and str(concept_type).strip():
+            clauses.append("concept_type=?")
+            params.append(str(concept_type).strip())
+        params.extend([limit, offset])
         with self._transaction() as conn:
             rows = conn.execute(
-                "SELECT * FROM concepts WHERE project_id=? "
-                "ORDER BY identity_key ASC LIMIT ?",
-                (project_id, limit),
+                "SELECT * FROM concepts WHERE "
+                + " AND ".join(clauses)
+                + " ORDER BY identity_key ASC LIMIT ? OFFSET ?",
+                params,
             ).fetchall()
             return [self._concept_dict(r) for r in rows]
+
+    def count_concepts(
+        self,
+        project_id: str,
+        *,
+        search: str | None = None,
+        concept_type: str | None = None,
+    ) -> int:
+        """Count concepts using the same filters as :meth:`list_concepts`."""
+        clauses = ["project_id=?"]
+        params: list[Any] = [project_id]
+        if search and str(search).strip():
+            needle = f"%{_like_literal(str(search).strip())}%"
+            clauses.append(
+                "(canonical_name LIKE ? ESCAPE '\\' "
+                "OR qualified_name LIKE ? ESCAPE '\\' "
+                "OR normalized_name LIKE ? ESCAPE '\\' "
+                "OR identity_key LIKE ? ESCAPE '\\')"
+            )
+            params.extend([needle] * 4)
+        if concept_type and str(concept_type).strip():
+            clauses.append("concept_type=?")
+            params.append(str(concept_type).strip())
+        with self._transaction() as conn:
+            row = conn.execute(
+                "SELECT COUNT(*) FROM concepts WHERE " + " AND ".join(clauses),
+                params,
+            ).fetchone()
+            return int(row[0] or 0)
+
+    def aliases_for_concept(self, concept_id: str, limit: int = 100) -> list[dict[str, Any]]:
+        limit = max(1, min(int(limit), 500))
+        with self._transaction() as conn:
+            rows = conn.execute(
+                "SELECT * FROM concept_aliases WHERE concept_id=? ORDER BY alias ASC LIMIT ?",
+                (concept_id, limit),
+            ).fetchall()
+            return [self._alias_dict(row) for row in rows]
 
     def remove_concept(self, project_id: str, identity_key: str) -> bool:
         with self._transaction() as conn:

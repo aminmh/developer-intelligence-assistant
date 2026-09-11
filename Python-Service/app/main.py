@@ -33,6 +33,7 @@ from index.models import (
 import jwt as pyjwt
 import uuid
 import os
+from datetime import datetime, timezone
 import re
 import json
 import time
@@ -1317,6 +1318,348 @@ def _domain_store_has_concepts(project_id: str) -> bool:
         return True
 
 
+# Read-only domain browsing is intentionally kept behind small composition
+# helpers. The SQLite concept store remains the semantic owner; HTTP only adds
+# pagination, redaction, and bounded response shaping.
+_DOMAIN_CONCEPT_LIMIT = 100
+_DOMAIN_CONTEXT_NODE_CAP = 50
+_DOMAIN_CONTEXT_EDGE_CAP = 50
+_DOMAIN_EVIDENCE_CAP = 100
+_DOMAIN_TEXT_CAP = 500
+
+
+def _analysis_domain_source(analysis_id: str) -> tuple[dict[str, Any], str, str]:
+    from analysis.analysis_service import project_stem
+    from analysis.analysis_store import analysis_store
+
+    row = analysis_store.get(analysis_id)
+    if row is None:
+        raise HTTPException(status_code=404, detail="Analysis not found")
+    filename = str(row.get("filename") or "")
+    project_id = project_stem(filename)
+    if not project_id:
+        raise HTTPException(status_code=422, detail="Analysis has no project filename")
+    profile = row.get("profile") if isinstance(row.get("profile"), dict) else {}
+    framework = profile.get("framework") if isinstance(profile, dict) else None
+    if isinstance(framework, dict):
+        framework = framework.get("name") or framework.get("id")
+    source = {
+        "analysis_id": analysis_id,
+        "filename": filename,
+        "project_id": project_id,
+        "framework": str(framework or "unknown"),
+        "provenance": ["saved_analysis", "domain_concept_store"],
+        "generated_at": datetime.now(timezone.utc).isoformat(),
+    }
+    return source, project_id, filename
+
+
+def _public_domain_concept(row: dict[str, Any], store: Any) -> dict[str, Any]:
+    """Return a bounded, non-code representation of one concept row."""
+    concept_id = str(row.get("id") or "")
+    aliases: list[dict[str, Any]] = []
+    sources: list[dict[str, Any]] = []
+    try:
+        if concept_id and hasattr(store, "aliases_for_concept"):
+            aliases = list(store.aliases_for_concept(concept_id, limit=50) or [])
+    except Exception:
+        aliases = []
+    try:
+        project_id = str(row.get("project_id") or "")
+        identity_key = str(row.get("identity_key") or "")
+        if project_id and identity_key and hasattr(store, "find_sources_for_concept"):
+            sources = list(store.find_sources_for_concept(project_id, identity_key) or [])
+    except Exception:
+        sources = []
+    clean_sources = [
+        {
+            "file": str(item.get("source_file") or item.get("file") or "")[:300],
+            "start_line": item.get("start_line"),
+            "end_line": item.get("end_line"),
+            "method": str(item.get("extraction_method") or item.get("method") or "")[:80],
+            "confidence": item.get("confidence"),
+        }
+        for item in sources[:50]
+        if isinstance(item, dict)
+    ]
+    metadata = row.get("metadata") if isinstance(row.get("metadata"), dict) else {}
+    safe_metadata = {
+        str(key)[:80]: value
+        for key, value in list(metadata.items())[:20]
+        if str(key).casefold() not in {"code", "raw", "source_hash", "excerpt"}
+        and isinstance(value, (str, int, float, bool, type(None), list, dict))
+    }
+    return {
+        "id": concept_id,
+        "identity_key": str(row.get("identity_key") or ""),
+        "canonical_name": str(row.get("canonical_name") or "")[:200],
+        "qualified_name": str(row.get("qualified_name") or "")[:300],
+        "concept_type": str(row.get("concept_type") or "")[:80],
+        "roles": [str(role)[:80] for role in (row.get("roles") or [])[:20]],
+        "normalized_name": str(row.get("normalized_name") or "")[:200],
+        "description": str(row.get("description") or "")[:_DOMAIN_TEXT_CAP] or None,
+        "aliases": [
+            {
+                "alias": str(item.get("alias") or "")[:200],
+                "alias_type": str(item.get("alias_type") or "")[:80],
+                "confidence": item.get("confidence"),
+            }
+            for item in aliases[:50]
+            if isinstance(item, dict)
+        ],
+        "sources": clean_sources,
+        "metadata": safe_metadata,
+        "relationship_count": 0,
+    }
+
+
+def _domain_relationship_public(edge: dict[str, Any]) -> dict[str, Any]:
+    source_identity = str(edge.get("source_identity") or "")
+    target_identity = str(edge.get("target_identity") or "")
+    relation_id = str(edge.get("id") or "")
+    return {
+        "id": relation_id or None,
+        "relation_type": str(edge.get("relation_type") or "")[:100],
+        "source_identity": source_identity,
+        "target_identity": target_identity,
+        "source": {
+            "id": str(edge.get("source_concept_id") or ""),
+            "identity_key": source_identity,
+            "canonical_name": str(edge.get("source_canonical_name") or ""),
+        },
+        "target": {
+            "id": str(edge.get("target_concept_id") or ""),
+            "identity_key": target_identity,
+            "canonical_name": str(edge.get("target_canonical_name") or ""),
+        },
+        "confidence": edge.get("confidence"),
+    }
+
+
+def _domain_evidence(concepts: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    evidence: list[dict[str, Any]] = []
+    for concept in concepts:
+        score = concept.get("final_score")
+        try:
+            score = round(float(score), 6) if score is not None else None
+        except (TypeError, ValueError):
+            score = None
+        sources = concept.get("sources") or []
+        if not sources:
+            evidence.append(
+                {
+                    "kind": "concept",
+                    "name": concept.get("canonical_name") or concept.get("identity_key"),
+                    "file": None,
+                    "start_line": None,
+                    "end_line": None,
+                    "score": score,
+                    "excerpt": (concept.get("description") or "")[:_DOMAIN_TEXT_CAP] or None,
+                }
+            )
+            continue
+        for source in sources[:20]:
+            evidence.append(
+                {
+                    "kind": "source",
+                    "name": concept.get("canonical_name") or concept.get("identity_key"),
+                    "file": source.get("file"),
+                    "start_line": source.get("start_line"),
+                    "end_line": source.get("end_line"),
+                    "score": score,
+                    "excerpt": (concept.get("description") or "")[:_DOMAIN_TEXT_CAP] or None,
+                }
+            )
+            if len(evidence) >= _DOMAIN_EVIDENCE_CAP:
+                return evidence
+    return evidence
+
+
+def _expanded_domain_payload(
+    project_id: str,
+    *,
+    query: str | None = None,
+    concept_id: str | None = None,
+    source: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Build expanded domain context without exceeding fixed graph/text caps."""
+    from projects.domain.recognizer import recognize
+    from projects.domain.store import concept_store
+
+    warnings: list[str] = []
+    recognized: list[dict[str, Any]] = []
+    ambiguous: list[dict[str, Any]] = []
+    rejected: list[dict[str, Any]] = []
+    relationships: list[dict[str, Any]] = []
+    truncated = False
+    degraded = False
+    try:
+        if concept_id:
+            concept = concept_store.find_by_id(project_id, concept_id)
+            if concept is None:
+                concept = concept_store.find_by_identity(project_id, concept_id)
+            if concept is None:
+                return {
+                    "success": True,
+                    "source": source,
+                    "recognized": [],
+                    "ambiguous": [],
+                    "rejected": [],
+                    "relationships": [],
+                    "evidence": [],
+                    "warnings": ["concept not found"],
+                    "truncated": False,
+                    "degraded": False,
+                }
+            recognized = [dict(concept)]
+        elif isinstance(query, str) and query.strip():
+            result = recognize(query, project_id, expand_relationships=False)
+            recognized = list(result.recognized or [])
+            ambiguous = list(result.ambiguous or [])
+            rejected = list(result.rejected or [])
+            degraded = bool(result.degraded)
+            if result.error:
+                warnings.append(str(result.error)[:_DOMAIN_TEXT_CAP])
+            if result.query_note:
+                warnings.append(str(result.query_note)[:_DOMAIN_TEXT_CAP])
+        else:
+            warnings.append("query or concept_id is required")
+    except Exception:  # noqa: BLE001 — read-only context is best effort
+        degraded = True
+        warnings.append("domain recognition unavailable")
+
+    expanded_rows: list[dict[str, Any]] = []
+    for row in recognized[:5]:
+        public = _public_domain_concept(row, concept_store)
+        try:
+            if hasattr(concept_store, "related_nodes") and row.get("id"):
+                graph = concept_store.related_nodes(
+                    project_id,
+                    str(row["id"]),
+                    depth=1,
+                    node_cap=_DOMAIN_CONTEXT_NODE_CAP,
+                    edge_cap=_DOMAIN_CONTEXT_EDGE_CAP,
+                )
+                if graph.get("truncated"):
+                    truncated = True
+                for node in graph.get("nodes") or []:
+                    expanded_rows.append(_public_domain_concept(node, concept_store))
+                for edge in graph.get("edges") or []:
+                    relationships.append(_domain_relationship_public(edge))
+        except Exception:  # noqa: BLE001 — graph expansion is optional
+            degraded = True
+            warnings.append("relationship expansion unavailable")
+        expanded_rows.append(public)
+
+    by_id = {str(row.get("id")): row for row in expanded_rows if row.get("id")}
+    for row in by_id.values():
+        row["relationship_count"] = sum(
+            1
+            for edge in relationships
+            if edge["source"].get("id") == row.get("id")
+            or edge["target"].get("id") == row.get("id")
+        )
+    if truncated:
+        warnings.append("context expansion was bounded")
+    return {
+        "success": True,
+        "source": source,
+        "recognized": [_public_domain_concept(row, concept_store) for row in recognized[:5]],
+        "ambiguous": [_public_domain_concept(row, concept_store) for row in ambiguous[:5]],
+        "rejected": rejected[:5],
+        "relationships": relationships[:_DOMAIN_CONTEXT_EDGE_CAP],
+        "evidence": _domain_evidence(
+            [_public_domain_concept(row, concept_store) for row in recognized[:5]]
+            + list(by_id.values())[: _DOMAIN_CONTEXT_NODE_CAP]
+        ),
+        "warnings": warnings[:20],
+        "truncated": truncated,
+        "degraded": degraded,
+    }
+
+
+def _render_expanded_domain_block(payload: dict[str, Any]) -> str | None:
+    recognized = payload.get("recognized") or []
+    relationships = payload.get("relationships") or []
+    analysis_context = payload.get("analysis_context")
+    if not recognized and not relationships and not (isinstance(analysis_context, str) and analysis_context.strip()):
+        return None
+    lines = ["# Expanded domain context", ""]
+    for row in recognized[:5]:
+        lines.append(
+            f"- {row.get('canonical_name') or row.get('identity_key')} "
+            f"({row.get('concept_type') or 'concept'})"
+        )
+        if row.get("description"):
+            lines.append(f"  Description: {str(row['description'])[:_DOMAIN_TEXT_CAP]}")
+    if relationships:
+        lines.extend(["", "## Verified relationships", ""])
+        for edge in relationships[:_DOMAIN_CONTEXT_EDGE_CAP]:
+            source = edge.get("source") or {}
+            target = edge.get("target") or {}
+            lines.append(
+                f"- {source.get('canonical_name') or source.get('identity_key')} "
+                f"{edge.get('relation_type')} "
+                f"{target.get('canonical_name') or target.get('identity_key')}"
+            )
+    if isinstance(analysis_context, str) and analysis_context.strip():
+        lines.extend(["", "## Saved analysis context", "", analysis_context[:4000]])
+    return "\n".join(lines)
+
+
+def _saved_analysis_context(analysis_id: str, project_id: str) -> str | None:
+    """Return bounded, already-normalized saved-analysis facts for grounding."""
+    from analysis.analysis_service import project_stem
+    from analysis.analysis_store import analysis_store
+
+    row = analysis_store.get(analysis_id)
+    if not row or project_stem(str(row.get("filename") or "")) != project_id:
+        return None
+    profile = row.get("profile") if isinstance(row.get("profile"), dict) else {}
+    grounding = str(row.get("grounding_md") or "").strip()
+    facts: list[str] = []
+    if isinstance(profile, dict):
+        for key in ("summary", "routes", "schema", "models", "behavior", "wiring", "config"):
+            value = profile.get(key)
+            if value:
+                rendered = (
+                    json.dumps(value, ensure_ascii=False, default=str)
+                    if isinstance(value, (dict, list))
+                    else str(value)
+                )
+                facts.append(f"{key}: {rendered[:700]}")
+    if grounding:
+        facts.append(grounding[:2200])
+    return "\n\n".join(facts)[:4000] or None
+
+
+def _maybe_expanded_domain_context(results: list, body: dict) -> str | None:
+    if body.get("domain_context_mode") != "expanded":
+        return None
+    project_id = _domain_project_id(body)
+    if not project_id:
+        return None
+    from analysis.analysis_service import project_stem
+    payload = _expanded_domain_payload(
+        project_id,
+        query=body.get("query") if isinstance(body.get("query"), str) else None,
+        concept_id=(
+            str(body.get("domain_concept_id")).strip()
+            if body.get("domain_concept_id")
+            else None
+        ),
+    )
+    analysis_id = str(body.get("domain_analysis_id") or "").strip()
+    if analysis_id:
+        try:
+            saved_context = _saved_analysis_context(analysis_id, project_id)
+            if saved_context:
+                payload["analysis_context"] = saved_context
+        except Exception:  # noqa: BLE001 — saved context is optional enrichment
+            payload.setdefault("warnings", []).append("saved analysis context unavailable")
+    return _render_expanded_domain_block(payload)
+
+
 def _maybe_domain_context(results: list, body: dict) -> str | None:
     """Recognized-domain-concept grounding for /answer requests.
 
@@ -1331,6 +1674,8 @@ def _maybe_domain_context(results: list, body: dict) -> str | None:
         return None
     if not isinstance(body, dict):
         return None
+    if body.get("domain_context_mode") == "expanded":
+        return _maybe_expanded_domain_context(results, body)
     query = body.get("query")
     if not isinstance(query, str) or not query.strip():
         return None
@@ -1930,6 +2275,177 @@ def delete_analysis(analysis_id: str):
     if not deleted:
         raise HTTPException(status_code=404, detail="Analysis not found")
     return {"success": True}
+
+
+@app.get(
+    "/analysis/{analysis_id}/domain-concepts",
+    tags=["Domain Concepts"],
+    summary="Browse Saved Analysis Domain Concepts",
+    description=(
+        "Returns the bounded, read-only canonical domain concepts associated "
+        "with a saved analysis. Search and type filters are project-scoped."
+    ),
+)
+def analysis_domain_concepts(
+    analysis_id: str,
+    search: str = Query("", max_length=200),
+    concept_type: str | None = Query(None, max_length=80),
+    type_filter: str | None = Query(None, alias="type", max_length=80),
+    offset: int = Query(0, ge=0, le=100000),
+    limit: int = Query(50, ge=1, le=_DOMAIN_CONCEPT_LIMIT),
+):
+    source, project_id, _filename = _analysis_domain_source(analysis_id)
+    from projects.domain.store import concept_store
+
+    search = search.strip()
+    concept_type = concept_type or type_filter
+    concept_type = concept_type.strip() if isinstance(concept_type, str) else None
+    warnings: list[str] = []
+    try:
+        total = (
+            concept_store.count_concepts(
+                project_id, search=search or None, concept_type=concept_type or None
+            )
+            if hasattr(concept_store, "count_concepts")
+            else len(concept_store.list_concepts(project_id, limit=10000))
+        )
+        try:
+            rows = concept_store.list_concepts(
+                project_id,
+                limit=limit,
+                search=search or None,
+                concept_type=concept_type or None,
+                offset=offset,
+            )
+        except TypeError:
+            # Keep endpoint seams easy to fake in hermetic tests and compatible
+            # with older store adapters while the canonical store evolves.
+            all_rows = list(concept_store.list_concepts(project_id, limit=10000) or [])
+            needle = search.casefold()
+            filtered_rows = [
+                row
+                for row in all_rows
+                if (not needle or needle in " ".join(
+                    str(row.get(key) or "")
+                    for key in ("identity_key", "canonical_name", "qualified_name", "normalized_name")
+                ).casefold())
+                and (not concept_type or str(row.get("concept_type") or "") == concept_type)
+            ]
+            rows = filtered_rows[offset : offset + limit]
+            total = len(filtered_rows)
+        items = [_public_domain_concept(dict(row), concept_store) for row in rows]
+        if hasattr(concept_store, "relationships_for"):
+            for item in items:
+                if item.get("id"):
+                    item["relationship_count"] = len(
+                        concept_store.relationships_for(
+                            project_id, concept_id=str(item["id"]), limit=5000
+                        )
+                        or []
+                    )
+    except Exception as exc:  # noqa: BLE001 — browsing must not expose internals
+        raise HTTPException(status_code=500, detail=f"Domain concepts unavailable: {str(exc)[:200]}") from exc
+    if offset + len(items) < total:
+        warnings.append("more concepts available")
+    return {
+        "success": True,
+        "source": source,
+        "items": items,
+        "total": int(total),
+        "offset": offset,
+        "limit": limit,
+        "warnings": warnings,
+    }
+
+
+@app.get(
+    "/analysis/{analysis_id}/domain-context",
+    tags=["Domain Concepts"],
+    summary="Get Bounded Expanded Domain Context",
+    description=(
+        "Recognizes a query or expands one saved-analysis concept through its "
+        "verified one-hop relationship neighborhood. Output is bounded and "
+        "contains no raw source code."
+    ),
+)
+def analysis_domain_context(
+    analysis_id: str,
+    query: str = Query("", max_length=500),
+    concept_id: str | None = Query(None, max_length=200),
+):
+    source, project_id, _filename = _analysis_domain_source(analysis_id)
+    query = query.strip()
+    concept_id = concept_id.strip() if isinstance(concept_id, str) else None
+    if not query and not concept_id:
+        raise HTTPException(status_code=400, detail="Missing query or concept_id")
+    payload = _expanded_domain_payload(
+        project_id,
+        query=query or None,
+        concept_id=concept_id or None,
+        source=source,
+    )
+    saved_context = _saved_analysis_context(analysis_id, project_id)
+    if saved_context:
+        payload["analysis_context"] = saved_context
+    return payload
+
+
+def _read_domain_dictionary(
+    *, search: str, offset: int, limit: int
+) -> tuple[list[dict[str, Any]], int, list[str]]:
+    from rag.domain_dictionary import DICTIONARY_PATH
+
+    warnings: list[str] = []
+    rows: list[dict[str, Any]] = []
+    try:
+        with DICTIONARY_PATH.open("r", encoding="utf-8") as handle:
+            for line_number, raw in enumerate(handle, 1):
+                line = raw.strip()
+                if not line:
+                    continue
+                term, separator, count = line.partition("\t")
+                if not separator or not term.strip():
+                    warnings.append(f"ignored malformed dictionary line {line_number}")
+                    continue
+                try:
+                    count_value = int(count.strip())
+                except (TypeError, ValueError):
+                    warnings.append(f"ignored malformed dictionary count at line {line_number}")
+                    continue
+                rows.append({"term": term.strip()[:200], "count": max(0, count_value)})
+    except OSError:
+        warnings.append("domain dictionary unavailable")
+    needle = search.casefold()
+    if needle:
+        rows = [row for row in rows if needle in row["term"].casefold()]
+    rows.sort(key=lambda row: row["term"])
+    return rows[offset : offset + limit], len(rows), warnings[:20]
+
+
+@app.get(
+    "/domain/dictionary",
+    tags=["Domain Concepts"],
+    summary="Browse Global Domain Dictionary",
+    description="Returns the generated global term-frequency dictionary used by typo correction.",
+)
+def domain_dictionary(
+    search: str = Query("", max_length=200),
+    offset: int = Query(0, ge=0, le=100000),
+    limit: int = Query(50, ge=1, le=_DOMAIN_CONCEPT_LIMIT),
+):
+    items, total, warnings = _read_domain_dictionary(
+        search=search.strip(), offset=offset, limit=limit
+    )
+    return {
+        "success": True,
+        "scope": "global",
+        "source": "domain_dictionary.txt",
+        "items": items,
+        "total": total,
+        "offset": offset,
+        "limit": limit,
+        "warnings": warnings,
+    }
 
 
 @app.get(
