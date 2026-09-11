@@ -587,6 +587,16 @@ const sendMessage = async (text: string, domainRequest?: DomainContextRequest) =
   const previewMode: RAGConfig['contextPreviewMode'] = config.value.contextPreviewMode || 'off';
   const requestFilename = domainRequest?.filename || activeFileName.value;
 
+  // Explicit saved-analysis explanations use the durable analysis bundle;
+  // they must not re-extract an upload that may already have expired.
+  if (domainRequest) {
+    await streamAnswer(text, domainRequest);
+    loading.value = false;
+    generatingAnswer.value = false;
+    scrollToBottom();
+    return;
+  }
+
   // ---- GATE + attached project: orchestrate (retrieval, no model call) then
   // ask python for the context window before any model runs.
   if (previewMode === 'gate' && requestFilename) {
