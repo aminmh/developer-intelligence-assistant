@@ -68,6 +68,22 @@ const graphConcepts = computed(() => {
   const map = new Map<string, DomainConcept>();
   for (const concept of visibleConcepts.value) map.set(concept.identity_key, concept);
   for (const concept of related) map.set(concept.identity_key, concept);
+  for (const relationship of context.value?.relationships || []) {
+    for (const endpoint of [
+      { identity: relationship.source_identity, details: relationship.source },
+      { identity: relationship.target_identity, details: relationship.target },
+    ]) {
+      if (!endpoint.identity || map.has(endpoint.identity)) continue;
+      const details = endpoint.details as { canonical_name?: string } | undefined;
+      map.set(endpoint.identity, {
+        identity_key: endpoint.identity,
+        canonical_name: details?.canonical_name || endpoint.identity,
+        qualified_name: endpoint.identity,
+        concept_type: 'related concept',
+        roles: [],
+      });
+    }
+  }
   if (selectedConcept.value) map.set(selectedConcept.value.identity_key, selectedConcept.value);
   return [...map.values()].slice(0, 80);
 });
