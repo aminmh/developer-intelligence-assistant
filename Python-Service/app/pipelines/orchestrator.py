@@ -209,6 +209,14 @@ class Orchestrator:
         ) or {}
         workspace_path = ws.get("extracted_path") if isinstance(ws, dict) else None
         file_count = ws.get("file_count") if isinstance(ws, dict) else None
+        if not workspace_path or not os.path.isdir(str(workspace_path)):
+            detail = None
+            if isinstance(ws, dict):
+                detail = ws.get("detail") or ws.get("error")
+            detail = str(detail or "workspace preparation returned no extracted path")
+            raise RuntimeError(
+                f"Workspace preparation failed for {ctx.filename}: {detail[:500]}"
+            )
         self._report_step_progress(ctx, "extracting", 100)
         return workspace_path, file_count
 

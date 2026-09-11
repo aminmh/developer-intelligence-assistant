@@ -2,6 +2,7 @@ from pydantic import BaseModel
 import os
 
 from infra.settings_store import settings_store
+from infra.log_paths import configured_log_dir
 
 
 class Settings(BaseModel):
@@ -109,7 +110,7 @@ class Settings(BaseModel):
     download_dir: str = os.getenv("DOWNLOAD_DIR", "/app/downloads")
     download_token_secret: str = os.getenv("DOWNLOAD_TOKEN_SECRET", "change-me")
     internal_secret: str = os.getenv("RAG_CALLBACK_SECRET", "change-me")
-    log_dir: str = os.getenv("LOG_DIR", "/app/logs")
+    log_dir: str = configured_log_dir()
 
 
 class RuntimeSettings:
