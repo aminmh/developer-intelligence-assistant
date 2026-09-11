@@ -1321,7 +1321,7 @@ def _domain_store_has_concepts(project_id: str) -> bool:
 # Read-only domain browsing is intentionally kept behind small composition
 # helpers. The SQLite concept store remains the semantic owner; HTTP only adds
 # pagination, redaction, and bounded response shaping.
-_DOMAIN_CONCEPT_LIMIT = 100
+_DOMAIN_CONCEPT_LIMIT = 200
 _DOMAIN_CONTEXT_NODE_CAP = 50
 _DOMAIN_CONTEXT_EDGE_CAP = 50
 _DOMAIN_EVIDENCE_CAP = 100
