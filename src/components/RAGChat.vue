@@ -21,6 +21,7 @@ import ChatLoading from './ChatLoading.vue';
 import EvaluationModal from './EvaluationModal.vue';
 import RetrievalInsights from './RetrievalInsights.vue';
 import SysMonitor from './SysMonitor.vue';
+import WelcomeTerminal from './WelcomeTerminal.vue';
 import type { PipelineStep } from './PipelineProgress.vue';
 
 interface Message {
@@ -203,7 +204,8 @@ const chatLocked = computed(() => props.loading || !!props.gatePreview);
     <div id="chat-scroll-container" class="flex-1 overflow-y-auto p-6 space-y-4 scroll-smooth">
       
       <!-- Messages list -->
-      <div class="max-w-4xl mx-auto space-y-4">
+      <div class="max-w-4xl mx-auto w-full space-y-4">
+        <WelcomeTerminal />
         <SysMonitor />
         <div 
           v-for="msg in messages" 

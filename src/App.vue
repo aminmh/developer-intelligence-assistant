@@ -107,18 +107,7 @@ interface Message {
 
 const ROUTES = ['code_explain', 'code_refactor', 'debug', 'search', 'knowledge', 'chat'];
 
-const messages = ref<Message[]>([
-  {
-    id: 'welcome',
-    role: 'assistant',
-    content: `👋 **Welcome to the Developer Assistant RAG System!**
-
-This application runs with an integrated Node/TS sandbox backend. Upload documents, generate embeddings, and query your knowledge base using semantic search.
-
-Configure your LLM and embedding settings under the **Connection & Settings** tab.`,
-    timestamp: new Date().toLocaleTimeString(),
-  }
-]);
+const messages = ref<Message[]>([]);
 
 const triggerToast = (msg: string, isSuccess = true) => {
   if (isSuccess) {
