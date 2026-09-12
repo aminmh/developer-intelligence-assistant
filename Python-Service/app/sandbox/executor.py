@@ -808,6 +808,7 @@ class SandboxExecutor:
         body: str | None = None,
         framework: str = "php",
         base_url: str = "http://127.0.0.1:8000",
+        start_server: bool = True,
     ) -> dict[str, Any]:
         """Run one bounded HTTP request against a staged app.
 
@@ -832,7 +833,36 @@ class SandboxExecutor:
         if body is not None:
             args.extend(["--data-binary", body])
         args.append(base_url.rstrip("/") + path)
-        command = " ".join(shlex.quote(value) for value in args)
+        request_command = shlex.join(args)
+        command = request_command
+        if start_server and framework.casefold() in {"php", "laravel"}:
+            # The staged project is disposable. Boot the app and issue the
+            # request in the same container so localhost is meaningful, then
+            # tear the process down before the container exits. Laravel's
+            # artisan server is preferred; plain PHP projects fall back to
+            # the built-in server when a public/ document root exists.
+            command = (
+                "if [ -f artisan ]; then "
+                "php artisan serve --host=127.0.0.1 --port=8000 "
+                ">/tmp/evaluator-server.log 2>&1 & server_pid=$!; "
+                "elif [ -d public ]; then "
+                "php -S 127.0.0.1:8000 -t public "
+                ">/tmp/evaluator-server.log 2>&1 & server_pid=$!; "
+                "else "
+                "php -S 127.0.0.1:8000 "
+                ">/tmp/evaluator-server.log 2>&1 & server_pid=$!; "
+                "fi; "
+                "cleanup() { kill \"$server_pid\" 2>/dev/null || true; }; "
+                "trap cleanup EXIT INT TERM; "
+                "ready=0; i=0; "
+                "while [ $i -lt 40 ]; do "
+                "if curl --max-time 1 --silent --output /dev/null "
+                f"{shlex.quote(base_url.rstrip('/') + '/')}; then ready=1; break; fi; "
+                "i=$((i+1)); sleep 0.25; done; "
+                "if [ $ready -ne 1 ]; then "
+                "cat /tmp/evaluator-server.log >&2 2>/dev/null || true; exit 28; fi; "
+                f"{request_command}"
+            )
         result = self.run_command(project_id, command, framework=framework)
         result["request"] = {"method": method, "path": path, "headers": sorted((headers or {}).keys())}
         return result

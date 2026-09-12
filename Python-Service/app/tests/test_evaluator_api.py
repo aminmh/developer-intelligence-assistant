@@ -49,6 +49,30 @@ def test_unknown_evaluator_run_is_404():
     assert client.get("/evaluator/runs/missing").status_code == 404
 
 
+def test_llm_handoff_is_available_when_route_has_no_telemetry(monkeypatch):
+    monkeypatch.setattr("evaluator.service.analysis_store.save_evaluator_reports", lambda *args, **kwargs: {})
+    monkeypatch.setattr(
+        "runtime.llm.complete_with_model",
+        lambda *args, **kwargs: ("Insufficient telemetry; instrument the route before changing SQL.", "test-model", "local"),
+    )
+    app = FastAPI()
+    app.include_router(router)
+    client = TestClient(app)
+    response = client.post("/evaluator/runs", json={"filename": "Orders.zip"})
+    run_id = response.json()["run_id"]
+    state = _wait(run_id)
+    assert state["status"] == "completed"
+
+    recommendation = client.post(
+        f"/evaluator/runs/{run_id}/recommendation",
+        json={"use_llm": True, "system_prompt": "Use only observed evidence."},
+    ).json()["recommendation"]
+    assert recommendation["availability"] == "insufficient_evidence"
+    assert recommendation["error"] == "No normalized evaluator reports are available."
+    assert recommendation["llm_response"].startswith("Insufficient telemetry")
+    assert recommendation["system_prompt"] == "Use only observed evidence."
+
+
 def test_sandbox_route_request_can_opt_into_evaluation(monkeypatch):
     class FakeExecutor:
         def inject_evaluator_hook(self, project_id, source):
@@ -71,3 +95,20 @@ def test_sandbox_route_request_can_opt_into_evaluation(monkeypatch):
     body = response.json()
     assert body["database_evaluation"]["enabled"] is True
     assert body["database_evaluation"]["run_id"]
+
+
+def test_sandbox_route_request_rejects_header_line_breaks(monkeypatch):
+    class NeverExecutor:
+        pass
+
+    monkeypatch.setattr(sandbox_router, "default_executor", lambda: NeverExecutor())
+    app = FastAPI()
+    app.include_router(sandbox_router.router)
+    response = TestClient(app).post("/sandbox/request", json={
+        "filename": "Orders.zip",
+        "path": "/api/orders",
+        "headers": {"X-Test": "ok\nX-Injected: yes"},
+    })
+    assert response.status_code == 200
+    assert response.json()["success"] is False
+    assert "Headers are malformed" in response.json()["error"]

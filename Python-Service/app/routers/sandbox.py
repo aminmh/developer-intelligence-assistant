@@ -64,7 +64,16 @@ def sandbox_request(body: dict):
         return {"success": False, "error": "Missing filename"}
     if not isinstance(path, str) or not path.startswith("/") or "\x00" in path or len(path) > 2000:
         return {"success": False, "error": "Route path must start with / and remain bounded"}
-    if not isinstance(headers, dict) or len(headers) > 50 or any(len(str(k)) > 120 or len(str(v)) > 4000 for k, v in headers.items()):
+    if (
+        not isinstance(headers, dict)
+        or len(headers) > 50
+        or any(
+            len(str(k)) > 120
+            or len(str(v)) > 4000
+            or any(char in str(k) or char in str(v) for char in ("\r", "\n"))
+            for k, v in headers.items()
+        )
+    ):
         return {"success": False, "error": "Headers are malformed or exceed limits"}
     if request_body is not None and (not isinstance(request_body, str) or len(request_body.encode("utf-8")) > 64 * 1024):
         return {"success": False, "error": "Request body must be a string under 64 KiB"}

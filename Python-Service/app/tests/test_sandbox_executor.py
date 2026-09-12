@@ -128,6 +128,38 @@ class TestRuntimeConfig:
         assert "php" in rt["runtimes"]
         assert rt["runtimes"]["php"]["probes"]["routes"]
 
+
+class TestApiRequest:
+    def test_route_request_boots_php_app_and_preserves_request_parts(self, fake_api, monkeypatch):
+        _, executor = fake_api
+        captured = {}
+
+        def fake_run_command(project_id, command, **kwargs):
+            captured.update({"project_id": project_id, "command": command, "kwargs": kwargs})
+            return {"status": "done", "exit_code": 0, "stdout": "HTTP/1.1 200 OK\n\n{}"}
+
+        monkeypatch.setattr(executor, "run_command", fake_run_command)
+        result = executor.run_api_request(
+            "proj-1",
+            "POST",
+            "/api/orders?include=items",
+            headers={"Authorization": "Bearer token", "Content-Type": "application/json"},
+            body='{"status":"paid"}',
+            framework="php",
+        )
+
+        assert result["request"] == {
+            "method": "POST",
+            "path": "/api/orders?include=items",
+            "headers": ["Authorization", "Content-Type"],
+        }
+        assert captured["project_id"] == "proj-1"
+        assert "php artisan serve --host=127.0.0.1 --port=8000" in captured["command"]
+        assert "--request POST" in captured["command"]
+        assert "--header 'Authorization: Bearer token'" in captured["command"]
+        assert "--data-binary '{\"status\":\"paid\"}'" in captured["command"]
+        assert captured["kwargs"]["framework"] == "php"
+
     def test_missing_framework(self, fake_api):
         _m, executor = fake_api
         assert executor.runtime_for("cobol") is None

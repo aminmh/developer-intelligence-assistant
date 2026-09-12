@@ -48,8 +48,6 @@ class EvaluatorService:
     def recommendation(self, run_id: str, body: dict[str, Any] | None = None) -> dict[str, Any]:
         body = body or {}
         reports = [EvaluatorReport.from_dict(item) for item in self.reports(run_id)]
-        if not reports:
-            return {"availability": "insufficient_evidence", "error": "No normalized evaluator reports are available.", "review_required": True}
         issues = sorted({issue for report in reports for issue in report.issues})
         evidence = [e for report in reports for e in report.evidence]
         root = "Evidence is insufficient to identify a database bottleneck."
@@ -64,6 +62,7 @@ class EvaluatorService:
             migration = "-- Review-only suggestion; confirm table and column order before applying.\nSchema::table('<table>', function (Blueprint $table) { $table->index(['<predicate_column>']); });"
         recommendation = {
             "availability": "available" if issues else "insufficient_evidence",
+            "error": None if reports else "No normalized evaluator reports are available.",
             "root_cause_analysis": root,
             "evidence": sorted(set(evidence)),
             "confidence": "high" if issues else "low",
