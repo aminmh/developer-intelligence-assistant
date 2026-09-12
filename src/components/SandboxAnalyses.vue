@@ -715,7 +715,7 @@ const copyShellOutput = async () => {
           Analyze project
         </h4>
 
-        <div class="flex items-end gap-3 flex-wrap">
+        <div class="flex items-start gap-3 flex-wrap">
           <div class="flex-1 min-w-[240px]">
             <label class="block text-[10px] text-slate-500 font-mono mb-1.5 uppercase tracking-wider">Uploaded project (ZIP)</label>
             <select
@@ -730,7 +730,7 @@ const copyShellOutput = async () => {
             </p>
           </div>
 
-          <div class="flex flex-col items-stretch gap-1.5">
+          <div class="flex flex-col items-stretch gap-1.5 pt-[21px]">
             <button
               @click="startAnalyze"
               :disabled="anyRunning || !selectedFile"
