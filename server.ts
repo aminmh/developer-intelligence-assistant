@@ -700,6 +700,20 @@ async function startServer() {
     }
   });
 
+  // Run one route request in the staged project; optionally starts the
+  // database-evaluation lifecycle for the same request.
+  app.post('/api/sandbox/request', async (req, res) => {
+    try {
+      const pyRes = await fetch(`${PYTHON_API_URL}/sandbox/request`, {
+        method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(req.body ?? {}),
+      });
+      const data = await pyRes.json().catch(() => ({ detail: 'Sandbox request failed.' }));
+      return res.status(pyRes.status).json(data);
+    } catch (error: any) {
+      return res.status(500).json({ success: false, error: error?.message || 'Sandbox request failed.' });
+    }
+  });
+
   // Poll an orchestration job status (carries sandbox object when done).
   app.get('/api/project/analyze/:jobId/status', async (req, res) => {
     try {

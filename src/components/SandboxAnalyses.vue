@@ -20,7 +20,7 @@ import {
   Database,
   Braces,
 } from 'lucide-vue-next';
-import { UploadedFile, AnalysisSession, SandboxProbe, SandboxResult } from '../types';
+import { UploadedFile, AnalysisSession, SandboxProbe, SandboxResult, EvaluatorReport, EvaluatorRecommendation } from '../types';
 import PipelineProgress, { PipelineStep } from './PipelineProgress.vue';
 import { makeRequest } from '../ui/makeRequest';
 
@@ -507,6 +507,112 @@ const shellRunning = ref(false);
 const shellOut = ref<ShellOutcome | null>(null);
 const shellHistory = ref<ShellOutcome[]>([]);
 
+// --- Postman-style route runner + opt-in database evaluation --------------
+
+type ApiOutcome = {
+  success: boolean;
+  status?: string;
+  exit_code?: number | null;
+  stdout?: string;
+  reason?: string;
+  error?: string;
+  request?: { method: string; path: string; headers: string[] };
+  database_evaluation?: { enabled: boolean; run_id?: string; hook?: { status: string; reason?: string }; cleanup?: { status: string; reason?: string } };
+};
+
+const apiMethod = ref('GET');
+const apiPath = ref('/');
+const apiHeaders = ref('');
+const apiBody = ref('');
+const apiDatabase = ref<'mysql' | 'postgresql'>('mysql');
+const apiEvaluateDatabase = ref(false);
+const apiRunning = ref(false);
+const apiOut = ref<ApiOutcome | null>(null);
+const apiReports = ref<EvaluatorReport[]>([]);
+const apiRecommendation = ref<EvaluatorRecommendation | null>(null);
+const apiRunId = ref<string | null>(null);
+const apiLlmRunning = ref(false);
+const apiLlmError = ref('');
+const apiSystemPrompt = ref('You are a senior database performance engineer. Use only observed evaluator evidence to explain the root cause and propose a safe application/index fix. Return a review-only unified diff and never claim changes were applied.');
+
+const parseApiHeaders = (): Record<string, string> => {
+  const result: Record<string, string> = {};
+  for (const line of apiHeaders.value.split(/\r?\n/)) {
+    const index = line.indexOf(':');
+    if (index <= 0) continue;
+    result[line.slice(0, index).trim()] = line.slice(index + 1).trim();
+  }
+  return result;
+};
+
+const waitForEvaluator = async (runId: string) => {
+  for (let attempt = 0; attempt < 80; attempt += 1) {
+    const response = await makeRequest(`/api/evaluator/runs/${encodeURIComponent(runId)}`);
+    const status = await response.json();
+    if (status.status === 'completed' || status.status === 'error') {
+      apiReports.value = (status.reports || []) as EvaluatorReport[];
+      if (status.status === 'error') apiLlmError.value = status.error || 'Database evaluation failed.';
+      return;
+    }
+    await new Promise((resolve) => setTimeout(resolve, 150));
+  }
+  apiLlmError.value = 'Database evaluation timed out while waiting for telemetry.';
+};
+
+const runApiRequest = async () => {
+  if (!selectedFile.value || !shellEnabled.value || apiRunning.value) return;
+  if (!apiPath.value.trim().startsWith('/')) { apiLlmError.value = 'Route path must start with /.'; return; }
+  apiRunning.value = true;
+  apiOut.value = null;
+  apiReports.value = [];
+  apiRecommendation.value = null;
+  apiRunId.value = null;
+  apiLlmError.value = '';
+  try {
+    const response = await makeRequest('/api/sandbox/request', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        filename: selectedFile.value,
+        method: apiMethod.value,
+        path: apiPath.value.trim(),
+        headers: parseApiHeaders(),
+        body: apiBody.value || undefined,
+        framework: lastFramework.value,
+        database: apiDatabase.value,
+        evaluate_database: apiEvaluateDatabase.value,
+      }),
+    });
+    const data = await response.json();
+    if (!response.ok) throw new Error(data.error || data.detail || 'API request failed.');
+    apiOut.value = data as ApiOutcome;
+    const runId = data.database_evaluation?.run_id;
+    if (runId) { apiRunId.value = runId; await waitForEvaluator(runId); }
+  } catch (err: any) {
+    apiOut.value = { success: false, error: String(err.message || err) };
+  } finally {
+    apiRunning.value = false;
+  }
+};
+
+const sendApiReportToLlm = async () => {
+  if (!apiRunId.value || apiLlmRunning.value) return;
+  apiLlmRunning.value = true;
+  apiLlmError.value = '';
+  try {
+    const response = await makeRequest(`/api/evaluator/runs/${encodeURIComponent(apiRunId.value)}/recommendation`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ use_llm: true, system_prompt: apiSystemPrompt.value }),
+    });
+    const data = await response.json();
+    if (!response.ok) throw new Error(data.detail || data.error || 'LLM request failed.');
+    apiRecommendation.value = data.recommendation as EvaluatorRecommendation;
+  } catch (err: any) {
+    apiLlmError.value = String(err.message || err);
+  } finally {
+    apiLlmRunning.value = false;
+  }
+};
+
 const shellEnabled = computed(
   () => !!selectedFile.value && !!sandboxResult.value?.staged,
 );
@@ -890,6 +996,70 @@ const copyShellOutput = async () => {
           </button>
         </div>
         <p v-if="notice" class="text-[11px]" :class="notice.ok ? 'text-emerald-400' : 'text-rose-400'">{{ notice.text }}</p>
+      </div>
+
+      <!-- Route request runner: Postman-like request against staged app -->
+      <div class="bg-slate-900/30 border border-cyan-500/20 rounded-2xl p-6 space-y-4">
+        <h4 class="text-xs font-bold tracking-wider uppercase text-slate-400 flex items-center gap-2">
+          <Braces class="w-4 h-4 text-cyan-400" />
+          Run API route
+        </h4>
+        <div class="grid grid-cols-[110px_1fr] gap-2">
+          <select v-model="apiMethod" class="bg-slate-950 border border-slate-800 rounded-lg px-3 py-2 text-xs text-cyan-200">
+            <option v-for="method in ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'HEAD']" :key="method" :value="method">{{ method }}</option>
+          </select>
+          <input v-model="apiPath" placeholder="/api/orders" class="font-mono bg-slate-950 border border-slate-800 rounded-lg px-3 py-2 text-xs text-slate-200" />
+        </div>
+        <div class="grid md:grid-cols-2 gap-3">
+          <textarea v-model="apiHeaders" rows="4" placeholder="Headers (one per line)\nAuthorization: Bearer …\nAccept: application/json" class="font-mono bg-slate-950 border border-slate-800 rounded-lg px-3 py-2 text-[10px] text-slate-300" />
+          <textarea v-model="apiBody" rows="4" placeholder="Optional request body" class="font-mono bg-slate-950 border border-slate-800 rounded-lg px-3 py-2 text-[10px] text-slate-300" />
+        </div>
+        <div class="flex flex-wrap items-center gap-3">
+          <button
+            @click="runApiRequest"
+            :disabled="!shellEnabled || apiRunning"
+            class="inline-flex items-center gap-2 px-4 py-2 rounded-lg text-xs font-semibold bg-cyan-600 text-white hover:bg-cyan-500 disabled:opacity-40"
+          >
+            <Loader2 v-if="apiRunning" class="w-3.5 h-3.5 animate-spin" />
+            <Play v-else class="w-3.5 h-3.5" />
+            {{ apiRunning ? 'Requesting…' : 'Send request' }}
+          </button>
+          <label class="inline-flex items-center gap-2 text-[10px] text-slate-400 font-mono cursor-pointer">
+            <input v-model="apiEvaluateDatabase" type="checkbox" class="accent-amber-500" :disabled="apiRunning" />
+            evaluate database performance
+          </label>
+          <select v-if="apiEvaluateDatabase" v-model="apiDatabase" class="bg-slate-950 border border-slate-800 rounded px-2 py-1 text-[10px] text-amber-200">
+            <option value="mysql">MySQL</option><option value="postgresql">PostgreSQL</option>
+          </select>
+        </div>
+        <p class="text-[10px] text-slate-600">The route is resolved inside the staged project sandbox. Database evaluation is opt-in and never applies a patch automatically.</p>
+
+        <div v-if="apiOut" class="rounded-xl bg-slate-950 border border-slate-800 overflow-hidden">
+          <div class="px-3 py-2 border-b border-slate-800 text-[10px] font-mono text-slate-400">{{ apiOut.request?.method }} {{ apiOut.request?.path }} · {{ apiOut.status || (apiOut.success ? 'done' : 'failed') }}</div>
+          <pre v-if="apiOut.stdout" class="p-3 text-[10px] font-mono text-cyan-100/90 max-h-64 overflow-auto whitespace-pre-wrap">{{ apiOut.stdout }}</pre>
+          <div v-else-if="apiOut.error || apiOut.reason" class="p-3 text-[10px] font-mono text-rose-300">{{ apiOut.error || apiOut.reason }}</div>
+        </div>
+
+        <div v-if="apiEvaluateDatabase && apiOut?.database_evaluation" class="rounded-xl border border-amber-500/20 bg-amber-950/10 p-4 space-y-3">
+          <div class="flex items-center gap-2"><Database class="w-4 h-4 text-amber-300" /><span class="text-xs font-semibold text-amber-100">Database evaluation report</span><span class="ml-auto text-[10px] text-slate-500">{{ apiReports.length }} report(s)</span></div>
+          <div v-if="apiReports.length === 0" class="text-[10px] text-amber-200/80">No normalized telemetry was available for this request. The sandbox hook was {{ apiOut.database_evaluation.hook?.status || 'not available' }}.</div>
+          <div v-for="report in apiReports" :key="report.query_fingerprint" class="rounded-lg bg-slate-950/70 border border-slate-800 p-3">
+            <div class="flex items-center justify-between gap-2"><code class="text-[10px] text-cyan-200">{{ report.query_fingerprint }}</code><span class="text-[9px] uppercase text-slate-500">{{ report.availability }}</span></div>
+            <div class="mt-1 text-[10px] text-amber-200">{{ (report.issues || []).join(', ') || 'No evidence-backed issue detected' }}</div>
+            <div v-if="report.source_trace?.file" class="mt-1 text-[10px] text-slate-500">{{ report.source_trace.file }}:{{ report.source_trace.line }}</div>
+          </div>
+          <textarea v-model="apiSystemPrompt" rows="3" class="w-full font-mono bg-slate-950 border border-slate-800 rounded-lg px-3 py-2 text-[10px] text-slate-300" />
+          <button @click="sendApiReportToLlm" :disabled="!apiRunId || apiLlmRunning" class="inline-flex items-center gap-2 px-3 py-2 rounded-lg text-[11px] font-semibold bg-amber-600 text-white hover:bg-amber-500 disabled:opacity-40">
+            <Loader2 v-if="apiLlmRunning" class="w-3.5 h-3.5 animate-spin" />
+            <Database v-else class="w-3.5 h-3.5" />
+            {{ apiLlmRunning ? 'Asking LLM…' : 'Send report to LLM' }}
+          </button>
+          <div v-if="apiLlmError" class="text-[10px] text-rose-300">{{ apiLlmError }}</div>
+          <article v-if="apiRecommendation?.llm_response" class="rounded-lg bg-slate-950 border border-emerald-500/20 p-3">
+            <div class="text-[10px] uppercase tracking-wider text-emerald-300 mb-2">LLM fix proposal · review only</div>
+            <pre class="whitespace-pre-wrap text-[10px] leading-relaxed text-slate-200">{{ apiRecommendation.llm_response }}</pre>
+          </article>
+        </div>
       </div>
 
       <!-- Shell: run any command -->
