@@ -21,6 +21,8 @@ from infra.settings_store import (
     mask_config,
     settings_store,
 )
+from infra.tool_store import tool_store
+from infra.tool_executor import execute_tool
 from index.models import (
     HealthResponse,
     RebuildResponse,
@@ -1909,6 +1911,68 @@ def update_settings(body: dict):
 
     settings_store.set_many(updates)
     return {"success": True, "config": mask_config(build_config(settings_store))}
+
+
+def _tool_view(tool: dict[str, Any]) -> dict[str, Any]:
+    out = dict(tool)
+    cfg = dict(out.get("config") or {})
+    for key in ("apiKey", "token", "password", "secret"):
+        if key in cfg and cfg[key]: cfg[key] = ""
+    out["config"] = cfg
+    return out
+
+
+@app.get("/tools", tags=["LLM Tools"], summary="List LLM tools")
+def list_tools(include_deleted: bool = False):
+    builtins = []
+    for name, cfg in (orchestrator.config.get("tools") or {}).items():
+        builtins.append({"id": f"builtin:{name}", "type": "shell", "name": name, "description": cfg.get("description", name), "config": {"builtin": True}, "enabled": True, "builtin": True})
+    return {"success": True, "tools": builtins + [_tool_view(t) for t in tool_store.list(include_deleted)]}
+
+
+@app.post("/tools", tags=["LLM Tools"], summary="Create an LLM tool")
+def create_tool(body: dict):
+    try: return {"success": True, "tool": _tool_view(tool_store.save(body))}
+    except ValueError as exc: raise HTTPException(status_code=400, detail=str(exc))
+
+
+@app.put("/tools/{tool_id}", tags=["LLM Tools"], summary="Update an LLM tool")
+def update_tool(tool_id: str, body: dict):
+    if tool_id.startswith("builtin:"): raise HTTPException(status_code=400, detail="Built-in tools cannot be edited")
+    if not tool_store.get(tool_id): raise HTTPException(status_code=404, detail="Tool not found")
+    try: return {"success": True, "tool": _tool_view(tool_store.save(body, tool_id))}
+    except ValueError as exc: raise HTTPException(status_code=400, detail=str(exc))
+
+
+@app.post("/tools/{tool_id}/enable", tags=["LLM Tools"])
+def enable_tool(tool_id: str):
+    tool = tool_store.set_enabled(tool_id, True)
+    if not tool: raise HTTPException(status_code=404, detail="Tool not found")
+    return {"success": True, "tool": _tool_view(tool)}
+
+
+@app.post("/tools/{tool_id}/disable", tags=["LLM Tools"])
+def disable_tool(tool_id: str):
+    tool = tool_store.set_enabled(tool_id, False)
+    if not tool: raise HTTPException(status_code=404, detail="Tool not found")
+    return {"success": True, "tool": _tool_view(tool)}
+
+
+@app.delete("/tools/{tool_id}", tags=["LLM Tools"])
+def delete_tool(tool_id: str):
+    if tool_id.startswith("builtin:"): raise HTTPException(status_code=400, detail="Built-in tools cannot be deleted")
+    tool = tool_store.soft_delete(tool_id)
+    if not tool: raise HTTPException(status_code=404, detail="Tool not found")
+    return {"success": True, "tool": _tool_view(tool)}
+
+
+@app.post("/tools/{tool_id}/test", tags=["LLM Tools"])
+def test_tool(tool_id: str, body: dict):
+    tool = tool_store.get(tool_id)
+    if not tool: raise HTTPException(status_code=404, detail="Tool not found")
+    result = execute_tool(tool, filename=str(body.get("filename") or "project.zip"), arguments=body.get("arguments") or {})
+    tool_store.record_run(tool_id, "success" if result.get("success") else "failed", result.get("error"))
+    return {"success": bool(result.get("success")), "result": result}
 
 
 @app.post(

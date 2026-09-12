@@ -245,6 +245,11 @@ class Orchestrator:
         if not ctx.route.get("llamaindex", True):
             return None
         tool_names = list((self.config.get("tools") or {}).keys())
+        try:
+            from infra.tool_store import tool_store
+            tool_names.extend(t["name"] for t in tool_store.list() if t.get("enabled"))
+        except Exception:
+            pass
         if not tool_names:
             return None
         routed = self._llamaindex_route(ctx.prompt, ctx.filename, ctx.route, tool_names)
@@ -1018,6 +1023,15 @@ class Orchestrator:
     ) -> dict[str, Any] | None:
         try:
             tool_config = (self.config.get("tools") or {}).get(tool_name, {})
+            if not tool_config:
+                from infra.tool_store import tool_store
+                from infra.tool_executor import execute_tool
+                managed = next((t for t in tool_store.list() if t.get("name") == tool_name and t.get("enabled")), None)
+                if not managed:
+                    return {"success": False, "error": f"Unknown tool: {tool_name}"}
+                result = execute_tool(managed, filename=ctx.filename, workspace_path=workspace_path)
+                tool_store.record_run(managed["id"], "success" if result.get("success") else "failed", result.get("error"))
+                return result
             args: dict[str, Any] = {}
             for key, value in (tool_config.get("args") or {}).items():
                 args[key] = self._resolve_env(value)
