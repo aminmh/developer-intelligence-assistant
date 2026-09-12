@@ -4,7 +4,6 @@ import {
   FileText, 
   Settings, 
   Terminal, 
-  Sparkles, 
   BookOpen, 
   FlaskConical,
   X,
@@ -13,7 +12,9 @@ import {
   ScrollText,
   Code2,
   Database,
-  Network
+  Network,
+  PanelLeftClose,
+  PanelLeftOpen
 } from 'lucide-vue-next';
 import { RAGConfig, SearchMatch, LLMUsage, ContextUsage } from './types';
 import { makeRequest } from './ui/makeRequest';
@@ -31,6 +32,12 @@ import type { DomainConcept, AnalysisSession } from './types';
 import type { PipelineStep } from './components/PipelineProgress.vue';
 
 const activeTab = ref<'chat' | 'files' | 'sandbox' | 'config' | 'logs' | 'definitions' | 'schema' | 'domain'>('chat');
+const sidebarCollapsed = ref(false);
+
+const toggleSidebar = () => {
+  sidebarCollapsed.value = !sidebarCollapsed.value;
+  localStorage.setItem('dev-assistant-sidebar-collapsed', String(sidebarCollapsed.value));
+};
 
 const config = ref<RAGConfig>({
   ollamaBaseUrl: 'http://host.docker.internal:11434',
@@ -790,6 +797,7 @@ const submitFeedback = async (query: string, route: string) => {
 };
 
 onMounted(async () => {
+  sidebarCollapsed.value = localStorage.getItem('dev-assistant-sidebar-collapsed') === 'true';
   fetchConfig();
   await fetchFiles();
   if (files.value.some((f) => f.status === 'processing')) {
@@ -799,22 +807,43 @@ onMounted(async () => {
 </script>
 
 <template>
-  <div class="flex h-screen w-screen bg-[#070a13] text-slate-100 overflow-hidden font-sans">
+  <div class="app-shell flex h-screen w-screen overflow-hidden font-sans">
     
     <!-- Sidebar navigation & Quick Config -->
-    <aside class="w-80 border-r border-slate-800 bg-[#0c101f] flex flex-col shrink-0 select-none">
-      <div class="p-5 border-b border-slate-800 flex items-center gap-3">
-        <div class="p-2 rounded-lg bg-indigo-600/20 text-indigo-400 border border-indigo-500/30">
-          <Sparkles class="w-6 h-6 animate-pulse" />
+    <aside
+      class="app-sidebar flex flex-col shrink-0 select-none transition-[width] duration-300 ease-in-out"
+      :class="sidebarCollapsed ? 'w-[5.25rem]' : 'w-80'"
+    >
+      <div
+        class="relative border-b border-slate-800 flex items-center"
+        :class="sidebarCollapsed ? 'justify-center p-4' : 'gap-3 p-5'"
+      >
+        <div class="brand-logo shrink-0" aria-hidden="true">
+          <svg class="brand-logo-svg" viewBox="0 0 48 48" fill="none" xmlns="http://www.w3.org/2000/svg">
+            <defs>
+              <linearGradient id="brandLogoGradient" x1="8" y1="7" x2="40" y2="42" gradientUnits="userSpaceOnUse">
+                <stop stop-color="#67E8F9" />
+                <stop offset="0.48" stop-color="#818CF8" />
+                <stop offset="1" stop-color="#C084FC" />
+              </linearGradient>
+            </defs>
+            <path class="brand-logo-ring brand-logo-ring-a" d="M24 4.5C35.3 4.5 44.5 13.2 44.5 24S35.3 43.5 24 43.5 3.5 34.8 3.5 24 12.7 4.5 24 4.5Z" stroke="url(#brandLogoGradient)" stroke-opacity=".28" />
+            <path class="brand-logo-ring brand-logo-ring-b" d="M24 9.5 37 17v14L24 38.5 11 31V17L24 9.5Z" stroke="url(#brandLogoGradient)" stroke-opacity=".55" />
+            <path class="brand-logo-network" d="m14 17 10-5 10 5v14l-10 5-10-5V17Z M14 17l10 7 10-7 M24 24v12" stroke="url(#brandLogoGradient)" stroke-width="1.35" stroke-linejoin="round" />
+            <circle class="brand-logo-node brand-logo-node-a" cx="14" cy="17" r="2.3" fill="#67E8F9" />
+            <circle class="brand-logo-node brand-logo-node-b" cx="34" cy="17" r="2.3" fill="#A5B4FC" />
+            <circle class="brand-logo-node brand-logo-node-c" cx="24" cy="36" r="2.3" fill="#C084FC" />
+            <circle class="brand-logo-core" cx="24" cy="24" r="3.2" fill="#F8FAFC" />
+          </svg>
         </div>
-        <div>
-          <h1 class="text-base font-bold tracking-tight text-white leading-tight text-left">DevAssistant RAG</h1>
-          <span class="text-[10px] text-slate-400 font-mono block text-left mt-0.5">Node/TS Sandbox Backend</span>
+        <div v-if="!sidebarCollapsed" class="min-w-0">
+          <h1 class="brand-title text-base font-bold tracking-tight leading-tight text-left">DevAssistant RAG</h1>
+          <span class="brand-subtitle text-[10px] text-slate-400 font-mono block text-left mt-0.5">Codebase Intelligence Workspace</span>
         </div>
       </div>
 
       <!-- Quick stats/status dashboard -->
-      <div class="px-5 py-4 bg-[#11162e] border-b border-slate-800">
+      <div v-if="!sidebarCollapsed" class="px-5 py-4 bg-[#11162e] border-b border-slate-800">
         <div class="flex items-center justify-between text-xs">
           <span class="text-slate-400">Indexed Files</span>
           <span class="font-semibold text-slate-300 font-mono">{{ files.length }} document(s)</span>
@@ -825,93 +854,113 @@ onMounted(async () => {
       <nav class="flex-1 p-4 space-y-1 overflow-y-auto">
         <button 
           @click="activeTab = 'chat'" 
-          class="w-full flex items-center gap-3 px-4 py-3 rounded-xl text-sm font-medium transition-all"
-          :class="activeTab === 'chat' ? 'bg-indigo-600 text-white shadow-md shadow-indigo-600/20' : 'text-slate-400 hover:text-white hover:bg-slate-800/50'"
+          class="w-full flex items-center gap-3 py-3 rounded-xl text-sm font-medium transition-all"
+          :class="[sidebarCollapsed ? 'justify-center px-2' : 'px-4', activeTab === 'chat' ? 'bg-indigo-600 text-white shadow-md shadow-indigo-600/20' : 'text-slate-400 hover:text-white hover:bg-slate-800/50']"
+          title="Interactive Chat"
         >
           <Terminal class="w-4 h-4" />
-          <span>Interactive Chat</span>
+          <span v-if="!sidebarCollapsed">Interactive Chat</span>
         </button>
 
         <button 
           @click="activeTab = 'files'" 
-          class="w-full flex items-center gap-3 px-4 py-3 rounded-xl text-sm font-medium transition-all"
-          :class="activeTab === 'files' ? 'bg-indigo-600 text-white shadow-md shadow-indigo-600/20' : 'text-slate-400 hover:text-white hover:bg-slate-800/50'"
+          class="w-full flex items-center gap-3 py-3 rounded-xl text-sm font-medium transition-all"
+          :class="[sidebarCollapsed ? 'justify-center px-2' : 'px-4', activeTab === 'files' ? 'bg-indigo-600 text-white shadow-md shadow-indigo-600/20' : 'text-slate-400 hover:text-white hover:bg-slate-800/50']"
+          title="Knowledge Base (Files)"
         >
           <FileText class="w-4 h-4" />
-          <span>Knowledge Base (Files)</span>
-          <span v-if="files.length > 0" class="ml-auto bg-slate-900/60 text-slate-300 text-[10px] px-2 py-0.5 rounded-full font-mono">{{ files.length }}</span>
+          <span v-if="!sidebarCollapsed">Knowledge Base (Files)</span>
+          <span v-if="!sidebarCollapsed && files.length > 0" class="ml-auto bg-slate-900/60 text-slate-300 text-[10px] px-2 py-0.5 rounded-full font-mono">{{ files.length }}</span>
         </button>
 
         <button 
           @click="activeTab = 'sandbox'" 
-          class="w-full flex items-center gap-3 px-4 py-3 rounded-xl text-sm font-medium transition-all"
-          :class="activeTab === 'sandbox' ? 'bg-indigo-600 text-white shadow-md shadow-indigo-600/20' : 'text-slate-400 hover:text-white hover:bg-slate-800/50'"
+          class="w-full flex items-center gap-3 py-3 rounded-xl text-sm font-medium transition-all"
+          :class="[sidebarCollapsed ? 'justify-center px-2' : 'px-4', activeTab === 'sandbox' ? 'bg-indigo-600 text-white shadow-md shadow-indigo-600/20' : 'text-slate-400 hover:text-white hover:bg-slate-800/50']"
+          title="Sandbox Analyzer"
         >
           <FlaskConical class="w-4 h-4" />
-          <span>Sandbox Analyzer</span>
+          <span v-if="!sidebarCollapsed">Sandbox Analyzer</span>
         </button>
 
         <button 
           @click="activeTab = 'config'" 
-          class="w-full flex items-center gap-3 px-4 py-3 rounded-xl text-sm font-medium transition-all"
-          :class="activeTab === 'config' ? 'bg-indigo-600 text-white shadow-md shadow-indigo-600/20' : 'text-slate-400 hover:text-white hover:bg-slate-800/50'"
+          class="w-full flex items-center gap-3 py-3 rounded-xl text-sm font-medium transition-all"
+          :class="[sidebarCollapsed ? 'justify-center px-2' : 'px-4', activeTab === 'config' ? 'bg-indigo-600 text-white shadow-md shadow-indigo-600/20' : 'text-slate-400 hover:text-white hover:bg-slate-800/50']"
+          title="Connection & Settings"
         >
           <Settings class="w-4 h-4" />
-          <span>Connection & Settings</span>
+          <span v-if="!sidebarCollapsed">Connection & Settings</span>
         </button>
 
         <button
           @click="activeTab = 'logs'"
-          class="w-full flex items-center gap-3 px-4 py-3 rounded-xl text-sm font-medium transition-all"
-          :class="activeTab === 'logs' ? 'bg-indigo-600 text-white shadow-md shadow-indigo-600/20' : 'text-slate-400 hover:text-white hover:bg-slate-800/50'"
+          class="w-full flex items-center gap-3 py-3 rounded-xl text-sm font-medium transition-all"
+          :class="[sidebarCollapsed ? 'justify-center px-2' : 'px-4', activeTab === 'logs' ? 'bg-indigo-600 text-white shadow-md shadow-indigo-600/20' : 'text-slate-400 hover:text-white hover:bg-slate-800/50']"
+          title="Developer Logs"
         >
           <ScrollText class="w-4 h-4" />
-          <span>Developer Logs</span>
+          <span v-if="!sidebarCollapsed">Developer Logs</span>
         </button>
 
         <button
           @click="activeTab = 'definitions'"
-          class="w-full flex items-center gap-3 px-4 py-3 rounded-xl text-sm font-medium transition-all"
-          :class="activeTab === 'definitions' ? 'bg-indigo-600 text-white shadow-md shadow-indigo-600/20' : 'text-slate-400 hover:text-white hover:bg-slate-800/50'"
+          class="w-full flex items-center gap-3 py-3 rounded-xl text-sm font-medium transition-all"
+          :class="[sidebarCollapsed ? 'justify-center px-2' : 'px-4', activeTab === 'definitions' ? 'bg-indigo-600 text-white shadow-md shadow-indigo-600/20' : 'text-slate-400 hover:text-white hover:bg-slate-800/50']"
+          title="Extracted Definitions"
         >
           <Code2 class="w-4 h-4" />
-          <span>Extracted Definitions</span>
+          <span v-if="!sidebarCollapsed">Extracted Definitions</span>
         </button>
 
         <button
           @click="activeTab = 'schema'"
-          class="w-full flex items-center gap-3 px-4 py-3 rounded-xl text-sm font-medium transition-all"
-          :class="activeTab === 'schema' ? 'bg-indigo-600 text-white shadow-md shadow-indigo-600/20' : 'text-slate-400 hover:text-white hover:bg-slate-800/50'"
+          class="w-full flex items-center gap-3 py-3 rounded-xl text-sm font-medium transition-all"
+          :class="[sidebarCollapsed ? 'justify-center px-2' : 'px-4', activeTab === 'schema' ? 'bg-indigo-600 text-white shadow-md shadow-indigo-600/20' : 'text-slate-400 hover:text-white hover:bg-slate-800/50']"
+          title="Database Schema"
         >
           <Database class="w-4 h-4" />
-          <span>Database Schema</span>
+          <span v-if="!sidebarCollapsed">Database Schema</span>
         </button>
 
         <button
           @click="activeTab = 'domain'"
-          class="w-full flex items-center gap-3 px-4 py-3 rounded-xl text-sm font-medium transition-all"
-          :class="activeTab === 'domain' ? 'bg-indigo-600 text-white shadow-md shadow-indigo-600/20' : 'text-slate-400 hover:text-white hover:bg-slate-800/50'"
+          class="w-full flex items-center gap-3 py-3 rounded-xl text-sm font-medium transition-all"
+          :class="[sidebarCollapsed ? 'justify-center px-2' : 'px-4', activeTab === 'domain' ? 'bg-indigo-600 text-white shadow-md shadow-indigo-600/20' : 'text-slate-400 hover:text-white hover:bg-slate-800/50']"
+          title="Domain Knowledge"
         >
           <Network class="w-4 h-4" />
-          <span>Domain Knowledge</span>
+          <span v-if="!sidebarCollapsed">Domain Knowledge</span>
         </button>
       </nav>
 
       <!-- Footer developer banner -->
-      <div class="p-4 border-t border-slate-800 text-[10px] text-slate-500 font-mono text-center">
-        <span>Dev RAG Front-End Client</span>
+      <div
+        class="p-4 border-t border-slate-800 text-[10px] text-slate-500 font-mono flex items-center"
+        :class="sidebarCollapsed ? 'justify-center' : 'justify-between gap-2'"
+      >
+        <span v-if="!sidebarCollapsed">Dev RAG Front-End Client</span>
+        <button
+          @click="toggleSidebar"
+          class="text-slate-400 hover:text-cyan-300 hover:bg-slate-800/60 rounded-lg p-1.5 transition-colors"
+          :title="sidebarCollapsed ? 'Expand sidebar' : 'Collapse sidebar'"
+          :aria-label="sidebarCollapsed ? 'Expand sidebar' : 'Collapse sidebar'"
+        >
+          <PanelLeftOpen v-if="sidebarCollapsed" class="w-4 h-4" />
+          <PanelLeftClose v-else class="w-4 h-4" />
+        </button>
       </div>
     </aside>
 
     <!-- Main Content Panel -->
-    <main class="flex-1 flex flex-col min-w-0 bg-[#090c17] relative">
+    <main class="app-main flex-1 flex flex-col min-w-0 relative">
       
       <!-- Top navbar -->
-      <header class="h-16 border-b border-slate-800 px-6 flex items-center justify-between select-none bg-[#0c101f]/40 backdrop-blur">
+      <header class="app-header h-16 px-6 flex items-center justify-between select-none backdrop-blur">
         <div class="flex items-center gap-2">
           <BookOpen class="w-4 h-4 text-indigo-400" />
           <h2 class="text-sm font-semibold text-white">
-            <span v-if="activeTab === 'chat'">Developer Playground</span>
+            <span v-if="activeTab === 'chat'">Codebase Chat</span>
             <span v-else-if="activeTab === 'files'">Document Chunker & Vector Indexer</span>
             <span v-else-if="activeTab === 'sandbox'">Sandbox Project Analysis</span>
             <span v-else-if="activeTab === 'config'">RAG Pipeline Configurations</span>

@@ -23,6 +23,10 @@ status: ready`;
 const displayedText = ref('');
 const reducedMotion = ref(false);
 
+defineProps<{
+  generatingAnswer: boolean;
+}>();
+
 let animationTimer: ReturnType<typeof setTimeout> | null = null;
 let mediaQuery: MediaQueryList | null = null;
 
@@ -109,10 +113,11 @@ onUnmounted(() => {
 
 <template>
   <section
-    class="w-full overflow-hidden rounded-2xl border border-slate-800 bg-[#080b14] shadow-lg shadow-slate-950/20"
+    class="w-full overflow-hidden rounded-2xl border border-slate-800 bg-[#080b14] shadow-lg shadow-slate-950/20 transition-opacity duration-500 ease-in-out"
+    :class="generatingAnswer ? 'opacity-0' : 'opacity-100'"
     aria-label="Developer Assistant terminal welcome"
   >
-    <div class="flex items-center gap-2 border-b border-slate-800 bg-slate-900/50 px-4 py-3">
+    <div class="flex items-center gap-2 border-b border-slate-800 bg-slate-900/50 px-4 py-2.5">
       <span class="h-2.5 w-2.5 rounded-full bg-rose-400/80"></span>
       <span class="h-2.5 w-2.5 rounded-full bg-amber-400/80"></span>
       <span class="h-2.5 w-2.5 rounded-full bg-emerald-400/80"></span>
@@ -123,9 +128,9 @@ onUnmounted(() => {
       </span>
     </div>
 
-    <div class="relative p-4 text-left text-[11px] leading-6 text-slate-300 sm:p-5 sm:text-xs">
+    <div class="relative p-3 text-left text-[11px] leading-5 text-slate-300 sm:p-4 sm:text-xs">
       <pre class="invisible m-0 whitespace-pre-wrap break-words font-mono" aria-hidden="true">{{ terminalContent }}</pre>
-      <pre class="absolute inset-4 m-0 whitespace-pre-wrap break-words font-mono sm:inset-5" aria-hidden="true">{{ displayedText }}<span class="text-emerald-400" :class="reducedMotion ? '' : 'animate-pulse'">▋</span></pre>
+      <pre class="absolute inset-3 m-0 whitespace-pre-wrap break-words font-mono sm:inset-4" aria-hidden="true">{{ displayedText }}<span class="text-emerald-400" :class="reducedMotion ? '' : 'animate-pulse'">▋</span></pre>
     </div>
   </section>
 </template>

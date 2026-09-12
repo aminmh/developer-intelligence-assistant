@@ -31,12 +31,6 @@ const gb = (bytes: unknown): string => {
   return (n / 1073741824).toFixed(1);
 };
 
-const barColor = (v: number): string => {
-  if (v < 50) return 'bg-emerald-500 shadow-[0_0_12px] shadow-emerald-500/50';
-  if (v < 80) return 'bg-amber-500 shadow-[0_0_12px] shadow-amber-500/50';
-  return 'bg-rose-500 shadow-[0_0_12px] shadow-rose-500/50';
-};
-
 const load = async () => {
   try {
     const res = await makeRequest('/api/sysmon');
@@ -98,81 +92,79 @@ onUnmounted(() => {
       <!-- Gauges -->
       <div v-else class="grid grid-cols-2 md:grid-cols-4 gap-3">
         <!-- CPU -->
-        <div class="bg-[#11162d] border border-slate-800 rounded-xl p-3">
-          <div class="flex items-center gap-1 text-[9px] text-slate-500 font-mono mb-1.5">
-            <Cpu class="w-3 h-3 text-indigo-400" />
-            CPU
-          </div>
-          <span :key="pct(stats.cpuPercent)" class="text-lg font-bold text-slate-100 font-mono transition-opacity duration-500">
-            {{ pct(stats.cpuPercent).toFixed(0) }}%
-          </span>
-          <div class="mt-2 h-1.5 bg-slate-800 rounded-full overflow-hidden">
-            <div
-              class="h-full rounded-full transition-all duration-700 ease-out"
-              :class="barColor(pct(stats.cpuPercent))"
-              :style="{ width: `${pct(stats.cpuPercent)}%` }"
-            ></div>
+        <div class="monitor-wave-card bg-[#11162d] border border-slate-800 rounded-xl p-3">
+          <div
+            class="monitor-wave monitor-wave-indigo"
+            :class="stats.cpuPercent == null ? 'monitor-wave-idle' : ''"
+            :style="{ '--wave-level': `${stats.cpuPercent != null ? 100 - pct(stats.cpuPercent) : 82}%` }"
+          ></div>
+          <div class="relative z-10">
+            <div class="flex items-center gap-1 text-[11px] text-slate-500 font-mono mb-1.5">
+              <Cpu class="w-3 h-3 text-indigo-400" />
+              CPU
+            </div>
+            <span :key="pct(stats.cpuPercent)" class="text-lg font-bold text-slate-100 font-mono transition-opacity duration-500">
+              {{ pct(stats.cpuPercent).toFixed(0) }}%
+            </span>
           </div>
         </div>
 
         <!-- Memory -->
-        <div class="bg-[#11162d] border border-slate-800 rounded-xl p-3">
-          <div class="flex items-center gap-1 text-[9px] text-slate-500 font-mono mb-1.5">
-            <MemoryStick class="w-3 h-3 text-indigo-400" />
-            RAM
-          </div>
-          <span :key="`${gb(stats.ramUsedBytes)}-${gb(stats.ramTotalBytes)}`" class="text-lg font-bold text-slate-100 font-mono transition-opacity duration-500">
-            {{ gb(stats.ramUsedBytes) }} / {{ gb(stats.ramTotalBytes) }} GB
-          </span>
-          <div class="mt-2 h-1.5 bg-slate-800 rounded-full overflow-hidden">
-            <div
-              class="h-full rounded-full transition-all duration-700 ease-out"
-              :class="barColor(pct(stats.ramPercent))"
-              :style="{ width: `${pct(stats.ramPercent)}%` }"
-            ></div>
+        <div class="monitor-wave-card bg-[#11162d] border border-slate-800 rounded-xl p-3">
+          <div
+            class="monitor-wave monitor-wave-cyan"
+            :class="stats.ramPercent == null ? 'monitor-wave-idle' : ''"
+            :style="{ '--wave-level': `${stats.ramPercent != null ? 100 - pct(stats.ramPercent) : 82}%` }"
+          ></div>
+          <div class="relative z-10">
+            <div class="flex items-center gap-1 text-[11px] text-slate-500 font-mono mb-1.5">
+              <MemoryStick class="w-3 h-3 text-indigo-400" />
+              RAM
+            </div>
+            <span :key="`${gb(stats.ramUsedBytes)}-${gb(stats.ramTotalBytes)}`" class="text-lg font-bold text-slate-100 font-mono transition-opacity duration-500">
+              {{ gb(stats.ramUsedBytes) }} / {{ gb(stats.ramTotalBytes) }} GB
+            </span>
           </div>
         </div>
 
         <!-- Temperature -->
-        <div class="bg-[#11162d] border border-slate-800 rounded-xl p-3">
-          <div class="flex items-center gap-1 text-[9px] text-slate-500 font-mono mb-1.5">
-            <Thermometer class="w-3 h-3 text-indigo-400" />
-            Temp
+        <div class="monitor-wave-card bg-[#11162d] border border-slate-800 rounded-xl p-3">
+          <div
+            class="monitor-wave monitor-wave-amber"
+            :class="stats.tempC == null ? 'monitor-wave-idle' : ''"
+            :style="{ '--wave-level': `${stats.tempC != null ? 100 - pct(stats.tempC) : 82}%` }"
+          ></div>
+          <div class="relative z-10">
+            <div class="flex items-center gap-1 text-[11px] text-slate-500 font-mono mb-1.5">
+              <Thermometer class="w-3 h-3 text-indigo-400" />
+              Temp
+            </div>
+            <span v-if="stats.tempC != null" :key="stats.tempC" class="text-lg font-bold text-slate-100 font-mono transition-opacity duration-500">
+              {{ Number(stats.tempC).toFixed(0) }}°C
+            </span>
+            <span v-else class="text-lg font-bold text-slate-600 font-mono">—</span>
+            <div v-if="stats.tempC == null" class="mt-2 text-[9px] text-slate-600 font-mono">n/a</div>
           </div>
-          <span v-if="stats.tempC != null" :key="stats.tempC" class="text-lg font-bold text-slate-100 font-mono transition-opacity duration-500">
-            {{ Number(stats.tempC).toFixed(0) }}°C
-          </span>
-          <span v-else class="text-lg font-bold text-slate-600 font-mono">—</span>
-          <div class="mt-2 h-1.5 bg-slate-800 rounded-full overflow-hidden">
-            <div
-              v-if="stats.tempC != null"
-              class="h-full rounded-full transition-all duration-700 ease-out"
-              :class="barColor(pct(stats.tempC))"
-              :style="{ width: `${pct(stats.tempC)}%` }"
-            ></div>
-          </div>
-          <div v-if="stats.tempC == null" class="mt-2 text-[9px] text-slate-600 font-mono">n/a</div>
         </div>
 
         <!-- GPU -->
-        <div class="bg-[#11162d] border border-slate-800 rounded-xl p-3">
-          <div class="flex items-center gap-1 text-[9px] text-slate-500 font-mono mb-1.5">
-            <Gauge class="w-3 h-3 text-indigo-400" />
-            GPU
+        <div class="monitor-wave-card bg-[#11162d] border border-slate-800 rounded-xl p-3">
+          <div
+            class="monitor-wave monitor-wave-violet"
+            :class="stats.gpuPercent == null ? 'monitor-wave-idle' : ''"
+            :style="{ '--wave-level': `${stats.gpuPercent != null ? 100 - pct(stats.gpuPercent) : 82}%` }"
+          ></div>
+          <div class="relative z-10">
+            <div class="flex items-center gap-1 text-[11px] text-slate-500 font-mono mb-1.5">
+              <Gauge class="w-3 h-3 text-indigo-400" />
+              GPU
+            </div>
+            <span v-if="stats.gpuPercent != null" :key="stats.gpuPercent" class="text-lg font-bold text-slate-100 font-mono transition-opacity duration-500">
+              {{ pct(stats.gpuPercent).toFixed(0) }}%
+            </span>
+            <span v-else class="text-lg font-bold text-slate-600 font-mono">n/a</span>
+            <div v-if="stats.gpuPercent == null" class="mt-2 text-[9px] text-slate-600 font-mono">not available (needs sudo)</div>
           </div>
-          <span v-if="stats.gpuPercent != null" :key="stats.gpuPercent" class="text-lg font-bold text-slate-100 font-mono transition-opacity duration-500">
-            {{ pct(stats.gpuPercent).toFixed(0) }}%
-          </span>
-          <span v-else class="text-lg font-bold text-slate-600 font-mono">n/a</span>
-          <div class="mt-2 h-1.5 bg-slate-800 rounded-full overflow-hidden">
-            <div
-              v-if="stats.gpuPercent != null"
-              class="h-full rounded-full transition-all duration-700 ease-out"
-              :class="barColor(pct(stats.gpuPercent))"
-              :style="{ width: `${pct(stats.gpuPercent)}%` }"
-            ></div>
-          </div>
-          <div v-if="stats.gpuPercent == null" class="mt-2 text-[9px] text-slate-600 font-mono">not available (needs sudo)</div>
         </div>
       </div>
     </div>

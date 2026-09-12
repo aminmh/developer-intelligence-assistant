@@ -205,7 +205,7 @@ const chatLocked = computed(() => props.loading || !!props.gatePreview);
       
       <!-- Messages list -->
       <div class="max-w-4xl mx-auto w-full space-y-4">
-        <WelcomeTerminal />
+        <WelcomeTerminal :generatingAnswer="generatingAnswer" />
         <SysMonitor />
         <div 
           v-for="msg in messages" 
