@@ -9,6 +9,8 @@ from fastapi import APIRouter
 from infra.settings import settings
 from runtime.sandbox_runtime import sandbox_available
 from sandbox.executor import default_executor
+from evaluator.sandbox_hook import EphemeralSqlTagger
+from evaluator.service import evaluator_service
 
 router = APIRouter(prefix="/sandbox", tags=["Sandbox"])
 
@@ -51,6 +53,59 @@ def sandbox_command(body: dict):
     return {"success": result.get("status") == "done", **result}
 
 
+@router.post("/request", summary="Run a route request in the staged project sandbox")
+def sandbox_request(body: dict):
+    filename = body.get("filename", "")
+    path = body.get("path", "")
+    method = body.get("method", "GET")
+    headers = body.get("headers") or {}
+    request_body = body.get("body")
+    if not isinstance(filename, str) or not filename:
+        return {"success": False, "error": "Missing filename"}
+    if not isinstance(path, str) or not path.startswith("/") or "\x00" in path or len(path) > 2000:
+        return {"success": False, "error": "Route path must start with / and remain bounded"}
+    if not isinstance(headers, dict) or len(headers) > 50 or any(len(str(k)) > 120 or len(str(v)) > 4000 for k, v in headers.items()):
+        return {"success": False, "error": "Headers are malformed or exceed limits"}
+    if request_body is not None and (not isinstance(request_body, str) or len(request_body.encode("utf-8")) > 64 * 1024):
+        return {"success": False, "error": "Request body must be a string under 64 KiB"}
+    try:
+        executor = default_executor()
+    except ValueError as exc:
+        return {"success": False, "error": f"sandbox backend unavailable: {exc}"}
+
+    evaluate = bool(body.get("evaluate_database"))
+    hook = EphemeralSqlTagger() if evaluate else None
+    hook_result = hook.inject(executor, _project_stem(filename)) if hook else None
+    try:
+        result = executor.run_api_request(
+            _project_stem(filename), str(method), path,
+            headers={str(k): str(v) for k, v in headers.items()},
+            body=request_body,
+            framework=body.get("framework") or "php",
+            # Route-only contract: the app endpoint is fixed to the staged
+            # sandbox loopback; callers cannot turn this into an open proxy.
+            base_url="http://127.0.0.1:8000",
+        )
+    finally:
+        cleanup_result = hook.cleanup(executor) if hook else None
+
+    response = {"success": result.get("status") == "done", **result}
+    if hook_result:
+        response["database_evaluation"] = {"enabled": True, "hook": hook_result.__dict__}
+        if cleanup_result:
+            response["database_evaluation"]["cleanup"] = cleanup_result.__dict__
+        run = evaluator_service.start({
+            "filename": filename,
+            "database": body.get("database") or "mysql",
+            "slow_log": body.get("slow_log") or "",
+            "explain": body.get("explain"),
+            "query": body.get("query") or "",
+            "schema": body.get("schema") or {},
+        })
+        response["database_evaluation"]["run_id"] = run.get("run_id")
+    return response
+
+
 @router.post("/clean", summary="Remove a Staged Project from the Sandbox Daemon")
 def sandbox_clean(body: dict):
     filename = body.get("filename", "")
@@ -62,4 +117,3 @@ def sandbox_clean(body: dict):
         return {"success": False, "error": f"sandbox backend unavailable: {exc}"}
     result = executor.cleanup_staging(_project_stem(filename))
     return {"success": result.get("status") == "done", **result}
-

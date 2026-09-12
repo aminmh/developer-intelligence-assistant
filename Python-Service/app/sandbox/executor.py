@@ -798,6 +798,45 @@ class SandboxExecutor:
         record["working_dir"] = working_dir
         return record
 
+    def run_api_request(
+        self,
+        project_id: str,
+        method: str,
+        path: str,
+        *,
+        headers: dict[str, str] | None = None,
+        body: str | None = None,
+        framework: str = "php",
+        base_url: str = "http://127.0.0.1:8000",
+    ) -> dict[str, Any]:
+        """Run one bounded HTTP request against a staged app.
+
+        The caller supplies a route/path, never an arbitrary external URL. The
+        staged runtime may expose the app on ``base_url``; if it is not running
+        the result carries the normal sandbox connection failure.
+        """
+        import shlex
+
+        method = str(method or "GET").upper()
+        if method not in {"GET", "POST", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS"}:
+            return {"status": "unavailable", "error": "unsupported HTTP method"}
+        if not isinstance(path, str) or not path.startswith("/") or "\x00" in path or len(path) > 2000:
+            return {"status": "unavailable", "error": "route path must start with / and remain bounded"}
+        if not isinstance(base_url, str) or not base_url.startswith(("http://", "https://")) or "\x00" in base_url:
+            return {"status": "unavailable", "error": "invalid sandbox app base URL"}
+        if len(base_url) > 300:
+            return {"status": "unavailable", "error": "sandbox app base URL is too long"}
+        args = ["curl", "--max-time", "30", "--silent", "--show-error", "--include", "--request", method]
+        for key, value in (headers or {}).items():
+            args.extend(["--header", f"{key}: {value}"])
+        if body is not None:
+            args.extend(["--data-binary", body])
+        args.append(base_url.rstrip("/") + path)
+        command = " ".join(shlex.quote(value) for value in args)
+        result = self.run_command(project_id, command, framework=framework)
+        result["request"] = {"method": method, "path": path, "headers": sorted((headers or {}).keys())}
+        return result
+
     # -- full driver --------------------------------------------------------
 
     def analyze(

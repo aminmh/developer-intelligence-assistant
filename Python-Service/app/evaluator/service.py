@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import threading
 import uuid
+import json
 from pathlib import Path
 from typing import Any
 
@@ -45,6 +46,7 @@ class EvaluatorService:
         return dict(state.get("context") or {}) if state else {}
 
     def recommendation(self, run_id: str, body: dict[str, Any] | None = None) -> dict[str, Any]:
+        body = body or {}
         reports = [EvaluatorReport.from_dict(item) for item in self.reports(run_id)]
         if not reports:
             return {"availability": "insufficient_evidence", "error": "No normalized evaluator reports are available.", "review_required": True}
@@ -60,7 +62,7 @@ class EvaluatorService:
         migration = ""
         if "missing_index_coverage" in issues or "full_table_scan" in issues:
             migration = "-- Review-only suggestion; confirm table and column order before applying.\nSchema::table('<table>', function (Blueprint $table) { $table->index(['<predicate_column>']); });"
-        return {
+        recommendation = {
             "availability": "available" if issues else "insufficient_evidence",
             "root_cause_analysis": root,
             "evidence": sorted(set(evidence)),
@@ -73,6 +75,30 @@ class EvaluatorService:
             "auto_apply": False,
             "notes": [] if issues else ["Profiler/plan evidence did not establish a concrete issue."],
         }
+        if body.get("use_llm") is True:
+            system_prompt = str(body.get("system_prompt") or (
+                "You are a senior database performance engineer. Analyze the supplied evaluator report, "
+                "separate observed evidence from hypotheses, and propose a safe fix. Return root cause, "
+                "application change, index/DDL suggestion, and a review-only unified diff. Never claim a "
+                "patch was applied and explicitly state missing evidence."
+            ))[:8000]
+            prompt = (
+                "Evaluator report (JSON):\n" + json.dumps([report.to_dict() for report in reports], ensure_ascii=False)[:30000]
+                + "\n\nDeterministic analysis:\n" + json.dumps(recommendation, ensure_ascii=False)[:12000]
+            )
+            try:
+                from runtime.llm import complete_with_model
+
+                completion = complete_with_model(prompt, system=system_prompt, max_tokens=3000, provider="remote" if body.get("use_remote") else "local")
+                recommendation["llm_response"] = completion[0]
+                recommendation["llm_model"] = completion[1]
+                recommendation["llm_provider"] = completion[2]
+                recommendation["system_prompt"] = system_prompt
+            except Exception as exc:  # noqa: BLE001 - explicit provider failure
+                recommendation["availability"] = "unavailable"
+                recommendation["llm_error"] = str(exc)[:400]
+                recommendation["system_prompt"] = system_prompt
+        return recommendation
 
     def _run(self, run_id: str, body: dict[str, Any]) -> None:
         self._set(run_id, status="running")

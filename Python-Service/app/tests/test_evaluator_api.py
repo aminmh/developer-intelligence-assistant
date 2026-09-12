@@ -9,6 +9,7 @@ from fastapi.testclient import TestClient
 
 from routers.evaluator import router
 from evaluator.service import evaluator_service
+import routers.sandbox as sandbox_router
 
 
 def _wait(run_id: str):
@@ -46,3 +47,27 @@ def test_unknown_evaluator_run_is_404():
     app.include_router(router)
     client = TestClient(app)
     assert client.get("/evaluator/runs/missing").status_code == 404
+
+
+def test_sandbox_route_request_can_opt_into_evaluation(monkeypatch):
+    class FakeExecutor:
+        def inject_evaluator_hook(self, project_id, source):
+            return {"status": "done"}
+
+        def remove_evaluator_hook(self, project_id):
+            return {"status": "done"}
+
+        def run_api_request(self, project_id, method, path, **kwargs):
+            return {"status": "done", "exit_code": 0, "stdout": "HTTP/1.1 200 OK\\n\\n{}", "request": {"method": method, "path": path, "headers": []}}
+
+    monkeypatch.setattr(sandbox_router, "default_executor", lambda: FakeExecutor())
+    app = FastAPI()
+    app.include_router(sandbox_router.router)
+    response = TestClient(app).post("/sandbox/request", json={
+        "filename": "Orders.zip", "method": "GET", "path": "/api/orders",
+        "evaluate_database": True,
+    })
+    assert response.status_code == 200
+    body = response.json()
+    assert body["database_evaluation"]["enabled"] is True
+    assert body["database_evaluation"]["run_id"]
