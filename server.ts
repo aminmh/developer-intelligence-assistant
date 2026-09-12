@@ -412,6 +412,29 @@ async function startServer() {
     }
   });
 
+  // LLM tool catalog (Python service owns persistence and execution).
+  app.get('/api/tools', async (req, res) => {
+    try {
+      const qs = req.query.include_deleted ? '?include_deleted=true' : '';
+      const pyRes = await fetch(`${PYTHON_API_URL}/tools${qs}`, { headers: { 'X-Internal-Secret': INTERNAL_SECRET } });
+      const data = await pyRes.json().catch(() => ({ success: false, error: 'Failed to load tools.' }));
+      return res.status(pyRes.status).json(data);
+    } catch (error: any) { return res.status(500).json({ success: false, error: error.message }); }
+  });
+  const proxyToolMutation = (method: string, suffix: string) => async (req: any, res: any) => {
+    try {
+      const pyRes = await fetch(`${PYTHON_API_URL}/tools/${encodeURIComponent(req.params.id)}${suffix}`, { method, headers: { 'Content-Type': 'application/json', 'X-Internal-Secret': INTERNAL_SECRET }, body: method === 'GET' ? undefined : JSON.stringify(req.body || {}) });
+      const data = await pyRes.json().catch(() => ({ success: false, error: 'Tool request failed.' }));
+      return res.status(pyRes.status).json(data);
+    } catch (error: any) { return res.status(500).json({ success: false, error: error.message }); }
+  };
+  app.post('/api/tools', proxyToolMutation('POST', ''));
+  app.put('/api/tools/:id', proxyToolMutation('PUT', ''));
+  app.post('/api/tools/:id/test', proxyToolMutation('POST', '/test'));
+  app.post('/api/tools/:id/enable', proxyToolMutation('POST', '/enable'));
+  app.post('/api/tools/:id/disable', proxyToolMutation('POST', '/disable'));
+  app.delete('/api/tools/:id', proxyToolMutation('DELETE', ''));
+
   app.get('/api/logs', async (req, res) => {
     try {
       const query = new URLSearchParams();
