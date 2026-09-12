@@ -51,6 +51,8 @@ const props = defineProps<{
   activeFileName: string | null;
   orchestrationSteps: PipelineStep[];
   generatingAnswer: boolean;
+  showSystemMonitor: boolean;
+  showWelcomeBanner: boolean;
   useRemote: boolean;
   previewMode: 'off' | 'inline' | 'gate';
   gatePreview: { text: string; markdown: string } | null;
@@ -205,8 +207,8 @@ const chatLocked = computed(() => props.loading || !!props.gatePreview);
       
       <!-- Messages list -->
       <div class="max-w-4xl mx-auto w-full space-y-4">
-        <WelcomeTerminal :generatingAnswer="generatingAnswer" />
-        <SysMonitor />
+        <WelcomeTerminal v-if="showWelcomeBanner" :generatingAnswer="generatingAnswer" />
+        <SysMonitor v-if="showSystemMonitor" />
         <div 
           v-for="msg in messages" 
           :key="msg.id" 

@@ -25,6 +25,16 @@ const pct = (v: unknown): number => {
   return Math.min(100, Math.max(0, n));
 };
 
+const waveTone = (v: unknown): string => {
+  const n = Number(v);
+  if (!Number.isFinite(n)) return 'monitor-wave-neutral';
+  const value = pct(n);
+  if (value < 25) return 'monitor-wave-green';
+  if (value < 50) return 'monitor-wave-yellow';
+  if (value < 75) return 'monitor-wave-orange';
+  return 'monitor-wave-red';
+};
+
 const gb = (bytes: unknown): string => {
   const n = Number(bytes);
   if (!Number.isFinite(n)) return '0.0';
@@ -94,8 +104,8 @@ onUnmounted(() => {
         <!-- CPU -->
         <div class="monitor-wave-card bg-[#11162d] border border-slate-800 rounded-xl p-3">
           <div
-            class="monitor-wave monitor-wave-indigo"
-            :class="stats.cpuPercent == null ? 'monitor-wave-idle' : ''"
+            class="monitor-wave"
+            :class="[waveTone(stats.cpuPercent), stats.cpuPercent == null ? 'monitor-wave-idle' : '']"
             :style="{ '--wave-level': `${stats.cpuPercent != null ? 100 - pct(stats.cpuPercent) : 82}%` }"
           ></div>
           <div class="relative z-10">
@@ -112,8 +122,8 @@ onUnmounted(() => {
         <!-- Memory -->
         <div class="monitor-wave-card bg-[#11162d] border border-slate-800 rounded-xl p-3">
           <div
-            class="monitor-wave monitor-wave-cyan"
-            :class="stats.ramPercent == null ? 'monitor-wave-idle' : ''"
+            class="monitor-wave"
+            :class="[waveTone(stats.ramPercent), stats.ramPercent == null ? 'monitor-wave-idle' : '']"
             :style="{ '--wave-level': `${stats.ramPercent != null ? 100 - pct(stats.ramPercent) : 82}%` }"
           ></div>
           <div class="relative z-10">
@@ -130,8 +140,8 @@ onUnmounted(() => {
         <!-- Temperature -->
         <div class="monitor-wave-card bg-[#11162d] border border-slate-800 rounded-xl p-3">
           <div
-            class="monitor-wave monitor-wave-amber"
-            :class="stats.tempC == null ? 'monitor-wave-idle' : ''"
+            class="monitor-wave"
+            :class="[waveTone(stats.tempC), stats.tempC == null ? 'monitor-wave-idle' : '']"
             :style="{ '--wave-level': `${stats.tempC != null ? 100 - pct(stats.tempC) : 82}%` }"
           ></div>
           <div class="relative z-10">
@@ -150,8 +160,8 @@ onUnmounted(() => {
         <!-- GPU -->
         <div class="monitor-wave-card bg-[#11162d] border border-slate-800 rounded-xl p-3">
           <div
-            class="monitor-wave monitor-wave-violet"
-            :class="stats.gpuPercent == null ? 'monitor-wave-idle' : ''"
+            class="monitor-wave"
+            :class="[waveTone(stats.gpuPercent), stats.gpuPercent == null ? 'monitor-wave-idle' : '']"
             :style="{ '--wave-level': `${stats.gpuPercent != null ? 100 - pct(stats.gpuPercent) : 82}%` }"
           ></div>
           <div class="relative z-10">

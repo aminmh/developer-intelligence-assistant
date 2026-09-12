@@ -28,6 +28,32 @@ export interface RAGConfig {
   rerankerTimeoutS: number;
 }
 
+export type AppearanceMode = 'dark' | 'light' | 'system';
+export type AppearancePalette =
+  | 'default'
+  | 'forest-teal'
+  | 'ember-violet'
+  | 'graphite-sage'
+  | 'royal-lilac'
+  | 'ember-copper'
+  | 'black-emerald'
+  | 'midnight-cobalt'
+  | 'deep-teal-plum'
+  | 'monochrome'
+  | 'obsidian-plum'
+  | 'black-coffee';
+export type AppearanceAccent = 'indigo' | 'cyan' | 'emerald' | 'orange' | 'rose';
+export type NeonBorderTheme = 'cyan' | 'violet' | 'amber' | 'emerald' | 'rose';
+
+export interface AppearancePreferences {
+  mode: AppearanceMode;
+  palette: AppearancePalette;
+  accent: AppearanceAccent;
+  neonBorder: NeonBorderTheme;
+  showSystemMonitor: boolean;
+  showWelcomeBanner: boolean;
+}
+
 export interface OllamaImportFile {
   file: string;
 }

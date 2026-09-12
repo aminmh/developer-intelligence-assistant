@@ -14,25 +14,201 @@ body {
 }
 
 .app-shell {
+  --theme-bg-start: #080b16;
+  --theme-bg-mid: #0d1224;
+  --theme-bg-end: #0b1825;
+  --theme-surface: #111830;
+  --theme-surface-alt: #0f1426;
+  --accent-primary: #818cf8;
+  --accent-strong: #4f46e5;
+  --accent-hover: #4338ca;
+  --accent-glow-rgb: 99 102 241;
+  --neon-border-rgb: 103 232 249;
+  --neon-glow-rgb: 34 211 238;
   color: #f1f5f9;
-  background: linear-gradient(135deg, #080b16 0%, #0d1224 52%, #0b1825 100%);
+  background: linear-gradient(135deg, var(--theme-bg-start) 0%, var(--theme-bg-mid) 52%, var(--theme-bg-end) 100%);
+}
+
+.app-shell[data-palette="forest-teal"] {
+  --theme-bg-start: #092328;
+  --theme-bg-mid: #12544f;
+  --theme-bg-end: #2a835f;
+  --theme-surface: #12544f;
+  --theme-surface-alt: #092328;
+}
+
+.app-shell[data-palette="ember-violet"] {
+  --theme-bg-start: #211832;
+  --theme-bg-mid: #412b6b;
+  --theme-bg-end: #5c3e94;
+  --theme-surface: #412b6b;
+  --theme-surface-alt: #211832;
+}
+
+.app-shell[data-palette="graphite-sage"] {
+  --theme-bg-start: #1e201e;
+  --theme-bg-mid: #3c3d37;
+  --theme-bg-end: #697565;
+  --theme-surface: #3c3d37;
+  --theme-surface-alt: #1e201e;
+}
+
+.app-shell[data-palette="royal-lilac"] {
+  --theme-bg-start: #17153b;
+  --theme-bg-mid: #2e236c;
+  --theme-bg-end: #433d8b;
+  --theme-surface: #2e236c;
+  --theme-surface-alt: #17153b;
+}
+
+.app-shell[data-palette="ember-copper"] {
+  --theme-bg-start: #0c0c0c;
+  --theme-bg-mid: #481e14;
+  --theme-bg-end: #9b3922;
+  --theme-surface: #481e14;
+  --theme-surface-alt: #0c0c0c;
+}
+
+.app-shell[data-palette="black-emerald"] {
+  --theme-bg-start: #0f0f0f;
+  --theme-bg-mid: #232d3f;
+  --theme-bg-end: #008170;
+  --theme-surface: #232d3f;
+  --theme-surface-alt: #0f0f0f;
+}
+
+.app-shell[data-palette="midnight-cobalt"] {
+  --theme-bg-start: #151e3f;
+  --theme-bg-mid: #19254d;
+  --theme-bg-end: #293a7a;
+  --theme-surface: #1f2c5c;
+  --theme-surface-alt: #151e3f;
+}
+
+.app-shell[data-palette="deep-teal-plum"] {
+  --theme-bg-start: #006466;
+  --theme-bg-mid: #144552;
+  --theme-bg-end: #4d194d;
+  --theme-surface: #144552;
+  --theme-surface-alt: #006466;
+}
+
+.app-shell[data-palette="monochrome"] {
+  --theme-bg-start: #000000;
+  --theme-bg-mid: #1e1e1e;
+  --theme-bg-end: #373737;
+  --theme-surface: #1e1e1e;
+  --theme-surface-alt: #000000;
+}
+
+.app-shell[data-palette="obsidian-plum"] {
+  --theme-bg-start: #09050a;
+  --theme-bg-mid: #1f1520;
+  --theme-bg-end: #342936;
+  --theme-surface: #1f1520;
+  --theme-surface-alt: #09050a;
+}
+
+.app-shell[data-palette="black-coffee"] {
+  --theme-bg-start: #090909;
+  --theme-bg-mid: #151412;
+  --theme-bg-end: #1d1a17;
+  --theme-surface: #151412;
+  --theme-surface-alt: #090909;
+}
+
+.app-shell[data-accent="cyan"] {
+  --accent-primary: #22d3ee;
+  --accent-strong: #0891b2;
+  --accent-hover: #0e7490;
+  --accent-glow-rgb: 34 211 238;
+}
+
+.app-shell[data-accent="emerald"] {
+  --accent-primary: #34d399;
+  --accent-strong: #059669;
+  --accent-hover: #047857;
+  --accent-glow-rgb: 52 211 153;
+}
+
+.app-shell[data-accent="orange"] {
+  --accent-primary: #f97316;
+  --accent-strong: #ea580c;
+  --accent-hover: #c2410c;
+  --accent-glow-rgb: 249 115 22;
+}
+
+.app-shell[data-accent="rose"] {
+  --accent-primary: #fb7185;
+  --accent-strong: #e11d48;
+  --accent-hover: #be123c;
+  --accent-glow-rgb: 251 113 133;
+}
+
+.app-shell[data-neon="violet"] {
+  --neon-border-rgb: 196 181 253;
+  --neon-glow-rgb: 139 92 246;
+}
+
+.app-shell[data-neon="amber"] {
+  --neon-border-rgb: 252 211 77;
+  --neon-glow-rgb: 245 158 11;
+}
+
+.app-shell[data-neon="emerald"] {
+  --neon-border-rgb: 139 187 146;
+  --neon-glow-rgb: 42 131 95;
+}
+
+.app-shell[data-neon="rose"] {
+  --neon-border-rgb: 253 164 175;
+  --neon-glow-rgb: 244 63 94;
+}
+
+.app-shell,
+.app-shell * {
+  scrollbar-color: var(--accent-primary) transparent;
+  scrollbar-width: thin;
+}
+
+.app-shell::-webkit-scrollbar,
+.app-shell *::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+
+.app-shell::-webkit-scrollbar-track,
+.app-shell *::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+.app-shell::-webkit-scrollbar-thumb,
+.app-shell *::-webkit-scrollbar-thumb {
+  border: 2px solid transparent;
+  border-radius: 999px;
+  background: linear-gradient(180deg, var(--accent-primary), var(--accent-strong)) padding-box;
+}
+
+.app-shell::-webkit-scrollbar-thumb:hover,
+.app-shell *::-webkit-scrollbar-thumb:hover {
+  background: linear-gradient(180deg, var(--accent-primary), var(--accent-hover)) padding-box;
 }
 
 .app-sidebar {
   border-right: 1px solid rgb(51 65 85 / 0.72);
-  background: linear-gradient(180deg, rgb(15 20 38 / 0.98), rgb(12 18 35 / 0.96));
+  background: linear-gradient(180deg, var(--theme-surface-alt), var(--theme-bg-end));
   box-shadow: 10px 0 30px rgb(79 70 229 / 0.12);
   animation: neon-edge-pulse 5.4s ease-in-out infinite;
 }
 
 .app-header {
   border-bottom: 1px solid rgb(51 65 85 / 0.72);
-  background: linear-gradient(90deg, rgb(15 20 38 / 0.84), rgb(17 24 48 / 0.72), rgb(10 30 43 / 0.78));
+  background: linear-gradient(90deg, var(--theme-surface-alt), var(--theme-surface), var(--theme-bg-end));
   animation: neon-edge-pulse 5.4s ease-in-out infinite;
 }
 
 .app-main {
-  background: linear-gradient(145deg, rgb(10 14 28 / 0.84), rgb(15 22 43 / 0.72) 52%, rgb(9 28 40 / 0.8));
+  background: linear-gradient(145deg, var(--theme-bg-start), var(--theme-surface) 52%, var(--theme-bg-end));
 }
 
 /* Re-map the existing dark utility surfaces onto the lighter shell without
@@ -42,22 +218,22 @@ body {
 .app-shell [class*="bg-[#11162d]"],
 .app-shell [class*="bg-[#090c17]"],
 .app-shell [class*="bg-[#0c101f]"] {
-  background-color: rgb(17 24 48 / 0.78) !important;
+  background-color: var(--theme-surface) !important;
 }
 
-.app-shell [class*="border-slate-800"],
-.app-shell [class*="border-slate-700"] {
-  border-color: rgb(71 85 105 / 0.5) !important;
+.app-shell [class*="border-slate-800"]:not([class*="border-b"]):not([class*="border-t"]):not([class*="border-l"]):not([class*="border-r"]),
+.app-shell [class*="border-slate-700"]:not([class*="border-b"]):not([class*="border-t"]):not([class*="border-l"]):not([class*="border-r"]) {
+  border-color: rgb(var(--neon-border-rgb) / 0.5) !important;
   animation: neon-border-pulse 4.8s ease-in-out infinite;
   transition: border-color 240ms ease, box-shadow 240ms ease;
 }
 
-.app-shell [class*="border-slate-800"]:hover,
-.app-shell [class*="border-slate-700"]:hover,
-.app-shell [class*="border-slate-800"]:focus-within,
-.app-shell [class*="border-slate-700"]:focus-within {
-  border-color: rgb(103 232 249 / 0.62) !important;
-  box-shadow: 0 0 0 1px rgb(99 102 241 / 0.18), 0 0 18px rgb(34 211 238 / 0.14);
+.app-shell [class*="border-slate-800"]:not([class*="border-b"]):not([class*="border-t"]):not([class*="border-l"]):not([class*="border-r"]):hover,
+.app-shell [class*="border-slate-700"]:not([class*="border-b"]):not([class*="border-t"]):not([class*="border-l"]):not([class*="border-r"]):hover,
+.app-shell [class*="border-slate-800"]:not([class*="border-b"]):not([class*="border-t"]):not([class*="border-l"]):not([class*="border-r"]):focus-within,
+.app-shell [class*="border-slate-700"]:not([class*="border-b"]):not([class*="border-t"]):not([class*="border-l"]):not([class*="border-r"]):focus-within {
+  border-color: rgb(var(--neon-border-rgb) / 0.62) !important;
+  box-shadow: 0 0 0 1px rgb(var(--accent-glow-rgb) / 0.18), 0 0 18px rgb(var(--neon-glow-rgb) / 0.14);
 }
 
 .app-shell [class~="text-white"] {
@@ -93,26 +269,112 @@ body {
   color: #ffffff !important;
 }
 
+.app-shell [class~="bg-indigo-600"] {
+  background-color: var(--accent-strong) !important;
+}
+
+.app-shell [class*="hover:bg-indigo-700"]:hover {
+  background-color: var(--accent-hover) !important;
+}
+
+.app-shell [class*="text-indigo-400"] {
+  color: var(--accent-primary) !important;
+}
+
+.app-sidebar nav button {
+  border: 1px solid transparent;
+}
+
+.app-sidebar nav button:hover,
+.app-sidebar nav button:focus-visible,
+.app-sidebar nav button[class~="bg-indigo-600"] {
+  border-color: rgb(var(--neon-border-rgb) / 0.5);
+  box-shadow: 0 0 0 1px rgb(var(--accent-glow-rgb) / 0.12), 0 0 12px rgb(var(--neon-glow-rgb) / 0.08);
+}
+
 @keyframes neon-border-pulse {
   0%, 100% {
-    border-color: rgb(71 85 105 / 0.42);
-    box-shadow: 0 0 0 1px rgb(99 102 241 / 0.07), 0 0 8px rgb(34 211 238 / 0.03);
+    border-color: rgb(var(--neon-border-rgb) / 0.42);
+    box-shadow: 0 0 0 1px rgb(var(--accent-glow-rgb) / 0.07), 0 0 8px rgb(var(--neon-glow-rgb) / 0.03);
   }
   50% {
-    border-color: rgb(103 232 249 / 0.58);
-    box-shadow: 0 0 0 1px rgb(99 102 241 / 0.18), 0 0 15px rgb(34 211 238 / 0.1);
+    border-color: rgb(var(--neon-border-rgb) / 0.58);
+    box-shadow: 0 0 0 1px rgb(var(--accent-glow-rgb) / 0.18), 0 0 15px rgb(var(--neon-glow-rgb) / 0.1);
   }
 }
 
 @keyframes neon-edge-pulse {
   0%, 100% {
-    border-color: rgb(51 65 85 / 0.62);
-    box-shadow: 10px 0 30px rgb(79 70 229 / 0.12);
+    border-color: rgb(var(--neon-border-rgb) / 0.62);
+    box-shadow: 10px 0 30px rgb(var(--accent-glow-rgb) / 0.12);
   }
   50% {
-    border-color: rgb(103 232 249 / 0.42);
-    box-shadow: 10px 0 34px rgb(79 70 229 / 0.18), 0 0 18px rgb(34 211 238 / 0.08);
+    border-color: rgb(var(--neon-border-rgb) / 0.42);
+    box-shadow: 10px 0 34px rgb(var(--accent-glow-rgb) / 0.18), 0 0 18px rgb(var(--neon-glow-rgb) / 0.08);
   }
+}
+
+.app-shell[data-theme="light"] {
+  color: #0f172a;
+  background: linear-gradient(135deg, #eef5ff 0%, #e8edff 52%, #e6f7f7 100%);
+}
+
+.app-shell[data-theme="light"] .app-sidebar {
+  background: linear-gradient(180deg, rgb(255 255 255 / 0.96), rgb(239 246 255 / 0.94));
+  box-shadow: 10px 0 30px rgb(var(--accent-glow-rgb) / 0.1);
+}
+
+.app-shell[data-theme="light"] .app-header {
+  background: linear-gradient(90deg, rgb(255 255 255 / 0.88), rgb(239 246 255 / 0.8), rgb(236 253 245 / 0.84));
+}
+
+.app-shell[data-theme="light"] .app-main {
+  background: linear-gradient(145deg, rgb(248 250 252 / 0.9), rgb(238 242 255 / 0.82) 52%, rgb(236 253 245 / 0.86));
+}
+
+.app-shell[data-theme="light"] [class*="bg-slate-900"],
+.app-shell[data-theme="light"] [class*="bg-slate-950"],
+.app-shell[data-theme="light"] [class*="11162d"],
+.app-shell[data-theme="light"] [class*="11162e"],
+.app-shell[data-theme="light"] [class*="090c17"],
+.app-shell[data-theme="light"] [class*="0c101f"],
+.app-shell[data-theme="light"] [class*="080b14"],
+.app-shell[data-theme="light"] [class*="0b1020"] {
+  background-color: rgb(255 255 255 / 0.72) !important;
+}
+
+.app-shell[data-theme="light"] [class~="text-white"] {
+  color: #0f172a !important;
+}
+
+.app-shell[data-theme="light"] [class~="text-slate-100"] {
+  color: #1e293b !important;
+}
+
+.app-shell[data-theme="light"] [class~="text-slate-200"] {
+  color: #334155 !important;
+}
+
+.app-shell[data-theme="light"] [class~="text-slate-300"] {
+  color: #475569 !important;
+}
+
+.app-shell[data-theme="light"] [class~="text-slate-400"] {
+  color: #64748b !important;
+}
+
+.app-shell[data-theme="light"] [class~="text-slate-500"],
+.app-shell[data-theme="light"] [class~="text-slate-600"] {
+  color: #64748b !important;
+}
+
+.app-shell[data-theme="light"] [class*="border-slate-800"]:not([class*="border-b"]):not([class*="border-t"]):not([class*="border-l"]):not([class*="border-r"]),
+.app-shell[data-theme="light"] [class*="border-slate-700"]:not([class*="border-b"]):not([class*="border-t"]):not([class*="border-l"]):not([class*="border-r"]) {
+  border-color: rgb(100 116 139 / 0.38) !important;
+}
+
+.app-shell[data-theme="light"] .brand-logo {
+  background: radial-gradient(circle at 35% 25%, rgb(var(--accent-glow-rgb) / 0.14), transparent 42%), linear-gradient(145deg, rgb(226 232 240 / 0.96), rgb(224 231 255 / 0.9));
 }
 
 @keyframes monitor-wave-shift {
@@ -156,7 +418,7 @@ body {
   background-size: 100% 180%;
   background-position: 50% 100%;
   pointer-events: none;
-  transition: inset 700ms ease-out;
+  transition: inset 700ms ease-out, color 500ms ease-out;
   box-shadow: 0 -1px 0 currentColor;
   filter: saturate(1.7);
   animation: monitor-wave-surge 3.8s ease-in-out infinite, monitor-wave-glint 5.5s ease-in-out infinite;
@@ -186,10 +448,11 @@ body {
   animation: monitor-wave-shift-reverse 6s ease-in-out infinite alternate;
 }
 
-.monitor-wave-indigo { color: #34d399; }
-.monitor-wave-cyan { color: #22d3ee; }
-.monitor-wave-amber { color: #fb7185; }
-.monitor-wave-violet { color: #fbbf24; }
+.monitor-wave-neutral { color: #38bdf8; }
+.monitor-wave-green { color: #34d399; }
+.monitor-wave-yellow { color: #facc15; }
+.monitor-wave-orange { color: #fb923c; }
+.monitor-wave-red { color: #fb7185; }
 
 @keyframes brand-logo-breathe {
   0%, 100% {

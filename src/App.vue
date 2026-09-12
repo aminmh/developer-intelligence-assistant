@@ -16,9 +16,10 @@ import {
   PanelLeftClose,
   PanelLeftOpen
 } from 'lucide-vue-next';
-import { RAGConfig, SearchMatch, LLMUsage, ContextUsage } from './types';
+import type { RAGConfig, SearchMatch, LLMUsage, ContextUsage } from './types';
 import { makeRequest } from './ui/makeRequest';
 import { useProjectFiles } from './composables/useProjectFiles';
+import { useAppearancePreferences } from './composables/useAppearancePreferences';
 
 import RAGChat from './components/RAGChat.vue';
 import RAGFiles from './components/RAGFiles.vue';
@@ -33,6 +34,7 @@ import type { PipelineStep } from './components/PipelineProgress.vue';
 
 const activeTab = ref<'chat' | 'files' | 'sandbox' | 'config' | 'logs' | 'definitions' | 'schema' | 'domain'>('chat');
 const sidebarCollapsed = ref(false);
+const appearance = useAppearancePreferences();
 
 const toggleSidebar = () => {
   sidebarCollapsed.value = !sidebarCollapsed.value;
@@ -807,7 +809,13 @@ onMounted(async () => {
 </script>
 
 <template>
-  <div class="app-shell flex h-screen w-screen overflow-hidden font-sans">
+  <div
+    class="app-shell flex h-screen w-screen overflow-hidden font-sans"
+    :data-theme="appearance.resolvedTheme"
+    :data-palette="appearance.preferences.palette"
+    :data-accent="appearance.preferences.accent"
+    :data-neon="appearance.preferences.neonBorder"
+  >
     
     <!-- Sidebar navigation & Quick Config -->
     <aside
@@ -991,6 +999,8 @@ onMounted(async () => {
         :activeFileName="activeFileName"
         :orchestrationSteps="orchestrationSteps"
         :generatingAnswer="generatingAnswer"
+        :showSystemMonitor="appearance.preferences.showSystemMonitor"
+        :showWelcomeBanner="appearance.preferences.showWelcomeBanner"
         @sendMessage="sendMessage"
         @attachZip="attachZip"
         @selectAttachment="selectAttachment"
@@ -1025,7 +1035,9 @@ onMounted(async () => {
       <RAGConfigComponent
         v-else-if="activeTab === 'config'"
         :config="config"
+        :appearance="appearance.preferences"
         @saveConfig="saveConfig"
+        @updateAppearance="appearance.updatePreference"
       />
 
       <LogsView v-else-if="activeTab === 'logs'" />
