@@ -173,11 +173,13 @@ from inspection.http import router as inspection_router  # noqa: E402 — after 
 from routers.developer_logs import router as developer_logs_router  # noqa: E402 — after app exists
 from routers.sandbox import router as sandbox_router  # noqa: E402 — after app exists
 from routers.system import router as system_router  # noqa: E402 — after app exists
+from routers.evaluator import router as evaluator_router  # noqa: E402 — after app exists
 
 app.include_router(inspection_router)
 app.include_router(developer_logs_router)
 app.include_router(sandbox_router)
 app.include_router(system_router)
+app.include_router(evaluator_router)
 
 app.add_middleware(
     CORSMiddleware,

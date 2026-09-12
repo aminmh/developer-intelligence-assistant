@@ -283,6 +283,55 @@ class AnalysisStore:
                 pass
         return deleted
 
+    # -- evaluator artifacts ----------------------------------------------
+
+    def save_evaluator_reports(
+        self,
+        session_id: str,
+        reports: list[dict[str, Any]],
+        *,
+        context: dict[str, Any] | None = None,
+    ) -> dict[str, Any] | None:
+        """Persist evaluator output under the existing analysis authority.
+
+        No evaluator-specific table is introduced: reports are stored in the
+        session's profile JSON and as a bounded artifact for durable reads.
+        """
+        row = self.get(session_id)
+        if row is None:
+            return None
+        profile = dict(row.get("profile") or {})
+        profile["evaluator_reports"] = list(reports)[:500]
+        if context is not None:
+            profile["evaluator_context"] = context
+        self.save(
+            session_id=session_id,
+            job_id=str(row.get("job_id") or session_id),
+            filename=str(row.get("filename") or "unknown.zip"),
+            collection_name=row.get("collection_name"),
+            label=row.get("label"),
+            summary=row.get("summary"),
+            profile=profile,
+            grounding_md=row.get("grounding_md"),
+            runtime=row.get("runtime"),
+            counts=row.get("counts"),
+            kind="evaluator",
+        )
+        try:
+            artifact = self.artifacts_dir(session_id) / "evaluator_reports.json"
+            artifact.write_text(json.dumps({"reports": profile["evaluator_reports"], "context": context or {}}, indent=2), encoding="utf-8")
+        except OSError:
+            pass
+        return self.get(session_id)
+
+    def evaluator_reports(self, session_id: str) -> list[dict[str, Any]]:
+        row = self.get(session_id)
+        if not row:
+            return []
+        profile = row.get("profile") or {}
+        reports = profile.get("evaluator_reports") if isinstance(profile, dict) else None
+        return list(reports or []) if isinstance(reports, list) else []
+
     # -- serialization ------------------------------------------------------
 
     @staticmethod

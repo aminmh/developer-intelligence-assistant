@@ -681,6 +681,41 @@ class SandboxExecutor:
         self._stage_probe_detail = {"error": (last.get("error") or str(last))[:200]}
         return False
 
+    def inject_evaluator_hook(self, project_id: str, source: str) -> dict[str, Any]:
+        """Write an evaluator-only hook into the staged copy, never the upload.
+
+        The evaluator runtime can load ``/app/.evaluator/sql_tagger.php`` via
+        its command/entrypoint adapter. The staged project is disposable and
+        is explicitly cleaned by :meth:`remove_evaluator_hook`.
+        """
+        if not project_id or "/" in project_id or ".." in Path(project_id).parts:
+            return {"status": "unavailable", "reason": "unsafe project id"}
+        if not isinstance(source, str) or not source or len(source.encode("utf-8")) > 64 * 1024:
+            return {"status": "unavailable", "reason": "invalid hook source"}
+        import base64
+
+        encoded = base64.b64encode(source.encode("utf-8")).decode("ascii")
+        target = f"{jobs_root()}/{project_id}/src/.evaluator/sql_tagger.php"
+        result = self.api.run_once(
+            image="alpine:3.20.3",
+            argv=["sh", "-c", f"mkdir -p '{jobs_root()}/{project_id}/src/.evaluator' && printf '%s' '{encoded}' | base64 -d > '{target}'"],
+            working_dir="/",
+            host_config={"Binds": [f"{jobs_root()}:/jobs"]},
+        )
+        return {"status": "done" if result.get("exit_code") == 0 else "unavailable", "path": "/app/.evaluator/sql_tagger.php", **result}
+
+    def remove_evaluator_hook(self, project_id: str) -> dict[str, Any]:
+        if not project_id or "/" in project_id or ".." in Path(project_id).parts:
+            return {"status": "unavailable", "reason": "unsafe project id"}
+        target = f"{jobs_root()}/{project_id}/src/.evaluator/sql_tagger.php"
+        result = self.api.run_once(
+            image="alpine:3.20.3",
+            argv=["sh", "-c", f"rm -f '{target}' && rmdir '{jobs_root()}/{project_id}/src/.evaluator' 2>/dev/null || true"],
+            working_dir="/",
+            host_config={"Binds": [f"{jobs_root()}:/jobs"]},
+        )
+        return {"status": "done" if result.get("exit_code") == 0 else "unavailable", **result}
+
     def run_command(
         self,
         project_id: str,
