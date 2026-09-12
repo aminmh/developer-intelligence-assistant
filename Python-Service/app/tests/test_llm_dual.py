@@ -1,5 +1,7 @@
 """Tests for dual-provider LLM routing (local Ollama + optional remote vLLM)."""
 
+import json
+
 import pytest
 
 import runtime.llm as llm
@@ -51,6 +53,54 @@ def _isolate_local_chat_settings(monkeypatch):
     settings.db — the local chat provider defaults to Ollama in tests."""
     monkeypatch.setattr(llm.settings, "local_llm_url", "")
     monkeypatch.setattr(llm.settings, "local_llm_model", "")
+    monkeypatch.setattr(llm.settings, "ollama_keep_alive", "-1")
+    llm._cancel_local_model_unload()
+
+
+def test_keep_alive_duration_parsing(monkeypatch):
+    monkeypatch.setattr(llm.settings, "ollama_keep_alive", "30s")
+    assert llm._keep_alive_seconds() == 30
+
+    monkeypatch.setattr(llm.settings, "ollama_keep_alive", "2m")
+    assert llm._keep_alive_seconds() == 120
+
+    monkeypatch.setattr(llm.settings, "ollama_keep_alive", "0")
+    assert llm._keep_alive_seconds() == 0
+
+    monkeypatch.setattr(llm.settings, "ollama_keep_alive", "-1")
+    assert llm._keep_alive_seconds() is None
+
+
+def test_unload_local_model_uses_native_ollama_endpoint(monkeypatch):
+    captured = {}
+
+    class _Response:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return False
+
+    def fake_urlopen(request, timeout):
+        captured["url"] = request.full_url
+        captured["body"] = request.data
+        captured["timeout"] = timeout
+        return _Response()
+
+    monkeypatch.setattr(llm.settings, "ollama_base_url", "http://ollama:11434")
+    monkeypatch.setattr(llm.settings, "local_llm_url", "")
+    monkeypatch.setattr(llm.urllib.request, "urlopen", fake_urlopen)
+
+    llm._unload_local_model("gemma3-4b")
+
+    assert captured["url"] == "http://ollama:11434/api/generate"
+    assert captured["timeout"] == 15
+    assert json.loads(captured["body"]) == {
+        "model": "gemma3-4b",
+        "prompt": "",
+        "stream": False,
+        "keep_alive": 0,
+    }
 
 
 def _configure_remote(monkeypatch, base_url="http://vllm:8000", model="qwen2.5-32b"):

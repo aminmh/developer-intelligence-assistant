@@ -4,8 +4,12 @@ optional remote vLLM (OpenAI-compatible) provider for heavy answers.
 
 from __future__ import annotations
 
+import json
+import re
+import threading
 import time
 from typing import Any, List, Optional, Tuple
+import urllib.request
 
 import instructor
 from openai import OpenAI
@@ -19,6 +23,94 @@ _instructor_client: Optional[Any] = None
 # (base_url, api_key, client) — re-created whenever either the dynamic base_url
 # or api_key setting changes.
 _remote_client_state: Optional[Tuple[str, str, OpenAI]] = None
+
+# Ollama's OpenAI-compatible endpoint does not reliably forward the native
+# ``keep_alive`` field. Keep the normal OpenAI path, then use Ollama's native
+# unload request after an idle period so model memory is actually released.
+_local_unload_timer: Optional[threading.Timer] = None
+_local_unload_lock = threading.Lock()
+
+
+def _keep_alive_seconds() -> float | None:
+    """Parse ``OLLAMA_KEEP_ALIVE`` into seconds.
+
+    ``None`` means unlimited (``-1``), while zero unloads immediately. Invalid
+    values fall back to Ollama's documented five-minute default.
+    """
+    raw = str(getattr(settings, "ollama_keep_alive", "5m") or "5m").strip().lower()
+    if raw in {"-1", "infinite", "forever"}:
+        return None
+    if raw == "0":
+        return 0.0
+
+    match = re.fullmatch(r"(\d+(?:\.\d+)?)(ms|s|m|h|d)?", raw)
+    if not match:
+        return 300.0
+    value = float(match.group(1))
+    multiplier = {
+        "ms": 0.001,
+        "s": 1.0,
+        "m": 60.0,
+        "h": 3600.0,
+        "d": 86400.0,
+    }.get(match.group(2) or "s", 1.0)
+    return max(0.0, value * multiplier)
+
+
+def _cancel_local_model_unload() -> None:
+    """Cancel an idle unload before starting another local Ollama request."""
+    global _local_unload_timer
+    with _local_unload_lock:
+        if _local_unload_timer is not None:
+            _local_unload_timer.cancel()
+            _local_unload_timer = None
+
+
+def _unload_local_model(model: str) -> None:
+    """Ask Ollama's native API to unload one model from memory."""
+    global _local_unload_timer
+    with _local_unload_lock:
+        _local_unload_timer = None
+
+    body = json.dumps(
+        {"model": model, "prompt": "", "stream": False, "keep_alive": 0}
+    ).encode("utf-8")
+    request = urllib.request.Request(
+        f"{settings.ollama_base_url.rstrip('/')}/api/generate",
+        data=body,
+        headers={"Content-Type": "application/json"},
+        method="POST",
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=15):
+            pass
+    except Exception:
+        # Unloading is best-effort; the next Ollama request remains healthy if
+        # the server is unavailable or the model has already been evicted.
+        pass
+
+
+def _schedule_local_model_unload(model: str, enabled: bool = True) -> None:
+    """Schedule an idle unload, replacing any older pending timer."""
+    global _local_unload_timer
+    if not enabled:
+        _cancel_local_model_unload()
+        return
+    delay = _keep_alive_seconds()
+    if delay is None:
+        _cancel_local_model_unload()
+        return
+    if delay <= 0:
+        _unload_local_model(model)
+        return
+
+    timer = threading.Timer(delay, _unload_local_model, args=(model,))
+    timer.daemon = True
+    with _local_unload_lock:
+        if _local_unload_timer is not None:
+            _local_unload_timer.cancel()
+        _local_unload_timer = timer
+    timer.start()
 
 
 class CompletionResult(tuple):
@@ -110,12 +202,17 @@ def extract(response_model, prompt: str):
     Raises on LLM/parse failure — callers are expected to degrade gracefully.
     """
     client = get_client()
-    return client.chat.completions.create(
-        model=settings.ollama_llm_model,
-        response_model=response_model,
-        messages=[{"role": "user", "content": prompt}],
-        max_retries=1,
-    )
+    model = settings.ollama_llm_model
+    _cancel_local_model_unload()
+    try:
+        return client.chat.completions.create(
+            model=model,
+            response_model=response_model,
+            messages=[{"role": "user", "content": prompt}],
+            max_retries=1,
+        )
+    finally:
+        _schedule_local_model_unload(model)
 
 
 def _get_remote_client() -> OpenAI:
@@ -233,15 +330,19 @@ def complete_with_model(
             pass  # silently fall back to the local model
 
     model = settings.local_llm_model or settings.ollama_llm_model
-    content, usage = _run_chat(
-        _get_openai_client(),
-        model,
-        prompt,
-        system=system,
-        temperature=temperature,
-        top_p=top_p,
-        max_tokens=max_tokens,
-    )
+    _cancel_local_model_unload()
+    try:
+        content, usage = _run_chat(
+            _get_openai_client(),
+            model,
+            prompt,
+            system=system,
+            temperature=temperature,
+            top_p=top_p,
+            max_tokens=max_tokens,
+        )
+    finally:
+        _schedule_local_model_unload(model, enabled=not bool(settings.local_llm_url))
     return CompletionResult(content, model, "local", usage)
 
 
@@ -321,12 +422,16 @@ def stream_complete_with_model(
 
     def _local_stream():
         model = settings.local_llm_model or settings.ollama_llm_model
-        yield "", model, "local"
-        for delta, usage in _stream_chat_with_usage(
-            _get_openai_client(), model, prompt, system=system,
-            temperature=temperature, top_p=top_p, max_tokens=max_tokens,
-        ):
-            yield StreamChunk(delta, model, "local", usage)
+        _cancel_local_model_unload()
+        try:
+            yield "", model, "local"
+            for delta, usage in _stream_chat_with_usage(
+                _get_openai_client(), model, prompt, system=system,
+                temperature=temperature, top_p=top_p, max_tokens=max_tokens,
+            ):
+                yield StreamChunk(delta, model, "local", usage)
+        finally:
+            _schedule_local_model_unload(model, enabled=not bool(settings.local_llm_url))
 
     if provider == "remote" and remote_configured():
         model = settings.llm_remote_model or settings.ollama_llm_model

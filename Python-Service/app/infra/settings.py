@@ -27,6 +27,10 @@ class Settings(BaseModel):
     ollama_base_url: str = os.getenv("OLLAMA_BASE_URL", "http://host.docker.internal:11434")
     ollama_embedding_model: str = os.getenv("OLLAMA_EMBED_MODEL", "BGE-M3")
     ollama_llm_model: str = os.getenv("OLLAMA_LLM_MODEL", "gemma3-4b")
+    # How long the local Ollama chat model may remain resident after its last
+    # request. Supports Ollama duration strings such as ``30s`` or ``5m``;
+    # ``0`` unloads immediately and ``-1`` disables application-side unloads.
+    ollama_keep_alive: str = os.getenv("OLLAMA_KEEP_ALIVE", "5m")
     # Optional OpenAI-compatible embedding server (LM Studio / Bionic). When set,
     # embeddings are produced via `{base}/v1/embeddings`; when empty they stay on
     # the Ollama server (`ollama_base_url` /api/embeddings).
