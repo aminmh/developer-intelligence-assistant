@@ -29,10 +29,11 @@ import LogsView from './components/LogsView.vue';
 import DefinitionsView from './components/DefinitionsView.vue';
 import DatabaseSchemaView from './components/DatabaseSchemaView.vue';
 import DomainKnowledgeView from './components/DomainKnowledgeView.vue';
+import DatabaseEvaluatorView from './components/DatabaseEvaluatorView.vue';
 import type { DomainConcept, AnalysisSession } from './types';
 import type { PipelineStep } from './components/PipelineProgress.vue';
 
-const activeTab = ref<'chat' | 'files' | 'sandbox' | 'config' | 'logs' | 'definitions' | 'schema' | 'domain'>('chat');
+const activeTab = ref<'chat' | 'files' | 'sandbox' | 'config' | 'logs' | 'definitions' | 'schema' | 'domain' | 'evaluator'>('chat');
 const sidebarCollapsed = ref(false);
 const appearance = useAppearancePreferences();
 
@@ -940,6 +941,16 @@ onMounted(async () => {
           <Network class="w-4 h-4" />
           <span v-if="!sidebarCollapsed">Domain Knowledge</span>
         </button>
+
+        <button
+          @click="activeTab = 'evaluator'"
+          class="w-full flex items-center gap-3 py-3 rounded-xl text-sm font-medium transition-all"
+          :class="[sidebarCollapsed ? 'justify-center px-2' : 'px-4', activeTab === 'evaluator' ? 'bg-indigo-600 text-white shadow-md shadow-indigo-600/20' : 'text-slate-400 hover:text-white hover:bg-slate-800/50']"
+          title="Database Evaluator"
+        >
+          <Database class="w-4 h-4" />
+          <span v-if="!sidebarCollapsed">Database Evaluator</span>
+        </button>
       </nav>
 
       <!-- Footer developer banner -->
@@ -976,6 +987,7 @@ onMounted(async () => {
             <span v-else-if="activeTab === 'definitions'">Extracted Definitions</span>
             <span v-else-if="activeTab === 'schema'">Database Schema</span>
             <span v-else-if="activeTab === 'domain'">Domain Knowledge</span>
+            <span v-else-if="activeTab === 'evaluator'">Database Evaluator</span>
           </h2>
         </div>
         
@@ -1047,6 +1059,7 @@ onMounted(async () => {
       <DatabaseSchemaView v-else-if="activeTab === 'schema'" />
 
       <DomainKnowledgeView v-else-if="activeTab === 'domain'" @ask-about-concept="askAboutDomainConcept" />
+      <DatabaseEvaluatorView v-else-if="activeTab === 'evaluator'" :filename="activeFileName || files[0]?.name || ''" />
 
     </main>
 

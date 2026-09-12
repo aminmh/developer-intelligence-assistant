@@ -879,6 +879,61 @@ async function startServer() {
     }
   });
 
+  // Database evaluator lifecycle (native slow-log/EXPLAIN MVP).
+  app.post('/api/evaluator/runs', async (req, res) => {
+    try {
+      const pyRes = await fetch(`${PYTHON_API_URL}/evaluator/runs`, {
+        method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(req.body ?? {}),
+      });
+      const data = await pyRes.json().catch(() => ({ detail: 'Evaluator start failed.' }));
+      return res.status(pyRes.status).json(data);
+    } catch (error: any) {
+      return res.status(500).json({ success: false, error: error?.message || 'Evaluator start failed.' });
+    }
+  });
+
+  app.get('/api/evaluator/runs/:runId', async (req, res) => {
+    try {
+      const pyRes = await fetch(`${PYTHON_API_URL}/evaluator/runs/${encodeURIComponent(req.params.runId)}`);
+      const data = await pyRes.json().catch(() => ({ detail: 'Evaluator status failed.' }));
+      return res.status(pyRes.status).json(data);
+    } catch (error: any) {
+      return res.status(500).json({ detail: error?.message || 'Evaluator status failed.' });
+    }
+  });
+
+  app.get('/api/evaluator/runs/:runId/reports', async (req, res) => {
+    try {
+      const pyRes = await fetch(`${PYTHON_API_URL}/evaluator/runs/${encodeURIComponent(req.params.runId)}/reports`);
+      const data = await pyRes.json().catch(() => ({ detail: 'Evaluator reports failed.' }));
+      return res.status(pyRes.status).json(data);
+    } catch (error: any) {
+      return res.status(500).json({ detail: error?.message || 'Evaluator reports failed.' });
+    }
+  });
+
+  app.get('/api/evaluator/runs/:runId/context', async (req, res) => {
+    try {
+      const pyRes = await fetch(`${PYTHON_API_URL}/evaluator/runs/${encodeURIComponent(req.params.runId)}/context`);
+      const data = await pyRes.json().catch(() => ({ detail: 'Evaluator context failed.' }));
+      return res.status(pyRes.status).json(data);
+    } catch (error: any) {
+      return res.status(500).json({ detail: error?.message || 'Evaluator context failed.' });
+    }
+  });
+
+  app.post('/api/evaluator/runs/:runId/recommendation', async (req, res) => {
+    try {
+      const pyRes = await fetch(`${PYTHON_API_URL}/evaluator/runs/${encodeURIComponent(req.params.runId)}/recommendation`, {
+        method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(req.body ?? {}),
+      });
+      const data = await pyRes.json().catch(() => ({ detail: 'Evaluator recommendation failed.' }));
+      return res.status(pyRes.status).json(data);
+    } catch (error: any) {
+      return res.status(500).json({ detail: error?.message || 'Evaluator recommendation failed.' });
+    }
+  });
+
   // LM Studio: list models available on the configured server.
   app.get('/api/lmstudio/models', async (req, res) => {
     try {

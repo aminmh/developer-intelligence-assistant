@@ -410,3 +410,53 @@ export interface SchemaVisualizationResponse {
     generatedAt: string;
   };
 }
+
+export interface EvaluatorSourceTrace {
+  file?: string | null;
+  line?: number | null;
+  class_name?: string | null;
+  method?: string | null;
+  namespace?: string | null;
+  context?: string[] | string;
+  language?: string | null;
+  available?: boolean;
+  error?: string | null;
+}
+
+export interface EvaluatorReport {
+  query_fingerprint: string;
+  query?: string;
+  database?: string | null;
+  metrics: Record<string, unknown>;
+  source_trace: EvaluatorSourceTrace;
+  profiler: Record<string, unknown> | string;
+  provenance?: Record<string, unknown>;
+  issues?: string[];
+  availability: 'available' | 'partial' | 'unavailable' | 'error';
+  error?: string | null;
+  evidence?: string[];
+}
+
+export interface EvaluatorRunStatus {
+  run_id: string;
+  analysis_id?: string;
+  filename: string;
+  status: 'queued' | 'running' | 'completed' | 'error';
+  reports: EvaluatorReport[];
+  context?: Record<string, unknown>;
+  error?: string | null;
+}
+
+export interface EvaluatorRecommendation {
+  availability: 'available' | 'insufficient_evidence' | 'unavailable' | string;
+  root_cause_analysis?: string;
+  evidence?: string[];
+  confidence?: 'high' | 'medium' | 'low' | string;
+  application_optimization?: string;
+  database_recommendation?: string;
+  migration_or_ddl?: string;
+  unified_diff_patch?: string;
+  review_required: boolean;
+  auto_apply: boolean;
+  notes?: string[];
+}
