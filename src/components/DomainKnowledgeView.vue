@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { computed, nextTick, onMounted, ref, watch } from 'vue';
-import { AlertTriangle, BookOpen, ChevronDown, ChevronRight, Focus, Link2, Maximize2, Network, RefreshCw, Search, Send, Tag, X } from 'lucide-vue-next';
+import { AlertTriangle, BookOpen, ChevronDown, ChevronRight, Copy, Download, Focus, Link2, Maximize2, Minus, Network, Plus, RefreshCw, Search, Send, Tag, X } from 'lucide-vue-next';
 import { VueFlow, useVueFlow, type Edge, type Node } from '@vue-flow/core';
 import '@vue-flow/core/dist/style.css';
 import '@vue-flow/core/dist/theme-default.css';
@@ -11,8 +11,12 @@ import type {
   DomainConceptsResponse,
   DomainContextResponse,
   DomainDictionaryResponse,
+  DomainEntity,
+  DomainEntityRelationship,
+  DomainModelResponse,
   DomainRelationship,
 } from '../types';
+import EntityModelCanvas from './EntityModelCanvas.vue';
 
 const emit = defineEmits<{
   (event: 'askAboutConcept', concept: DomainConcept, analysis: AnalysisSession): void;
@@ -31,6 +35,13 @@ const loadingConcepts = ref(false);
 const loadingContext = ref(false);
 const error = ref('');
 const dictionaryExpanded = ref(false);
+const mode = ref<'concepts' | 'entity-model'>('concepts');
+const entityModel = ref<DomainModelResponse | null>(null);
+const selectedEntityId = ref('');
+const selectedRelationshipId = ref('');
+const loadingEntityModel = ref(false);
+const enrichingEntityModel = ref(false);
+const entityCanvas = ref<InstanceType<typeof EntityModelCanvas> | null>(null);
 
 const { fitView } = useVueFlow('domain-knowledge');
 
@@ -47,6 +58,23 @@ const isLaravelAnalysis = computed(() => !selectedFramework.value || /laravel/i.
 const selectedConcept = computed(() => concepts.value.find((concept) => concept.identity_key === selectedConceptId.value)
   || context.value?.recognized.find((concept) => concept.identity_key === selectedConceptId.value)
   || null);
+const selectedEntity = computed(() => entityModel.value?.entities.find((entity) => (entity.id || `entity:${entity.name}`) === selectedEntityId.value) || null);
+const selectedEntityRelationships = computed(() => selectedEntity.value?.relationships || []);
+const selectedEntityRelationship = computed<DomainEntityRelationship | null>(() => {
+  if (!entityModel.value || !selectedRelationshipId.value) return null;
+  for (const entity of entityModel.value.entities) {
+    const found = (entity.relationships || []).find((relationship) => relationship.id === selectedRelationshipId.value);
+    if (found) return found;
+  }
+  const edge = (entityModel.value.relationships || []).find((relationship: any) => relationship.id === selectedRelationshipId.value);
+  if (!edge) return null;
+  return {
+    ...edge,
+    source_entity: edge.source_entity || (edge as any).sourceEntity,
+    target_entity: edge.target_entity || (edge as any).targetEntity,
+    name: edge.name || edge.relation_name,
+  };
+});
 const conceptTypes = computed(() => [...new Set(concepts.value.map((concept) => concept.concept_type).filter(Boolean))].sort());
 const visibleConcepts = computed(() => {
   const query = search.value.trim().toLowerCase();
@@ -179,6 +207,61 @@ const loadConcepts = async () => {
   }
 };
 
+const loadEntityModel = async () => {
+  if (!selectedAnalysisId.value) {
+    entityModel.value = null;
+    selectedEntityId.value = '';
+    selectedRelationshipId.value = '';
+    return;
+  }
+  loadingEntityModel.value = true;
+  error.value = '';
+  selectedEntityId.value = '';
+  selectedRelationshipId.value = '';
+  try {
+    const response = await makeRequest(`/api/analysis/${encodeURIComponent(selectedAnalysisId.value)}/domain-model`);
+    const data = await response.json() as DomainModelResponse & { detail?: string };
+    if (!response.ok) throw new Error(data.detail || 'Failed to load entity model.');
+    entityModel.value = { ...data, entities: Array.isArray(data.entities) ? data.entities : [], plantuml: data.plantuml || '' };
+    const first = entityModel.value.entities[0];
+    if (first) selectedEntityId.value = first.id || `entity:${first.name}`;
+  } catch (cause: any) {
+    entityModel.value = null;
+    error.value = cause?.message || 'Failed to load entity model.';
+  } finally {
+    loadingEntityModel.value = false;
+  }
+};
+
+const enrichEntityModel = async () => {
+  if (!selectedAnalysisId.value || enrichingEntityModel.value) return;
+  enrichingEntityModel.value = true;
+  error.value = '';
+  try {
+    const response = await makeRequest(`/api/analysis/${encodeURIComponent(selectedAnalysisId.value)}/domain-model/enrich`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({}) });
+    const data = await response.json() as DomainModelResponse & { model?: DomainModelResponse; detail?: string };
+    if (!response.ok) throw new Error(data.detail || 'Entity model enrichment failed.');
+    const nextModel = data.model || data;
+    entityModel.value = { ...nextModel, entities: Array.isArray(nextModel.entities) ? nextModel.entities : entityModel.value?.entities || [], plantuml: nextModel.plantuml || entityModel.value?.plantuml || '', enriched: true };
+  } catch (cause: any) {
+    error.value = cause?.message || 'Entity model enrichment failed; deterministic data is still available.';
+  } finally {
+    enrichingEntityModel.value = false;
+  }
+};
+
+const selectEntity = (entity: DomainEntity) => { selectedEntityId.value = entity.id || `entity:${entity.name}`; selectedRelationshipId.value = ''; };
+const selectEntityRelationship = (relationship: DomainEntityRelationship) => { selectedRelationshipId.value = relationship.id || ''; selectedEntityId.value = ''; };
+const downloadPlantuml = () => {
+  if (!entityModel.value?.plantuml) return;
+  const url = URL.createObjectURL(new Blob([entityModel.value.plantuml], { type: 'text/plain' }));
+  const anchor = document.createElement('a'); anchor.href = url; anchor.download = `domain-model-${selectedAnalysisId.value || 'analysis'}.puml`; anchor.click(); URL.revokeObjectURL(url);
+};
+const copyPlantuml = async () => {
+  if (!entityModel.value?.plantuml) return;
+  try { await navigator.clipboard.writeText(entityModel.value.plantuml); } catch { error.value = 'Could not copy PlantUML source to the clipboard.'; }
+};
+
 const loadContext = async (concept?: DomainConcept) => {
   if (!selectedAnalysisId.value || !concept) return;
   loadingContext.value = true;
@@ -207,8 +290,9 @@ const askAboutConcept = () => {
 };
 const relationshipLabel = (relationship: DomainRelationship) => relationship.relation_type.replaceAll('_', ' ').toLowerCase();
 
-watch(selectedAnalysisId, loadConcepts);
-watch([search, conceptType], () => { loadConcepts(); loadDictionary(); });
+watch(selectedAnalysisId, () => { loadConcepts(); if (mode.value === 'entity-model') loadEntityModel(); });
+watch(mode, (value) => { if (value === 'entity-model') loadEntityModel(); });
+watch([search, conceptType], () => { if (mode.value === 'concepts') loadConcepts(); loadDictionary(); });
 onMounted(() => { loadAnalyses(); loadDictionary(); });
 </script>
 
@@ -222,15 +306,23 @@ onMounted(() => { loadAnalyses(); loadDictionary(); });
       <button @click="loadAnalyses" class="px-3 py-2 rounded-xl border border-slate-700 text-xs text-slate-300 hover:bg-slate-800"><RefreshCw :class="loadingAnalyses ? 'animate-spin' : ''" class="w-3.5 h-3.5 inline mr-1" />Refresh</button>
     </div>
 
-    <div class="grid grid-cols-1 lg:grid-cols-[260px_1fr_auto] gap-2 rounded-2xl border border-slate-800 bg-slate-900/30 p-3">
+    <div class="grid grid-cols-1 lg:grid-cols-[260px_minmax(0,1fr)_auto] gap-2 rounded-2xl border border-slate-800 bg-slate-900/30 p-3">
       <select v-model="selectedAnalysisId" class="bg-[#11162d] border border-slate-800 rounded-xl px-3 py-2 text-xs text-slate-300"><option value="">Select saved analysis</option><option v-for="analysis in analyses" :key="analysis.id" :value="analysis.id">{{ analysis.label || analysis.filename }} · {{ analysis.created_at }}</option></select>
-      <div class="relative"><Search class="absolute left-3 top-2.5 w-3.5 h-3.5 text-slate-500" /><input v-model="search" placeholder="Search concept, alias, role…" class="w-full bg-[#11162d] border border-slate-800 rounded-xl pl-9 pr-3 py-2 text-xs text-slate-200" /></div>
-      <select v-model="conceptType" class="bg-[#11162d] border border-slate-800 rounded-xl px-3 py-2 text-xs text-slate-300"><option value="">All concept types</option><option v-for="type in conceptTypes" :key="type" :value="type">{{ type }}</option></select>
+      <div class="flex flex-wrap items-center gap-2">
+        <div class="flex rounded-xl border border-slate-800 bg-[#11162d] p-0.5">
+          <button type="button" @click="mode = 'concepts'" class="rounded-lg px-3 py-1.5 text-[11px]" :class="mode === 'concepts' ? 'bg-cyan-500/20 text-cyan-200' : 'text-slate-500 hover:text-slate-300'">Concepts</button>
+          <button type="button" @click="mode = 'entity-model'" class="rounded-lg px-3 py-1.5 text-[11px]" :class="mode === 'entity-model' ? 'bg-cyan-500/20 text-cyan-200' : 'text-slate-500 hover:text-slate-300'">Entity Model</button>
+        </div>
+        <div class="relative min-w-[180px] flex-1"><Search class="absolute left-3 top-2.5 w-3.5 h-3.5 text-slate-500" /><input v-model="search" :placeholder="mode === 'concepts' ? 'Search concept, alias, role…' : 'Search entity, table, property…'" class="w-full bg-[#11162d] border border-slate-800 rounded-xl pl-9 pr-3 py-2 text-xs text-slate-200" /></div>
+      </div>
+      <select v-if="mode === 'concepts'" v-model="conceptType" class="bg-[#11162d] border border-slate-800 rounded-xl px-3 py-2 text-xs text-slate-300"><option value="">All concept types</option><option v-for="type in conceptTypes" :key="type" :value="type">{{ type }}</option></select>
+      <div v-else class="flex items-center gap-1"><button type="button" @click="enrichEntityModel" :disabled="enrichingEntityModel || !entityModel" class="rounded-xl border border-cyan-400/30 bg-cyan-500/10 px-3 py-2 text-xs text-cyan-200 hover:bg-cyan-500/20 disabled:opacity-50">{{ enrichingEntityModel ? 'Enriching…' : 'Enrich model' }}</button></div>
     </div>
 
-    <div v-if="error" class="rounded-xl border border-rose-500/30 bg-rose-950/20 p-4 text-xs text-rose-300">{{ error }}</div>
+    <div v-if="error && (!entityModel || mode === 'concepts')" class="rounded-xl border border-rose-500/30 bg-rose-950/20 p-4 text-xs text-rose-300">{{ error }}</div>
     <div v-else-if="!selectedAnalysisId" class="flex-1 rounded-2xl border border-dashed border-slate-700 p-10 text-center text-sm text-slate-500 flex items-center justify-center">Choose a saved analysis to browse its domain knowledge.</div>
-    <div v-else-if="loadingConcepts" class="flex-1 rounded-2xl border border-slate-800 bg-slate-900/30 flex items-center justify-center text-sm text-slate-500">Loading domain concepts…</div>
+    <template v-else-if="mode === 'concepts'">
+    <div v-if="loadingConcepts" class="flex-1 rounded-2xl border border-slate-800 bg-slate-900/30 flex items-center justify-center text-sm text-slate-500">Loading domain concepts…</div>
     <div v-else-if="!concepts.length" class="flex-1 rounded-2xl border border-dashed border-slate-700 p-10 text-center text-sm text-slate-500 flex items-center justify-center">{{ isLaravelAnalysis ? 'No canonical domain concepts were indexed for this analysis.' : 'Domain Knowledge currently supports Laravel analyses only.' }}</div>
     <div v-else class="flex-1 min-h-0 grid grid-cols-1 xl:grid-cols-[260px_minmax(0,1fr)_340px] gap-3">
       <div class="min-h-0 overflow-y-auto rounded-2xl border border-slate-800 bg-slate-900/30">
@@ -274,6 +366,26 @@ onMounted(() => { loadAnalyses(); loadDictionary(); });
         <div class="rounded-2xl border border-slate-800 bg-slate-900/40 p-3"><button @click="dictionaryExpanded = !dictionaryExpanded" class="flex w-full items-center justify-between text-left"><span class="text-xs font-semibold text-slate-300 flex items-center gap-2"><BookOpen class="w-3.5 h-3.5 text-amber-300" /> Vocabulary index</span><ChevronDown v-if="dictionaryExpanded" class="h-3.5 w-3.5 text-slate-400" /><ChevronRight v-else class="h-3.5 w-3.5 text-slate-400" /></button><p v-if="dictionaryExpanded" class="mt-2 text-[10px] text-slate-500">Global typo-correction vocabulary from domain_dictionary.txt; frequency is not business meaning.</p><div v-if="dictionaryExpanded" class="mt-2 space-y-1"><div v-for="term in dictionary" :key="term.term" class="flex justify-between text-[11px] text-slate-400"><span>{{ term.term }}</span><span class="font-mono text-slate-500">{{ term.count }}</span></div></div></div>
       </aside>
     </div>
+    </template>
+    <template v-else>
+      <div v-if="loadingEntityModel" class="flex-1 rounded-2xl border border-slate-800 bg-slate-900/30 flex items-center justify-center text-sm text-slate-500">Loading entity model…</div>
+      <div v-else-if="!entityModel?.entities?.length" class="flex-1 rounded-2xl border border-dashed border-slate-700 p-10 text-center text-sm text-slate-500 flex items-center justify-center">No deterministic entities were found for this saved analysis.</div>
+      <div v-else class="flex-1 min-h-0 grid grid-cols-1 xl:grid-cols-[minmax(0,1fr)_340px] gap-3">
+        <div class="min-h-0 rounded-2xl border border-slate-800 bg-[#0b1020] overflow-hidden relative">
+          <div class="absolute top-3 left-3 z-10 text-[10px] text-slate-400 bg-slate-950/80 border border-slate-800 rounded-lg px-2 py-1">{{ entityModel.entities.length }} entity(s) · {{ entityModel.antv_x6?.edges?.length || 0 }} relationship(s)</div>
+          <div class="absolute top-3 right-3 z-10 flex items-center gap-1 rounded-lg border border-slate-800 bg-slate-950/80 px-2 py-1"><button type="button" @click="entityCanvas?.fit()" title="Fit to view" class="p-1 text-slate-300"><Maximize2 class="h-3.5 w-3.5" /></button><button type="button" @click="entityCanvas?.zoomIn()" title="Zoom in" class="p-1 text-slate-300"><Plus class="h-3.5 w-3.5" /></button><button type="button" @click="entityCanvas?.zoomOut()" title="Zoom out" class="p-1 text-slate-300"><Minus class="h-3.5 w-3.5" /></button><button type="button" @click="entityCanvas?.reset()" title="Reset layout" class="p-1 text-slate-300"><Focus class="h-3.5 w-3.5" /></button></div>
+          <EntityModelCanvas ref="entityCanvas" :model="entityModel" :search="search" :selected-entity-id="selectedEntityId" :selected-relationship-id="selectedRelationshipId" @select-entity="selectEntity" @select-relationship="selectEntityRelationship" />
+        </div>
+        <aside class="min-h-0 overflow-y-auto rounded-2xl border border-slate-800 bg-slate-900/30 p-3 space-y-3">
+          <div v-if="error && entityModel" class="rounded-xl border border-amber-500/30 bg-amber-950/20 p-3 text-[11px] text-amber-100/80">{{ error }}</div>
+          <div class="rounded-2xl border border-slate-800 bg-slate-900/40 p-3"><div class="flex items-center justify-between gap-2"><h4 class="text-xs font-semibold text-slate-300">Entity model</h4><span class="rounded-md px-2 py-1 text-[9px]" :class="entityModel.enriched ? 'bg-indigo-500/20 text-indigo-200' : 'bg-emerald-500/15 text-emerald-200'">{{ entityModel.enriched ? 'enriched' : 'deterministic' }}</span></div><p class="mt-2 text-[10px] text-slate-500">{{ entityModel.source?.framework || selectedFramework || 'framework-neutral' }} · {{ entityModel.entities.length }} entities</p></div>
+          <div v-if="selectedEntity" class="rounded-2xl border border-cyan-500/20 bg-cyan-950/10 p-3"><div class="flex items-start justify-between gap-2"><div><h4 class="text-sm font-semibold text-white">{{ selectedEntity.name }}</h4><p class="mt-1 text-[10px] text-slate-500 break-all">{{ selectedEntity.namespace || selectedEntity.table || 'entity' }}</p></div><button type="button" @click="selectedEntityId = ''" class="text-slate-500 hover:text-slate-300"><X class="h-3.5 w-3.5" /></button></div><p v-if="selectedEntity.description" class="mt-3 text-xs text-slate-300">{{ selectedEntity.description }}</p><div class="mt-3 space-y-2"><div v-for="property in selectedEntity.properties" :key="property.name" class="border-b border-slate-800 pb-2 text-[11px]"><div class="flex justify-between gap-2"><span class="font-mono text-slate-200">{{ property.name }}</span><span class="text-slate-500">{{ property.type }}</span></div><div class="mt-1 text-slate-500">{{ (property.is_primary ?? property.primaryKey) ? 'primary key · ' : '' }}{{ (property.is_foreign ?? property.foreignKey) ? 'foreign key · ' : '' }}{{ (property.is_nullable ?? property.nullable) ? 'nullable' : 'required' }}</div></div></div><div v-if="selectedEntityRelationships.length" class="mt-3"><h5 class="text-[10px] uppercase tracking-wide text-slate-500">Relationships</h5><button v-for="relationship in selectedEntityRelationships" :key="relationship.id || relationship.name" type="button" @click="selectEntityRelationship(relationship)" class="mt-2 block w-full text-left text-[11px] text-slate-400 hover:text-cyan-200">{{ relationship.name || relationship.relation_name || relationship.type || 'relationship' }} → {{ relationship.target_entity }} <span class="text-cyan-300">{{ relationship.cardinality || '' }}</span></button></div><div v-if="selectedEntity.scopes_or_behaviors?.length || selectedEntity.behaviors?.length" class="mt-3"><h5 class="text-[10px] uppercase tracking-wide text-slate-500">Behaviors</h5><p v-for="behavior in (selectedEntity.scopes_or_behaviors || selectedEntity.behaviors || [])" :key="behavior" class="mt-1 text-[11px] text-slate-400">{{ behavior }}</p></div></div>
+          <div v-else-if="selectedEntityRelationship" class="rounded-2xl border border-indigo-500/20 bg-indigo-950/10 p-3"><div class="flex items-center justify-between"><h4 class="text-sm font-semibold text-white">{{ selectedEntityRelationship.cardinality || 'Relationship' }}</h4><button type="button" @click="selectedRelationshipId = ''" class="text-slate-500 hover:text-slate-300"><X class="h-3.5 w-3.5" /></button></div><p class="mt-3 text-xs text-slate-300">{{ selectedEntityRelationship.name || selectedEntityRelationship.relation_name || selectedEntityRelationship.type }}</p><p class="mt-2 text-[11px] text-slate-500">{{ selectedEntityRelationship.source_entity }} → {{ selectedEntityRelationship.target_entity }}{{ selectedEntityRelationship.foreign_key ? ` · FK ${selectedEntityRelationship.foreign_key}` : '' }}</p></div>
+          <div class="rounded-2xl border border-slate-800 bg-slate-900/40 p-3"><div class="flex items-center justify-between gap-2"><h4 class="text-xs font-semibold text-slate-300">PlantUML source</h4><div class="flex items-center gap-1"><button type="button" @click="copyPlantuml" title="Copy source" class="rounded-lg p-1.5 text-slate-400 hover:bg-slate-800 hover:text-white"><Copy class="h-3.5 w-3.5" /></button><button type="button" @click="downloadPlantuml" title="Download .puml" class="rounded-lg p-1.5 text-slate-400 hover:bg-slate-800 hover:text-white"><Download class="h-3.5 w-3.5" /></button></div></div><pre class="mt-2 max-h-64 overflow-auto whitespace-pre-wrap text-[10px] leading-relaxed text-slate-300">{{ entityModel.plantuml }}</pre></div>
+          <div v-if="entityModel.warnings?.length" class="rounded-2xl border border-amber-500/30 bg-amber-950/20 p-3"><h4 class="text-xs font-semibold text-amber-200 flex items-center gap-2"><AlertTriangle class="h-3.5 w-3.5" /> Warnings</h4><p v-for="warning in entityModel.warnings" :key="typeof warning === 'string' ? warning : warning.code + warning.message" class="mt-2 text-[11px] text-amber-100/80">{{ typeof warning === 'string' ? warning : warning.message || warning.code }}</p></div>
+        </aside>
+      </div>
+    </template>
   </section>
 </template>
 

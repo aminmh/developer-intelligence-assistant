@@ -4,7 +4,8 @@ import { Graph } from '@antv/x6';
 import type { Edge, Node } from '@antv/x6';
 import type { ErdRef, ErdTable, NormalizedSchema } from '../types';
 import { registerErdNode } from '../utils/registerErdNode';
-import { buildErdEdges } from '../utils/erdTransformer';
+import { buildErdEdges, tableDimensions } from '../utils/erdTransformer';
+import { ERD_NODE_METRICS } from '../utils/erdMetrics';
 
 const props = defineProps<{
   schema: NormalizedSchema | null;
@@ -22,70 +23,32 @@ const emit = defineEmits<{
 const container = ref<HTMLElement | null>(null);
 let graph: Graph | null = null;
 
-const truncate = (value: string, maxLength: number) => {
-  const text = String(value || '');
-  return text.length > maxLength ? `${text.slice(0, Math.max(1, maxLength - 1))}…` : text;
-};
-
 const nodeFor = (table: ErdTable, visible: boolean) => {
-  const width = table.width || 280;
-  const height = table.height || 46 + table.fields.length * 27;
-  const rowHeight = 27;
-  const rowY = (index: number) => 36 + index * rowHeight;
-  const rowTextY = (index: number) => rowY(index) + rowHeight / 2;
-  const fieldContentWidth = Math.max(120, width - 40);
-  const nameColumnWidth = Math.floor(fieldContentWidth * 0.56);
-  const typeColumnWidth = Math.max(72, fieldContentWidth - nameColumnWidth);
-  const nameLimit = Math.max(8, Math.floor(nameColumnWidth / 7));
-  const typeLimit = Math.max(8, Math.floor(typeColumnWidth / 6.5));
-  const markup = [
-    { tagName: 'rect', selector: 'body' },
-    { tagName: 'rect', selector: 'header' },
-    { tagName: 'rect', selector: 'divider' },
-    { tagName: 'text', selector: 'title' },
-    { tagName: 'text', selector: 'count' },
-    ...table.fields.flatMap((_, index) => [
-      { tagName: 'rect', selector: `row-${index}` },
-      { tagName: 'text', selector: `marker-${index}` },
-      { tagName: 'text', selector: `name-${index}` },
-      { tagName: 'text', selector: `type-${index}` },
-    ]),
-  ];
+  const { width, height } = tableDimensions(table);
+  const portY = (index: number) => ERD_NODE_METRICS.HEADER_HEIGHT
+    + index * ERD_NODE_METRICS.ROW_HEIGHT
+    + ERD_NODE_METRICS.ROW_HEIGHT / 2;
   return {
     id: table.id,
-    shape: 'erd-table',
-    markup,
+    shape: 'erd-vue-table',
     x: table.position?.x || 40,
     y: table.position?.y || 40,
     width,
     height,
     visible,
-    attrs: {
-      body: { width, height, fill: '#11182d', stroke: props.selectedTableId === table.id ? '#a5b4fc' : '#334155', strokeWidth: props.selectedTableId === table.id ? 2.2 : 1.2, rx: 10, ry: 10 },
-      header: { width, height: 36, fill: '#1e293b', stroke: 'none', rx: 10, ry: 10 },
-      divider: { x: 0, y: 36, width, height: 1, fill: '#334155', stroke: 'none' },
-      title: {
-        text: truncate(table.name, Math.max(8, Math.floor((width - 72) / 7))),
-        x: 14,
-        y: 11,
-        fill: '#fff',
-        fontSize: 13,
-        fontWeight: 600,
-        textAnchor: 'start',
-        textVerticalAnchor: 'top',
-      },
-      count: { text: `${table.fields.length} cols`, x: width - 12, y: 11, fill: '#94a3b8', fontSize: 9, textAnchor: 'end', textVerticalAnchor: 'top' },
-      ...Object.fromEntries(table.fields.flatMap((field, index) => {
-        const textY = rowTextY(index);
-        const fieldName = truncate(field.name, nameLimit);
-        const fieldType = truncate(`${field.type}${field.nullable ? ' · null' : ''}`, typeLimit);
-        return [
-          [`row-${index}`, { x: 0, y: rowY(index), width, height: rowHeight, fill: index % 2 ? '#0f172a' : '#11182d', stroke: '#1e293b', strokeWidth: 0.6 }],
-          [`marker-${index}`, { text: field.primaryKey ? '◆' : field.foreignKey ? '↳' : '', x: 14, y: textY, fill: field.primaryKey ? '#fcd34d' : '#818cf8', fontSize: 10, textAnchor: 'middle', textVerticalAnchor: 'middle' }],
-          [`name-${index}`, { text: fieldName, ...(fieldName !== field.name ? { textLength: nameColumnWidth, lengthAdjust: 'spacingAndGlyphs' } : {}), x: 28, y: textY, fill: '#e2e8f0', fontSize: 11, fontFamily: 'ui-monospace, SFMono-Regular, Menlo, monospace', textAnchor: 'start', textVerticalAnchor: 'middle' }],
-          [`type-${index}`, { text: fieldType, ...(fieldType !== `${field.type}${field.nullable ? ' · null' : ''}` ? { textLength: typeColumnWidth, lengthAdjust: 'spacingAndGlyphs' } : {}), x: width - 12, y: textY, fill: '#94a3b8', fontSize: 10, fontFamily: 'ui-monospace, SFMono-Regular, Menlo, monospace', textAnchor: 'end', textVerticalAnchor: 'middle' }],
-        ];
+    data: {
+      table,
+      id: table.id,
+      name: table.name,
+      columns: table.fields.map((field) => ({
+        id: field.id,
+        name: field.name,
+        type: field.type,
+        isPk: field.primaryKey,
+        isFk: field.foreignKey,
+        nullable: field.nullable,
       })),
+      selected: props.selectedTableId === table.id,
     },
     ports: {
       groups: {
@@ -93,8 +56,8 @@ const nodeFor = (table: ErdTable, visible: boolean) => {
         right: { position: 'absolute', attrs: { circle: { r: 4, magnet: true, stroke: '#0f172a', strokeWidth: 1.5, fill: '#818cf8' } } },
       },
       items: table.fields.flatMap((field, index) => [
-        { id: `${field.id}:in`, group: 'left', args: { x: 0, y: 48 + index * 27 } },
-        { id: `${field.id}:out`, group: 'right', args: { x: width, y: 48 + index * 27 } },
+        { id: `${field.id}:in`, group: 'left', args: { x: 0, y: portY(index) } },
+        { id: `${field.id}:out`, group: 'right', args: { x: width, y: portY(index) } },
       ]),
     },
   };

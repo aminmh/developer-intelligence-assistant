@@ -34,10 +34,10 @@ services:
       - sh
       - -c
       - >-
-        lock_hash="$$(sha256sum /app/package-lock.json | cut -d ' ' -f1)";
+        lock_hash="$$(sha256sum /workspace/package-lock.json | cut -d ' ' -f1)";
         if [ ! -f /workspace/node_modules/.deps-lock.sha256 ] || [ "$${lock_hash}" != "$$(cat /workspace/node_modules/.deps-lock.sha256 2>/dev/null)" ]; then
-        find /workspace/node_modules -mindepth 1 -maxdepth 1 -exec rm -rf {} +;
-        (cd /app/node_modules && tar cf - .) | (cd /workspace/node_modules && tar xf -);
+        cd /workspace;
+        if [ -f package-lock.json ]; then npm ci --no-audit --no-fund; else npm install --no-audit --no-fund; fi;
         printf '%s' "$${lock_hash}" > /workspace/node_modules/.deps-lock.sha256;
         fi;
         rm -rf /workspace/node_modules/@esbuild/darwin-* /workspace/node_modules/tsx/node_modules/@esbuild/darwin-*;

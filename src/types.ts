@@ -343,6 +343,92 @@ export interface DomainContextResponse {
   analysis_context?: string | null;
 }
 
+/** Framework-neutral saved entity model produced by the domain-model API. */
+export interface DomainEntityProperty {
+  name: string;
+  type: string;
+  visibility?: 'public' | 'protected' | 'private' | 'internal' | string;
+  is_primary?: boolean;
+  is_foreign?: boolean;
+  is_nullable?: boolean;
+  cast_or_enum?: string | null;
+  primaryKey?: boolean;
+  foreignKey?: boolean;
+  nullable?: boolean;
+  [key: string]: unknown;
+}
+
+export interface DomainEntityRelationship {
+  id?: string;
+  name?: string;
+  type?: string;
+  target_entity: string;
+  foreign_key?: string | null;
+  cardinality?: string;
+  relation_name?: string;
+  source_entity?: string;
+  description?: string | null;
+  [key: string]: unknown;
+}
+
+export interface DomainEntity {
+  id?: string;
+  name: string;
+  namespace?: string | null;
+  table?: string | null;
+  framework?: string | null;
+  stereotype?: string;
+  description?: string | null;
+  properties: DomainEntityProperty[];
+  relationships?: DomainEntityRelationship[];
+  methods?: Array<string | { name: string; visibility?: string; return_type?: string; parameters?: string; is_static?: boolean }>;
+  extends?: string[];
+  implements?: string[];
+  scopes_or_behaviors?: string[];
+  behaviors?: string[];
+  provenance?: string | null;
+  [key: string]: unknown;
+}
+
+export interface DomainModelGraphNode {
+  id: string;
+  shape?: string;
+  x?: number;
+  y?: number;
+  position?: { x: number; y: number };
+  width?: number;
+  height?: number;
+  data?: Record<string, unknown>;
+  [key: string]: unknown;
+}
+
+export interface DomainModelGraphEdge {
+  id?: string;
+  source: string | { cell: string; port?: string };
+  target: string | { cell: string; port?: string };
+  labels?: Array<Record<string, unknown>>;
+  label?: string;
+  router?: Record<string, unknown>;
+  connector?: Record<string, unknown>;
+  attrs?: Record<string, unknown>;
+  data?: Record<string, unknown>;
+  [key: string]: unknown;
+}
+
+export interface DomainModelResponse {
+  success?: boolean;
+  entities: DomainEntity[];
+  relationships?: DomainEntityRelationship[];
+  plantuml: string;
+  antv_x6?: { nodes?: DomainModelGraphNode[]; edges?: DomainModelGraphEdge[] };
+  source?: DomainKnowledgeSource & Record<string, unknown>;
+  warnings?: Array<string | { code?: string; message?: string; severity?: string; [key: string]: unknown }>;
+  deterministic?: boolean;
+  enriched?: boolean;
+  status?: string;
+  [key: string]: unknown;
+}
+
 export interface DomainDictionaryResponse {
   success: boolean;
   source: 'domain_dictionary.txt' | string;

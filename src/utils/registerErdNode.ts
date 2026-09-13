@@ -1,16 +1,12 @@
-import { Graph } from '@antv/x6';
+import { register } from '@antv/x6-vue-shape';
+import ErdTableNode from '../components/ErdTableNode.vue';
 
-/** Register the native SVG table shape used by ErdCanvas. */
+/** Register the Vue table shape used by ErdCanvas. */
 export function registerErdNode() {
-  Graph.registerNode('erd-table', {
-    inherit: 'rect',
-    markup: [
-      { tagName: 'rect', selector: 'body' },
-      { tagName: 'rect', selector: 'header' },
-      { tagName: 'rect', selector: 'divider' },
-      { tagName: 'text', selector: 'title' },
-      { tagName: 'text', selector: 'count' },
-      { tagName: 'text', selector: 'label' },
-    ],
-  }, true);
+  register({
+    shape: 'erd-vue-table',
+    width: 280,
+    height: 38,
+    component: ErdTableNode,
+  });
 }

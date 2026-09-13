@@ -9,6 +9,7 @@ import type {
   NormalizedSchema,
   SchemaVisualizationResponse,
 } from '../types';
+import { erdTableDimensions } from './erdMetrics';
 
 export type SchemaInputFormat = 'sql' | 'dbml' | 'json';
 
@@ -39,8 +40,8 @@ export interface ErdGraphEdge {
   source: { cell: string; port?: string };
   target: { cell: string; port?: string };
   data: ErdRef;
-  router: { name: 'normal' };
-  connector: { name: 'smooth' };
+  router: { name: 'manhattan'; args: { padding: number } };
+  connector: { name: 'rounded'; args: { radius: number } };
 }
 
 /** Build the canonical table/column endpoints consumed by X6 and assertions. */
@@ -56,8 +57,8 @@ export function buildErdEdges(schema: NormalizedSchema): ErdGraphEdge[] {
       source: { cell: source.id, port: `${sourceField.id}:out` },
       target: { cell: target.id, port: `${targetField.id}:in` },
       data: ref,
-      router: { name: 'normal' as const },
-      connector: { name: 'smooth' as const },
+      router: { name: 'manhattan' as const, args: { padding: 18 } },
+      connector: { name: 'rounded' as const, args: { radius: 6 } },
     }];
   });
 }
@@ -336,8 +337,7 @@ export function normalizeSavedSchema(value: SchemaVisualizationResponse | Normal
 }
 
 export function tableDimensions(table: ErdTable) {
-  const longest = Math.max(table.name.length, ...table.fields.map((field) => `${field.name}  ${field.type}`.length), 12);
-  return { width: Math.max(250, Math.min(430, 110 + longest * 7)), height: 46 + table.fields.length * 27 };
+  return erdTableDimensions(table);
 }
 
 export async function layoutSchema(schema: NormalizedSchema): Promise<NormalizedSchema> {
@@ -365,11 +365,23 @@ export async function layoutSchema(schema: NormalizedSchema): Promise<Normalized
 export function transformSchemaToGraph(schema: NormalizedSchema) {
   const nodes = schema.tables.map((table) => ({
     id: table.id,
-    shape: 'erd-table',
+    shape: 'erd-vue-table',
     width: tableDimensions(table).width,
     height: tableDimensions(table).height,
     position: table.position || { x: 40, y: 40 },
-    data: table,
+    data: {
+      table,
+      id: table.id,
+      name: table.name,
+      columns: table.fields.map((field) => ({
+        id: field.id,
+        name: field.name,
+        type: field.type,
+        isPk: field.primaryKey,
+        isFk: field.foreignKey,
+        nullable: field.nullable,
+      })),
+    },
   }));
   return { nodes, edges: buildErdEdges(schema) };
 }

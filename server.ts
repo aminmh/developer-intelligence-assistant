@@ -862,6 +862,33 @@ async function startServer() {
     }
   });
 
+  // Deterministic entity model and explicit, session-scoped LLM enrichment.
+  app.get('/api/analysis/:id/domain-model', async (req, res) => {
+    try {
+      const pyRes = await fetch(`${PYTHON_API_URL}/analysis/${encodeURIComponent(req.params.id)}/domain-model`);
+      const data = await pyRes.json().catch(() => ({ detail: 'Failed to load domain model.' }));
+      return res.status(pyRes.status).json(data);
+    } catch (error: any) {
+      console.error('Failed to fetch domain model via Python:', error.message);
+      return res.status(500).json({ detail: error?.message || 'Failed to load domain model.' });
+    }
+  });
+
+  app.post('/api/analysis/:id/domain-model/enrich', async (req, res) => {
+    try {
+      const pyRes = await fetch(`${PYTHON_API_URL}/analysis/${encodeURIComponent(req.params.id)}/domain-model/enrich`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(req.body ?? {}),
+      });
+      const data = await pyRes.json().catch(() => ({ detail: 'Failed to enrich domain model.' }));
+      return res.status(pyRes.status).json(data);
+    } catch (error: any) {
+      console.error('Failed to enrich domain model via Python:', error.message);
+      return res.status(500).json({ detail: error?.message || 'Failed to enrich domain model.' });
+    }
+  });
+
   app.get('/api/domain/dictionary', async (req, res) => {
     try {
       const params = new URLSearchParams();
