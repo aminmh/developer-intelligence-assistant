@@ -411,6 +411,79 @@ export interface SchemaVisualizationResponse {
   };
 }
 
+/** Framework-neutral schema model consumed by the X6 visualizer. */
+export interface ErdSourceMetadata {
+  kind?: 'saved-analysis' | 'sql' | 'dbml' | 'json' | string;
+  framework?: string | null;
+  dialect?: 'mysql' | 'postgres' | 'sqlite' | string | null;
+  analysisId?: string | null;
+  generatedAt?: string | null;
+  provenance?: string | null;
+  migrationProvenance?: string | null;
+  modelProvenance?: string | null;
+  [key: string]: unknown;
+}
+
+export interface ErdField {
+  id: string;
+  name: string;
+  type: string;
+  nullable: boolean;
+  default?: unknown;
+  primaryKey: boolean;
+  unique?: boolean;
+  indexed?: boolean;
+  autoIncrement?: boolean;
+  foreignKey?: boolean;
+  references?: { table: string; column: string } | null;
+  provenance?: string | null;
+  unsupported?: boolean;
+}
+
+export interface ErdTable {
+  id: string;
+  name: string;
+  schema?: string | null;
+  fields: ErdField[];
+  position?: { x: number; y: number };
+  width?: number;
+  height?: number;
+  provenance?: string | null;
+}
+
+export interface ErdRef {
+  id: string;
+  sourceTable: string;
+  sourceColumn: string;
+  targetTable: string;
+  targetColumn: string;
+  cardinality: '1:1' | '1:N' | 'N:M' | string;
+  sourceMany?: boolean;
+  targetMany?: boolean;
+  description?: string;
+  provenance?: string | null;
+  unsupported?: boolean;
+}
+
+export interface ErdWarning {
+  code: string;
+  message: string;
+  severity?: 'info' | 'warning' | 'error';
+  table?: string;
+  column?: string;
+  target?: string;
+  source?: string;
+}
+
+export interface NormalizedSchema {
+  tables: ErdTable[];
+  refs: ErdRef[];
+  warnings: ErdWarning[];
+  source: ErdSourceMetadata;
+  /** Kept for compatibility while older API responses are being migrated. */
+  legacy?: SchemaVisualizationResponse;
+}
+
 export interface EvaluatorSourceTrace {
   file?: string | null;
   line?: number | null;

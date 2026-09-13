@@ -11,6 +11,9 @@
     "lint": "tsc --noEmit"
   },
   "dependencies": {
+    "@antv/layout": "^2.0.0",
+    "@antv/x6": "^3.1.8",
+    "@dbml/core": "^10.1.1",
     "@google/genai": "^2.4.0",
     "@qdrant/js-client-rest": "^1.18.0",
     "@tailwindcss/typography": "^0.5.20",
