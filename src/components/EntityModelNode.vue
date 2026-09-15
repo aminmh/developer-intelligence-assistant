@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { computed, inject } from 'vue';
 import type { Node } from '@antv/x6';
-import type { DomainEntity, DomainEntityProperty } from '../types';
+import type { DomainEntity, DomainEntityBehavior, DomainEntityProperty } from '../types';
 
 const props = defineProps<{ node?: Node }>();
 const injectedNode = inject<() => Node>('getNode', () => props.node as Node);
@@ -39,6 +39,17 @@ const propertyFlags = (property: DomainEntityProperty) => [
   property.is_foreign ?? property.foreignKey ? 'FK' : '',
   property.is_nullable ?? property.nullable ? 'null' : '',
 ].filter(Boolean).join(' ');
+const behaviorKey = (method: string | DomainEntityBehavior) => typeof method === 'string' ? `${entity.value?.name || 'entity'}::${method}()` : String(method.behavior_key || `${method.owner || entity.value?.name}::${method.name}(${method.parameters || ''})`);
+const behaviorText = (method: string | DomainEntityBehavior) => typeof method === 'string' ? method : String(method.signature || methodText(method));
+const behaviorClick = (method: string | DomainEntityBehavior, event: MouseEvent) => {
+  event.stopPropagation();
+  const callback = data.value.onBehaviorClick;
+  if (typeof callback === 'function') {
+    callback(typeof method === 'string'
+      ? { name: method, behavior_key: `${entity.value?.name || 'entity'}::${method}()` }
+      : method);
+  }
+};
 </script>
 
 <template>
@@ -63,7 +74,7 @@ const propertyFlags = (property: DomainEntityProperty) => [
       <div v-if="!entity.properties.length" class="entity-model-node__empty">No attributes recorded</div>
     </div>
     <div class="entity-model-node__methods">
-      <div v-for="method in methods" :key="methodName(method)" class="entity-model-node__method">{{ methodVisibility(method) }} {{ methodText(method) }}</div>
+      <button v-for="method in methods" :key="behaviorKey(method)" type="button" class="entity-model-node__method" :data-behavior-key="behaviorKey(method)" @click="behaviorClick(method, $event)">{{ methodVisibility(method) }} {{ behaviorText(method) }}</button>
       <div v-if="!methods.length" class="entity-model-node__empty">No behaviors recorded</div>
     </div>
   </article>

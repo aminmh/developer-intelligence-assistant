@@ -1,8 +1,9 @@
 <script setup lang="ts">
 import { onBeforeUnmount, onMounted, ref, watch } from 'vue';
 import { Graph } from '@antv/x6';
+import { DagreLayout } from '@antv/layout';
 import type { Edge, Node } from '@antv/x6';
-import type { DomainEntity, DomainEntityRelationship, DomainModelGraphEdge, DomainModelResponse } from '../types';
+import type { DomainEntity, DomainEntityBehavior, DomainEntityRelationship, DomainModelGraphEdge, DomainModelResponse } from '../types';
 import { registerEntityNode } from '../utils/registerEntityNode';
 
 const props = defineProps<{
@@ -14,6 +15,7 @@ const props = defineProps<{
 
 const emit = defineEmits<{
   (event: 'select-entity', entity: DomainEntity): void;
+  (event: 'select-behavior', entity: DomainEntity, behavior: DomainEntityBehavior): void;
   (event: 'select-relationship', relationship: DomainEntityRelationship): void;
   (event: 'ready', graph: Graph): void;
 }>();
@@ -81,7 +83,14 @@ const nodeFor = (entity: DomainEntity, index: number, isVisible: boolean) => {
     width: size.width,
     height: size.height,
     visible: isVisible,
-    data: { entity, name: entity.name, table: entity.table, framework: entity.framework, selected: props.selectedEntityId === id },
+    data: {
+      entity,
+      name: entity.name,
+      table: entity.table,
+      framework: entity.framework,
+      selected: props.selectedEntityId === id,
+      onBehaviorClick: (behavior: DomainEntityBehavior) => emit('select-behavior', entity, behavior),
+    },
       ports: {
       groups: {
         left: { position: 'absolute', attrs: { circle: { r: 4, magnet: true, stroke: '#0f172a', strokeWidth: 1.5, fill: '#818cf8' } } },
@@ -131,24 +140,95 @@ const rebuild = () => {
 
 const selectNode = (cell: Node) => { const entity = entityFromNodeId(cell.id); if (entity) emit('select-entity', entity); };
 const selectEdge = (cell: Edge) => { const relationship = cell.getData() as DomainEntityRelationship; if (relationship?.target_entity) emit('select-relationship', relationship); };
+const syncSelection = () => {
+  if (!graph) return;
+  graph.getNodes().forEach((node) => {
+    const data = node.getData() || {};
+    const selected = props.selectedEntityId === node.id;
+    if (data.selected !== selected) node.setData({ ...data, selected });
+  });
+  graph.getEdges().forEach((edge) => {
+    const data = edge.getData() as DomainEntityRelationship | undefined;
+    const selected = props.selectedRelationshipId === (data?.id || edge.id);
+    edge.setAttrs({
+      line: {
+        stroke: selected ? '#22d3ee' : '#89b4fa',
+        strokeWidth: selected ? 2.8 : 1.5,
+      },
+    });
+  });
+};
 const fit = () => graph?.zoomToFit({ padding: 24, maxScale: 1.2 });
 const zoomIn = () => graph?.zoom(0.15);
 const zoomOut = () => graph?.zoom(-0.15);
 const reset = () => { localPositions = new Map((props.model?.entities || []).map((entity, index) => [entityId(entity), { x: 40 + (index % 3) * 360, y: 40 + Math.floor(index / 3) * 300 }])); rebuild(); };
+const prettify = async () => {
+  if (!props.model) return;
+  const entities = props.model.entities || [];
+  const nodes = entities.map((entity) => {
+    const size = dimensions(entity);
+    return { id: entityId(entity), width: size.width, height: size.height };
+  });
+  const edges = (props.model.antv_x6?.edges || []).flatMap((edge) => {
+    const source = entityFromNodeId(edgeValue(edge, 'source') || '');
+    const target = entityFromNodeId(edgeValue(edge, 'target') || '');
+    if (!source || !target) return [];
+    return [{
+      id: edge.id || `${entityId(source)}-${entityId(target)}`,
+      source: entityId(source),
+      target: entityId(target),
+    }];
+  });
+  try {
+    const layout = new DagreLayout({
+      type: 'dagre',
+      rankdir: 'LR',
+      nodesep: 70,
+      ranksep: 150,
+      controlPoints: false,
+      nodeSize: (node: { width: number; height: number }) => [node.width, node.height],
+    });
+    await layout.execute({ nodes, edges }, { width: 1600, height: 1000 });
+    const positions = new Map<string, { x: number; y: number }>();
+    layout.forEachNode((node) => positions.set(String(node.id), {
+      x: Math.max(40, node.x - ((node.size as any)?.[0] || 0) / 2),
+      y: Math.max(40, node.y - ((node.size as any)?.[1] || 0) / 2),
+    }));
+    localPositions = positions;
+  } catch {
+    reset();
+    return;
+  }
+  rebuild();
+};
 
-defineExpose({ fit, zoomIn, zoomOut, reset });
+defineExpose({ fit, zoomIn, zoomOut, reset, prettify });
 
 onMounted(() => {
   if (!container.value) return;
   registerEntityNode();
   graph = new Graph({ container: container.value, background: { color: '#0b1020' }, grid: { visible: true, type: 'dot', args: { color: '#1e293b', thickness: 1 } }, panning: true, mousewheel: { enabled: true, modifiers: ['ctrl', 'meta'] }, interacting: { nodeMovable: true, edgeMovable: false, edgeLabelMovable: false } });
-  graph.on('node:click', ({ node }) => selectNode(node));
+  graph.on('node:click', ({ node, e }) => {
+    const target = e?.target as Element | null;
+    const behaviorElement = target?.closest?.('[data-behavior-key]') as HTMLElement | null;
+    if (behaviorElement) {
+      const entity = entityFromNodeId(node.id);
+      const behavior = (entity?.methods || []).find((item: any) => {
+        const key = typeof item === 'string' ? `${entity?.name || 'entity'}::${item}()` : String(item.behavior_key || `${item.owner || entity?.name}::${item.name}(${item.parameters || ''})`);
+        return key === behaviorElement.dataset.behaviorKey;
+      });
+      if (entity && behavior && typeof behavior !== 'string') emit('select-behavior', entity, behavior);
+      return;
+    }
+    selectNode(node);
+  });
   graph.on('edge:click', ({ edge }) => selectEdge(edge));
   graph.on('node:moved', ({ node }) => localPositions.set(node.id, node.getPosition()));
   emit('ready', graph);
   rebuild();
 });
-watch(() => [props.model, props.search, props.selectedEntityId, props.selectedRelationshipId], rebuild, { deep: true });
+watch(() => [props.model, props.search], rebuild, { deep: true });
+watch(() => [props.selectedEntityId, props.selectedRelationshipId], syncSelection);
 onBeforeUnmount(() => { graph?.dispose(); graph = null; });
 </script>
 

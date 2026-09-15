@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { onBeforeUnmount, onMounted, ref, watch } from 'vue';
 import { Graph } from '@antv/x6';
+import { DagreLayout } from '@antv/layout';
 import type { Edge, Node } from '@antv/x6';
 import type { ErdRef, ErdTable, NormalizedSchema } from '../types';
 import { registerErdNode } from '../utils/registerErdNode';
@@ -105,6 +106,33 @@ const fit = () => graph?.zoomToFit({ padding: 24, maxScale: 1.2 });
 const zoomIn = () => graph?.zoom(0.15);
 const zoomOut = () => graph?.zoom(-0.15);
 const reset = () => { if (props.schema) { props.schema.tables.forEach((table, index) => { table.position = { x: 40 + (index % 3) * 360, y: 40 + Math.floor(index / 3) * 260 }; }); rebuild(); } };
+const prettify = async () => {
+  if (!props.schema) return;
+  const tables = props.schema.tables;
+  const nodes = tables.map((table) => ({ id: table.id, width: tableDimensions(table).width, height: tableDimensions(table).height }));
+  const edges = buildErdEdges(props.schema).map((edge) => ({ id: edge.id, source: edge.source.cell, target: edge.target.cell }));
+  try {
+    const layout = new DagreLayout({
+      type: 'dagre',
+      rankdir: 'LR',
+      nodesep: 70,
+      ranksep: 150,
+      controlPoints: false,
+      nodeSize: (node: { width: number; height: number }) => [node.width, node.height],
+    });
+    await layout.execute({ nodes, edges }, { width: 1600, height: 1000 });
+    const positions = new Map<string, { x: number; y: number }>();
+    layout.forEachNode((node) => positions.set(String(node.id), {
+      x: Math.max(40, node.x - ((node.size as any)?.[0] || 0) / 2),
+      y: Math.max(40, node.y - ((node.size as any)?.[1] || 0) / 2),
+    }));
+    tables.forEach((table) => { table.position = positions.get(table.id) || table.position || { x: 40, y: 40 }; });
+  } catch {
+    reset();
+    return;
+  }
+  rebuild();
+};
 
 const exportSvg = () => {
   if (!graph) return;
@@ -125,7 +153,7 @@ const exportPng = () => {
   const image = new Image(); image.onload = () => { const canvas = document.createElement('canvas'); canvas.width = Math.max(1, svg.clientWidth * 2); canvas.height = Math.max(1, svg.clientHeight * 2); const ctx = canvas.getContext('2d'); if (!ctx) return; ctx.fillStyle = '#0b1020'; ctx.fillRect(0, 0, canvas.width, canvas.height); ctx.drawImage(image, 0, 0, canvas.width, canvas.height); const anchor = document.createElement('a'); anchor.href = canvas.toDataURL('image/png'); anchor.download = 'schema-erd.png'; anchor.click(); }; image.src = source;
 };
 
-defineExpose({ fit, zoomIn, zoomOut, reset, exportSvg, exportPng });
+defineExpose({ fit, zoomIn, zoomOut, reset, prettify, exportSvg, exportPng });
 
 onMounted(() => {
   if (!container.value) return;

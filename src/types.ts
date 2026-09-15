@@ -381,13 +381,60 @@ export interface DomainEntity {
   description?: string | null;
   properties: DomainEntityProperty[];
   relationships?: DomainEntityRelationship[];
-  methods?: Array<string | { name: string; visibility?: string; return_type?: string; parameters?: string; is_static?: boolean }>;
+  methods?: Array<string | DomainEntityBehavior>;
   extends?: string[];
   implements?: string[];
   scopes_or_behaviors?: string[];
   behaviors?: string[];
   provenance?: string | null;
   [key: string]: unknown;
+}
+
+export interface DomainEntityBehavior {
+  name: string;
+  visibility?: string;
+  return_type?: string;
+  parameters?: string;
+  is_static?: boolean;
+  signature?: string;
+  owner?: string | null;
+  source_file?: string | null;
+  definition_line?: number | null;
+  lookup_key?: string | null;
+  behavior_key?: string;
+  has_source_identity?: boolean;
+  usage_available?: boolean;
+  [key: string]: unknown;
+}
+
+export interface DomainBehaviorUsage {
+  file: string;
+  line: number;
+  location: string;
+  usage_kind?: string;
+  caller_class?: string | null;
+  caller_method?: string | null;
+  caller_fqn?: string | null;
+}
+
+export interface DomainBehaviorUsagesResponse {
+  success: boolean;
+  analysis_id: string;
+  entity: string;
+  behavior?: DomainEntityBehavior & {
+    signature?: string;
+    file?: string | null;
+    line?: number | null;
+  } | null;
+  definition?: DomainBehaviorUsagesResponse['behavior'];
+  usages: DomainBehaviorUsage[];
+  total: number;
+  offset: number;
+  limit: number;
+  has_more: boolean;
+  next_offset?: number | null;
+  index?: { available: boolean; collection?: string };
+  warnings?: Array<{ code?: string; message?: string } | string>;
 }
 
 export interface DomainModelGraphNode {

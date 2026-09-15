@@ -874,6 +874,23 @@ async function startServer() {
     }
   });
 
+  app.get('/api/analysis/:id/domain-model/usages', async (req, res) => {
+    try {
+      const params = new URLSearchParams();
+      for (const key of ['entity', 'behavior', 'offset', 'limit']) {
+        const value = req.query?.[key];
+        if (typeof value === 'string' && value) params.set(key, value);
+      }
+      const suffix = params.toString() ? `?${params.toString()}` : '';
+      const pyRes = await fetch(`${PYTHON_API_URL}/analysis/${encodeURIComponent(req.params.id)}/domain-model/usages${suffix}`);
+      const data = await pyRes.json().catch(() => ({ detail: 'Failed to load behavior usages.' }));
+      return res.status(pyRes.status).json(data);
+    } catch (error: any) {
+      console.error('Failed to fetch domain behavior usages via Python:', error.message);
+      return res.status(500).json({ detail: error?.message || 'Failed to load behavior usages.' });
+    }
+  });
+
   app.post('/api/analysis/:id/domain-model/enrich', async (req, res) => {
     try {
       const pyRes = await fetch(`${PYTHON_API_URL}/analysis/${encodeURIComponent(req.params.id)}/domain-model/enrich`, {

@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { computed, nextTick, onMounted, ref, watch } from 'vue';
-import { AlertTriangle, BookOpen, ChevronDown, ChevronRight, Copy, Download, Focus, Link2, Maximize2, Minus, Network, Plus, RefreshCw, Search, Send, Tag, X } from 'lucide-vue-next';
+import { AlertTriangle, BookOpen, ChevronDown, ChevronRight, Copy, Download, Focus, Link2, Maximize2, Minus, Network, Plus, RefreshCw, Search, Send, Sparkles, Tag, X } from 'lucide-vue-next';
 import { VueFlow, useVueFlow, type Edge, type Node } from '@vue-flow/core';
 import '@vue-flow/core/dist/style.css';
 import '@vue-flow/core/dist/theme-default.css';
@@ -12,7 +12,9 @@ import type {
   DomainContextResponse,
   DomainDictionaryResponse,
   DomainEntity,
+  DomainEntityBehavior,
   DomainEntityRelationship,
+  DomainBehaviorUsagesResponse,
   DomainModelResponse,
   DomainRelationship,
 } from '../types';
@@ -39,6 +41,10 @@ const mode = ref<'concepts' | 'entity-model'>('concepts');
 const entityModel = ref<DomainModelResponse | null>(null);
 const selectedEntityId = ref('');
 const selectedRelationshipId = ref('');
+const selectedBehavior = ref<DomainEntityBehavior | null>(null);
+const behaviorUsages = ref<DomainBehaviorUsagesResponse | null>(null);
+const loadingBehaviorUsages = ref(false);
+const loadingMoreBehaviorUsages = ref(false);
 const loadingEntityModel = ref(false);
 const enrichingEntityModel = ref(false);
 const entityCanvas = ref<InstanceType<typeof EntityModelCanvas> | null>(null);
@@ -59,6 +65,7 @@ const selectedConcept = computed(() => concepts.value.find((concept) => concept.
   || context.value?.recognized.find((concept) => concept.identity_key === selectedConceptId.value)
   || null);
 const selectedEntity = computed(() => entityModel.value?.entities.find((entity) => (entity.id || `entity:${entity.name}`) === selectedEntityId.value) || null);
+const selectedBehaviorEntity = computed(() => selectedBehavior.value ? (entityModel.value?.entities.find((entity) => entity.name === selectedBehavior.value?.owner?.split('\\').pop()) || selectedEntity.value) : null);
 const selectedEntityRelationships = computed(() => selectedEntity.value?.relationships || []);
 const selectedEntityRelationship = computed<DomainEntityRelationship | null>(() => {
   if (!entityModel.value || !selectedRelationshipId.value) return null;
@@ -218,6 +225,8 @@ const loadEntityModel = async () => {
   error.value = '';
   selectedEntityId.value = '';
   selectedRelationshipId.value = '';
+  selectedBehavior.value = null;
+  behaviorUsages.value = null;
   try {
     const response = await makeRequest(`/api/analysis/${encodeURIComponent(selectedAnalysisId.value)}/domain-model`);
     const data = await response.json() as DomainModelResponse & { detail?: string };
@@ -250,8 +259,36 @@ const enrichEntityModel = async () => {
   }
 };
 
-const selectEntity = (entity: DomainEntity) => { selectedEntityId.value = entity.id || `entity:${entity.name}`; selectedRelationshipId.value = ''; };
-const selectEntityRelationship = (relationship: DomainEntityRelationship) => { selectedRelationshipId.value = relationship.id || ''; selectedEntityId.value = ''; };
+const selectEntity = (entity: DomainEntity) => { selectedEntityId.value = entity.id || `entity:${entity.name}`; selectedRelationshipId.value = ''; selectedBehavior.value = null; behaviorUsages.value = null; };
+const selectEntityRelationship = (relationship: DomainEntityRelationship) => { selectedRelationshipId.value = relationship.id || ''; selectedEntityId.value = ''; selectedBehavior.value = null; behaviorUsages.value = null; };
+const loadBehaviorUsages = async (entity: DomainEntity, behavior: DomainEntityBehavior, append = false) => {
+  if (!selectedAnalysisId.value || !behavior) return;
+  if (append) loadingMoreBehaviorUsages.value = true; else loadingBehaviorUsages.value = true;
+  error.value = '';
+  try {
+    const offset = append ? (behaviorUsages.value?.next_offset || 0) : 0;
+    const params = new URLSearchParams({ entity: entity.name, behavior: behavior.behavior_key || behavior.name, offset: String(offset), limit: '25' });
+    const response = await makeRequest(`/api/analysis/${encodeURIComponent(selectedAnalysisId.value)}/domain-model/usages?${params.toString()}`);
+    const data = await response.json() as DomainBehaviorUsagesResponse & { detail?: string };
+    if (!response.ok) throw new Error(data.detail || 'Failed to load behavior usages.');
+    behaviorUsages.value = append && behaviorUsages.value
+      ? { ...data, usages: [...behaviorUsages.value.usages, ...(data.usages || [])], offset: 0 }
+      : data;
+  } catch (cause: any) {
+    error.value = cause?.message || 'Failed to load behavior usages.';
+    if (!append) behaviorUsages.value = null;
+  } finally {
+    loadingBehaviorUsages.value = false;
+    loadingMoreBehaviorUsages.value = false;
+  }
+};
+const selectEntityBehavior = (entity: DomainEntity, behavior: DomainEntityBehavior) => {
+  selectedEntityId.value = '';
+  selectedRelationshipId.value = '';
+  selectedBehavior.value = behavior;
+  behaviorUsages.value = null;
+  loadBehaviorUsages(entity, behavior);
+};
 const downloadPlantuml = () => {
   if (!entityModel.value?.plantuml) return;
   const url = URL.createObjectURL(new Blob([entityModel.value.plantuml], { type: 'text/plain' }));
@@ -373,13 +410,14 @@ onMounted(() => { loadAnalyses(); loadDictionary(); });
       <div v-else class="flex-1 min-h-0 grid grid-cols-1 xl:grid-cols-[minmax(0,1fr)_340px] gap-3">
         <div class="min-h-0 rounded-2xl border border-slate-800 bg-[#0b1020] overflow-hidden relative">
           <div class="absolute top-3 left-3 z-10 text-[10px] text-slate-400 bg-slate-950/80 border border-slate-800 rounded-lg px-2 py-1">{{ entityModel.entities.length }} entity(s) · {{ entityModel.antv_x6?.edges?.length || 0 }} relationship(s)</div>
-          <div class="absolute top-3 right-3 z-10 flex items-center gap-1 rounded-lg border border-slate-800 bg-slate-950/80 px-2 py-1"><button type="button" @click="entityCanvas?.fit()" title="Fit to view" class="p-1 text-slate-300"><Maximize2 class="h-3.5 w-3.5" /></button><button type="button" @click="entityCanvas?.zoomIn()" title="Zoom in" class="p-1 text-slate-300"><Plus class="h-3.5 w-3.5" /></button><button type="button" @click="entityCanvas?.zoomOut()" title="Zoom out" class="p-1 text-slate-300"><Minus class="h-3.5 w-3.5" /></button><button type="button" @click="entityCanvas?.reset()" title="Reset layout" class="p-1 text-slate-300"><Focus class="h-3.5 w-3.5" /></button></div>
-          <EntityModelCanvas ref="entityCanvas" :model="entityModel" :search="search" :selected-entity-id="selectedEntityId" :selected-relationship-id="selectedRelationshipId" @select-entity="selectEntity" @select-relationship="selectEntityRelationship" />
+          <div class="absolute top-3 right-3 z-10 flex items-center gap-1 rounded-lg border border-slate-800 bg-slate-950/80 px-2 py-1"><button type="button" @click="entityCanvas?.fit()" title="Fit to view" class="p-1 text-slate-300"><Maximize2 class="h-3.5 w-3.5" /></button><button type="button" @click="entityCanvas?.zoomIn()" title="Zoom in" class="p-1 text-slate-300"><Plus class="h-3.5 w-3.5" /></button><button type="button" @click="entityCanvas?.zoomOut()" title="Zoom out" class="p-1 text-slate-300"><Minus class="h-3.5 w-3.5" /></button><button type="button" @click="entityCanvas?.reset()" title="Reset layout" class="p-1 text-slate-300"><Focus class="h-3.5 w-3.5" /></button><button type="button" @click="entityCanvas?.prettify()" title="Prettify layout" class="p-1 text-slate-300"><Sparkles class="h-3.5 w-3.5" /></button></div>
+          <EntityModelCanvas ref="entityCanvas" :model="entityModel" :search="search" :selected-entity-id="selectedEntityId" :selected-relationship-id="selectedRelationshipId" @select-entity="selectEntity" @select-relationship="selectEntityRelationship" @select-behavior="selectEntityBehavior" />
         </div>
         <aside class="min-h-0 overflow-y-auto rounded-2xl border border-slate-800 bg-slate-900/30 p-3 space-y-3">
           <div v-if="error && entityModel" class="rounded-xl border border-amber-500/30 bg-amber-950/20 p-3 text-[11px] text-amber-100/80">{{ error }}</div>
           <div class="rounded-2xl border border-slate-800 bg-slate-900/40 p-3"><div class="flex items-center justify-between gap-2"><h4 class="text-xs font-semibold text-slate-300">Entity model</h4><span class="rounded-md px-2 py-1 text-[9px]" :class="entityModel.enriched ? 'bg-indigo-500/20 text-indigo-200' : 'bg-emerald-500/15 text-emerald-200'">{{ entityModel.enriched ? 'enriched' : 'deterministic' }}</span></div><p class="mt-2 text-[10px] text-slate-500">{{ entityModel.source?.framework || selectedFramework || 'framework-neutral' }} · {{ entityModel.entities.length }} entities</p></div>
-          <div v-if="selectedEntity" class="rounded-2xl border border-cyan-500/20 bg-cyan-950/10 p-3"><div class="flex items-start justify-between gap-2"><div><h4 class="text-sm font-semibold text-white">{{ selectedEntity.name }}</h4><p class="mt-1 text-[10px] text-slate-500 break-all">{{ selectedEntity.namespace || selectedEntity.table || 'entity' }}</p></div><button type="button" @click="selectedEntityId = ''" class="text-slate-500 hover:text-slate-300"><X class="h-3.5 w-3.5" /></button></div><p v-if="selectedEntity.description" class="mt-3 text-xs text-slate-300">{{ selectedEntity.description }}</p><div class="mt-3 space-y-2"><div v-for="property in selectedEntity.properties" :key="property.name" class="border-b border-slate-800 pb-2 text-[11px]"><div class="flex justify-between gap-2"><span class="font-mono text-slate-200">{{ property.name }}</span><span class="text-slate-500">{{ property.type }}</span></div><div class="mt-1 text-slate-500">{{ (property.is_primary ?? property.primaryKey) ? 'primary key · ' : '' }}{{ (property.is_foreign ?? property.foreignKey) ? 'foreign key · ' : '' }}{{ (property.is_nullable ?? property.nullable) ? 'nullable' : 'required' }}</div></div></div><div v-if="selectedEntityRelationships.length" class="mt-3"><h5 class="text-[10px] uppercase tracking-wide text-slate-500">Relationships</h5><button v-for="relationship in selectedEntityRelationships" :key="relationship.id || relationship.name" type="button" @click="selectEntityRelationship(relationship)" class="mt-2 block w-full text-left text-[11px] text-slate-400 hover:text-cyan-200">{{ relationship.name || relationship.relation_name || relationship.type || 'relationship' }} → {{ relationship.target_entity }} <span class="text-cyan-300">{{ relationship.cardinality || '' }}</span></button></div><div v-if="selectedEntity.scopes_or_behaviors?.length || selectedEntity.behaviors?.length" class="mt-3"><h5 class="text-[10px] uppercase tracking-wide text-slate-500">Behaviors</h5><p v-for="behavior in (selectedEntity.scopes_or_behaviors || selectedEntity.behaviors || [])" :key="behavior" class="mt-1 text-[11px] text-slate-400">{{ behavior }}</p></div></div>
+          <div v-if="selectedBehavior" class="rounded-2xl border border-violet-500/20 bg-violet-950/10 p-3"><div class="flex items-start justify-between gap-2"><div><h4 class="text-sm font-semibold text-white">{{ selectedBehaviorEntity?.name || selectedBehavior.owner || 'Behavior' }}</h4><p class="mt-1 text-[10px] text-violet-200 break-all">{{ selectedBehavior.signature || selectedBehavior.name }}</p></div><button type="button" @click="selectedBehavior = null; behaviorUsages = null" class="text-slate-500 hover:text-slate-300"><X class="h-3.5 w-3.5" /></button></div><div v-if="loadingBehaviorUsages" class="mt-4 text-[11px] text-slate-500">Loading verified usages…</div><template v-else-if="behaviorUsages"><div v-if="behaviorUsages.definition?.file || behaviorUsages.definition?.line" class="mt-3 text-[11px] text-slate-400"><span class="text-slate-500">Definition:</span> {{ behaviorUsages.definition.file || 'indexed source' }}{{ behaviorUsages.definition.line ? ':' + behaviorUsages.definition.line : '' }}</div><div v-if="behaviorUsages.warnings?.length" class="mt-3 space-y-1"><p v-for="warning in behaviorUsages.warnings" :key="typeof warning === 'string' ? warning : warning.code + warning.message" class="text-[11px] text-amber-200/80">{{ typeof warning === 'string' ? warning : warning.message || warning.code }}</p></div><div class="mt-3"><h5 class="text-[10px] uppercase tracking-wide text-slate-500">Verified usages · {{ behaviorUsages.total }}</h5><div v-if="!behaviorUsages.usages.length" class="mt-2 text-[11px] text-slate-500">No verified usage data available.</div><div v-for="usage in behaviorUsages.usages" :key="usage.location + usage.usage_kind + usage.caller_fqn" class="mt-2 rounded-lg border border-slate-800 bg-slate-950/40 p-2"><div class="font-mono text-[11px] text-slate-200">{{ usage.location }}</div><div class="mt-1 text-[10px] text-slate-500">{{ usage.usage_kind || 'reference' }}<span v-if="usage.caller_class || usage.caller_method"> · {{ [usage.caller_class, usage.caller_method].filter(Boolean).join('::') }}</span></div></div><button v-if="behaviorUsages.has_more" type="button" :disabled="loadingMoreBehaviorUsages" @click="loadBehaviorUsages(selectedBehaviorEntity || ({ name: behaviorUsages.entity } as DomainEntity), selectedBehavior, true)" class="mt-3 w-full rounded-lg border border-slate-700 px-3 py-2 text-[11px] text-slate-300 hover:bg-slate-800 disabled:opacity-50">{{ loadingMoreBehaviorUsages ? 'Loading…' : 'Load more' }}</button></div></template></div>
+          <div v-else-if="selectedEntity" class="rounded-2xl border border-cyan-500/20 bg-cyan-950/10 p-3"><div class="flex items-start justify-between gap-2"><div><h4 class="text-sm font-semibold text-white">{{ selectedEntity.name }}</h4><p class="mt-1 text-[10px] text-slate-500 break-all">{{ selectedEntity.namespace || selectedEntity.table || 'entity' }}</p></div><button type="button" @click="selectedEntityId = ''" class="text-slate-500 hover:text-slate-300"><X class="h-3.5 w-3.5" /></button></div><p v-if="selectedEntity.description" class="mt-3 text-xs text-slate-300">{{ selectedEntity.description }}</p><div class="mt-3 space-y-2"><div v-for="property in selectedEntity.properties" :key="property.name" class="border-b border-slate-800 pb-2 text-[11px]"><div class="flex justify-between gap-2"><span class="font-mono text-slate-200">{{ property.name }}</span><span class="text-slate-500">{{ property.type }}</span></div><div class="mt-1 text-slate-500">{{ (property.is_primary ?? property.primaryKey) ? 'primary key · ' : '' }}{{ (property.is_foreign ?? property.foreignKey) ? 'foreign key · ' : '' }}{{ (property.is_nullable ?? property.nullable) ? 'nullable' : 'required' }}</div></div></div><div v-if="selectedEntityRelationships.length" class="mt-3"><h5 class="text-[10px] uppercase tracking-wide text-slate-500">Relationships</h5><button v-for="relationship in selectedEntityRelationships" :key="relationship.id || relationship.name" type="button" @click="selectEntityRelationship(relationship)" class="mt-2 block w-full text-left text-[11px] text-slate-400 hover:text-cyan-200">{{ relationship.name || relationship.relation_name || relationship.type || 'relationship' }} → {{ relationship.target_entity }} <span class="text-cyan-300">{{ relationship.cardinality || '' }}</span></button></div><div v-if="selectedEntity.scopes_or_behaviors?.length || selectedEntity.behaviors?.length" class="mt-3"><h5 class="text-[10px] uppercase tracking-wide text-slate-500">Behaviors</h5><button v-for="behavior in (selectedEntity.methods || selectedEntity.scopes_or_behaviors || selectedEntity.behaviors || [])" :key="typeof behavior === 'string' ? behavior : behavior.behavior_key || behavior.name" type="button" @click="selectEntityBehavior(selectedEntity, typeof behavior === 'string' ? { name: behavior, behavior_key: `${selectedEntity.name}::${behavior}()` } : behavior)" class="mt-1 block w-full text-left text-[11px] text-slate-400 hover:text-cyan-200">{{ typeof behavior === 'string' ? behavior : behavior.signature || behavior.name }}</button></div></div>
           <div v-else-if="selectedEntityRelationship" class="rounded-2xl border border-indigo-500/20 bg-indigo-950/10 p-3"><div class="flex items-center justify-between"><h4 class="text-sm font-semibold text-white">{{ selectedEntityRelationship.cardinality || 'Relationship' }}</h4><button type="button" @click="selectedRelationshipId = ''" class="text-slate-500 hover:text-slate-300"><X class="h-3.5 w-3.5" /></button></div><p class="mt-3 text-xs text-slate-300">{{ selectedEntityRelationship.name || selectedEntityRelationship.relation_name || selectedEntityRelationship.type }}</p><p class="mt-2 text-[11px] text-slate-500">{{ selectedEntityRelationship.source_entity }} → {{ selectedEntityRelationship.target_entity }}{{ selectedEntityRelationship.foreign_key ? ` · FK ${selectedEntityRelationship.foreign_key}` : '' }}</p></div>
           <div class="rounded-2xl border border-slate-800 bg-slate-900/40 p-3"><div class="flex items-center justify-between gap-2"><h4 class="text-xs font-semibold text-slate-300">PlantUML source</h4><div class="flex items-center gap-1"><button type="button" @click="copyPlantuml" title="Copy source" class="rounded-lg p-1.5 text-slate-400 hover:bg-slate-800 hover:text-white"><Copy class="h-3.5 w-3.5" /></button><button type="button" @click="downloadPlantuml" title="Download .puml" class="rounded-lg p-1.5 text-slate-400 hover:bg-slate-800 hover:text-white"><Download class="h-3.5 w-3.5" /></button></div></div><pre class="mt-2 max-h-64 overflow-auto whitespace-pre-wrap text-[10px] leading-relaxed text-slate-300">{{ entityModel.plantuml }}</pre></div>
           <div v-if="entityModel.warnings?.length" class="rounded-2xl border border-amber-500/30 bg-amber-950/20 p-3"><h4 class="text-xs font-semibold text-amber-200 flex items-center gap-2"><AlertTriangle class="h-3.5 w-3.5" /> Warnings</h4><p v-for="warning in entityModel.warnings" :key="typeof warning === 'string' ? warning : warning.code + warning.message" class="mt-2 text-[11px] text-amber-100/80">{{ typeof warning === 'string' ? warning : warning.message || warning.code }}</p></div>
