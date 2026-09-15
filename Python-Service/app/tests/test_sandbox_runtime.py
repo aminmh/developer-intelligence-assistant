@@ -82,15 +82,19 @@ def test_unsupported_host_raises_but_available_reports_false(no_docker_host, mon
 
 
 def test_sandbox_keys_in_config_defaults_and_round_trip(tmp_path):
-    """sandboxDockerHost / sandboxJobsRoot are UI-editable, persisted keys."""
+    """Sandbox runner settings are UI-editable and persisted without secrets."""
     from infra.settings_store import RAG_CONFIG_DEFAULTS, SettingsStore, build_config
 
     assert "sandboxDockerHost" in RAG_CONFIG_DEFAULTS
     assert "sandboxJobsRoot" in RAG_CONFIG_DEFAULTS
+    assert RAG_CONFIG_DEFAULTS["sandboxExecutionMode"] == "local"
+    assert RAG_CONFIG_DEFAULTS["sandboxRemoteSshAlias"] == ""
     assert RAG_CONFIG_DEFAULTS["sandboxJobsRoot"] == "/jobs"
 
     store = SettingsStore(db_path=str(tmp_path / "settings.db"))
-    store.set_many({"sandboxDockerHost": "tcp://sandbox-runner:2375"})
+    store.set_many({"sandboxDockerHost": "tcp://sandbox-runner:2375", "sandboxExecutionMode": "remote", "sandboxRemoteSshAlias": "linuxbox"})
     config = build_config(store)
     assert config["sandboxDockerHost"] == "tcp://sandbox-runner:2375"
     assert config["sandboxJobsRoot"] == "/jobs"
+    assert config["sandboxExecutionMode"] == "remote"
+    assert config["sandboxRemoteSshAlias"] == "linuxbox"

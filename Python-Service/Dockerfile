@@ -11,7 +11,7 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
 # pure-PHP CLI tools (AST chunking + project structure export).
 RUN apt-get update \
     && apt-get install -y --no-install-recommends \
-         ca-certificates curl gnupg lsb-release tree \
+         ca-certificates curl gnupg lsb-release tree openssh-client \
     && curl -sSLo /usr/share/keyrings/sury.gpg https://packages.sury.org/php/apt.gpg \
     && echo "deb [signed-by=/usr/share/keyrings/sury.gpg] https://packages.sury.org/php/ bookworm main" > /etc/apt/sources.list.d/sury.list \
     && apt-get update \

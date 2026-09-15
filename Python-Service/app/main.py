@@ -129,6 +129,12 @@ async def lifespan(app: FastAPI):
         shutdown()
     except Exception:
         pass
+    try:
+        from runtime.remote_sandbox import remote_sandbox_manager
+
+        remote_sandbox_manager.close_tunnel()
+    except Exception:
+        pass
 
 
 tags_metadata = [
@@ -1839,6 +1845,22 @@ def _coerce_setting(key: str, value):
     default = RAG_CONFIG_DEFAULTS.get(key)
     if key == "logDeletionMode":
         return value if value in {"soft", "hard"} else default
+    if key == "sandboxExecutionMode":
+        return value if value in {"local", "remote"} else default
+    if key == "sandboxRemoteSshAlias":
+        from runtime.remote_sandbox import validate_alias
+        if value in (None, ""):
+            return ""
+        try:
+            return validate_alias(value)
+        except ValueError:
+            return default
+    if key == "sandboxJobsRoot":
+        from runtime.remote_sandbox import validate_jobs_root
+        try:
+            return validate_jobs_root(value)
+        except ValueError:
+            return default
     if isinstance(default, int) and not isinstance(value, bool):
         try:
             return int(value)
@@ -1902,6 +1924,18 @@ def update_settings(body: dict):
             status_code=400,
             detail="contextPreviewMode must be one of off, inline, gate",
         )
+    if "sandboxRemoteSshAlias" in incoming and incoming["sandboxRemoteSshAlias"] not in (None, ""):
+        from runtime.remote_sandbox import validate_alias
+        try:
+            validate_alias(incoming["sandboxRemoteSshAlias"])
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+    if "sandboxJobsRoot" in incoming:
+        from runtime.remote_sandbox import validate_jobs_root
+        try:
+            validate_jobs_root(incoming["sandboxJobsRoot"])
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
     updates = {}
     for key in RAG_CONFIG_DEFAULTS:
         if key not in incoming:

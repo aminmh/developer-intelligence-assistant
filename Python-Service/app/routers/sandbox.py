@@ -4,10 +4,11 @@ from __future__ import annotations
 
 import re
 
-from fastapi import APIRouter
+from fastapi import APIRouter, HTTPException
 
 from infra.settings import settings
 from runtime.sandbox_runtime import sandbox_available
+from runtime.remote_sandbox import remote_sandbox_manager, validate_alias, validate_jobs_root
 from sandbox.executor import default_executor
 from evaluator.sandbox_hook import EphemeralSqlTagger
 from evaluator.service import evaluator_service
@@ -23,11 +24,52 @@ def _project_stem(filename: str) -> str:
 
 @router.get("/status", summary="Sandbox Runner Status")
 def sandbox_status():
-    host = settings.sandbox_docker_host or None
-    result = sandbox_available(docker_host=host)
-    result["dockerHost"] = host or "(default — host daemon socket)"
-    result["jobsRoot"] = settings.sandbox_jobs_root or "/jobs"
+    mode = str(settings.sandbox_execution_mode or "local").lower()
+    root = settings.sandbox_jobs_root or "/jobs"
+    if mode == "remote":
+        alias = settings.sandbox_remote_ssh_alias or ""
+        try:
+            if not remote_sandbox_manager.is_ready(alias, root):
+                raise RuntimeError("connection test required before remote mode can execute jobs")
+            host = remote_sandbox_manager.ensure_tunnel(alias)
+            result = sandbox_available(docker_host=host)
+        except Exception as exc:  # never fall back to local in remote mode
+            result = {"available": False, "backend": "remote", "runsc": False,
+                      "detail": f"remote sandbox unavailable: {str(exc)[:300]}"}
+            host = "(SSH tunnel unavailable)"
+        result.update({"runner": "remote", "remoteAlias": alias, "tunnelState": remote_sandbox_manager.tunnel_state(alias),
+                       "dockerHost": host, "jobsRoot": root})
+    else:
+        host = settings.sandbox_docker_host or None
+        result = sandbox_available(docker_host=host)
+        result.update({"runner": "local", "remoteAlias": "", "tunnelState": "not used",
+                       "dockerHost": host or "(default — host daemon socket)", "jobsRoot": root})
     return {"success": True, **result}
+
+
+@router.post("/remote/test", summary="Test Remote Sandbox SSH Connection")
+def remote_test(body: dict):
+    alias = body.get("alias", settings.sandbox_remote_ssh_alias)
+    root = body.get("jobsRoot", settings.sandbox_jobs_root)
+    return remote_sandbox_manager.test_connection(alias, root)
+
+
+@router.post("/remote/initialize", summary="Start Remote Sandbox Initialization")
+def remote_initialize(body: dict):
+    alias = body.get("alias", settings.sandbox_remote_ssh_alias)
+    root = body.get("jobsRoot", settings.sandbox_jobs_root)
+    try:
+        return {"success": True, "job": remote_sandbox_manager.start_initialization(alias, root)}
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@router.get("/remote/initialize/{job_id}", summary="Get Remote Sandbox Initialization Status")
+def remote_initialize_status(job_id: str):
+    job = remote_sandbox_manager.initialization_status(job_id)
+    if job is None:
+        raise HTTPException(status_code=404, detail="Remote initialization job not found")
+    return {"success": True, "job": job}
 
 
 @router.post("/command", summary="Run a Shell Command in the Project Sandbox")

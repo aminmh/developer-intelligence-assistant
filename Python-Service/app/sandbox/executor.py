@@ -384,9 +384,13 @@ class SandboxExecutor:
         self,
         docker_host: str | None = None,
         runtime_config_path: str = CONFIG_PATH,
+        jobs_root_path: str | None = None,
     ) -> None:
         self.api = DockerApi(docker_host)
         self.config_path = runtime_config_path
+        # This belongs to the selected runner, not the Python process. Remote
+        # runners must stage into their own filesystem path.
+        self.jobs_root = jobs_root_path or jobs_root()
         self._config: dict[str, Any] | None = None
         # project_id -> relative app dir inside the staged source ('' = root).
         self._rel: dict[str, str] = {}
@@ -494,9 +498,9 @@ class SandboxExecutor:
         # through the bind persists; tar merges into the existing dir).
         self.api.run_once(
             image="alpine:3.20.3",
-            argv=["sh", "-c", f"mkdir -p '{jobs_root()}/{project_id}'"],
+            argv=["sh", "-c", f"mkdir -p '{self.jobs_root}/{project_id}'"],
             working_dir="/",
-            host_config={"Binds": [f"{jobs_root()}:/jobs"]},
+            host_config={"Binds": [f"{self.jobs_root}:/jobs"]},
         )
         tar_bytes = _tar_directory(workspace_path, f"{project_id}/src")
         holder = self.api.create_container(
@@ -504,7 +508,7 @@ class SandboxExecutor:
                 "Image": "alpine:3.20.3",
                 "Cmd": ["sleep", "infinity"],
                 "HostConfig": {
-                    "Binds": [f"{jobs_root()}:/jobs"],
+                    "Binds": [f"{self.jobs_root}:/jobs"],
                     "ReadonlyRootfs": False,
                 },
             }
@@ -513,7 +517,7 @@ class SandboxExecutor:
             self.api.put_archive(holder, "/jobs", tar_bytes)
         finally:
             self.api.remove(holder, force=True)
-        return f"{jobs_root()}/{project_id}/src"
+        return f"{self.jobs_root}/{project_id}/src"
 
     # -- tier 1: dependency install -----------------------------------------
 
@@ -549,7 +553,7 @@ class SandboxExecutor:
         cmd_name, verb, flags = _installer_flags(installer, bool(dev))
         opts = " ".join(shlex.quote(a) for a in flags)
         script = _composer_retry_script(cmd_name, verb, opts)
-        src = f"{jobs_root()}/{project_id}/src"
+        src = f"{self.jobs_root}/{project_id}/src"
         rel = self._rel.get(project_id, "")
         working_dir = "/app" if not rel else f"/app/{rel}"
         result = self.api.run_once(
@@ -607,7 +611,7 @@ class SandboxExecutor:
         if not command:
             return {"name": probe_name, "status": "skipped",
                     "reason": f"no probe template {probe_name!r}"}
-        src = f"{jobs_root()}/{project_id}/src"
+        src = f"{self.jobs_root}/{project_id}/src"
         rel = self._rel.get(project_id, "")
         working_dir = "/app" if not rel else f"/app/{rel}"
         record = self.api.run_once(
@@ -655,7 +659,7 @@ class SandboxExecutor:
                     working_dir="/",
                     env={"HOME": "/tmp"},
                     host_config={
-                        "Binds": [f"{jobs_root()}:/jobs:ro"],
+                        "Binds": [f"{self.jobs_root}:/jobs:ro"],
                         "CapDrop": _RUNSC_CAPS,
                         "PidsLimit": 64,
                         "Memory": 128 * 1024 * 1024,
@@ -695,24 +699,24 @@ class SandboxExecutor:
         import base64
 
         encoded = base64.b64encode(source.encode("utf-8")).decode("ascii")
-        target = f"{jobs_root()}/{project_id}/src/.evaluator/sql_tagger.php"
+        target = f"{self.jobs_root}/{project_id}/src/.evaluator/sql_tagger.php"
         result = self.api.run_once(
             image="alpine:3.20.3",
-            argv=["sh", "-c", f"mkdir -p '{jobs_root()}/{project_id}/src/.evaluator' && printf '%s' '{encoded}' | base64 -d > '{target}'"],
+            argv=["sh", "-c", f"mkdir -p '{self.jobs_root}/{project_id}/src/.evaluator' && printf '%s' '{encoded}' | base64 -d > '{target}'"],
             working_dir="/",
-            host_config={"Binds": [f"{jobs_root()}:/jobs"]},
+            host_config={"Binds": [f"{self.jobs_root}:/jobs"]},
         )
         return {"status": "done" if result.get("exit_code") == 0 else "unavailable", "path": "/app/.evaluator/sql_tagger.php", **result}
 
     def remove_evaluator_hook(self, project_id: str) -> dict[str, Any]:
         if not project_id or "/" in project_id or ".." in Path(project_id).parts:
             return {"status": "unavailable", "reason": "unsafe project id"}
-        target = f"{jobs_root()}/{project_id}/src/.evaluator/sql_tagger.php"
+        target = f"{self.jobs_root}/{project_id}/src/.evaluator/sql_tagger.php"
         result = self.api.run_once(
             image="alpine:3.20.3",
-            argv=["sh", "-c", f"rm -f '{target}' && rmdir '{jobs_root()}/{project_id}/src/.evaluator' 2>/dev/null || true"],
+            argv=["sh", "-c", f"rm -f '{target}' && rmdir '{self.jobs_root}/{project_id}/src/.evaluator' 2>/dev/null || true"],
             working_dir="/",
-            host_config={"Binds": [f"{jobs_root()}:/jobs"]},
+            host_config={"Binds": [f"{self.jobs_root}:/jobs"]},
         )
         return {"status": "done" if result.get("exit_code") == 0 else "unavailable", **result}
 
@@ -759,7 +763,7 @@ class SandboxExecutor:
                 reason += f" [liveness: {_json.dumps(detail)[:240]}]"
             return {"status": "skipped", "reason": reason}
         rel = self._rel.get(project_id, "")
-        src = f"{jobs_root()}/{project_id}/src"
+        src = f"{self.jobs_root}/{project_id}/src"
         if cwd:
             script = command
             working_dir = cwd
@@ -979,13 +983,13 @@ class SandboxExecutor:
         try:
             self.api.run_once(
                 image="alpine:3.20.3",
-                argv=["sh", "-c", f"rm -rf '{jobs_root()}/{project_id}'"],
+                argv=["sh", "-c", f"rm -rf '{self.jobs_root}/{project_id}'"],
                 working_dir="/",
-                host_config={"Binds": [f"{jobs_root()}:/jobs"]},
+                host_config={"Binds": [f"{self.jobs_root}:/jobs"]},
             )
             self._rel.pop(project_id, None)
             self._runtime_images.pop(project_id, None)
-            return {"status": "done", "staging": f"{jobs_root()}/{project_id}"}
+            return {"status": "done", "staging": f"{self.jobs_root}/{project_id}"}
         except Exception as exc:  # noqa: BLE001 — cleanup is best-effort
             return {"status": "failed", "error": str(exc)[:300]}
 
@@ -998,12 +1002,32 @@ def load_runtime_yml(path: str = CONFIG_PATH) -> dict[str, Any]:
 
 
 _executor: SandboxExecutor | None = None
+_executor_key: tuple[str, str, str, str] | None = None
 
 
 def default_executor() -> SandboxExecutor:
-    """Lazy singleton — constructing DockerApi validates DOCKER_HOST, so
-    importing this module must not require a configured daemon."""
-    global _executor
-    if _executor is None:
-        _executor = SandboxExecutor()
+    """Return an executor for the live local or remote runner configuration.
+
+    Remote mode deliberately has no local fallback: a lost tunnel leaves the
+    selected runner unavailable instead of executing user code on another host.
+    """
+    global _executor, _executor_key
+    from infra.settings import settings
+
+    mode = str(settings.sandbox_execution_mode or "local").lower()
+    root = str(settings.sandbox_jobs_root or "/jobs")
+    alias = str(settings.sandbox_remote_ssh_alias or "")
+    if mode == "remote":
+        from runtime.remote_sandbox import remote_sandbox_manager
+
+        if not remote_sandbox_manager.is_ready(alias, root):
+            raise ValueError("remote sandbox has not passed a connection test for this alias and jobs root")
+        host = remote_sandbox_manager.ensure_tunnel(alias)
+        key = (mode, host, root, alias)
+    else:
+        host = str(settings.sandbox_docker_host or "")
+        key = ("local", host, root, "")
+    if _executor is None or _executor_key != key:
+        _executor = SandboxExecutor(docker_host=host or None, jobs_root_path=root)
+        _executor_key = key
     return _executor

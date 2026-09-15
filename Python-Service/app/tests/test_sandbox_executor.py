@@ -187,6 +187,19 @@ class TestStaging:
         with pytest.raises(ValueError):
             executor.stage_project("/tmp/x", "a/b")
 
+    def test_configured_jobs_root_is_used_for_remote_staging(self, fake_api, tmp_path):
+        ex_module, _ = fake_api
+        cfg = tmp_path / "runtimes.yml"
+        cfg.write_text(FIXTURE_YML, encoding="utf-8")
+        executor = SandboxExecutor(
+            docker_host="tcp://127.0.0.1:40123",
+            runtime_config_path=str(cfg),
+            jobs_root_path="/var/lib/dev-assistant-sandbox/jobs",
+        )
+        executor.stage_project(str(_workspace(tmp_path)), "project")
+        assert executor.jobs_root == "/var/lib/dev-assistant-sandbox/jobs"
+        assert "/var/lib/dev-assistant-sandbox/jobs:/jobs" in str(executor.api.last_run["host_config"])
+
 
 class TestInstallTier:
     def test_install_done_when_image_present(self, fake_api, tmp_path):
