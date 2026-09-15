@@ -51,6 +51,8 @@ const config = ref<RAGConfig>({
   qdrantApiKey: '',
   sandboxDockerHost: '',
   sandboxJobsRoot: '/jobs',
+  sandboxExecutionMode: 'local',
+  sandboxRemoteSshAlias: '',
   llmRemoteBaseUrl: '',
   llmRemoteModel: '',
   llmRemoteApiKey: '',

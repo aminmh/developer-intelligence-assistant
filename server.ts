@@ -661,6 +661,37 @@ async function startServer() {
     }
   });
 
+  app.post('/api/sandbox/remote/test', async (req, res) => {
+    try {
+      const pyRes = await fetch(`${PYTHON_API_URL}/sandbox/remote/test`, {
+        method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(req.body ?? {}),
+      });
+      res.status(pyRes.status).json(await pyRes.json());
+    } catch (error: any) {
+      res.status(500).json({ success: false, error: 'Remote sandbox test could not reach the Python service.' });
+    }
+  });
+
+  app.post('/api/sandbox/remote/initialize', async (req, res) => {
+    try {
+      const pyRes = await fetch(`${PYTHON_API_URL}/sandbox/remote/initialize`, {
+        method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(req.body ?? {}),
+      });
+      res.status(pyRes.status).json(await pyRes.json());
+    } catch (error: any) {
+      res.status(500).json({ success: false, error: 'Remote sandbox initialization could not start.' });
+    }
+  });
+
+  app.get('/api/sandbox/remote/initialize/:jobId', async (req, res) => {
+    try {
+      const pyRes = await fetch(`${PYTHON_API_URL}/sandbox/remote/initialize/${encodeURIComponent(req.params.jobId)}`);
+      res.status(pyRes.status).json(await pyRes.json());
+    } catch (error: any) {
+      res.status(500).json({ success: false, error: 'Remote sandbox initialization status is unavailable.' });
+    }
+  });
+
   // Launch a sandbox analysis orchestration job (extract → framework profile
   // → composer install in DinD → runsc probes). Returns { job_id }.
   app.post('/api/project/analyze', async (req, res) => {

@@ -8,6 +8,8 @@ export interface RAGConfig {
   qdrantApiKey: string;
   sandboxDockerHost: string;
   sandboxJobsRoot: string;
+  sandboxExecutionMode: 'local' | 'remote';
+  sandboxRemoteSshAlias: string;
   llmRemoteBaseUrl: string;
   llmRemoteModel: string;
   llmRemoteApiKey: string;
