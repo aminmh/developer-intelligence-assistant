@@ -1,6 +1,9 @@
 # syntax=docker/dockerfile:1.7
 
-FROM python:3.12-slim
+# The PHP packages below are intentionally sourced from the Debian Bookworm
+# Sury repository. Pin the Python base so a moving ``slim`` tag cannot switch
+# the OS release underneath those packages.
+FROM python:3.12-slim-bookworm
 
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \

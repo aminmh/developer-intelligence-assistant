@@ -38,6 +38,14 @@ def test_connection_reports_root_permission_without_leaking_paths(monkeypatch):
     assert "/root/.ssh" not in result["detail"]
 
 
+def test_connection_reports_missing_ssh_client_without_raising(monkeypatch):
+    manager = RemoteSandboxManager()
+    monkeypatch.setattr(manager, "_run_ssh", lambda *args, **kwargs: (_ for _ in ()).throw(FileNotFoundError("ssh")))
+    result = manager.test_connection("linuxbox", "/jobs")
+    assert result["success"] is False
+    assert "does not include the SSH client" in result["detail"]
+
+
 def test_tunnel_reused_and_closed(monkeypatch):
     manager = RemoteSandboxManager()
     process = SimpleNamespace(poll=lambda: None, terminate=lambda: None, wait=lambda timeout: None, stderr=None)

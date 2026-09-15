@@ -156,6 +156,14 @@ class RemoteSandboxManager:
             result = self._run_ssh(target, _remote_check_script(root))
         except subprocess.TimeoutExpired:
             return {"success": False, "reachable": False, "detail": "SSH connection timed out."}
+        except FileNotFoundError:
+            return {
+                "success": False,
+                "reachable": False,
+                "detail": "The sandbox service image does not include the SSH client. Rebuild and restart python-api.",
+            }
+        except OSError as exc:
+            return {"success": False, "reachable": False, "detail": f"SSH client could not start: {_safe_detail(exc)}"}
         output = _safe_detail(result.stdout or result.stderr)
         if result.returncode == 0:
             with self._lock:
