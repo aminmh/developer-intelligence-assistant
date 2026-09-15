@@ -2325,6 +2325,255 @@ def get_schema_visualization(analysis_id: str):
     return build_schema_visualization(profile, analysis_id)
 
 
+@app.get(
+    "/analysis/{analysis_id}/domain-model",
+    tags=["Analysis"],
+    summary="Build Domain Entity Model",
+    description=(
+        "Returns a deterministic framework-neutral entity/class model from the "
+        "saved analysis profile. No database or LLM is queried; optional domain "
+        "concept facts are read from the verified concept store."
+    ),
+)
+def get_domain_model(analysis_id: str):
+    try:
+        from analysis.analysis_store import analysis_store
+
+        row = analysis_store.get(analysis_id)
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"Get failed: {exc}") from exc
+    if row is None:
+        raise HTTPException(status_code=404, detail="Analysis not found")
+    from analysis.analysis_service import project_stem
+    from agent.domain_model import build_domain_model, profile_for_saved_analysis
+
+    profile, fallback_id = profile_for_saved_analysis(row, analysis_store)
+    project_id = project_stem(str(row.get("filename") or ""))
+    result = build_domain_model(profile, analysis_id, project_id=project_id or None)
+    if fallback_id:
+        result.setdefault("warnings", []).append({
+            "code": "profile-fallback",
+            "message": "This saved code-index run had no profile; reused authoritative metadata from a same-file structure analysis.",
+        })
+        result.setdefault("source", {})["profile_analysis_id"] = fallback_id
+    return result
+
+
+def _relative_usage_file(value: Any) -> str | None:
+    """Return a safe project-relative-looking path, never an absolute path."""
+    if not isinstance(value, str) or not value.strip():
+        return None
+    path = value.replace("\\", "/").strip()
+    if not os.path.isabs(path):
+        return path.lstrip("./") or None
+    # Inspection exports currently carry absolute workspace paths. Preserve a
+    # useful source suffix while refusing to expose the workspace root.
+    parts = [part for part in path.split("/") if part]
+    markers = {"app", "src", "routes", "database", "config", "resources", "public", "bin", "tests", "lib", "modules", "packages"}
+    # An extracted upload is commonly rooted at
+    # ``/app/workspaces/<id>/<project>/app/...``.  Prefer the *deepest*
+    # project-root marker so the response exposes ``app/...`` rather than the
+    # container's temporary workspace path.
+    marker_indexes = [
+        index for index, part in enumerate(parts)
+        if part.casefold() in markers
+    ]
+    if marker_indexes:
+        return "/".join(parts[marker_indexes[-1]:])
+    return parts[-1] if parts else None
+
+
+def _domain_behavior_lookup(model: dict[str, Any], entity_name: str, behavior: str) -> tuple[dict[str, Any] | None, dict[str, Any] | None, str | None]:
+    """Resolve an entity behavior only against normalized model metadata."""
+    entity = next(
+        (item for item in model.get("entities", [])
+         if str(item.get("name") or "").casefold() == entity_name.casefold()),
+        None,
+    )
+    if entity is None:
+        return None, None, "unknown-entity"
+    candidates = [item for item in (entity.get("methods") or []) if isinstance(item, dict)]
+    needle = behavior.strip()
+    selected = next(
+        (item for item in candidates if str(item.get("behavior_key") or "") == needle),
+        None,
+    )
+    if selected is None:
+        selected = next(
+            (item for item in candidates if str(item.get("signature") or "") == needle),
+            None,
+        )
+    if selected is None:
+        same_name = [item for item in candidates if str(item.get("name") or "") == needle]
+        selected = same_name[0] if len(same_name) == 1 else None
+    if selected is None:
+        return entity, None, "unknown-behavior"
+    return entity, selected, None
+
+
+@app.get(
+    "/analysis/{analysis_id}/domain-model/usages",
+    tags=["Analysis"],
+    summary="Get Verified Domain Behavior Usages",
+    description=(
+        "Returns verified incoming reference sites for one domain-model behavior. "
+        "Results come only from the saved project's indexed symbol graph; no "
+        "text-search fallback is used."
+    ),
+)
+def get_domain_behavior_usages(
+    analysis_id: str,
+    entity: str = Query(..., min_length=1, max_length=240),
+    behavior: str = Query(..., min_length=1, max_length=400),
+    offset: int = Query(0, ge=0, le=100000),
+    limit: int = Query(25, ge=1, le=25),
+):
+    from analysis.analysis_store import analysis_store
+    from analysis.analysis_service import project_stem
+    from agent.domain_model import build_domain_model, profile_for_saved_analysis
+
+    row = analysis_store.get(analysis_id)
+    if row is None:
+        raise HTTPException(status_code=404, detail="Analysis not found")
+    profile, fallback_id = profile_for_saved_analysis(row, analysis_store)
+    stem = project_stem(str(row.get("filename") or ""))
+    model = build_domain_model(profile, analysis_id, project_id=stem or None)
+    entity_row, selected, resolution_error = _domain_behavior_lookup(model, entity, behavior)
+    warnings: list[dict[str, str]] = []
+    if fallback_id:
+        warnings.append({"code": "profile-fallback", "message": "Behavior metadata reused a same-file structure analysis profile."})
+    if resolution_error == "unknown-entity":
+        warnings.append({"code": "unknown-entity", "message": f"Entity {entity!r} is not present in the saved domain model."})
+    elif resolution_error == "unknown-behavior":
+        warnings.append({"code": "unknown-behavior", "message": f"Behavior {behavior!r} is not present on entity {entity!r}."})
+
+    definition = None
+    if selected:
+        definition = {
+            "entity": entity_row.get("name") if entity_row else entity,
+            "name": selected.get("name"),
+            "signature": selected.get("signature") or selected.get("name"),
+            "owner": selected.get("owner"),
+            "file": _relative_usage_file(selected.get("source_file")),
+            "line": selected.get("definition_line"),
+            "lookup_key": selected.get("lookup_key"),
+            "behavior_key": selected.get("behavior_key"),
+            "has_source_identity": bool(selected.get("has_source_identity")),
+            "usage_available": bool(selected.get("usage_available")),
+        }
+
+    usages: list[dict[str, Any]] = []
+    collection = f"sym_{stem or 'unnamed'}"
+    index_available = False
+    if selected and not resolution_error and selected.get("usage_available"):
+        try:
+            from inspection.service import inspection_service, sym_collection_for
+
+            collection = sym_collection_for(stem)
+            service = inspection_service()
+            projects = service.list_projects()
+            index_available = any(str(item.get("collection") or "") == collection for item in projects)
+            if not index_available:
+                warnings.append({"code": "unavailable-index", "message": "No verified reference index is available for this saved analysis."})
+            else:
+                lookup_key = str(selected.get("lookup_key") or "")
+                resolved = service.resolve_symbol(collection, lookup_key) if lookup_key else []
+                if not resolved:
+                    warnings.append({"code": "behavior-not-indexed", "message": "The behavior has source metadata but no matching indexed symbol."})
+                else:
+                    for caller in service.find_references(collection, lookup_key):
+                        ref = caller.get("ref") if isinstance(caller, dict) else {}
+                        file_name = _relative_usage_file((ref or {}).get("file"))
+                        line = (ref or {}).get("line")
+                        if not file_name or not isinstance(line, int):
+                            continue
+                        usages.append({
+                            "file": file_name,
+                            "line": line,
+                            "location": f"{file_name}:{line}",
+                            "usage_kind": str((ref or {}).get("kind") or "reference"),
+                            "caller_class": caller.get("owner") or None,
+                            "caller_method": caller.get("name") or None,
+                            "caller_fqn": caller.get("fqn") or None,
+                        })
+        except Exception as exc:  # noqa: BLE001 — graph reads are honest degradation
+            warnings.append({"code": "unavailable-index", "message": f"Verified usage index could not be read: {str(exc)[:180]}"})
+    elif selected and not selected.get("has_source_identity"):
+        warnings.append({"code": "no-source-identity", "message": "No verified usage data is available because this synthesized behavior has no indexed source symbol."})
+
+    usages.sort(key=lambda item: (
+        str(item.get("file") or ""),
+        int(item.get("line") or 0),
+        str(item.get("usage_kind") or ""),
+        str(item.get("caller_class") or ""),
+        str(item.get("caller_method") or ""),
+    ))
+    total = len(usages)
+    page = usages[offset : offset + limit]
+    next_offset = offset + len(page) if offset + len(page) < total else None
+    if next_offset is not None:
+        warnings.append({"code": "truncated", "message": "More verified usage locations are available."})
+    return {
+        "success": True,
+        "analysis_id": analysis_id,
+        "entity": entity_row.get("name") if entity_row else entity,
+        "behavior": definition,
+        "definition": definition,
+        "usages": page,
+        "total": total,
+        "offset": offset,
+        "limit": limit,
+        "has_more": next_offset is not None,
+        "next_offset": next_offset,
+        "index": {"available": index_available, "collection": collection},
+        "warnings": warnings,
+    }
+
+
+@app.post(
+    "/analysis/{analysis_id}/domain-model/enrich",
+    tags=["Analysis"],
+    summary="Enrich Domain Entity Model",
+    description=(
+        "Explicitly asks the configured LLM to enrich a deterministic entity "
+        "model with bounded descriptions, behaviors, or ambiguous relationship "
+        "labels. Authoritative schema and key metadata are never overwritten; "
+        "errors return the deterministic model with warnings."
+    ),
+)
+def enrich_domain_model_endpoint(analysis_id: str):
+    try:
+        from analysis.analysis_store import analysis_store
+
+        row = analysis_store.get(analysis_id)
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"Get failed: {exc}") from exc
+    if row is None:
+        raise HTTPException(status_code=404, detail="Analysis not found")
+    from analysis.analysis_service import project_stem
+    from agent.domain_model import build_domain_model, enrich_domain_model, profile_for_saved_analysis
+
+    profile, fallback_id = profile_for_saved_analysis(row, analysis_store)
+    project_id = project_stem(str(row.get("filename") or ""))
+    deterministic = build_domain_model(profile, analysis_id, project_id=project_id or None)
+    if fallback_id:
+        deterministic.setdefault("warnings", []).append({
+            "code": "profile-fallback",
+            "message": "This saved code-index run had no profile; reused authoritative metadata from a same-file structure analysis.",
+        })
+        deterministic.setdefault("source", {})["profile_analysis_id"] = fallback_id
+    try:
+        enriched = enrich_domain_model(deterministic, profile)
+        return enriched
+    except Exception as exc:  # enrichment is explicitly optional
+        degraded = dict(deterministic)
+        degraded["status"] = "degraded"
+        degraded["warnings"] = list(degraded.get("warnings") or []) + [
+            {"code": "enrichment-failed", "message": str(exc)[:300]}
+        ]
+        return degraded
+
+
 @app.delete(
     "/analysis/{analysis_id}",
     tags=["Analysis"],

@@ -11,7 +11,9 @@ import re
 from typing import Any
 
 _CLASS_RE = re.compile(
-    r"class\s+(?P<name>\w+)\s+extends\s+[\\\w]+",
+    r"\b(?:abstract\s+|final\s+)?class\s+(?P<name>\w+)"
+    r"(?:\s+extends\s+(?P<extends>[\\\w]+))?"
+    r"(?:\s+implements\s+(?P<implements>[\\\w\s,]+))?",
 )
 _NAMESPACE_RE = re.compile(r"namespace\s+([^;]+);")
 _TABLE_RE = re.compile(r"protected\s+\$table\s*=\s*['\"]([^'\"]+)['\"]")
@@ -28,6 +30,16 @@ _RELATION_RE = re.compile(
     r"\s*(?P<target>[^,\)]+)",
 )
 _SCOPE_RE = re.compile(r"public\s+function\s+scope(?P<scope>\w+)\s*\(")
+_PROPERTY_RE = re.compile(
+    r"(?m)^\s*(?P<visibility>public|protected|private)\s+"
+    r"(?:(?P<static>static)\s+)?(?:(?P<type>[?\\\w|\[\]]+)\s+)?"
+    r"\$(?P<name>\w+)\s*(?:=[^;]*)?;"
+)
+_METHOD_RE = re.compile(
+    r"(?m)^\s*(?P<visibility>public|protected|private)?\s*"
+    r"(?:(?P<static>static)\s+)?function\s+(?P<name>\w+)\s*"
+    r"\((?P<params>[^)]*)\)\s*(?::\s*(?P<return>[?\\\w|\[\]]+))?"
+)
 
 
 def _split_items(body: str) -> list[str]:
@@ -50,14 +62,27 @@ def parse_model(source: str, file_name: str = "") -> dict[str, Any]:
         "traits": [],
         "relations": [],
         "scopes": [],
+        "extends": [],
+        "implements": [],
+        "properties": [],
+        "methods": [],
     }
     cm = _CLASS_RE.search(source)
     if not cm:
         return model
     model["name"] = cm.group("name")
+    parent = (cm.group("extends") or "").strip().lstrip("\\")
+    if parent:
+        model["extends"] = [parent]
+    model["implements"] = [
+        value.strip().lstrip("\\")
+        for value in (cm.group("implements") or "").split(",")
+        if value.strip()
+    ]
 
     ns_m = _NAMESPACE_RE.search(source)
     ns = ns_m.group(1).strip() if ns_m else ""
+    model["namespace"] = ns
 
     for am in _ARRAY_ATTR_RE.finditer(source):
         attr = am.group("attr")
@@ -92,10 +117,53 @@ def parse_model(source: str, file_name: str = "") -> dict[str, Any]:
                 "method": rm.group("method"),
                 "type": rm.group("rel"),
                 "target": f"{ns}\\{short}" if not target.count("\\") and ns else target,
+                "definition_line": source.count("\n", 0, rm.start()) + 1,
+                "source_file": file_name,
             }
         )
 
+    relation_methods = {item["method"] for item in model["relations"]}
+    known_class_fields = {"table", "primaryKey", "fillable", "guarded", "casts", "hidden", "appends", "with"}
+    for pm in _PROPERTY_RE.finditer(source):
+        name = pm.group("name")
+        if name in known_class_fields:
+            continue
+        model["properties"].append(
+            {
+                "name": name,
+                "type": pm.group("type") or "unknown",
+                "visibility": pm.group("visibility") or "public",
+                "is_static": bool(pm.group("static")),
+            }
+        )
+
+    for mm in _METHOD_RE.finditer(source):
+        name = mm.group("name")
+        visibility = mm.group("visibility") or "public"
+        params = re.sub(r"\s+", " ", mm.group("params") or "").strip()
+        method = {
+            "name": name,
+            "visibility": visibility,
+            "return_type": mm.group("return") or "void",
+            "parameters": params,
+            "is_static": bool(mm.group("static")),
+            "definition_line": source.count("\n", 0, mm.start()) + 1,
+            "source_file": file_name,
+        }
+        model["methods"].append(method)
+
     model["scopes"] = [s.group("scope") for s in _SCOPE_RE.finditer(source)]
+    for scope in model["scopes"]:
+        if not any(item.get("name") == f"scope{scope}" for item in model["methods"]):
+            scope_match = re.search(rf"(?m)^\s*public\s+function\s+scope{re.escape(scope)}\s*\(", source)
+            model["methods"].append({
+                "name": f"scope{scope}",
+                "visibility": "public",
+                "return_type": "void",
+                "parameters": "...",
+                "definition_line": source.count("\n", 0, scope_match.start()) + 1 if scope_match else None,
+                "source_file": file_name,
+            })
     return model
 
 
