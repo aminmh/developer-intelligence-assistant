@@ -2300,11 +2300,12 @@ def get_analysis(analysis_id: str):
 @app.get(
     "/analysis/{analysis_id}/schema-visualization",
     tags=["Analysis"],
-    summary="Build Laravel Database Schema Visualization",
+    summary="Build Database Schema Visualization",
     description=(
         "Regenerates a deterministic database schema graph from the saved "
-        "analysis profile. Migration-derived schema is authoritative; Eloquent "
-        "relationships are optional enrichment. No live database is queried."
+        "analysis profile using the detected framework adapter. Migration or "
+        "mapping-derived schema is authoritative; model relationships are "
+        "optional enrichment. No live database is queried."
     ),
 )
 def get_schema_visualization(analysis_id: str):
@@ -2317,9 +2318,7 @@ def get_schema_visualization(analysis_id: str):
     if row is None:
         raise HTTPException(status_code=404, detail="Analysis not found")
 
-    from agent.plugins.frameworks.laravel.schema_visualization import (
-        build_schema_visualization,
-    )
+    from agent.schema_visualization import build_schema_visualization
 
     profile = row.get("profile") if isinstance(row, dict) else None
     return build_schema_visualization(profile, analysis_id)

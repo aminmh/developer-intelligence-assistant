@@ -9,6 +9,7 @@ from __future__ import annotations
 
 from agent.core.registry import PluginRegistry
 from agent.plugins.frameworks.laravel import LaravelFrameworkPlugin
+from agent.plugins.frameworks.symfony import SymfonyFrameworkPlugin
 from agent.plugins.languages.php import PhpLanguagePlugin
 from agent.plugins.test_framework import TestFrameworkPlugin
 
@@ -16,5 +17,6 @@ from agent.plugins.test_framework import TestFrameworkPlugin
 def register_builtins(registry: PluginRegistry) -> PluginRegistry:
     registry.register_language(PhpLanguagePlugin())
     registry.register_framework(LaravelFrameworkPlugin())
+    registry.register_framework(SymfonyFrameworkPlugin())
     registry.register_framework(TestFrameworkPlugin())
     return registry

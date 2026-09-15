@@ -41,7 +41,7 @@ class TestRegistration:
     def test_builtins_registered(self):
         registry = make_registry()
         assert set(registry.languages) == {"php"}
-        assert set(registry.frameworks) == {"laravel", "testframework"}
+        assert set(registry.frameworks) == {"laravel", "symfony", "testframework"}
         assert isinstance(registry.language("php"), PhpLanguagePlugin)
         assert isinstance(registry.framework("laravel"), LaravelFrameworkPlugin)
         assert isinstance(registry.framework("testframework"), TestFrameworkPlugin)
