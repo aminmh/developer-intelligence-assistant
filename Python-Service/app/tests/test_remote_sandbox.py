@@ -92,3 +92,4 @@ def test_bootstrap_preserves_an_existing_docker_installation():
     assert "gpg --batch --yes --dearmor" in script
     assert "gvisor.tar.bz2" in script
     assert "sha512sum -c gvisor.tar.bz2.sha512" in script
+    assert "install -d -m 0770 -o root -g docker" in script

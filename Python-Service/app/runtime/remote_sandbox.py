@@ -135,7 +135,9 @@ runtimes.setdefault('runsc', {{'path': os.environ['RUNSC_PATH']}})
 p.write_text(json.dumps(data, indent=2) + '\\n')
 PY
 systemctl restart docker
-install -d -m 0750 -o root -g docker {jobs_root!r}
+# The SSH user is added to the docker group and must stage projects here.
+# 0770 remains private to root and that group while permitting group writes.
+install -d -m 0770 -o root -g docker {jobs_root!r}
 if [ -n "${{SUDO_USER:-}}" ]; then usermod -aG docker "$SUDO_USER"; fi
 docker info --format '{{{{json .Runtimes}}}}' | grep -q '"runsc"'
 runsc --version >/dev/null
