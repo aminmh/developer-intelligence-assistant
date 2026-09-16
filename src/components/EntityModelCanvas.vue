@@ -1,15 +1,17 @@
 <script setup lang="ts">
-import { onBeforeUnmount, onMounted, ref, watch } from 'vue';
+import { nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue';
 import { Graph } from '@antv/x6';
 import { DagreLayout } from '@antv/layout';
 import type { Edge, Node } from '@antv/x6';
 import type { DomainEntity, DomainEntityBehavior, DomainEntityRelationship, DomainModelGraphEdge, DomainModelResponse } from '../types';
 import { registerEntityNode } from '../utils/registerEntityNode';
+import { entityMatchesModelSearch, entityModelBehaviorKey, entityModelBehaviors } from '../utils/entityModelSearch';
 
 const props = defineProps<{
   model: DomainModelResponse | null;
   search?: string;
   selectedEntityId?: string;
+  selectedBehaviorKey?: string;
   selectedRelationshipId?: string;
 }>();
 
@@ -61,11 +63,9 @@ const relationshipForEdge = (edge: DomainModelGraphEdge, index: number): DomainE
   };
 };
 
-const dimensions = (entity: DomainEntity) => ({ width: 280, height: Math.max(150, 92 + Math.min(14, entity.properties.length) * 25 + Math.min(10, (entity.methods || []).length) * 25 + (entity.properties.length > 14 ? 20 : 0)) });
+const dimensions = (entity: DomainEntity) => ({ width: 280, height: Math.max(150, 92 + Math.min(14, entity.properties.length) * 25 + Math.min(10, entityModelBehaviors(entity).length) * 25 + (entity.properties.length > 14 ? 20 : 0)) });
 const visible = (entity: DomainEntity) => {
-  const query = (props.search || '').trim().toLowerCase();
-  if (!query) return true;
-  return [entity.name, entity.namespace, entity.table, ...(entity.properties || []).map((item) => `${item.name} ${item.type}`), ...(entity.relationships || []).map((item) => `${item.name || ''} ${item.target_entity}`)].filter(Boolean).join(' ').toLowerCase().includes(query);
+  return entityMatchesModelSearch(entity, props.search || '');
 };
 
 const nodeFor = (entity: DomainEntity, index: number, isVisible: boolean) => {
@@ -89,6 +89,7 @@ const nodeFor = (entity: DomainEntity, index: number, isVisible: boolean) => {
       table: entity.table,
       framework: entity.framework,
       selected: props.selectedEntityId === id,
+      selectedBehaviorKey: props.selectedBehaviorKey || '',
       onBehaviorClick: (behavior: DomainEntityBehavior) => emit('select-behavior', entity, behavior),
     },
       ports: {
@@ -145,7 +146,8 @@ const syncSelection = () => {
   graph.getNodes().forEach((node) => {
     const data = node.getData() || {};
     const selected = props.selectedEntityId === node.id;
-    if (data.selected !== selected) node.setData({ ...data, selected });
+    const selectedBehaviorKey = props.selectedBehaviorKey || '';
+    if (data.selected !== selected || data.selectedBehaviorKey !== selectedBehaviorKey) node.setData({ ...data, selected, selectedBehaviorKey });
   });
   graph.getEdges().forEach((edge) => {
     const data = edge.getData() as DomainEntityRelationship | undefined;
@@ -161,6 +163,11 @@ const syncSelection = () => {
 const fit = () => graph?.zoomToFit({ padding: 24, maxScale: 1.2 });
 const zoomIn = () => graph?.zoom(0.15);
 const zoomOut = () => graph?.zoom(-0.15);
+const focusNode = async (id: string) => {
+  await nextTick();
+  const node = graph?.getCellById(id);
+  if (node) graph?.centerCell(node);
+};
 const reset = () => { localPositions = new Map((props.model?.entities || []).map((entity, index) => [entityId(entity), { x: 40 + (index % 3) * 360, y: 40 + Math.floor(index / 3) * 300 }])); rebuild(); };
 const prettify = async () => {
   if (!props.model) return;
@@ -202,7 +209,7 @@ const prettify = async () => {
   rebuild();
 };
 
-defineExpose({ fit, zoomIn, zoomOut, reset, prettify });
+defineExpose({ fit, zoomIn, zoomOut, focusNode, reset, prettify });
 
 onMounted(() => {
   if (!container.value) return;
@@ -213,11 +220,8 @@ onMounted(() => {
     const behaviorElement = target?.closest?.('[data-behavior-key]') as HTMLElement | null;
     if (behaviorElement) {
       const entity = entityFromNodeId(node.id);
-      const behavior = (entity?.methods || []).find((item: any) => {
-        const key = typeof item === 'string' ? `${entity?.name || 'entity'}::${item}()` : String(item.behavior_key || `${item.owner || entity?.name}::${item.name}(${item.parameters || ''})`);
-        return key === behaviorElement.dataset.behaviorKey;
-      });
-      if (entity && behavior && typeof behavior !== 'string') emit('select-behavior', entity, behavior);
+      const behavior = entity && entityModelBehaviors(entity).find((item) => entityModelBehaviorKey(entity, item) === behaviorElement.dataset.behaviorKey);
+      if (entity && behavior) emit('select-behavior', entity, typeof behavior === 'string' ? { name: behavior, behavior_key: entityModelBehaviorKey(entity, behavior) } : behavior);
       return;
     }
     selectNode(node);
@@ -228,7 +232,7 @@ onMounted(() => {
   rebuild();
 });
 watch(() => [props.model, props.search], rebuild, { deep: true });
-watch(() => [props.selectedEntityId, props.selectedRelationshipId], syncSelection);
+watch(() => [props.selectedEntityId, props.selectedBehaviorKey, props.selectedRelationshipId], syncSelection);
 onBeforeUnmount(() => { graph?.dispose(); graph = null; });
 </script>
 

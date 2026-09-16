@@ -2,6 +2,7 @@
 import { computed, inject } from 'vue';
 import type { Node } from '@antv/x6';
 import type { DomainEntity, DomainEntityBehavior, DomainEntityProperty } from '../types';
+import { entityModelBehaviorKey, entityModelBehaviors } from '../utils/entityModelSearch';
 
 const props = defineProps<{ node?: Node }>();
 const injectedNode = inject<() => Node>('getNode', () => props.node as Node);
@@ -22,8 +23,9 @@ const entity = computed<DomainEntity | null>(() => {
   };
 });
 const selected = computed(() => Boolean(data.value.selected));
+const selectedBehaviorKey = computed(() => String(data.value.selectedBehaviorKey || ''));
 const properties = computed(() => (entity.value?.properties || []).slice(0, 14));
-const methods = computed(() => ((entity.value as any)?.methods || (entity.value as any)?.scopes_or_behaviors || []).slice(0, 10));
+const methods = computed(() => entity.value ? entityModelBehaviors(entity.value).slice(0, 10) : []);
 const propertyType = (property: DomainEntityProperty) => String(property.type || 'unknown');
 const visibilityMarker = (visibility?: unknown) => ({ public: '+', protected: '#', private: '-', internal: '~' }[String(visibility || 'public')] || '+');
 const methodName = (method: any) => typeof method === 'string' ? method : String(method?.name || 'method');
@@ -39,7 +41,7 @@ const propertyFlags = (property: DomainEntityProperty) => [
   property.is_foreign ?? property.foreignKey ? 'FK' : '',
   property.is_nullable ?? property.nullable ? 'null' : '',
 ].filter(Boolean).join(' ');
-const behaviorKey = (method: string | DomainEntityBehavior) => typeof method === 'string' ? `${entity.value?.name || 'entity'}::${method}()` : String(method.behavior_key || `${method.owner || entity.value?.name}::${method.name}(${method.parameters || ''})`);
+const behaviorKey = (method: string | DomainEntityBehavior) => entity.value ? entityModelBehaviorKey(entity.value, method) : '';
 const behaviorText = (method: string | DomainEntityBehavior) => typeof method === 'string' ? method : String(method.signature || methodText(method));
 const behaviorClick = (method: string | DomainEntityBehavior, event: MouseEvent) => {
   event.stopPropagation();
@@ -74,7 +76,7 @@ const behaviorClick = (method: string | DomainEntityBehavior, event: MouseEvent)
       <div v-if="!entity.properties.length" class="entity-model-node__empty">No attributes recorded</div>
     </div>
     <div class="entity-model-node__methods">
-      <button v-for="method in methods" :key="behaviorKey(method)" type="button" class="entity-model-node__method" :data-behavior-key="behaviorKey(method)" @click="behaviorClick(method, $event)">{{ methodVisibility(method) }} {{ behaviorText(method) }}</button>
+      <button v-for="method in methods" :key="behaviorKey(method)" type="button" class="entity-model-node__method" :class="{ 'entity-model-node__method--selected': selectedBehaviorKey === behaviorKey(method) }" :data-behavior-key="behaviorKey(method)" @click="behaviorClick(method, $event)">{{ methodVisibility(method) }} {{ behaviorText(method) }}</button>
       <div v-if="!methods.length" class="entity-model-node__empty">No behaviors recorded</div>
     </div>
   </article>
@@ -100,5 +102,6 @@ const behaviorClick = (method: string | DomainEntityBehavior, event: MouseEvent)
 .entity-model-node__flags { flex: 0 0 auto; margin-left: 4px; color: #94a3b8; font-size: 8px; }
 .entity-model-node__methods { max-height: 180px; overflow: hidden; }
 .entity-model-node__method { box-sizing: border-box; height: 25px; padding: 5px 12px; border-bottom: 1px solid #1e293b; color: #c4b5fd; font-size: 10px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.entity-model-node__method--selected { background: rgba(139, 92, 246, .25); box-shadow: inset 3px 0 #a78bfa; color: #ede9fe; }
 .entity-model-node__more, .entity-model-node__empty { padding: 6px 12px; color: #64748b; font-size: 9px; }
 </style>
