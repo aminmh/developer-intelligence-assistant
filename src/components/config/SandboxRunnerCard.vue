@@ -318,7 +318,7 @@ const initializeRemote = async () => {
           <p class="text-[9px] text-slate-600">An alias from the mounted SSH config; no keys or passwords are stored here.</p>
         </div>
 
-        <div class="space-y-1.5">
+        <div class="space-y-1.5 md:col-span-2">
           <label class="text-xs text-slate-400 font-mono">Docker Host</label>
           <input
             :value="config.sandboxDockerHost"
@@ -330,7 +330,7 @@ const initializeRemote = async () => {
           <p class="text-[9px] text-slate-600">Empty = host daemon socket. In the dev stack point this at the nested sandbox-runner daemon.</p>
         </div>
 
-        <div class="space-y-1.5" :class="config.sandboxExecutionMode === 'remote' ? '' : 'md:col-span-1'">
+        <div class="space-y-1.5 md:col-span-2">
           <label class="text-xs text-slate-400 font-mono">Jobs Root</label>
           <input
             :value="config.sandboxJobsRoot"
