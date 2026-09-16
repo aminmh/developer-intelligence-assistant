@@ -817,6 +817,8 @@ onMounted(async () => {
     :data-palette="appearance.preferences.palette"
     :data-accent="appearance.preferences.accent"
     :data-neon="appearance.preferences.neonBorder"
+    :data-ui-font="appearance.preferences.uiFontFamily"
+    :data-code-font="appearance.preferences.codeFontFamily"
   >
     
     <!-- Sidebar navigation & Quick Config -->

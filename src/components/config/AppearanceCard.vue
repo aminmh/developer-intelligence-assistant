@@ -1,11 +1,13 @@
 <script setup lang="ts">
-import { Activity, Monitor, Moon, Palette, Sparkles, Sun } from 'lucide-vue-next';
+import { Activity, Monitor, Moon, Palette, Sparkles, Sun, Type } from 'lucide-vue-next';
 import type {
   AppearanceAccent,
   AppearanceMode,
   AppearancePalette,
   AppearancePreferences,
+  CodeFontFamily,
   NeonBorderTheme,
+  UiFontFamily,
 } from '../../types';
 
 defineProps<{
@@ -37,6 +39,9 @@ const neonOptions: Array<{ value: NeonBorderTheme; label: string; color: string 
   { value: 'emerald', label: 'Emerald', color: '#8bbb92' },
   { value: 'rose', label: 'Rose', color: '#fda4af' },
 ];
+
+const uiFontOptions: UiFontFamily[] = ['Inter', 'IBM Plex Sans'];
+const codeFontOptions: CodeFontFamily[] = ['Fira Code', 'JetBrains Mono'];
 
 const paletteOptions: Array<{
   value: AppearancePalette;
@@ -154,6 +159,35 @@ const selectPalette = (option: (typeof paletteOptions)[number]) => {
             {{ option.label }}
           </button>
         </div>
+      </div>
+    </div>
+
+    <div class="border-t border-slate-800 pt-4">
+      <p class="text-[10px] uppercase tracking-wider text-slate-500 font-mono mb-2">Fonts</p>
+      <div class="grid grid-cols-1 sm:grid-cols-2 gap-3">
+        <label class="rounded-xl border border-slate-700 bg-slate-900/30 px-3 py-3 space-y-1.5">
+          <span class="flex items-center gap-2 text-xs font-semibold text-slate-200"><Type class="w-4 h-4 text-cyan-300" />App UI</span>
+          <select
+            :value="appearance.uiFontFamily"
+            class="w-full h-[34px] rounded-lg border border-slate-700 bg-[#11162d] px-3 text-xs text-slate-200 focus:outline-none focus:border-cyan-400"
+            @change="update('uiFontFamily', ($event.target as HTMLSelectElement).value as UiFontFamily)"
+          >
+            <option v-for="font in uiFontOptions" :key="font" :value="font">{{ font }}</option>
+          </select>
+          <span class="block text-[10px] text-slate-500">Panels, menus, and general text</span>
+        </label>
+
+        <label class="rounded-xl border border-slate-700 bg-slate-900/30 px-3 py-3 space-y-1.5">
+          <span class="flex items-center gap-2 text-xs font-semibold text-slate-200"><Type class="w-4 h-4 text-violet-300" />Code</span>
+          <select
+            :value="appearance.codeFontFamily"
+            class="w-full h-[34px] rounded-lg border border-slate-700 bg-[#11162d] px-3 text-xs font-mono text-slate-200 focus:outline-none focus:border-cyan-400"
+            @change="update('codeFontFamily', ($event.target as HTMLSelectElement).value as CodeFontFamily)"
+          >
+            <option v-for="font in codeFontOptions" :key="font" :value="font">{{ font }}</option>
+          </select>
+          <span class="block text-[10px] text-slate-500">Code snippets, diffs, JSON, and data views</span>
+        </label>
       </div>
     </div>
 

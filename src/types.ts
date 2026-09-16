@@ -46,12 +46,16 @@ export type AppearancePalette =
   | 'black-coffee';
 export type AppearanceAccent = 'indigo' | 'cyan' | 'emerald' | 'orange' | 'rose';
 export type NeonBorderTheme = 'cyan' | 'violet' | 'amber' | 'emerald' | 'rose';
+export type UiFontFamily = 'Inter' | 'IBM Plex Sans';
+export type CodeFontFamily = 'Fira Code' | 'JetBrains Mono';
 
 export interface AppearancePreferences {
   mode: AppearanceMode;
   palette: AppearancePalette;
   accent: AppearanceAccent;
   neonBorder: NeonBorderTheme;
+  uiFontFamily: UiFontFamily;
+  codeFontFamily: CodeFontFamily;
   showSystemMonitor: boolean;
   showWelcomeBanner: boolean;
 }

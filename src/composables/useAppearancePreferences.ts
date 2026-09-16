@@ -4,7 +4,9 @@ import type {
   AppearanceMode,
   AppearancePalette,
   AppearancePreferences,
+  CodeFontFamily,
   NeonBorderTheme,
+  UiFontFamily,
 } from '../types';
 
 const STORAGE_KEY = 'dev-assistant-appearance';
@@ -14,6 +16,8 @@ const DEFAULT_PREFERENCES: AppearancePreferences = {
   palette: 'default',
   accent: 'indigo',
   neonBorder: 'cyan',
+  uiFontFamily: 'Inter',
+  codeFontFamily: 'JetBrains Mono',
   showSystemMonitor: true,
   showWelcomeBanner: true,
 };
@@ -40,6 +44,12 @@ const isPalette = (value: unknown): value is AppearancePalette =>
 
 const isNeonBorder = (value: unknown): value is NeonBorderTheme =>
   value === 'cyan' || value === 'violet' || value === 'amber' || value === 'rose';
+
+const isUiFontFamily = (value: unknown): value is UiFontFamily =>
+  value === 'Inter' || value === 'IBM Plex Sans';
+
+const isCodeFontFamily = (value: unknown): value is CodeFontFamily =>
+  value === 'Fira Code' || value === 'JetBrains Mono';
 
 export const useAppearancePreferences = () => {
   const preferences = reactive<AppearancePreferences>({ ...DEFAULT_PREFERENCES });
@@ -80,6 +90,8 @@ export const useAppearancePreferences = () => {
         if (isPalette(stored.palette)) preferences.palette = stored.palette;
         if (isAccent(stored.accent)) preferences.accent = stored.accent;
         if (isNeonBorder(stored.neonBorder)) preferences.neonBorder = stored.neonBorder;
+        if (isUiFontFamily(stored.uiFontFamily)) preferences.uiFontFamily = stored.uiFontFamily;
+        if (isCodeFontFamily(stored.codeFontFamily)) preferences.codeFontFamily = stored.codeFontFamily;
         if (typeof stored.showSystemMonitor === 'boolean') preferences.showSystemMonitor = stored.showSystemMonitor;
         if (typeof stored.showWelcomeBanner === 'boolean') preferences.showWelcomeBanner = stored.showWelcomeBanner;
       }
