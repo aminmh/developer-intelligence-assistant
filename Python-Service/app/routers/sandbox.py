@@ -54,6 +54,11 @@ def remote_test(body: dict):
     return remote_sandbox_manager.test_connection(alias, root)
 
 
+@router.get("/remote/monitor", summary="Read Remote Sandbox Host Metrics")
+def remote_monitor():
+    return remote_sandbox_manager.system_monitor(settings.sandbox_remote_ssh_alias)
+
+
 @router.post("/remote/initialize", summary="Start Remote Sandbox Initialization")
 def remote_initialize(body: dict):
     alias = body.get("alias", settings.sandbox_remote_ssh_alias)

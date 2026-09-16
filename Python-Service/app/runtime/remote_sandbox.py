@@ -69,6 +69,22 @@ echo "CHECK:ok"
 '''
 
 
+def _remote_monitor_script() -> str:
+    """Emit bounded system metrics from Linux procfs for the monitor card."""
+    return '''set -eu
+read_cpu() { awk '/^cpu / {print $2+$3+$4+$5+$6+$7+$8+$9, $5+$6}' /proc/stat; }
+read_net() { awk -F: 'NR>2 {gsub(/^[ \\t]+/, "", $2); split($2, a, / +/); rx += a[1]; tx += a[9]} END {print rx, tx}' /proc/net/dev; }
+set -- $(read_cpu); total1=$1; idle1=$2
+set -- $(read_net); rx1=$1; tx1=$2
+sleep 1
+set -- $(read_cpu); total2=$1; idle2=$2
+set -- $(read_net); rx2=$1; tx2=$2
+set -- $(awk '/MemTotal:/ {total=$2} /MemAvailable:/ {available=$2} END {print total * 1024, available * 1024}' /proc/meminfo)
+cpu=$(awk -v total1="$total1" -v idle1="$idle1" -v total2="$total2" -v idle2="$idle2" 'BEGIN { if (total2 <= total1) print "0.0"; else printf "%.1f", 100 * (1 - (idle2-idle1)/(total2-total1)) }')
+echo "MONITOR cpu=$cpu ram_total=$1 ram_free=$2 rx=$((rx2-rx1)) tx=$((tx2-tx1))"
+'''
+
+
 def _bootstrap_script(jobs_root: str) -> str:
     """Versioned, idempotent Debian/Ubuntu bootstrap run through ``sudo -n``."""
     return f'''#!/bin/sh
@@ -212,6 +228,37 @@ class RemoteSandboxManager:
                     "jobsRootWritable": False, "detail": "SSH authentication succeeded, but Docker is unavailable for this account."}
         return {"success": False, "reachable": False, "docker": False, "runsc": False,
                 "jobsRootWritable": False, "detail": f"SSH connection failed: {output}"}
+
+    def system_monitor(self, alias: object) -> dict[str, Any]:
+        """Read CPU, memory and aggregate network rate from the remote host."""
+        try:
+            target = validate_alias(alias)
+            result = self._run_ssh(target, _remote_monitor_script(), timeout=15)
+        except subprocess.TimeoutExpired:
+            return {"success": False, "detail": "Remote monitor timed out."}
+        except FileNotFoundError:
+            return {"success": False, "detail": "The sandbox service image does not include the SSH client."}
+        except OSError as exc:
+            return {"success": False, "detail": f"SSH client could not start: {_safe_detail(exc)}"}
+        if result.returncode:
+            return {"success": False, "detail": f"Remote monitor unavailable: {_safe_detail(result.stderr or result.stdout)}"}
+        match = re.search(
+            r"MONITOR cpu=([0-9.]+) ram_total=(\d+) ram_free=(\d+) rx=(-?\d+) tx=(-?\d+)",
+            result.stdout,
+        )
+        if not match:
+            return {"success": False, "detail": "Remote monitor returned an invalid response."}
+        cpu, total, free, rx, tx = match.groups()
+        total_bytes, free_bytes = int(total), int(free)
+        return {
+            "success": True,
+            "cpuPercent": float(cpu),
+            "ramTotalBytes": total_bytes,
+            "ramFreeBytes": free_bytes,
+            "ramUsedBytes": max(0, total_bytes - free_bytes),
+            "networkDownloadBytesPerSec": max(0, int(rx)),
+            "networkUploadBytesPerSec": max(0, int(tx)),
+        }
 
     def ensure_tunnel(self, alias: object) -> str:
         target = validate_alias(alias)

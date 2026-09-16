@@ -33,6 +33,29 @@ def test_connection_success_marks_alias_ready(monkeypatch):
     assert manager.is_ready("linuxbox", "/var/lib/dev-assistant-sandbox/jobs") is True
 
 
+def test_remote_monitor_parses_procfs_metrics(monkeypatch):
+    manager = RemoteSandboxManager()
+    monkeypatch.setattr(
+        manager,
+        "_run_ssh",
+        lambda *args, **kwargs: SimpleNamespace(
+            returncode=0,
+            stdout="MONITOR cpu=12.5 ram_total=34359738368 ram_free=8589934592 rx=2048 tx=512\n",
+            stderr="",
+        ),
+    )
+    result = manager.system_monitor("linuxbox")
+    assert result == {
+        "success": True,
+        "cpuPercent": 12.5,
+        "ramTotalBytes": 34359738368,
+        "ramFreeBytes": 8589934592,
+        "ramUsedBytes": 25769803776,
+        "networkDownloadBytesPerSec": 2048,
+        "networkUploadBytesPerSec": 512,
+    }
+
+
 def test_connection_reports_root_permission_without_leaking_paths(monkeypatch):
     manager = RemoteSandboxManager()
     monkeypatch.setattr(manager, "_run_ssh", lambda *args, **kwargs: SimpleNamespace(returncode=23, stdout="CHECK:jobs_root=not_writable\n", stderr="/root/.ssh/id_ed25519"))
