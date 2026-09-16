@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ref } from 'vue';
+import { onMounted, onUnmounted, ref } from 'vue';
 import MarkdownIt from 'markdown-it';
 import { Shield, RefreshCw, PlugZap, Wrench, BookOpen, ChevronDown } from 'lucide-vue-next';
 import { RAGConfig } from '../../types';
@@ -27,7 +27,19 @@ const initializingRemote = ref(false);
 const remoteResult = ref<{ success: boolean; detail: string; jobsRootWritable?: boolean } | null>(null);
 const initJob = ref<{ jobId: string; status: string; detail: string; log: string[] } | null>(null);
 const showRemoteGuide = ref(false);
+const remoteMonitor = ref<{
+  success: boolean;
+  detail?: string;
+  cpuPercent?: number;
+  ramTotalBytes?: number;
+  ramFreeBytes?: number;
+  ramUsedBytes?: number;
+  networkDownloadBytesPerSec?: number;
+  networkUploadBytesPerSec?: number;
+} | null>(null);
+const loadingRemoteMonitor = ref(false);
 let initTimer: ReturnType<typeof setTimeout> | null = null;
+let monitorTimer: ReturnType<typeof setInterval> | null = null;
 
 const remoteGuide = new MarkdownIt({ html: false, linkify: true, breaks: true }).render(`
 ## Remote sandbox developer guide
@@ -138,6 +150,41 @@ const fetchSandboxStatus = async () => {
   }
 };
 
+const fetchRemoteMonitor = async () => {
+  if (config.sandboxExecutionMode !== 'remote' || loadingRemoteMonitor.value) return;
+  loadingRemoteMonitor.value = true;
+  try {
+    const res = await makeRequest('/api/sandbox/remote/monitor');
+    remoteMonitor.value = await res.json();
+  } catch {
+    remoteMonitor.value = { success: false, detail: 'Remote monitor is unavailable.' };
+  } finally {
+    loadingRemoteMonitor.value = false;
+  }
+};
+
+const refreshRunner = () => {
+  fetchSandboxStatus();
+  fetchRemoteMonitor();
+};
+
+const formatBytes = (bytes = 0) => {
+  if (bytes < 1024) return `${bytes} B`;
+  const units = ['KB', 'MB', 'GB', 'TB'];
+  const index = Math.min(Math.floor(Math.log(bytes) / Math.log(1024)), units.length);
+  return `${(bytes / 1024 ** index).toFixed(index > 1 ? 1 : 0)} ${units[index - 1]}`;
+};
+
+onMounted(() => {
+  refreshRunner();
+  monitorTimer = setInterval(fetchRemoteMonitor, 5000);
+});
+
+onUnmounted(() => {
+  if (monitorTimer) clearInterval(monitorTimer);
+  if (initTimer) clearTimeout(initTimer);
+});
+
 const testRemote = async () => {
   testingRemote.value = true;
   remoteResult.value = null;
@@ -189,7 +236,8 @@ const initializeRemote = async () => {
       <h4 class="text-[11px] font-bold text-slate-400 uppercase tracking-widest">Sandbox Runner</h4>
     </div>
 
-    <div class="bg-slate-900/30 border border-slate-800 rounded-2xl p-6 space-y-4 max-w-2xl">
+    <div class="grid grid-cols-1 xl:grid-cols-[minmax(0,2fr)_minmax(280px,1fr)] gap-4 items-start max-w-6xl">
+    <div class="bg-slate-900/30 border border-slate-800 rounded-2xl p-6 space-y-4">
       <h4 class="text-xs font-bold text-slate-200 uppercase tracking-wider flex items-center justify-between gap-2 border-b border-slate-800 pb-3">
         <span class="flex items-center gap-2">
           <Shield class="w-4 h-4 text-rose-400" />
@@ -197,7 +245,7 @@ const initializeRemote = async () => {
         </span>
         <button
           type="button"
-          @click="fetchSandboxStatus"
+          @click="refreshRunner"
           class="text-[10px] text-slate-400 hover:text-indigo-300 flex items-center gap-1 font-mono"
           :disabled="loadingSandbox"
         >
@@ -328,6 +376,44 @@ const initializeRemote = async () => {
           <div v-if="showRemoteGuide" class="prose prose-invert prose-sm max-w-none border-t border-slate-800 px-4 py-3 text-slate-400 [&_h2]:text-sm [&_h2]:text-slate-200 [&_h3]:text-xs [&_h3]:text-slate-300 [&_code]:text-indigo-200 [&_pre]:bg-[#11162d] [&_pre]:border [&_pre]:border-slate-800 [&_pre]:text-[10px]" v-html="remoteGuide"></div>
         </div>
       </div>
+    </div>
+
+    <aside v-if="config.sandboxExecutionMode === 'remote'" class="bg-slate-900/30 border border-slate-800 rounded-2xl p-5 space-y-4">
+      <div class="flex items-center justify-between gap-2 border-b border-slate-800 pb-3">
+        <div>
+          <h4 class="text-xs font-bold text-slate-200 uppercase tracking-wider">Remote host monitor</h4>
+          <p class="mt-0.5 text-[9px] font-mono text-slate-600">Refreshes every 5 seconds</p>
+        </div>
+        <button type="button" @click="fetchRemoteMonitor" :disabled="loadingRemoteMonitor" class="text-slate-400 hover:text-indigo-300 disabled:opacity-50">
+          <RefreshCw class="w-3.5 h-3.5" :class="loadingRemoteMonitor ? 'animate-spin' : ''" />
+          <span class="sr-only">Refresh remote monitor</span>
+        </button>
+      </div>
+
+      <div v-if="loadingRemoteMonitor && !remoteMonitor" class="flex items-center gap-2 text-[10px] font-mono text-slate-500">
+        <RefreshCw class="w-3.5 h-3.5 animate-spin" /> Sampling remote host…
+      </div>
+      <div v-else-if="!remoteMonitor || !remoteMonitor.success" class="text-[10px] font-mono text-amber-200 bg-amber-500/5 border border-amber-500/20 rounded-lg px-3 py-2">
+        {{ remoteMonitor?.detail || 'Remote monitor is waiting for a successful connection.' }}
+      </div>
+      <div v-else class="space-y-4">
+        <div class="space-y-1.5">
+          <div class="flex items-center justify-between text-[10px] font-mono">
+            <span class="text-slate-400">CPU usage</span>
+            <span class="text-emerald-300">{{ remoteMonitor.cpuPercent?.toFixed(1) }}%</span>
+          </div>
+          <div class="h-1.5 rounded-full bg-slate-800 overflow-hidden"><div class="h-full rounded-full bg-emerald-400" :style="{ width: `${Math.min(remoteMonitor.cpuPercent || 0, 100)}%` }"></div></div>
+        </div>
+        <div class="space-y-1.5">
+          <div class="flex items-center justify-between text-[10px] font-mono"><span class="text-slate-400">RAM allocated</span><span class="text-slate-200">{{ formatBytes(remoteMonitor.ramUsedBytes) }} / {{ formatBytes(remoteMonitor.ramTotalBytes) }}</span></div>
+          <div class="flex items-center justify-between text-[10px] font-mono"><span class="text-slate-400">RAM free</span><span class="text-sky-300">{{ formatBytes(remoteMonitor.ramFreeBytes) }}</span></div>
+        </div>
+        <div class="grid grid-cols-2 gap-2 border-t border-slate-800 pt-3 text-[10px] font-mono">
+          <div><div class="text-slate-500">UPLOAD</div><div class="mt-1 text-violet-300">{{ formatBytes(remoteMonitor.networkUploadBytesPerSec) }}/s</div></div>
+          <div><div class="text-slate-500">DOWNLOAD</div><div class="mt-1 text-cyan-300">{{ formatBytes(remoteMonitor.networkDownloadBytesPerSec) }}/s</div></div>
+        </div>
+      </div>
+    </aside>
     </div>
   </div>
 </template>

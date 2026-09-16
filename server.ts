@@ -672,6 +672,15 @@ async function startServer() {
     }
   });
 
+  app.get('/api/sandbox/remote/monitor', async (req, res) => {
+    try {
+      const pyRes = await fetch(`${PYTHON_API_URL}/sandbox/remote/monitor`);
+      res.status(pyRes.status).json(await pyRes.json());
+    } catch (error: any) {
+      res.status(500).json({ success: false, error: 'Remote sandbox monitor is unavailable.' });
+    }
+  });
+
   app.post('/api/sandbox/remote/initialize', async (req, res) => {
     try {
       const pyRes = await fetch(`${PYTHON_API_URL}/sandbox/remote/initialize`, {
