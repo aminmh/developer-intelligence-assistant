@@ -231,7 +231,9 @@ onMounted(() => {
   emit('ready', graph);
   rebuild();
 });
-watch(() => [props.model, props.search], rebuild, { deep: true });
+// Model loads and enrichment replace the model object. Watching it deeply makes
+// X6 node interaction look like a model update, rebuilding cells during a drag.
+watch(() => [props.model, props.search], rebuild);
 watch(() => [props.selectedEntityId, props.selectedBehaviorKey, props.selectedRelationshipId], syncSelection);
 onBeforeUnmount(() => { graph?.dispose(); graph = null; });
 </script>
