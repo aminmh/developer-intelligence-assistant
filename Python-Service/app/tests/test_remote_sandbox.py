@@ -101,6 +101,30 @@ def test_initializer_reports_bootstrap_failure(monkeypatch):
     assert "password" in state["detail"]
 
 
+def test_initializer_skips_bootstrap_when_remote_is_already_ready(monkeypatch):
+    manager = RemoteSandboxManager()
+    monkeypatch.setattr(
+        manager,
+        "test_connection",
+        lambda *args, **kwargs: {"success": True, "detail": "ready"},
+    )
+    monkeypatch.setattr(
+        manager,
+        "_run_ssh",
+        lambda *args, **kwargs: pytest.fail("bootstrap must not run for a ready host"),
+    )
+    job = manager.start_initialization("linuxbox", "/jobs")
+    import time
+    for _ in range(20):
+        state = manager.initialization_status(job["jobId"])
+        if state and state["status"] != "running":
+            break
+        time.sleep(0.01)
+    assert state["status"] == "done"
+    assert "already ready" in state["detail"]
+    assert any("bootstrap skipped" in entry for entry in state["log"])
+
+
 def test_bootstrap_preserves_an_existing_docker_installation():
     script = _bootstrap_script("/var/lib/dev-assistant-sandbox/jobs")
     assert "if ! command -v docker" in script

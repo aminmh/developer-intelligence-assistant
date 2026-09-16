@@ -335,8 +335,20 @@ class RemoteSandboxManager:
         return job.view()
 
     def _initialize(self, job: _InitJob) -> None:
-        job.log.append("Checking passwordless sudo and installing Docker/gVisor prerequisites.")
+        job.log.append("Checking the current remote sandbox readiness.")
         try:
+            # Initialization is intentionally idempotent.  A manually prepared
+            # host must not be sent through the package bootstrap again: apart
+            # from needless work, external package repositories may no longer
+            # be reachable even though Docker and runsc are already healthy.
+            existing = self.test_connection(job.alias, job.jobs_root)
+            if existing.get("success"):
+                job.status = "done"
+                job.detail = "Remote Docker, runsc, and jobs directory are already ready."
+                job.log.append("Existing remote runtime passed verification; bootstrap skipped.")
+                return
+
+            job.log.append("Checking passwordless sudo and installing Docker/gVisor prerequisites.")
             result = self._run_ssh(
                 job.alias, _bootstrap_script(job.jobs_root), timeout=900,
                 remote_argv=["sudo", "-n", "sh", "-s"],

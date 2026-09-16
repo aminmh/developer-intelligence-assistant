@@ -33,6 +33,10 @@ def sandbox_status():
                 raise RuntimeError("connection test required before remote mode can execute jobs")
             host = remote_sandbox_manager.ensure_tunnel(alias)
             result = sandbox_available(docker_host=host)
+            # sandbox_available labels TCP Docker endpoints as nested DinD.
+            # This endpoint owns the remote-runner context, so expose the
+            # runner actually selected by the user instead.
+            result["backend"] = "remote"
         except Exception as exc:  # never fall back to local in remote mode
             result = {"available": False, "backend": "remote", "runsc": False,
                       "detail": f"remote sandbox unavailable: {str(exc)[:300]}"}
