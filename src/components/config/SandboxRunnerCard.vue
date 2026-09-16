@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { ref } from 'vue';
-import { Shield, RefreshCw, PlugZap, Wrench } from 'lucide-vue-next';
+import MarkdownIt from 'markdown-it';
+import { Shield, RefreshCw, PlugZap, Wrench, BookOpen, ChevronDown } from 'lucide-vue-next';
 import { RAGConfig } from '../../types';
 import { makeRequest } from '../../ui/makeRequest';
 
@@ -25,7 +26,50 @@ const testingRemote = ref(false);
 const initializingRemote = ref(false);
 const remoteResult = ref<{ success: boolean; detail: string; jobsRootWritable?: boolean } | null>(null);
 const initJob = ref<{ jobId: string; status: string; detail: string; log: string[] } | null>(null);
+const showRemoteGuide = ref(false);
 let initTimer: ReturnType<typeof setTimeout> | null = null;
+
+const remoteGuide = new MarkdownIt({ html: false, linkify: true, breaks: true }).render(`
+## Remote sandbox developer guide
+
+### 1. Mount SSH configuration
+
+Set an **absolute** local path in \`api/.env\`, then recreate \`python-api\`:
+
+\`\`\`env
+SANDBOX_SSH_DIR=/Users/you/.ssh
+\`\`\`
+
+The directory must contain the SSH alias configuration, its private key, and \`known_hosts\`. The container mounts it read-only; the UI never stores keys or passwords.
+
+### 2. Configure the remote host
+
+Use an SSH-config alias such as \`linuxbox\`, select **Remote SSH runner**, and set the jobs root to:
+
+\`\`\`text
+/var/lib/dev-assistant-sandbox/jobs
+\`\`\`
+
+The SSH account needs non-interactive access and Docker-group membership:
+
+\`\`\`sh
+ssh linuxbox 'sudo -n true && docker info'
+\`\`\`
+
+The jobs root must be owned by \`root:docker\` with mode \`0770\` so Docker-group users can stage disposable projects.
+
+### 3. Validate and enable
+
+Click **Test connection**. A ready result requires SSH, Docker, \`runsc\`, and a writable jobs root. Remote mode never silently falls back to the local runner.
+
+### Troubleshooting
+
+- **Permission denied (publickey):** add the mounted key's public half to the remote user's \`~/.ssh/authorized_keys\`.
+- **sudo: a password is required:** configure passwordless sudo for the bootstrap, or install/configure Docker and gVisor manually.
+- **runsc not registered:** install gVisor on the remote host and register \`runsc\` with Docker, then restart Docker.
+- **Jobs root not writable:** create \`/var/lib/dev-assistant-sandbox/jobs\` as \`root:docker\` mode \`0770\`.
+- **gVisor download errors:** allow the host to fetch gVisor through your approved package or artifact source; the initializer reports external download failures directly.
+`);
 
 const fetchSandboxStatus = async () => {
   loadingSandbox.value = true;
@@ -219,6 +263,19 @@ const initializeRemote = async () => {
         <div v-if="initJob" class="text-[10px] font-mono rounded-lg px-3 py-2 border border-slate-700 bg-slate-900/60 text-slate-300 space-y-1">
           <div>{{ initJob.status }} · {{ initJob.detail }}</div>
           <div v-for="line in initJob.log" :key="line" class="text-slate-500">{{ line }}</div>
+        </div>
+
+        <div class="border border-slate-800 rounded-xl overflow-hidden">
+          <button
+            type="button"
+            class="w-full flex items-center justify-between gap-3 px-3 py-2.5 text-left text-[10px] font-mono text-slate-300 hover:bg-slate-800/50"
+            :aria-expanded="showRemoteGuide"
+            @click="showRemoteGuide = !showRemoteGuide"
+          >
+            <span class="inline-flex items-center gap-1.5"><BookOpen class="w-3.5 h-3.5 text-indigo-300" /> Developer setup guide</span>
+            <ChevronDown class="w-3.5 h-3.5 transition-transform" :class="showRemoteGuide ? 'rotate-180' : ''" />
+          </button>
+          <div v-if="showRemoteGuide" class="prose prose-invert prose-sm max-w-none border-t border-slate-800 px-4 py-3 text-slate-400 [&_h2]:text-sm [&_h2]:text-slate-200 [&_h3]:text-xs [&_h3]:text-slate-300 [&_code]:text-indigo-200 [&_pre]:bg-[#11162d] [&_pre]:border [&_pre]:border-slate-800 [&_pre]:text-[10px]" v-html="remoteGuide"></div>
         </div>
       </div>
     </div>
