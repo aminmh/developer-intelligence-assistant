@@ -44,13 +44,63 @@ The directory must contain the SSH alias configuration, its private key, and \`k
 
 ### 2. Configure the remote host
 
+#### Create the local SSH alias
+
+On the developer machine, add an alias to \`~/.ssh/config\`. The alias—not a hostname, username, or password—is what goes in the Sandbox **SSH Alias** field:
+
+\`\`\`sshconfig
+Host linuxbox
+  HostName 192.0.2.10
+  User amin
+  IdentityFile ~/.ssh/id_ed25519
+  IdentitiesOnly yes
+  StrictHostKeyChecking yes
+\`\`\`
+
+Use the remote host's actual DNS name or IP for \`HostName\`. Ensure \`known_hosts\` is populated before using the UI:
+
+\`\`\`sh
+ssh linuxbox 'echo connected'
+\`\`\`
+
+#### Authorize the developer machine's public key
+
+Copy the public half of the key from the developer machine to the remote SSH account:
+
+\`\`\`sh
+ssh-copy-id -i ~/.ssh/id_ed25519.pub linuxbox
+\`\`\`
+
+Or append the contents of \`~/.ssh/id_ed25519.pub\` to the remote user's \`~/.ssh/authorized_keys\`, then apply:
+
+\`\`\`sh
+chmod 700 ~/.ssh
+chmod 600 ~/.ssh/authorized_keys
+\`\`\`
+
+#### Require passwordless public-key SSH
+
+The sandbox uses \`BatchMode=yes\`, so it cannot answer a password or key-passphrase prompt. Use a dedicated, unencrypted deployment key or make an SSH agent available to the container. On the remote machine, an administrator can enforce public-key-only login in \`/etc/ssh/sshd_config.d/dev-assistant.conf\`:
+
+\`\`\`text
+PubkeyAuthentication yes
+PasswordAuthentication no
+KbdInteractiveAuthentication no
+\`\`\`
+
+Validate and reload the SSH daemon:
+
+\`\`\`sh
+sudo sshd -t && sudo systemctl reload ssh
+\`\`\`
+
 Use an SSH-config alias such as \`linuxbox\`, select **Remote SSH runner**, and set the jobs root to:
 
 \`\`\`text
 /var/lib/dev-assistant-sandbox/jobs
 \`\`\`
 
-The SSH account needs non-interactive access and Docker-group membership:
+The SSH account needs non-interactive SSH, non-interactive sudo for bootstrap, and Docker-group membership:
 
 \`\`\`sh
 ssh linuxbox 'sudo -n true && docker info'
