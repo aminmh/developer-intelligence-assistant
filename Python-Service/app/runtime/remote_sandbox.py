@@ -81,20 +81,49 @@ case "$ID:$VERSION_ID" in
   *) echo "Unsupported distribution: $ID $VERSION_ID (need Debian 12 or Ubuntu 22.04/24.04)"; exit 40 ;;
 esac
 export DEBIAN_FRONTEND=noninteractive
-apt-get update
-apt-get install -y --no-install-recommends ca-certificates curl gnupg docker.io python3
+# Avoid failing an otherwise healthy setup because an unrelated third-party
+# APT source is down. Refresh all configured sources only when a prerequisite
+# is actually absent; existing Docker hosts normally already have these tools.
+missing_prerequisite=0
+for bin in curl gpg python3; do command -v "$bin" >/dev/null 2>&1 || missing_prerequisite=1; done
+if [ "$missing_prerequisite" -eq 1 ]; then
+  apt-get update
+  apt-get install -y --no-install-recommends ca-certificates curl gnupg python3
+fi
+# Do not replace an existing Docker CE installation with Ubuntu/Debian's
+# docker.io package: the packages conflict and an existing daemon is valid.
+if ! command -v docker >/dev/null 2>&1; then
+  apt-get install -y --no-install-recommends docker.io
+fi
 systemctl enable --now docker
 arch="$(dpkg --print-architecture)"
-case "$arch" in amd64) gvisor_arch=x86_64 ;; arm64) gvisor_arch=aarch64 ;; *) echo "Unsupported CPU architecture: $arch"; exit 41 ;; esac
-base="https://storage.googleapis.com/gvisor/releases/release/latest/$gvisor_arch"
-for bin in runsc containerd-shim-runsc-v1; do
-  if ! command -v "$bin" >/dev/null 2>&1; then
-    curl -fsSL "$base/$bin" -o "/usr/local/bin/$bin"
-    chmod 0755 "/usr/local/bin/$bin"
-  fi
-done
+case "$arch" in amd64|arm64) ;; *) echo "Unsupported CPU architecture: $arch"; exit 41 ;; esac
+# gVisor's package repository is the supported installation path. It carries
+# the complete current runtime layout instead of assuming legacy standalone
+# runsc/containerd-shim binaries exist at a download URL.
+curl -fsSL https://gvisor.dev/archive.key | gpg --batch --yes --dearmor -o /usr/share/keyrings/gvisor-archive-keyring.gpg
+echo "deb [arch=$arch signed-by=/usr/share/keyrings/gvisor-archive-keyring.gpg] https://storage.googleapis.com/gvisor/releases release main" > /etc/apt/sources.list.d/gvisor.list
+# Only update the repository just added. Existing distribution package lists
+# remain available for dependency resolution without contacting unrelated
+# repositories such as optional developer tools.
+apt-get update -o Dir::Etc::sourcelist="sources.list.d/gvisor.list" -o Dir::Etc::sourceparts="-" -o APT::Get::List-Cleanup="0"
+if ! apt-get install -y --no-install-recommends runsc; then
+  # Some networks can reach repository metadata but reject the package object.
+  # Fall back to gVisor's documented, checksum-verified complete release
+  # archive; it includes runsc, the shim, and the required gvisor-bin sidecars.
+  case "$arch" in amd64) gvisor_arch=x86_64 ;; arm64) gvisor_arch=aarch64 ;; esac
+  gvisor_url="https://storage.googleapis.com/gvisor/releases/release/latest/$gvisor_arch"
+  gvisor_tmp="$(mktemp -d)"
+  curl -fsSL "$gvisor_url/gvisor.tar.bz2" -o "$gvisor_tmp/gvisor.tar.bz2"
+  curl -fsSL "$gvisor_url/gvisor.tar.bz2.sha512" -o "$gvisor_tmp/gvisor.tar.bz2.sha512"
+  (cd "$gvisor_tmp" && sha512sum -c gvisor.tar.bz2.sha512)
+  tar -xjf "$gvisor_tmp/gvisor.tar.bz2" -C /usr/local/bin
+  rm -rf "$gvisor_tmp"
+fi
+export RUNSC_PATH="$(command -v runsc)"
 python3 - <<'PY'
 import json
+import os
 from pathlib import Path
 p = Path('/etc/docker/daemon.json')
 try:
@@ -102,7 +131,7 @@ try:
 except json.JSONDecodeError as e:
     raise SystemExit(f'Existing /etc/docker/daemon.json is invalid; preserved: {{e}}')
 runtimes = data.setdefault('runtimes', {{}})
-runtimes.setdefault('runsc', {{'path': '/usr/local/bin/runsc'}})
+runtimes.setdefault('runsc', {{'path': os.environ['RUNSC_PATH']}})
 p.write_text(json.dumps(data, indent=2) + '\\n')
 PY
 systemctl restart docker

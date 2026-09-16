@@ -4,7 +4,12 @@ from types import SimpleNamespace
 
 import pytest
 
-from runtime.remote_sandbox import RemoteSandboxManager, validate_alias, validate_jobs_root
+from runtime.remote_sandbox import (
+    RemoteSandboxManager,
+    _bootstrap_script,
+    validate_alias,
+    validate_jobs_root,
+)
 
 
 def test_alias_and_root_validation_reject_shell_shaped_values():
@@ -71,3 +76,19 @@ def test_initializer_reports_bootstrap_failure(monkeypatch):
         time.sleep(0.01)
     assert state["status"] == "failed"
     assert "password" in state["detail"]
+
+
+def test_bootstrap_preserves_an_existing_docker_installation():
+    script = _bootstrap_script("/var/lib/dev-assistant-sandbox/jobs")
+    assert "if ! command -v docker" in script
+    assert "apt-get install -y --no-install-recommends docker.io" in script
+    assert script.index("if ! command -v docker") < script.index(
+        "apt-get install -y --no-install-recommends docker.io"
+    )
+    assert "https://storage.googleapis.com/gvisor/releases release main" in script
+    assert "apt-get install -y --no-install-recommends runsc" in script
+    assert "gvisor.tar.zstd" not in script
+    assert 'Dir::Etc::sourcelist="sources.list.d/gvisor.list"' in script
+    assert "gpg --batch --yes --dearmor" in script
+    assert "gvisor.tar.bz2" in script
+    assert "sha512sum -c gvisor.tar.bz2.sha512" in script
