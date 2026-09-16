@@ -299,7 +299,7 @@ const initializeRemote = async () => {
           <select
             :value="config.sandboxExecutionMode"
             @change="updateField('sandboxExecutionMode', ($event.target as HTMLSelectElement).value as 'local' | 'remote')"
-            class="w-full bg-[#11162d] border border-slate-800 rounded-xl px-4 py-2.5 text-xs font-mono focus:outline-none focus:border-rose-500 text-slate-200"
+            class="w-full h-[38px] bg-[#11162d] border border-slate-800 rounded-xl px-4 py-0 text-xs font-mono focus:outline-none focus:border-rose-500 text-slate-200"
           >
             <option value="local">Local Docker runner</option>
             <option value="remote">Remote SSH runner</option>
