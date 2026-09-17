@@ -64,3 +64,18 @@ test('prettify collision resolution separates variable-size node rectangles', ()
   assert.equal(hasEntityLayoutCollisions(nodes, positions, 80), true);
   assert.equal(hasEntityLayoutCollisions(nodes, resolveEntityLayoutCollisions(nodes, positions, 80), 80), false);
 });
+
+test('larger prettify gaps produce a more spacious collision-free layout', () => {
+  const nodes = [
+    { id: 'one', width: 280, height: 180 },
+    { id: 'two', width: 280, height: 260 },
+  ];
+  const positions = new Map([
+    ['one', { x: 40, y: 40 }],
+    ['two', { x: 80, y: 70 }],
+  ]);
+  const compact = resolveEntityLayoutCollisions(nodes, positions, 80);
+  const spacious = resolveEntityLayoutCollisions(nodes, positions, 160);
+  assert.equal(hasEntityLayoutCollisions(nodes, spacious, 160), false);
+  assert.ok((spacious.get('two')?.y || 0) > (compact.get('two')?.y || 0));
+});

@@ -27,6 +27,7 @@ const container = ref<HTMLElement | null>(null);
 let graph: Graph | null = null;
 let localPositions = new Map<string, { x: number; y: number }>();
 let focusZoomFrame: number | null = null;
+let prettifyPass = 0;
 
 const entityId = (entity: DomainEntity) => entity.id || `entity:${entity.name}`;
 const entityFromNodeId = (id: string) => {
@@ -66,15 +67,20 @@ const relationshipForEdge = (edge: DomainModelGraphEdge, index: number): DomainE
 };
 
 const dimensions = (entity: DomainEntity) => ({ width: 280, height: Math.max(150, 92 + Math.min(14, entity.properties.length) * 25 + Math.min(10, entityModelBehaviors(entity).length) * 25 + (entity.properties.length > 14 ? 20 : 0)) });
-const collisionFreePositions = (nodes: Array<{ id: string; width: number; height: number }>, positions: Map<string, { x: number; y: number }>) => {
-  const resolved = resolveEntityLayoutCollisions(nodes, positions, 80);
-  if (hasEntityLayoutCollisions(nodes, resolved, 80)) throw new Error('Entity layout still contains overlapping nodes.');
+const collisionFreePositions = (nodes: Array<{ id: string; width: number; height: number }>, positions: Map<string, { x: number; y: number }>, gap = 80) => {
+  const resolved = resolveEntityLayoutCollisions(nodes, positions, gap);
+  if (hasEntityLayoutCollisions(nodes, resolved, gap)) throw new Error('Entity layout still contains overlapping nodes.');
   return resolved;
 };
-const defaultPositions = (entities: DomainEntity[]) => {
+const defaultPositions = (entities: DomainEntity[], gap = 80) => {
   const nodes = entities.map((entity) => ({ id: entityId(entity), ...dimensions(entity) }));
-  const positions = new Map(nodes.map((node, index) => [node.id, { x: 40 + (index % 3) * 360, y: 40 + Math.floor(index / 3) * 300 }]));
-  return collisionFreePositions(nodes, positions);
+  const positions = new Map(nodes.map((node, index) => [node.id, { x: 40 + (index % 3) * (280 + gap), y: 40 + Math.floor(index / 3) * (300 + gap) }]));
+  return collisionFreePositions(nodes, positions, gap);
+};
+const prettifySpacing = (expand: boolean) => {
+  if (expand) prettifyPass = Math.min(prettifyPass + 1, 6);
+  const level = expand ? prettifyPass : 0;
+  return { gap: 80 + level * 40, nodesep: 120 + level * 50, ranksep: 220 + level * 80 };
 };
 const visible = (entity: DomainEntity) => {
   return entityMatchesModelSearch(entity, props.search || '');
@@ -212,9 +218,10 @@ const focusNode = async (id: string, zoom = false) => {
   if (zoom) animateFocusZoom(node, 0.75);
   graph.centerCell(node);
 };
-const reset = () => { localPositions = defaultPositions(props.model?.entities || []); rebuild(); };
-const prettify = async () => {
+const reset = () => { prettifyPass = 0; localPositions = defaultPositions(props.model?.entities || []); rebuild(); };
+const prettify = async (expand = true) => {
   if (!props.model) return;
+  const spacing = prettifySpacing(expand);
   const entities = props.model.entities || [];
   const nodes = entities.map((entity) => {
     const size = dimensions(entity);
@@ -240,8 +247,8 @@ const prettify = async () => {
     const layout = new DagreLayout({
       type: 'dagre',
       rankdir: 'LR',
-      nodesep: 120,
-      ranksep: 220,
+      nodesep: spacing.nodesep,
+      ranksep: spacing.ranksep,
       controlPoints: false,
       nodeSize: (node: { width: number; height: number }) => [node.width, node.height],
     });
@@ -251,9 +258,9 @@ const prettify = async () => {
       x: Math.max(40, node.x - ((node.size as any)?.[0] || 0) / 2),
       y: Math.max(40, node.y - ((node.size as any)?.[1] || 0) / 2),
     }));
-    localPositions = collisionFreePositions(nodes, positions);
+    localPositions = collisionFreePositions(nodes, positions, spacing.gap);
   } catch {
-    localPositions = defaultPositions(entities);
+    localPositions = defaultPositions(entities, spacing.gap);
     rebuild();
     return;
   }
@@ -284,7 +291,8 @@ onMounted(() => {
 });
 // Model loads and enrichment replace the model object. Watching it deeply makes
 // X6 node interaction look like a model update, rebuilding cells during a drag.
-watch(() => [props.model, props.search], rebuild);
+watch(() => props.model, () => { prettifyPass = 0; rebuild(); });
+watch(() => props.search, rebuild);
 watch(() => [props.selectedEntityId, props.selectedBehaviorKey, props.selectedRelationshipId], syncSelection);
 onBeforeUnmount(() => { if (focusZoomFrame !== null) cancelAnimationFrame(focusZoomFrame); graph?.dispose(); graph = null; });
 </script>
