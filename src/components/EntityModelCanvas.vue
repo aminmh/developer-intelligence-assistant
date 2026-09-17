@@ -174,11 +174,13 @@ const animateFocusZoom = (node: Node, targetZoom: number) => {
     return;
   }
   const startedAt = performance.now();
-  const duration = 180;
+  const duration = 260;
   const frame = (now: number) => {
     if (!graph) return;
     const progress = Math.min(1, (now - startedAt) / duration);
-    const eased = 1 - (1 - progress) ** 3;
+    const eased = progress < 0.5
+      ? 4 * progress ** 3
+      : 1 - (-2 * progress + 2) ** 3 / 2;
     graph.zoomTo(startZoom + (targetZoom - startZoom) * eased, { maxScale: targetZoom });
     graph.centerCell(node);
     if (progress < 1) focusZoomFrame = requestAnimationFrame(frame);
@@ -191,7 +193,7 @@ const focusNode = async (id: string, zoom = false) => {
   const node = graph?.getCellById(id);
   if (!node || !graph) return;
   graph.centerCell(node);
-  if (zoom) animateFocusZoom(node, 1.25);
+  if (zoom) animateFocusZoom(node, 0.75);
   graph.centerCell(node);
 };
 const reset = () => { localPositions = new Map((props.model?.entities || []).map((entity, index) => [entityId(entity), { x: 40 + (index % 3) * 360, y: 40 + Math.floor(index / 3) * 300 }])); rebuild(); };
