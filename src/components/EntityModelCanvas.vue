@@ -25,6 +25,7 @@ const emit = defineEmits<{
 const container = ref<HTMLElement | null>(null);
 let graph: Graph | null = null;
 let localPositions = new Map<string, { x: number; y: number }>();
+let focusZoomFrame: number | null = null;
 
 const entityId = (entity: DomainEntity) => entity.id || `entity:${entity.name}`;
 const entityFromNodeId = (id: string) => {
@@ -163,12 +164,34 @@ const syncSelection = () => {
 const fit = () => graph?.zoomToFit({ padding: 24, maxScale: 1.2 });
 const zoomIn = () => graph?.zoom(0.15);
 const zoomOut = () => graph?.zoom(-0.15);
+const animateFocusZoom = (node: Node, targetZoom: number) => {
+  if (!graph) return;
+  if (focusZoomFrame !== null) cancelAnimationFrame(focusZoomFrame);
+  const startZoom = graph.zoom();
+  if (Math.abs(targetZoom - startZoom) < 0.01 || window.matchMedia('(prefers-reduced-motion: reduce)').matches) {
+    graph.zoomTo(targetZoom, { maxScale: targetZoom });
+    graph.centerCell(node);
+    return;
+  }
+  const startedAt = performance.now();
+  const duration = 180;
+  const frame = (now: number) => {
+    if (!graph) return;
+    const progress = Math.min(1, (now - startedAt) / duration);
+    const eased = 1 - (1 - progress) ** 3;
+    graph.zoomTo(startZoom + (targetZoom - startZoom) * eased, { maxScale: targetZoom });
+    graph.centerCell(node);
+    if (progress < 1) focusZoomFrame = requestAnimationFrame(frame);
+    else focusZoomFrame = null;
+  };
+  focusZoomFrame = requestAnimationFrame(frame);
+};
 const focusNode = async (id: string, zoom = false) => {
   await nextTick();
   const node = graph?.getCellById(id);
   if (!node || !graph) return;
   graph.centerCell(node);
-  if (zoom) graph.zoomTo(1.35, { maxScale: 1.35 });
+  if (zoom) animateFocusZoom(node, 1.25);
   graph.centerCell(node);
 };
 const reset = () => { localPositions = new Map((props.model?.entities || []).map((entity, index) => [entityId(entity), { x: 40 + (index % 3) * 360, y: 40 + Math.floor(index / 3) * 300 }])); rebuild(); };
@@ -238,7 +261,7 @@ onMounted(() => {
 // X6 node interaction look like a model update, rebuilding cells during a drag.
 watch(() => [props.model, props.search], rebuild);
 watch(() => [props.selectedEntityId, props.selectedBehaviorKey, props.selectedRelationshipId], syncSelection);
-onBeforeUnmount(() => { graph?.dispose(); graph = null; });
+onBeforeUnmount(() => { if (focusZoomFrame !== null) cancelAnimationFrame(focusZoomFrame); graph?.dispose(); graph = null; });
 </script>
 
 <template><div ref="container" class="h-full w-full" /></template>
