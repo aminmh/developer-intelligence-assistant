@@ -206,9 +206,10 @@ const syncSelection = () => {
     });
   });
 };
-const fit = () => graph?.zoomToFit({ padding: 24, maxScale: 1.2 });
+const fit = () => graph?.zoomToFit({ padding: 48, maxScale: 0.75 });
 const zoomIn = () => graph?.zoom(0.15);
 const zoomOut = () => graph?.zoom(-0.15);
+const revealLayout = () => graph?.zoomToFit({ padding: 48, maxScale: 0.75 });
 const animateFocusZoom = (node: Node, targetZoom: number) => {
   if (!graph) return;
   if (focusZoomFrame !== null) cancelAnimationFrame(focusZoomFrame);
@@ -244,7 +245,7 @@ const focusNode = async (id: string, zoom = false) => {
 const reset = () => {
   prettifyPass = 0;
   applyPositions(initialPositions(props.model?.entities || []));
-  graph?.centerContent();
+  revealLayout();
 };
 const prettify = async (expand = true) => {
   if (!props.model) return;
@@ -288,10 +289,10 @@ const prettify = async (expand = true) => {
     applyPositions(collisionFreePositions(nodes, positions, spacing.gap));
   } catch {
     applyPositions(defaultPositions(entities, spacing.gap));
-    graph?.centerContent();
+    revealLayout();
     return;
   }
-  graph?.centerContent();
+  revealLayout();
 };
 
 defineExpose({ fit, zoomIn, zoomOut, focusNode, reset, prettify });
