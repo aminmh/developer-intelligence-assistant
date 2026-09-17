@@ -85,12 +85,20 @@ const prettifySpacing = (expand: boolean) => {
 const visible = (entity: DomainEntity) => {
   return entityMatchesModelSearch(entity, props.search || '');
 };
+const backendPositionFor = (entity: DomainEntity) => {
+  const entityNodeId = entityId(entity).toLowerCase();
+  const namedNodeId = `node-${entity.name}`.toLowerCase();
+  const backendNode = (props.model?.antv_x6?.nodes || []).find((node) => {
+    const id = String(node.id || '').toLowerCase();
+    return id === entityNodeId || id === namedNodeId;
+  });
+  return backendNode?.position || (typeof backendNode?.x === 'number' && typeof backendNode?.y === 'number' ? { x: backendNode.x, y: backendNode.y } : null);
+};
 
 const nodeFor = (entity: DomainEntity, index: number, isVisible: boolean) => {
   const id = entityId(entity);
   const size = dimensions(entity);
-  const backendNode = (props.model?.antv_x6?.nodes || []).find((node) => node.id === id || node.id === `node-${entity.name}`);
-  const backendPosition = backendNode?.position || (typeof backendNode?.x === 'number' && typeof backendNode?.y === 'number' ? { x: backendNode.x, y: backendNode.y } : null);
+  const backendPosition = backendPositionFor(entity);
   const position = localPositions.get(id) || backendPosition || { x: 40 + (index % 3) * 360, y: 40 + Math.floor(index / 3) * 300 };
   const portY = (fieldIndex: number) => 58 + fieldIndex * 25 + 12;
   return {
@@ -123,7 +131,7 @@ const nodeFor = (entity: DomainEntity, index: number, isVisible: boolean) => {
   };
 };
 
-const rebuild = () => {
+const rebuild = (fit = true) => {
   if (!graph || !props.model) return;
   graph.clearCells();
   const entities = props.model.entities || [];
@@ -154,7 +162,7 @@ const rebuild = () => {
       data: relationship || rawEdge.data || {},
     } as any];
   }));
-  graph.zoomToFit({ padding: 24, maxScale: 1.2 });
+  if (fit) graph.zoomToFit({ padding: 24, maxScale: 1.2 });
 };
 
 const selectNode = (cell: Node) => {
@@ -218,7 +226,12 @@ const focusNode = async (id: string, zoom = false) => {
   if (zoom) animateFocusZoom(node, 0.75);
   graph.centerCell(node);
 };
-const reset = () => { prettifyPass = 0; localPositions = defaultPositions(props.model?.entities || []); rebuild(); };
+const reset = () => {
+  prettifyPass = 0;
+  localPositions = new Map();
+  rebuild(false);
+  graph?.centerContent();
+};
 const prettify = async (expand = true) => {
   if (!props.model) return;
   const spacing = prettifySpacing(expand);
@@ -261,10 +274,12 @@ const prettify = async (expand = true) => {
     localPositions = collisionFreePositions(nodes, positions, spacing.gap);
   } catch {
     localPositions = defaultPositions(entities, spacing.gap);
-    rebuild();
+    rebuild(false);
+    graph?.centerContent();
     return;
   }
-  rebuild();
+  rebuild(false);
+  graph?.centerContent();
 };
 
 defineExpose({ fit, zoomIn, zoomOut, focusNode, reset, prettify });
