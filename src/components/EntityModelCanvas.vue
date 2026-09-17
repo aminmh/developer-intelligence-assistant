@@ -6,7 +6,7 @@ import type { Edge, Node } from '@antv/x6';
 import type { DomainEntity, DomainEntityBehavior, DomainEntityRelationship, DomainModelGraphEdge, DomainModelResponse } from '../types';
 import { registerEntityNode } from '../utils/registerEntityNode';
 import { entityMatchesModelSearch, entityModelBehaviorKey, entityModelBehaviors } from '../utils/entityModelSearch';
-import { hasEntityLayoutCollisions, resolveEntityLayoutCollisions } from '../utils/entityModelLayout';
+import { completeEntityLayoutPositions, hasEntityLayoutCollisions, resolveEntityLayoutCollisions } from '../utils/entityModelLayout';
 
 const props = defineProps<{
   model: DomainModelResponse | null;
@@ -142,7 +142,7 @@ const applyPositions = (positions: Map<string, { x: number; y: number }>) => {
   localPositions = new Map(positions);
   graph?.getNodes().forEach((node) => {
     const position = localPositions.get(node.id);
-    if (position) node.setPosition(position.x, position.y);
+    if (position && Number.isFinite(position.x) && Number.isFinite(position.y)) node.setPosition(position.x, position.y);
   });
 };
 
@@ -286,7 +286,8 @@ const prettify = async (expand = true) => {
       x: Math.max(40, node.x - ((node.size as any)?.[0] || 0) / 2),
       y: Math.max(40, node.y - ((node.size as any)?.[1] || 0) / 2),
     }));
-    applyPositions(collisionFreePositions(nodes, positions, spacing.gap));
+    const completedPositions = completeEntityLayoutPositions(nodes, positions, defaultPositions(entities, spacing.gap));
+    applyPositions(collisionFreePositions(nodes, completedPositions, spacing.gap));
   } catch {
     applyPositions(defaultPositions(entities, spacing.gap));
     revealLayout();

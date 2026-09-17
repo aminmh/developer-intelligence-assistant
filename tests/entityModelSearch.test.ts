@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import type { DomainEntity } from '../src/types';
-import { hasEntityLayoutCollisions, resolveEntityLayoutCollisions } from '../src/utils/entityModelLayout';
+import { completeEntityLayoutPositions, hasEntityLayoutCollisions, resolveEntityLayoutCollisions } from '../src/utils/entityModelLayout';
 import { findEntityModelSearchMatches, wrapEntityModelSearchIndex } from '../src/utils/entityModelSearch';
 
 const entities: DomainEntity[] = [
@@ -78,4 +78,21 @@ test('larger prettify gaps produce a more spacious collision-free layout', () =>
   const spacious = resolveEntityLayoutCollisions(nodes, positions, 160);
   assert.equal(hasEntityLayoutCollisions(nodes, spacious, 160), false);
   assert.ok((spacious.get('two')?.y || 0) > (compact.get('two')?.y || 0));
+});
+
+test('prettify replaces missing layout-engine coordinates before rendering nodes', () => {
+  const nodes = [
+    { id: 'placed', width: 280, height: 180 },
+    { id: 'isolated', width: 280, height: 180 },
+  ];
+  const positions = new Map([
+    ['placed', { x: 120, y: 200 }],
+    ['isolated', { x: Number.NaN, y: Number.NaN }],
+  ]);
+  const fallbacks = new Map([
+    ['isolated', { x: 480, y: 200 }],
+  ]);
+  const completed = completeEntityLayoutPositions(nodes, positions, fallbacks);
+  assert.deepEqual(completed.get('placed'), { x: 120, y: 200 });
+  assert.deepEqual(completed.get('isolated'), { x: 480, y: 200 });
 });

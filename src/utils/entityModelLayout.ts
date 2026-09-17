@@ -9,6 +9,17 @@ export interface EntityLayoutPosition {
   y: number;
 }
 
+/** Replaces missing or invalid layout-engine coordinates with a known safe position. */
+export const completeEntityLayoutPositions = (
+  nodes: EntityLayoutNode[],
+  positions: Map<string, EntityLayoutPosition>,
+  fallbacks: Map<string, EntityLayoutPosition>,
+) => new Map(nodes.map((node, index) => {
+  const position = positions.get(node.id);
+  if (position && Number.isFinite(position.x) && Number.isFinite(position.y)) return [node.id, position];
+  return [node.id, fallbacks.get(node.id) || { x: 40 + (index % 3) * 360, y: 40 + Math.floor(index / 3) * 300 }];
+}));
+
 const intersects = (
   left: EntityLayoutPosition & EntityLayoutNode,
   right: EntityLayoutPosition & EntityLayoutNode,
