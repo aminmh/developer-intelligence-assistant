@@ -131,6 +131,21 @@ const nodeFor = (entity: DomainEntity, index: number, isVisible: boolean) => {
   };
 };
 
+const initialPositions = (entities: DomainEntity[]) => new Map(entities.map((entity, index) => {
+  const id = entityId(entity);
+  return [id, backendPositionFor(entity) || { x: 40 + (index % 3) * 360, y: 40 + Math.floor(index / 3) * 300 }];
+}));
+
+// Layout actions operate on the existing X6 cells. Rebuilding the graph here
+// can discard the visible move before the canvas has a chance to paint it.
+const applyPositions = (positions: Map<string, { x: number; y: number }>) => {
+  localPositions = new Map(positions);
+  graph?.getNodes().forEach((node) => {
+    const position = localPositions.get(node.id);
+    if (position) node.setPosition(position.x, position.y);
+  });
+};
+
 const rebuild = (fit = true) => {
   if (!graph || !props.model) return;
   graph.clearCells();
@@ -228,8 +243,7 @@ const focusNode = async (id: string, zoom = false) => {
 };
 const reset = () => {
   prettifyPass = 0;
-  localPositions = new Map();
-  rebuild(false);
+  applyPositions(initialPositions(props.model?.entities || []));
   graph?.centerContent();
 };
 const prettify = async (expand = true) => {
@@ -271,14 +285,12 @@ const prettify = async (expand = true) => {
       x: Math.max(40, node.x - ((node.size as any)?.[0] || 0) / 2),
       y: Math.max(40, node.y - ((node.size as any)?.[1] || 0) / 2),
     }));
-    localPositions = collisionFreePositions(nodes, positions, spacing.gap);
+    applyPositions(collisionFreePositions(nodes, positions, spacing.gap));
   } catch {
-    localPositions = defaultPositions(entities, spacing.gap);
-    rebuild(false);
+    applyPositions(defaultPositions(entities, spacing.gap));
     graph?.centerContent();
     return;
   }
-  rebuild(false);
   graph?.centerContent();
 };
 
