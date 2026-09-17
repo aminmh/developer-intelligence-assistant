@@ -140,7 +140,12 @@ const rebuild = () => {
   graph.zoomToFit({ padding: 24, maxScale: 1.2 });
 };
 
-const selectNode = (cell: Node) => { const entity = entityFromNodeId(cell.id); if (entity) emit('select-entity', entity); };
+const selectNode = (cell: Node) => {
+  const entity = entityFromNodeId(cell.id);
+  if (!entity) return;
+  emit('select-entity', entity);
+  focusNode(cell.id);
+};
 const selectEdge = (cell: Edge) => { const relationship = cell.getData() as DomainEntityRelationship; if (relationship?.target_entity) emit('select-relationship', relationship); };
 const syncSelection = () => {
   if (!graph) return;
@@ -242,7 +247,7 @@ defineExpose({ fit, zoomIn, zoomOut, focusNode, reset, prettify });
 onMounted(() => {
   if (!container.value) return;
   registerEntityNode();
-  graph = new Graph({ container: container.value, background: { color: '#0b1020' }, grid: { visible: true, type: 'dot', args: { color: '#1e293b', thickness: 1 } }, panning: true, mousewheel: { enabled: true, modifiers: ['ctrl', 'meta'] }, interacting: { nodeMovable: true, edgeMovable: false, edgeLabelMovable: false } });
+  graph = new Graph({ container: container.value, background: { color: '#0b1020' }, grid: { visible: true, type: 'dot', args: { color: '#1e293b', thickness: 1 } }, panning: true, mousewheel: { enabled: true, modifiers: ['ctrl', 'meta'] }, interacting: { nodeMovable: false, edgeMovable: false, edgeLabelMovable: false } });
   graph.on('node:click', ({ node, e }) => {
     const target = e?.target as Element | null;
     const behaviorElement = target?.closest?.('[data-behavior-key]') as HTMLElement | null;
@@ -255,7 +260,6 @@ onMounted(() => {
     selectNode(node);
   });
   graph.on('edge:click', ({ edge }) => selectEdge(edge));
-  graph.on('node:moved', ({ node }) => localPositions.set(node.id, node.getPosition()));
   emit('ready', graph);
   rebuild();
 });
