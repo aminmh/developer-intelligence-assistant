@@ -6,6 +6,7 @@ import type { Edge, Node } from '@antv/x6';
 import type { DomainEntity, DomainEntityBehavior, DomainEntityRelationship, DomainModelGraphEdge, DomainModelResponse } from '../types';
 import { registerEntityNode } from '../utils/registerEntityNode';
 import { entityMatchesModelSearch, entityModelBehaviorKey, entityModelBehaviors } from '../utils/entityModelSearch';
+import { hasEntityLayoutCollisions, resolveEntityLayoutCollisions } from '../utils/entityModelLayout';
 
 const props = defineProps<{
   model: DomainModelResponse | null;
@@ -65,6 +66,16 @@ const relationshipForEdge = (edge: DomainModelGraphEdge, index: number): DomainE
 };
 
 const dimensions = (entity: DomainEntity) => ({ width: 280, height: Math.max(150, 92 + Math.min(14, entity.properties.length) * 25 + Math.min(10, entityModelBehaviors(entity).length) * 25 + (entity.properties.length > 14 ? 20 : 0)) });
+const collisionFreePositions = (nodes: Array<{ id: string; width: number; height: number }>, positions: Map<string, { x: number; y: number }>) => {
+  const resolved = resolveEntityLayoutCollisions(nodes, positions, 80);
+  if (hasEntityLayoutCollisions(nodes, resolved, 80)) throw new Error('Entity layout still contains overlapping nodes.');
+  return resolved;
+};
+const defaultPositions = (entities: DomainEntity[]) => {
+  const nodes = entities.map((entity) => ({ id: entityId(entity), ...dimensions(entity) }));
+  const positions = new Map(nodes.map((node, index) => [node.id, { x: 40 + (index % 3) * 360, y: 40 + Math.floor(index / 3) * 300 }]));
+  return collisionFreePositions(nodes, positions);
+};
 const visible = (entity: DomainEntity) => {
   return entityMatchesModelSearch(entity, props.search || '');
 };
@@ -201,7 +212,7 @@ const focusNode = async (id: string, zoom = false) => {
   if (zoom) animateFocusZoom(node, 0.75);
   graph.centerCell(node);
 };
-const reset = () => { localPositions = new Map((props.model?.entities || []).map((entity, index) => [entityId(entity), { x: 40 + (index % 3) * 360, y: 40 + Math.floor(index / 3) * 300 }])); rebuild(); };
+const reset = () => { localPositions = defaultPositions(props.model?.entities || []); rebuild(); };
 const prettify = async () => {
   if (!props.model) return;
   const entities = props.model.entities || [];
@@ -240,9 +251,10 @@ const prettify = async () => {
       x: Math.max(40, node.x - ((node.size as any)?.[0] || 0) / 2),
       y: Math.max(40, node.y - ((node.size as any)?.[1] || 0) / 2),
     }));
-    localPositions = positions;
+    localPositions = collisionFreePositions(nodes, positions);
   } catch {
-    reset();
+    localPositions = defaultPositions(entities);
+    rebuild();
     return;
   }
   rebuild();

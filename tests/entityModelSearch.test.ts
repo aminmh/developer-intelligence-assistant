@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import type { DomainEntity } from '../src/types';
+import { hasEntityLayoutCollisions, resolveEntityLayoutCollisions } from '../src/utils/entityModelLayout';
 import { findEntityModelSearchMatches, wrapEntityModelSearchIndex } from '../src/utils/entityModelSearch';
 
 const entities: DomainEntity[] = [
@@ -47,4 +48,19 @@ test('wraps previous and next navigation indexes', () => {
   assert.equal(wrapEntityModelSearchIndex(-1, 2), 1);
   assert.equal(wrapEntityModelSearchIndex(2, 2), 0);
   assert.equal(wrapEntityModelSearchIndex(0, 0), -1);
+});
+
+test('prettify collision resolution separates variable-size node rectangles', () => {
+  const nodes = [
+    { id: 'one', width: 280, height: 180 },
+    { id: 'two', width: 280, height: 260 },
+    { id: 'three', width: 280, height: 150 },
+  ];
+  const positions = new Map([
+    ['one', { x: 40, y: 40 }],
+    ['two', { x: 100, y: 80 }],
+    ['three', { x: 160, y: 120 }],
+  ]);
+  assert.equal(hasEntityLayoutCollisions(nodes, positions, 80), true);
+  assert.equal(hasEntityLayoutCollisions(nodes, resolveEntityLayoutCollisions(nodes, positions, 80), 80), false);
 });
