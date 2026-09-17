@@ -309,7 +309,7 @@ const focusSearchMatch = async (index: number) => {
   selectedRelationshipId.value = '';
   clearSelectedBehavior();
   await nextTick();
-  await entityCanvas.value?.focusNode(match.entityId);
+  await entityCanvas.value?.focusNode(match.entityId, match.rank === 0);
 };
 const focusCurrentSearchMatch = () => {
   if (search.value.trim()) focusSearchMatch(selectedSearchMatchIndex.value < 0 ? 0 : selectedSearchMatchIndex.value);

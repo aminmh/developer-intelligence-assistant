@@ -163,10 +163,13 @@ const syncSelection = () => {
 const fit = () => graph?.zoomToFit({ padding: 24, maxScale: 1.2 });
 const zoomIn = () => graph?.zoom(0.15);
 const zoomOut = () => graph?.zoom(-0.15);
-const focusNode = async (id: string) => {
+const focusNode = async (id: string, zoom = false) => {
   await nextTick();
   const node = graph?.getCellById(id);
-  if (node) graph?.centerCell(node);
+  if (!node || !graph) return;
+  graph.centerCell(node);
+  if (zoom) graph.zoomTo(1.35, { maxScale: 1.35 });
+  graph.centerCell(node);
 };
 const reset = () => { localPositions = new Map((props.model?.entities || []).map((entity, index) => [entityId(entity), { x: 40 + (index % 3) * 360, y: 40 + Math.floor(index / 3) * 300 }])); rebuild(); };
 const prettify = async () => {

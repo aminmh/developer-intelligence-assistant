@@ -28,10 +28,30 @@ export const entityModelBehavior = (entity: DomainEntity, behavior: EntityBehavi
 );
 
 const normalized = (value: unknown) => String(value || '').trim().toLowerCase();
-const includesQuery = (values: unknown[], query: string) => values.some((value) => normalized(value).includes(query));
+const identifier = (value: unknown) => normalized(value).replace(/[^a-z0-9]/g, '');
+const singularIdentifier = (value: unknown) => {
+  const compact = identifier(value);
+  if (compact.endsWith('ies')) return `${compact.slice(0, -3)}y`;
+  return compact.endsWith('s') ? compact.slice(0, -1) : compact;
+};
+const matchesExactly = (value: unknown, query: string) => (
+  normalized(value) === query
+  || (Boolean(identifier(query)) && (
+    identifier(value) === identifier(query)
+    || singularIdentifier(value) === singularIdentifier(query)
+  ))
+);
+const includesQuery = (values: unknown[], query: string) => {
+  const compactQuery = identifier(query);
+  return values.some((value) => (
+    normalized(value).includes(query)
+    || (Boolean(compactQuery) && identifier(value).includes(compactQuery))
+  ));
+};
 
 const entityExactNames = (entity: DomainEntity) => [
   entity.name,
+  entity.id,
   (entity as any).class,
   (entity as any).class_name,
   (entity as any).model,
@@ -59,9 +79,9 @@ export const findEntityModelSearchMatches = (entities: DomainEntity[], query: st
   if (!needle) return [];
 
   return entities.flatMap((entity, index) => {
-    const exactEntity = entityExactNames(entity).some((value) => normalized(value) === needle);
+    const exactEntity = entityExactNames(entity).some((value) => matchesExactly(value, needle));
     const exactBehavior = entityModelBehaviors(entity).some((behavior) => (
-      behaviorSearchValues(entity, behavior).some((value) => normalized(value) === needle)
+      behaviorSearchValues(entity, behavior).some((value) => matchesExactly(value, needle))
     ));
     const partial = includesQuery(entitySearchValues(entity), needle);
     if (!partial) return [];

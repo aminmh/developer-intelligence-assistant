@@ -33,6 +33,16 @@ test('finds partial entity metadata and property matches, and reports no match',
   assert.deepEqual(findEntityModelSearchMatches(entities, 'missing').map((match) => match.entityId), []);
 });
 
+test('matches class identifiers across camelCase, snake_case, and plural table forms', () => {
+  const activityLog: DomainEntity = {
+    id: 'entity:activity_logs', name: 'activity_logs', namespace: 'App\\Models', table: 'activity_logs',
+    stereotype: 'Model', framework: 'Laravel', properties: [], methods: [],
+  };
+  const matches = findEntityModelSearchMatches([activityLog], 'ActivityLog');
+  assert.deepEqual(matches.map((match) => match.entityId), ['entity:activity_logs']);
+  assert.equal(matches[0].rank, 0);
+});
+
 test('wraps previous and next navigation indexes', () => {
   assert.equal(wrapEntityModelSearchIndex(-1, 2), 1);
   assert.equal(wrapEntityModelSearchIndex(2, 2), 0);
