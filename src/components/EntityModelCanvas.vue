@@ -209,7 +209,13 @@ const prettify = async () => {
     const size = dimensions(entity);
     return { id: entityId(entity), width: size.width, height: size.height };
   });
-  const edges = (props.model.antv_x6?.edges || []).flatMap((edge) => {
+  const rawEdges = props.model.antv_x6?.edges || entities.flatMap((entity) => (entity.relationships || []).map((relationship) => ({
+    id: relationship.id,
+    source: entityId(entity),
+    target: relationship.target_entity,
+    data: relationship,
+  })));
+  const edges = rawEdges.flatMap((edge) => {
     const source = entityFromNodeId(edgeValue(edge, 'source') || '');
     const target = entityFromNodeId(edgeValue(edge, 'target') || '');
     if (!source || !target) return [];
@@ -223,8 +229,8 @@ const prettify = async () => {
     const layout = new DagreLayout({
       type: 'dagre',
       rankdir: 'LR',
-      nodesep: 70,
-      ranksep: 150,
+      nodesep: 120,
+      ranksep: 220,
       controlPoints: false,
       nodeSize: (node: { width: number; height: number }) => [node.width, node.height],
     });
@@ -247,7 +253,7 @@ defineExpose({ fit, zoomIn, zoomOut, focusNode, reset, prettify });
 onMounted(() => {
   if (!container.value) return;
   registerEntityNode();
-  graph = new Graph({ container: container.value, background: { color: '#0b1020' }, grid: { visible: true, type: 'dot', args: { color: '#1e293b', thickness: 1 } }, panning: true, mousewheel: { enabled: true, modifiers: ['ctrl', 'meta'] }, interacting: { nodeMovable: false, edgeMovable: false, edgeLabelMovable: false } });
+  graph = new Graph({ container: container.value, background: { color: '#0b1020' }, grid: { visible: true, type: 'dot', args: { color: '#1e293b', thickness: 1 } }, panning: true, mousewheel: { enabled: true, modifiers: ['ctrl', 'meta'] }, interacting: { nodeMovable: true, edgeMovable: false, edgeLabelMovable: false } });
   graph.on('node:click', ({ node, e }) => {
     const target = e?.target as Element | null;
     const behaviorElement = target?.closest?.('[data-behavior-key]') as HTMLElement | null;
@@ -260,6 +266,7 @@ onMounted(() => {
     selectNode(node);
   });
   graph.on('edge:click', ({ edge }) => selectEdge(edge));
+  graph.on('node:moved', ({ node }) => localPositions.set(node.id, node.getPosition()));
   emit('ready', graph);
   rebuild();
 });
