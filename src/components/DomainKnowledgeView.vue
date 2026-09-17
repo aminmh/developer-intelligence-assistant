@@ -19,7 +19,7 @@ import type {
   DomainRelationship,
 } from '../types';
 import EntityModelCanvas from './EntityModelCanvas.vue';
-import { entityModelBehaviorKey, entityModelBehaviors, findEntityModelBehavior, findEntityModelSearchMatches, wrapEntityModelSearchIndex } from '../utils/entityModelSearch';
+import { entityModelBehaviorKey, entityModelBehaviors, findEntityModelBehavior, findEntityModelSearchMatches, normalizeEntityModelEntityIds, wrapEntityModelSearchIndex } from '../utils/entityModelSearch';
 
 const emit = defineEmits<{
   (event: 'askAboutConcept', concept: DomainConcept, analysis: AnalysisSession): void;
@@ -238,7 +238,7 @@ const loadEntityModel = async () => {
     const response = await makeRequest(`/api/analysis/${encodeURIComponent(selectedAnalysisId.value)}/domain-model`);
     const data = await response.json() as DomainModelResponse & { detail?: string };
     if (!response.ok) throw new Error(data.detail || 'Failed to load entity model.');
-    entityModel.value = { ...data, entities: Array.isArray(data.entities) ? data.entities : [], plantuml: data.plantuml || '' };
+    entityModel.value = { ...data, entities: normalizeEntityModelEntityIds(Array.isArray(data.entities) ? data.entities : []), plantuml: data.plantuml || '' };
     const first = entityModel.value.entities[0];
     if (first) selectedEntityId.value = first.id || `entity:${first.name}`;
   } catch (cause: any) {
@@ -258,7 +258,7 @@ const enrichEntityModel = async () => {
     const data = await response.json() as DomainModelResponse & { model?: DomainModelResponse; detail?: string };
     if (!response.ok) throw new Error(data.detail || 'Entity model enrichment failed.');
     const nextModel = data.model || data;
-    entityModel.value = { ...nextModel, entities: Array.isArray(nextModel.entities) ? nextModel.entities : entityModel.value?.entities || [], plantuml: nextModel.plantuml || entityModel.value?.plantuml || '', enriched: true };
+    entityModel.value = { ...nextModel, entities: normalizeEntityModelEntityIds(Array.isArray(nextModel.entities) ? nextModel.entities : entityModel.value?.entities || []), plantuml: nextModel.plantuml || entityModel.value?.plantuml || '', enriched: true };
   } catch (cause: any) {
     error.value = cause?.message || 'Entity model enrichment failed; deterministic data is still available.';
   } finally {

@@ -10,6 +10,24 @@ type EntityBehavior = string | DomainEntityBehavior;
 
 export const entityModelEntityId = (entity: DomainEntity) => entity.id || `entity:${entity.name}`;
 
+/** Gives duplicate source entities stable IDs for one rendered domain model. */
+export const normalizeEntityModelEntityIds = (entities: DomainEntity[]) => {
+  const sourceIds = entities.map(entityModelEntityId);
+  const counts = new Map<string, number>();
+  sourceIds.forEach((id) => counts.set(id, (counts.get(id) || 0) + 1));
+  const occurrences = new Map<string, number>();
+  return entities.map((entity, index) => {
+    const sourceId = sourceIds[index];
+    if ((counts.get(sourceId) || 0) < 2) return entity;
+    const occurrence = occurrences.get(sourceId) || 0;
+    occurrences.set(sourceId, occurrence + 1);
+    return {
+      ...entity,
+      id: `${sourceId}:${entity.namespace || entity.table || 'duplicate'}:${occurrence}`,
+    };
+  });
+};
+
 export const entityModelBehaviorKey = (entity: DomainEntity, behavior: EntityBehavior) => (
   typeof behavior === 'string'
     ? `${entity.name}::${behavior}()`

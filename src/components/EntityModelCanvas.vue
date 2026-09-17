@@ -29,7 +29,17 @@ let localPositions = new Map<string, { x: number; y: number }>();
 let focusZoomFrame: number | null = null;
 let prettifyPass = 0;
 
-const entityId = (entity: DomainEntity) => entity.id || `entity:${entity.name}`;
+const rawEntityId = (entity: DomainEntity) => entity.id || `entity:${entity.name}`;
+// Analysis data can contain same-named entities from different namespaces. X6
+// requires every rendered node ID to be unique, even when the source model is
+// not. Keep the original ID whenever it is unique, and scope duplicates locally.
+const entityId = (entity: DomainEntity) => {
+  const rawId = rawEntityId(entity);
+  const duplicates = (props.model?.entities || []).filter((item) => rawEntityId(item) === rawId);
+  if (duplicates.length < 2) return rawId;
+  const index = duplicates.indexOf(entity);
+  return `${rawId}:${entity.namespace || entity.table || index || 'duplicate'}:${index}`;
+};
 const entityFromNodeId = (id: string) => {
   const model = props.model;
   const needle = String(id || '').toLowerCase();

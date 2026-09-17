@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 import type { DomainEntity } from '../src/types';
 import { completeEntityLayoutPositions, hasEntityLayoutCollisions, resolveEntityLayoutCollisions } from '../src/utils/entityModelLayout';
-import { findEntityModelSearchMatches, wrapEntityModelSearchIndex } from '../src/utils/entityModelSearch';
+import { findEntityModelSearchMatches, normalizeEntityModelEntityIds, wrapEntityModelSearchIndex } from '../src/utils/entityModelSearch';
 
 const entities: DomainEntity[] = [
   {
@@ -95,4 +95,24 @@ test('prettify replaces missing layout-engine coordinates before rendering nodes
   const completed = completeEntityLayoutPositions(nodes, positions, fallbacks);
   assert.deepEqual(completed.get('placed'), { x: 120, y: 200 });
   assert.deepEqual(completed.get('isolated'), { x: 480, y: 200 });
+});
+
+test('prettify collision resolution supports same-named entities once they have distinct canvas IDs', () => {
+  const nodes = [
+    { id: 'entity:AbstractTenantAwareModel::0', width: 280, height: 150 },
+    { id: 'entity:AbstractTenantAwareModel:App\\Models:1', width: 280, height: 150 },
+  ];
+  const positions = new Map(nodes.map((node) => [node.id, { x: 40, y: 40 }]));
+  const resolved = resolveEntityLayoutCollisions(nodes, positions, 120);
+  assert.equal(hasEntityLayoutCollisions(nodes, resolved, 120), false);
+});
+
+test('normalizes duplicate source entity IDs before search, selection, and layout', () => {
+  const normalizedEntities = normalizeEntityModelEntityIds([
+    { ...entities[0], id: '', name: 'AbstractTenantAwareModel', namespace: '' },
+    { ...entities[1], id: '', name: 'AbstractTenantAwareModel', namespace: 'App\\Models' },
+  ]);
+  assert.equal(new Set(normalizedEntities.map((entity) => entity.id)).size, 2);
+  assert.match(normalizedEntities[0].id || '', /^entity:AbstractTenantAwareModel:orders:0$/);
+  assert.equal(normalizedEntities[1].id, 'entity:AbstractTenantAwareModel:App\\Models:1');
 });
