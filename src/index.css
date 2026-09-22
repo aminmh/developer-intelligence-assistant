@@ -458,9 +458,9 @@ body {
 
 .monitor-wave-neutral { color: #38bdf8; }
 .monitor-wave-green { color: #34d399; }
-.monitor-wave-yellow { color: #facc15; }
-.monitor-wave-orange { color: #fb923c; }
-.monitor-wave-red { color: #fb7185; }
+.monitor-wave-yellow { color: #FFFF00; }
+.monitor-wave-orange { color: #FF9100; }
+.monitor-wave-red { color: #FF1744; }
 
 @keyframes brand-logo-breathe {
   0%, 100% {
