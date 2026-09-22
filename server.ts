@@ -8,6 +8,7 @@ import { createServer as createViteServer } from 'vite';
 import dotenv from 'dotenv';
 import { RAGService } from './src/server/rag';
 import { UploadedFile } from './src/types';
+import { openDocument, complete as completeDockerfile, format as formatDockerfile, closeSession as closeDockerfileSession, closeAllSessions, bridgeStatus } from './src/server/dockerfileLanguageBridge';
 
 dotenv.config();
 
@@ -46,7 +47,6 @@ const jobToQueryId = new Map<string, string>();
 //   /api/query/*          chat flow — orchestrates + streams, answers at result
 //   /api/answer/*         direct python /answer (no orchestration)
 //   /api/settings         GET/PUT config (masked secrets) + /api/health/*
-//   /api/sandbox/*        status, command (python /sandbox/*), project analyze,
 //                         analysis save/list/get/delete (python /project/analyze,
 //                         /analysis). Static structure census + code-index
 //                         preview jobs (python /structure/analyze, /code/index)
@@ -357,6 +357,22 @@ async function startServer() {
   app.use(express.json({ limit: '100mb' }));
   app.use(express.urlencoded({ limit: '100mb', extended: true }));
 
+  // Dockerfile language intelligence is isolated from runtime management.
+  app.get('/api/dockerfile/language/status', (_req, res) => res.json({ success: true, ...bridgeStatus() }));
+  app.post('/api/dockerfile/language/open', async (req, res) => {
+    try { res.json({ success: true, ...(await openDocument(req.body ?? {})) }); }
+    catch (error: any) { res.status(400).json({ success: false, error: error?.message || 'Dockerfile language server unavailable.' }); }
+  });
+  app.post('/api/dockerfile/language/complete', async (req, res) => {
+    try { res.json({ success: true, items: await completeDockerfile(req.body ?? {}) }); }
+    catch (error: any) { res.status(400).json({ success: false, error: error?.message || 'Completion unavailable.' }); }
+  });
+  app.post('/api/dockerfile/language/format', async (req, res) => {
+    try { res.json({ success: true, edits: await formatDockerfile(req.body ?? {}) }); }
+    catch (error: any) { res.status(400).json({ success: false, error: error?.message || 'Formatting unavailable.' }); }
+  });
+  app.delete('/api/dockerfile/language/:sessionId', (req, res) => res.json({ success: closeDockerfileSession(req.params.sessionId) }));
+
   // CORS - allow cross-origin requests from any frontend origin
   app.use((req, res, next) => {
     res.setHeader('Access-Control-Allow-Origin', '*');
@@ -647,129 +663,7 @@ async function startServer() {
     }
   });
 
-  // Sandbox runner status (proxies to Python service).
-  app.get('/api/sandbox/status', async (req, res) => {
-    try {
-      const pyRes = await fetch(`${PYTHON_API_URL}/sandbox/status`);
-      if (!pyRes.ok) {
-        return res.status(pyRes.status).json({ success: false, error: 'Sandbox status check failed.' });
-      }
-      res.json(await pyRes.json());
-    } catch (error: any) {
-      console.error('Failed to check sandbox status via Python:', error.message);
-      res.status(500).json({ success: false, error: error.message });
-    }
-  });
-
-  app.post('/api/sandbox/remote/test', async (req, res) => {
-    try {
-      const pyRes = await fetch(`${PYTHON_API_URL}/sandbox/remote/test`, {
-        method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(req.body ?? {}),
-      });
-      res.status(pyRes.status).json(await pyRes.json());
-    } catch (error: any) {
-      res.status(500).json({ success: false, error: 'Remote sandbox test could not reach the Python service.' });
-    }
-  });
-
-  app.get('/api/sandbox/remote/monitor', async (req, res) => {
-    try {
-      const pyRes = await fetch(`${PYTHON_API_URL}/sandbox/remote/monitor`);
-      res.status(pyRes.status).json(await pyRes.json());
-    } catch (error: any) {
-      res.status(500).json({ success: false, error: 'Remote sandbox monitor is unavailable.' });
-    }
-  });
-
-  app.post('/api/sandbox/remote/initialize', async (req, res) => {
-    try {
-      const pyRes = await fetch(`${PYTHON_API_URL}/sandbox/remote/initialize`, {
-        method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(req.body ?? {}),
-      });
-      res.status(pyRes.status).json(await pyRes.json());
-    } catch (error: any) {
-      res.status(500).json({ success: false, error: 'Remote sandbox initialization could not start.' });
-    }
-  });
-
-  app.get('/api/sandbox/remote/initialize/:jobId', async (req, res) => {
-    try {
-      const pyRes = await fetch(`${PYTHON_API_URL}/sandbox/remote/initialize/${encodeURIComponent(req.params.jobId)}`);
-      res.status(pyRes.status).json(await pyRes.json());
-    } catch (error: any) {
-      res.status(500).json({ success: false, error: 'Remote sandbox initialization status is unavailable.' });
-    }
-  });
-
-  // Launch a sandbox analysis orchestration job (extract → framework profile
-  // → composer install in DinD → runsc probes). Returns { job_id }.
-  app.post('/api/project/analyze', async (req, res) => {
-    try {
-      const pyRes = await fetch(`${PYTHON_API_URL}/project/analyze`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(req.body ?? {}),
-      });
-      if (!pyRes.ok) {
-        const body = await pyRes.json().catch(() => ({}));
-        return res.status(pyRes.status).json({ success: false, error: body.detail || body.error || 'Sandbox analysis failed to start.' });
-      }
-      res.json(await pyRes.json());
-    } catch (error: any) {
-      console.error('Failed to start sandbox analysis via Python:', error.message);
-      res.status(500).json({ success: false, error: error.message });
-    }
-  });
-
-  // Run an arbitrary shell command in the staged project sandbox.
-  app.post('/api/sandbox/command', async (req, res) => {
-    try {
-      const pyRes = await fetch(`${PYTHON_API_URL}/sandbox/command`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(req.body ?? {}),
-      });
-      if (!pyRes.ok) {
-        const body = await pyRes.json().catch(() => ({}));
-        return res.status(pyRes.status).json({ success: false, error: body.detail || body.error || 'Sandbox command failed.' });
-      }
-      res.json(await pyRes.json());
-    } catch (error: any) {
-      console.error('Failed to run sandbox command via Python:', error.message);
-      res.status(500).json({ success: false, error: error.message });
-    }
-  });
-
-  // Run one route request in the staged project; optionally starts the
-  // database-evaluation lifecycle for the same request.
-  app.post('/api/sandbox/request', async (req, res) => {
-    try {
-      const pyRes = await fetch(`${PYTHON_API_URL}/sandbox/request`, {
-        method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(req.body ?? {}),
-      });
-      const data = await pyRes.json().catch(() => ({ detail: 'Sandbox request failed.' }));
-      return res.status(pyRes.status).json(data);
-    } catch (error: any) {
-      return res.status(500).json({ success: false, error: error?.message || 'Sandbox request failed.' });
-    }
-  });
-
-  // Poll an orchestration job status (carries sandbox object when done).
-  app.get('/api/project/analyze/:jobId/status', async (req, res) => {
-    try {
-      const pyRes = await fetch(`${PYTHON_API_URL}/orchestrate/${req.params.jobId}/status`);
-      if (!pyRes.ok) {
-        return res.status(pyRes.status).json({ success: false, error: 'Job status check failed.' });
-      }
-      res.json(await pyRes.json());
-    } catch (error: any) {
-      console.error('Failed to poll job status via Python:', error.message);
-      res.status(500).json({ success: false, error: error.message });
-    }
-  });
-
-  // Launch a static structure-profile job (deterministic, no sandbox) — or the
-  // full sandbox_analyze route when deep:true. Returns { job_id }.
+  // Launch a static structure-profile job. Returns { job_id }.
   app.post('/api/structure/analyze', async (req, res) => {
     try {
       const pyRes = await fetch(`${PYTHON_API_URL}/structure/analyze`, {
@@ -1745,6 +1639,9 @@ async function startServer() {
   app.listen(PORT, '0.0.0.0', () => {
     console.log(`[RAG Server] Running on http://localhost:${PORT}`);
   });
+  const cleanup = () => closeAllSessions();
+  process.once('SIGINT', cleanup);
+  process.once('SIGTERM', cleanup);
 }
 
 startServer();
