@@ -92,8 +92,12 @@ const prettifySpacing = (expand: boolean) => {
   const level = expand ? prettifyPass : 0;
   return { gap: 80 + level * 40, nodesep: 120 + level * 50, ranksep: 220 + level * 80 };
 };
-const visible = (entity: DomainEntity) => {
-  return entityMatchesModelSearch(entity, props.search || '');
+const syncVisibility = () => {
+  if (!graph) return;
+  // Search is a focus/navigation feature, not a destructive graph filter.
+  // Keep the complete model visible while the parent focuses the match.
+  graph.getNodes().forEach((node) => node.setVisible(true));
+  graph.getEdges().forEach((edge) => edge.setVisible(true));
 };
 const backendPositionFor = (entity: DomainEntity) => {
   const entityNodeId = entityId(entity).toLowerCase();
@@ -160,7 +164,7 @@ const rebuild = (fit = true) => {
   if (!graph || !props.model) return;
   graph.clearCells();
   const entities = props.model.entities || [];
-  const shown = new Set(entities.filter(visible).map(entityId));
+  const shown = new Set(entities.map(entityId));
   graph.addNodes(entities.map((entity, index) => nodeFor(entity, index, shown.has(entityId(entity)))));
   const rawEdges = props.model.antv_x6?.edges || [];
   const relationships = rawEdges.length ? rawEdges : entities.flatMap((entity) => (entity.relationships || []).map((relationship) => ({
@@ -331,7 +335,9 @@ onMounted(() => {
 // Model loads and enrichment replace the model object. Watching it deeply makes
 // X6 node interaction look like a model update, rebuilding cells during a drag.
 watch(() => props.model, () => { prettifyPass = 0; rebuild(); });
-watch(() => props.search, rebuild);
+// Search only changes visibility. Rebuilding X6 cells for every keystroke can
+// leave stale custom Vue-shape views behind until the component is remounted.
+watch(() => props.search, syncVisibility);
 watch(() => [props.selectedEntityId, props.selectedBehaviorKey, props.selectedRelationshipId], syncSelection);
 onBeforeUnmount(() => { if (focusZoomFrame !== null) cancelAnimationFrame(focusZoomFrame); graph?.dispose(); graph = null; });
 </script>
