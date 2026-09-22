@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { computed, nextTick, onMounted, ref, watch } from 'vue';
-import { AlertTriangle, BookOpen, ChevronDown, ChevronRight, Copy, Download, Focus, Link2, Maximize2, Minus, Network, Plus, RefreshCw, Search, Send, Sparkles, Tag, X } from 'lucide-vue-next';
+import { AlertTriangle, BookOpen, ChevronDown, ChevronRight, Copy, Download, Focus, Hand, Link2, LoaderCircle, Maximize2, Minus, Network, Plus, RefreshCw, Search, Send, Sparkles, Tag, X } from 'lucide-vue-next';
 import { VueFlow, useVueFlow, type Edge, type Node } from '@vue-flow/core';
 import '@vue-flow/core/dist/style.css';
 import '@vue-flow/core/dist/theme-default.css';
@@ -53,6 +53,8 @@ const enrichingEntityModel = ref(false);
 const entityCanvas = ref<InstanceType<typeof EntityModelCanvas> | null>(null);
 const selectedSearchMatchIndex = ref(-1);
 const searchDrivenSelection = ref(false);
+const diagramAction = ref('');
+const diagramMoveMode = ref(false);
 
 const { fitView } = useVueFlow('domain-knowledge');
 
@@ -315,6 +317,24 @@ const focusSearchMatch = async (index: number) => {
 const focusCurrentSearchMatch = () => {
   if (search.value.trim()) focusSearchMatch(selectedSearchMatchIndex.value < 0 ? 0 : selectedSearchMatchIndex.value);
 };
+const runDiagramAction = async (action: string, operation: () => void | Promise<void> | undefined) => {
+  if (diagramAction.value) return;
+  diagramAction.value = action;
+  await nextTick();
+  try {
+    await operation();
+  } finally {
+    await new Promise<void>((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve)));
+    diagramAction.value = '';
+  }
+};
+const fitEntityModel = () => runDiagramAction('fit', () => entityCanvas.value?.fit());
+const zoomEntityModel = (direction: 'in' | 'out') => runDiagramAction(`zoom-${direction}`, () => (
+  direction === 'in' ? entityCanvas.value?.zoomIn() : entityCanvas.value?.zoomOut()
+));
+const resetEntityModel = () => runDiagramAction('reset', () => entityCanvas.value?.reset());
+const prettifyEntityModel = () => runDiagramAction('prettify', () => entityCanvas.value?.prettify());
+const toggleDiagramMoveMode = () => { diagramMoveMode.value = !diagramMoveMode.value; };
 const downloadPlantuml = () => {
   if (!entityModel.value?.plantuml) return;
   const url = URL.createObjectURL(new Blob([entityModel.value.plantuml], { type: 'text/plain' }));
@@ -450,8 +470,15 @@ onMounted(() => { loadAnalyses(); loadDictionary(); });
       <div v-else class="flex-1 min-h-0 grid grid-cols-1 xl:grid-cols-[minmax(0,1fr)_340px] gap-3">
         <div class="min-h-0 rounded-2xl border border-slate-800 bg-[#0b1020] overflow-hidden relative">
           <div class="absolute top-3 left-3 z-10 text-[10px] text-slate-400 bg-slate-950/80 border border-slate-800 rounded-lg px-2 py-1">{{ entityModel.entities.length }} entity(s) · {{ entityModel.antv_x6?.edges?.length || 0 }} relationship(s)</div>
-          <div class="absolute top-3 right-3 z-10 flex items-center gap-1 rounded-lg border border-slate-800 bg-slate-950/80 px-2 py-1"><button type="button" @click="entityCanvas?.fit()" title="Fit to view" class="p-1 text-slate-300"><Maximize2 class="h-3.5 w-3.5" /></button><button type="button" @click="entityCanvas?.zoomIn()" title="Zoom in" class="p-1 text-slate-300"><Plus class="h-3.5 w-3.5" /></button><button type="button" @click="entityCanvas?.zoomOut()" title="Zoom out" class="p-1 text-slate-300"><Minus class="h-3.5 w-3.5" /></button><button type="button" @click="entityCanvas?.reset()" title="Reset layout" class="p-1 text-slate-300"><Focus class="h-3.5 w-3.5" /></button><button type="button" @click="entityCanvas?.prettify()" title="Prettify layout" class="p-1 text-slate-300"><Sparkles class="h-3.5 w-3.5" /></button></div>
-          <EntityModelCanvas ref="entityCanvas" :model="entityModel" :search="search" :selected-entity-id="selectedEntityId" :selected-behavior-key="selectedBehaviorKey" :selected-relationship-id="selectedRelationshipId" @ready="focusCurrentSearchMatch" @select-entity="selectEntity" @select-relationship="selectEntityRelationship" @select-behavior="selectEntityBehavior" />
+          <div class="absolute top-3 right-3 z-10 flex items-center gap-1 rounded-lg border border-slate-800 bg-slate-950/80 px-2 py-1">
+            <button type="button" :disabled="Boolean(diagramAction)" @click="fitEntityModel" title="Fit to view" class="p-1 text-slate-300 disabled:opacity-50"><LoaderCircle v-if="diagramAction === 'fit'" class="h-3.5 w-3.5 animate-spin" /><Maximize2 v-else class="h-3.5 w-3.5" /></button>
+            <button type="button" :disabled="Boolean(diagramAction)" @click="zoomEntityModel('in')" title="Zoom in" class="p-1 text-slate-300 disabled:opacity-50"><LoaderCircle v-if="diagramAction === 'zoom-in'" class="h-3.5 w-3.5 animate-spin" /><Plus v-else class="h-3.5 w-3.5" /></button>
+            <button type="button" :disabled="Boolean(diagramAction)" @click="zoomEntityModel('out')" title="Zoom out" class="p-1 text-slate-300 disabled:opacity-50"><LoaderCircle v-if="diagramAction === 'zoom-out'" class="h-3.5 w-3.5 animate-spin" /><Minus v-else class="h-3.5 w-3.5" /></button>
+            <button type="button" :disabled="Boolean(diagramAction)" @click="resetEntityModel" title="Reset layout" class="p-1 text-slate-300 disabled:opacity-50"><LoaderCircle v-if="diagramAction === 'reset'" class="h-3.5 w-3.5 animate-spin" /><Focus v-else class="h-3.5 w-3.5" /></button>
+            <button type="button" :disabled="Boolean(diagramAction)" @click="prettifyEntityModel" title="Prettify layout" class="p-1 text-slate-300 disabled:opacity-50"><LoaderCircle v-if="diagramAction === 'prettify'" class="h-3.5 w-3.5 animate-spin" /><Sparkles v-else class="h-3.5 w-3.5" /></button>
+            <button type="button" :disabled="Boolean(diagramAction)" @click="toggleDiagramMoveMode" :title="diagramMoveMode ? 'Stop moving diagram' : 'Move diagram'" class="rounded p-1 disabled:opacity-50" :class="diagramMoveMode ? 'bg-cyan-500/20 text-cyan-200' : 'text-slate-300'"><Hand class="h-3.5 w-3.5" /></button>
+          </div>
+          <EntityModelCanvas ref="entityCanvas" :model="entityModel" :search="search" :selected-entity-id="selectedEntityId" :selected-behavior-key="selectedBehaviorKey" :selected-relationship-id="selectedRelationshipId" :panning-enabled="diagramMoveMode" @ready="focusCurrentSearchMatch" @select-entity="selectEntity" @select-relationship="selectEntityRelationship" @select-behavior="selectEntityBehavior" />
         </div>
         <aside class="min-h-0 overflow-y-auto rounded-2xl border border-slate-800 bg-slate-900/30 p-3 space-y-3">
           <div v-if="error && entityModel" class="rounded-xl border border-amber-500/30 bg-amber-950/20 p-3 text-[11px] text-amber-100/80">{{ error }}</div>

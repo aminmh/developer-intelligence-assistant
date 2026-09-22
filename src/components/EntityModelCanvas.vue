@@ -1,11 +1,11 @@
 <script setup lang="ts">
 import { nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue';
-import { Graph } from '@antv/x6';
+import { Graph, Scroller, Selection, Snapline } from '@antv/x6';
 import { DagreLayout } from '@antv/layout';
 import type { Edge, Node } from '@antv/x6';
 import type { DomainEntity, DomainEntityBehavior, DomainEntityRelationship, DomainModelGraphEdge, DomainModelResponse } from '../types';
 import { registerEntityNode } from '../utils/registerEntityNode';
-import { entityMatchesModelSearch, entityModelBehaviorKey, entityModelBehaviors } from '../utils/entityModelSearch';
+import { entityModelBehaviorKey, entityModelBehaviors } from '../utils/entityModelSearch';
 import { completeEntityLayoutPositions, hasEntityLayoutCollisions, resolveEntityLayoutCollisions } from '../utils/entityModelLayout';
 
 const props = defineProps<{
@@ -14,6 +14,7 @@ const props = defineProps<{
   selectedEntityId?: string;
   selectedBehaviorKey?: string;
   selectedRelationshipId?: string;
+  panningEnabled?: boolean;
 }>();
 
 const emit = defineEmits<{
@@ -25,6 +26,7 @@ const emit = defineEmits<{
 
 const container = ref<HTMLElement | null>(null);
 let graph: Graph | null = null;
+let scroller: Scroller | null = null;
 let localPositions = new Map<string, { x: number; y: number }>();
 let focusZoomFrame: number | null = null;
 let prettifyPass = 0;
@@ -223,10 +225,15 @@ const syncSelection = () => {
 const fit = () => graph?.zoomToFit({ padding: 48, maxScale: 0.75 });
 const zoomIn = () => graph?.zoom(0.15);
 const zoomOut = () => graph?.zoom(-0.15);
+const cancelFocusZoom = () => {
+  if (focusZoomFrame === null) return;
+  cancelAnimationFrame(focusZoomFrame);
+  focusZoomFrame = null;
+};
 const revealLayout = () => graph?.zoomToFit({ padding: 48, maxScale: 0.75 });
 const animateFocusZoom = (node: Node, targetZoom: number) => {
   if (!graph) return;
-  if (focusZoomFrame !== null) cancelAnimationFrame(focusZoomFrame);
+  cancelFocusZoom();
   const startZoom = graph.zoom();
   if (Math.abs(targetZoom - startZoom) < 0.01 || window.matchMedia('(prefers-reduced-motion: reduce)').matches) {
     graph.zoomTo(targetZoom, { maxScale: targetZoom });
@@ -250,6 +257,9 @@ const animateFocusZoom = (node: Node, targetZoom: number) => {
 };
 const focusNode = async (id: string, zoom = false) => {
   await nextTick();
+  // A click must take ownership of the viewport. Otherwise a pending search
+  // focus animation can continue centering the previously matched node.
+  cancelFocusZoom();
   const node = graph?.getCellById(id);
   if (!node || !graph) return;
   graph.centerCell(node);
@@ -315,7 +325,30 @@ defineExpose({ fit, zoomIn, zoomOut, focusNode, reset, prettify });
 onMounted(() => {
   if (!container.value) return;
   registerEntityNode();
-  graph = new Graph({ container: container.value, background: { color: '#0b1020' }, grid: { visible: true, type: 'dot', args: { color: '#1e293b', thickness: 1 } }, panning: true, mousewheel: { enabled: true, modifiers: ['ctrl', 'meta'] }, interacting: { nodeMovable: true, edgeMovable: false, edgeLabelMovable: false } });
+  graph = new Graph({ container: container.value, background: { color: '#0b1020' }, grid: { visible: true, type: 'dot', args: { color: '#1e293b', thickness: 1 } }, panning: false, mousewheel: { enabled: true, modifiers: ['ctrl', 'meta'] }, interacting: { nodeMovable: true, edgeMovable: true, edgeLabelMovable: false } });
+  scroller = new Scroller({
+    enabled: true,
+    pannable: { enabled: Boolean(props.panningEnabled), eventTypes: ['leftMouseDown'] },
+    autoResize: true,
+    pageVisible: false,
+    padding: 24,
+  });
+  graph.use(scroller);
+  graph.use(new Selection({
+    enabled: true,
+    multiple: true,
+    multipleSelectionModifiers: ['ctrl', 'meta'],
+    rubberband: false,
+    showNodeSelectionBox: true,
+    showEdgeSelectionBox: false,
+    movable: true,
+  }));
+  graph.use(new Snapline({
+    enabled: true,
+    sharp: true,
+    tolerance: 8,
+    clean: 200,
+  }));
   graph.on('node:click', ({ node, e }) => {
     const target = e?.target as Element | null;
     const behaviorElement = target?.closest?.('[data-behavior-key]') as HTMLElement | null;
@@ -328,6 +361,11 @@ onMounted(() => {
     selectNode(node);
   });
   graph.on('edge:click', ({ edge }) => selectEdge(edge));
+  graph.on('edge:mouseenter', ({ edge }) => edge.addTools({
+    name: 'segments',
+    args: { snapRadius: 12, threshold: 32 },
+  }));
+  graph.on('edge:mouseleave', ({ edge }) => edge.removeTools());
   graph.on('node:moved', ({ node }) => localPositions.set(node.id, node.getPosition()));
   emit('ready', graph);
   rebuild();
@@ -339,7 +377,16 @@ watch(() => props.model, () => { prettifyPass = 0; rebuild(); });
 // leave stale custom Vue-shape views behind until the component is remounted.
 watch(() => props.search, syncVisibility);
 watch(() => [props.selectedEntityId, props.selectedBehaviorKey, props.selectedRelationshipId], syncSelection);
-onBeforeUnmount(() => { if (focusZoomFrame !== null) cancelAnimationFrame(focusZoomFrame); graph?.dispose(); graph = null; });
+watch(() => props.panningEnabled, (enabled) => scroller?.togglePanning(Boolean(enabled)));
+onBeforeUnmount(() => { cancelFocusZoom(); graph?.dispose(); graph = null; scroller = null; });
 </script>
 
 <template><div ref="container" class="h-full w-full" /></template>
+
+<style>
+.x6-widget-selection-box,
+.x6-widget-selection-inner {
+  border-color: #22d3ee !important;
+  box-shadow: 0 0 0 1px rgb(34 211 238 / 25%), 0 0 14px rgb(34 211 238 / 28%) !important;
+}
+</style>
