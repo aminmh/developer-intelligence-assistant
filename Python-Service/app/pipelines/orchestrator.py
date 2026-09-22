@@ -178,13 +178,9 @@ class Orchestrator:
             # answer reads from the Qdrant collection, never from this dir.
             # Set WORKSPACE_KEEP_EXTRACTED=1 to retain for debugging.
             keep = os.environ.get("WORKSPACE_KEEP_EXTRACTED", "").strip().lower() in ("1", "true", "yes")
-            # F17: sandbox routes retain their workspace (bounded LRU) so the
-            # /api/inspect Tier-2/3 file reads keep working after the job.
             # Code-index routes opt in via retain_workspace so a later
             # POST /analysis persist can re-produce + ingest the chunks.
-            route_retain = bool((ctx.route or {}).get("sandbox")) or bool(
-                (ctx.route or {}).get("retain_workspace")
-            )
+            route_retain = bool((ctx.route or {}).get("retain_workspace"))
             retain = keep or route_retain
             if retain and workspace_path and os.path.isdir(workspace_path):
                 try:
@@ -475,22 +471,19 @@ class Orchestrator:
             return None
         # Profile cache is keyed by normalized filename only — safe because
         # uploads are analyzed once per filename and later questions reuse that
-        # profile (knowledge_cache contract); sandbox runs bypass the cache so
-        # runtime probes always reflect the freshly staged source. Re-uploading
-        # a new project under the same filename serves the cached profile (same
+        # profile cache is keyed by normalized filename. Re-uploading a new
+        # project under the same filename serves the cached profile (same
         # trade as the answer auto-inject path).
-        route_sandbox = bool((ctx.route or {}).get("sandbox"))
         try:
             from projects.knowledge_cache import get as cache_get
             from projects.knowledge_cache import put as cache_put
             from projects.project_profile import build_project_profile
 
             existing = None
-            if not route_sandbox:
-                try:
-                    existing = cache_get(ctx.filename)
-                except Exception:  # noqa: BLE001 — a cache read error must never block the job
-                    existing = None
+            try:
+                existing = cache_get(ctx.filename)
+            except Exception:  # noqa: BLE001 — a cache read error must never block the job
+                existing = None
             if isinstance(existing, dict) and existing.get("framework"):
                 logger.info(
                     "Framework profile cached for job %s (route=%s)",
@@ -535,11 +528,10 @@ class Orchestrator:
             from projects.structure_profile import build_structure_profile
 
             existing = None
-            if not bool((ctx.route or {}).get("sandbox")):
-                try:
-                    existing = cache_get(ctx.filename)
-                except Exception:  # noqa: BLE001 — a cache read error must never block the job
-                    existing = None
+            try:
+                existing = cache_get(ctx.filename)
+            except Exception:  # noqa: BLE001 — a cache read error must never block the job
+                existing = None
             if isinstance(existing, dict) and existing.get("framework"):
                 logger.info(
                     "Structure profile cached for job %s (route=%s)",
@@ -603,72 +595,11 @@ class Orchestrator:
             )
             return {**empty, "error": str(exc)[:300]}
 
-    def _safe_project_id(self, filename: str) -> str:
-        """Filesystem-safe project id (must also be safe as a DinD path seg)."""
-        stem = Path(filename).stem if filename else "project"
-        cleaned = re.sub(r"[^A-Za-z0-9_.-]", "_", stem)
-        return cleaned.strip(".") or "project"
-
-    def _run_sandbox_analysis(
-        self,
-        ctx: JobContext,
-        workspace_path: str | None,
-        project_profile: dict[str, Any] | None,
-    ) -> dict[str, Any] | None:
-        """Stage + install + probe the project inside the nested sandbox.
-
-        Best-effort: every failure is captured as a structured record (honest
-        status/reason) — a missing backend, image or egress never fails the job.
-        """
-        if not (ctx.route or {}).get("sandbox"):
-            return None
-        if not workspace_path or not os.path.isdir(workspace_path):
-            return {"status": "failed", "error": "workspace missing"}
-        try:
-            from sandbox.executor import default_executor
-
-            executor = default_executor()
-            if executor is None:
-                return {"status": "skipped", "reason": "sandbox backend unavailable"}
-            framework = (project_profile or {}).get("framework")
-            probes = ctx.route.get("sandbox_probes") or None
-            return executor.analyze(
-                workspace_path,
-                project_id=self._safe_project_id(ctx.filename),
-                framework=str(framework) if framework else "php",
-                probes=list(probes) if isinstance(probes, list) else None,
-                progress=lambda pct, label: self._report_step_progress(
-                    ctx, "sandbox", pct, label
-                ),
-            )
-        except Exception as exc:
-            get_exception_logger().error(
-                "Sandbox analysis failed for job %s: %s", ctx.job_id, exc, exc_info=exc
-            )
-            return {"status": "failed", "error": str(exc)[:500]}
-
-    def _merge_runtime_routes(
-        self,
-        project_profile: dict[str, Any] | None,
-        sandbox_result: dict[str, Any] | None,
-    ) -> dict[str, Any] | None:
-        """Promote the sandbox routes probe into the profile (runtime truth)."""
-        try:
-            from projects.project_profile import merge_runtime_routes
-
-            return merge_runtime_routes(project_profile, sandbox_result)
-        except Exception as exc:
-            get_exception_logger().error(
-                "Runtime route merge failed: %s", exc, exc_info=exc
-            )
-            return project_profile
-
     def _persist_result_bundle(
         self,
         ctx: JobContext,
         doc_context: dict[str, Any] | None,
         project_profile: dict[str, Any] | None,
-        sandbox_result: dict[str, Any] | None,
     ) -> None:
         """Write the DURABLE per-job result bundle.
 
@@ -695,11 +626,10 @@ class Orchestrator:
                     "project_profile": project_profile,
                     "structure_profile": job.get("structure_profile"),
                     "code_index": job.get("code_index"),
-                    "sandbox": sandbox_result,
                     # F15: compact run manifest — everything a downstream
                     # consumer needs without re-reading the heavy payloads.
                     "manifest": self._bundle_manifest(
-                        ctx, job, doc_context, project_profile, sandbox_result
+                        ctx, job, doc_context, project_profile
                     ),
                 },
             )
@@ -714,19 +644,9 @@ class Orchestrator:
         job: dict[str, Any],
         doc_context: dict[str, Any] | None,
         project_profile: dict[str, Any] | None,
-        sandbox_result: dict[str, Any] | None,
     ) -> dict[str, Any]:
         """Compact counts for the durable bundle (F15) — pure derivation."""
         profile = project_profile or {}
-        sandbox = sandbox_result or {}
-        probes = [
-            {
-                "name": (p or {}).get("name"),
-                "status": (p or {}).get("status"),
-                "exit_code": (p or {}).get("exit_code"),
-            }
-            for p in (sandbox.get("probes") or [])
-        ]
         output = job.get("output")
         return {
             "filename": ctx.filename,
@@ -741,9 +661,6 @@ class Orchestrator:
             "models": len(profile.get("models") or []),
             "tables": len(profile.get("schema") or []),
             "controllers": len(profile.get("controllers") or []),
-            "sandbox_image": sandbox.get("runtime_image"),
-            "install": (sandbox.get("install") or {}).get("status"),
-            "probes": probes,
         }
 
     def _act_extract_json(
@@ -1230,7 +1147,6 @@ class Orchestrator:
                 "doc_context": job.get("doc_context"),
                 "project_profile": job.get("project_profile"),
                 "structure_profile": job.get("structure_profile"),
-                "sandbox": job.get("sandbox"),
                 "code_index": job.get("code_index"),
                 "entities": job.get("entities"),
                 "error": job.get("error"),
@@ -1248,7 +1164,6 @@ class Orchestrator:
         doc_context: dict[str, Any] | None = None,
         project_profile: dict[str, Any] | None = None,
         structure_profile: dict[str, Any] | None = None,
-        sandbox: dict[str, Any] | None = None,
         code_index: dict[str, Any] | None = None,
     ) -> None:
         with self._lock:
@@ -1264,7 +1179,6 @@ class Orchestrator:
             job["doc_context"] = doc_context
             job["project_profile"] = project_profile
             job["structure_profile"] = structure_profile
-            job["sandbox"] = sandbox
             job["code_index"] = code_index
             job["updated_at"] = time.time()
         self._write_status(job_id)

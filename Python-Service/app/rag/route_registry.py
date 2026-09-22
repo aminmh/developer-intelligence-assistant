@@ -299,7 +299,7 @@ def assert_route_enum(
     ``config/orchestrator.yml``. ``allowed_extra`` names orchestrator-only
     routes that are launched by dedicated endpoints (never through the chat
     classifier) and are therefore exempt from the enum — e.g.
-    ``frozenset({"sandbox_analyze"})``. Raises an AssertionError listing
+    dedicated analysis routes. Raises an AssertionError listing
     missing and extra names so a route added to one side but not the other is
     caught immediately.
     """

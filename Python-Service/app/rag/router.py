@@ -466,7 +466,7 @@ def _check_route_enum_drift() -> None:
         assert_route_enum(
             keys,
             allowed_extra=frozenset(
-                {"sandbox_analyze", "structure_analyze", "index_code"}
+                {"structure_analyze", "index_code"}
             ),
         )
     except Exception as exc:  # noqa: BLE001 — best-effort tripwire; never crash boot.

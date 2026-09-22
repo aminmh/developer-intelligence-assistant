@@ -42,10 +42,6 @@ RAG_CONFIG_DEFAULTS: Dict[str, Any] = {
     "logDeletionMode": "soft",
     "qdrantUrl": "",
     "qdrantApiKey": "",
-    "sandboxDockerHost": "",
-    "sandboxJobsRoot": "/jobs",
-    "sandboxExecutionMode": "local",
-    "sandboxRemoteSshAlias": "",
     "temperature": 0.7,
     "topP": 0.9,
 }

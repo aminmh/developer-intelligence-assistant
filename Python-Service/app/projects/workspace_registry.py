@@ -3,8 +3,8 @@
 Orchestrator job workspaces used to be deleted unconditionally after every
 run — which made post-job ``/api/inspect`` file reads (skeleton/attributes/
 method) impossible: the ``sym_<stem>`` graph survives, the source is gone.
-Sandbox-style jobs (route ``sandbox: true``) now pin their workspace here so
-inspection and re-probing keep working; the registry is a bounded LRU (cap 3)
+Analysis jobs pin their workspace here so inspection keeps working; the
+registry is a bounded LRU (cap 3)
 and eviction removes the oldest directory on disk.
 
 All mutations are best-effort and race-tolerant: a stale registry entry never

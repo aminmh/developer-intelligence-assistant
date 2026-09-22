@@ -12,7 +12,7 @@ class Runtime(Protocol):
     """How a language/framework executes commands.
 
     Framework plugins never manipulate Docker directly (spec §12) — they ask
-    the runtime to run something; where it runs is the sandbox's concern.
+    the runtime to run something.
     """
 
     @property

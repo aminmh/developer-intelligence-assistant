@@ -19,13 +19,6 @@ def _blocked_host(host: str) -> bool:
 def execute_tool(tool: dict[str, Any], *, filename: str = "", workspace_path: str | None = None, arguments: dict[str, Any] | None = None) -> dict[str, Any]:
     cfg = tool.get("config") or {}; args = arguments or {}
     kind = tool.get("type")
-    if kind == "shell":
-        from sandbox.executor import default_executor
-        command = str(cfg.get("command") or "").strip()
-        if not command: return {"success": False, "error": "Shell command is empty"}
-        for key, value in args.items(): command = command.replace("{{" + key + "}}", shlex.quote(str(value)))
-        result = default_executor().run_command(str(filename).rsplit(".", 1)[0] or "project", command, framework=cfg.get("framework") or "php", cwd=cfg.get("cwd"))
-        return {"success": result.get("status") == "done", **result}
     if kind == "rest":
         method = str(cfg.get("method") or "GET").upper(); url = str(cfg.get("url") or "")
         for key, value in args.items(): url = url.replace("{{" + key + "}}", urllib.parse.quote(str(value)))

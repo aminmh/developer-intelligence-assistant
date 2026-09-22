@@ -156,27 +156,6 @@ class RuntimeInstance:
 
 
 @dataclass(frozen=True)
-class SandboxConfig:
-    image: str = "alpine:3.20.3"
-    read_only: bool = True
-    cap_drop: tuple[str, ...] = ("ALL",)
-    pids_limit: int = 256
-    mem_limit: str = "1g"
-    tmpfs: tuple[str, ...] = ("/tmp",)
-    runtime: str = "runsc"
-    timeout_s: int = 120
-
-
-@dataclass(frozen=True)
-class SandboxInstance:
-    """A created sandbox ready for execution (spec §13)."""
-
-    id: str
-    workspace_root: Path
-    detail: str = ""
-
-
-@dataclass(frozen=True)
 class RuntimeInspection:
     name: str
     version: str | None = None

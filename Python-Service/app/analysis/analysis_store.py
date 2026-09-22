@@ -1,7 +1,7 @@
 """Persistent analysis-session registry (SQLite) + artifact file store.
 
 Each row is one **saved analysis**: the durable record of running an uploaded
-project through the sandbox/analysis pipeline, with pointers to the full LLM
+    project through the analysis pipeline, with pointers to the full LLM
 context artifacts (profile JSON, grounding markdown, runtime probe results).
 
 Backing DB shares the settings DB file (SETTINGS_DB_PATH, default

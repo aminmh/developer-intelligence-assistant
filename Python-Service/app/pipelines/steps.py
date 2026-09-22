@@ -1,7 +1,7 @@
 """Orchestration step abstraction — the run pipeline as declarative units.
 
 Every phase of a job (extract → route/tool → post-process → doc retrieval →
-framework profile → sandbox run → synthesize → persist) is a ``Step``.
+framework profile → synthesize → persist) is a ``Step``.
 The runner (``Orchestrator._run_job``) only iterates the plan; individual
 steps own their progress markers, guards and artifact writes, reading/writing
 a shared ``SharedState``.
@@ -36,7 +36,6 @@ class SharedState:
     doc_context: dict[str, Any] | None = None
     project_profile: dict[str, Any] | None = None
     structure_profile: dict[str, Any] | None = None
-    sandbox_result: dict[str, Any] | None = None
     code_chunks: list[dict[str, Any]] | None = None
     code_language: str | None = None
     code_producer: str | None = None
@@ -235,33 +234,6 @@ def _dispatch_index(runner: Any, ctx: Any, shared: SharedState) -> None:
     _report_progress(runner, ctx, "index", 100)
 
 
-def _sandbox(runner: Any, ctx: Any, shared: SharedState) -> None:
-    """Stage + install + probe the project in the nested sandbox backend."""
-    if (ctx.route or {}).get("sandbox"):
-        runner._update_step(ctx.job_id, "sandbox", "running")
-        _report_progress(runner, ctx, "sandbox", 5, "Running sandbox analysis")
-    shared.sandbox_result = runner._run_sandbox_analysis(
-        ctx, shared.workspace_path, shared.project_profile
-    )
-    if shared.sandbox_result and shared.project_profile:
-        # Runtime route:list (when the routes probe succeeded) supersedes the
-        # static parser's route table — real verbs, middleware, package routes.
-        shared.project_profile = runner._merge_runtime_routes(
-            shared.project_profile, shared.sandbox_result
-        )
-    if (ctx.route or {}).get("sandbox"):
-        detail = "run complete"
-        if (
-            shared.sandbox_result
-            and shared.sandbox_result.get("install", {}).get("status") == "unavailable"
-        ):
-            detail = "runtime image unavailable"
-        elif shared.sandbox_result is None:
-            detail = "sandbox unavailable"
-        runner._update_step(ctx.job_id, "sandbox", "done", detail=detail)
-        _report_progress(runner, ctx, "sandbox", 100)
-
-
 def _synthesize(runner: Any, ctx: Any, shared: SharedState) -> None:
     """Produce the final job output (LlamaIndex summary preferred).
 
@@ -316,11 +288,10 @@ def _persist(runner: Any, ctx: Any, shared: SharedState) -> None:
         doc_context=shared.doc_context,
         project_profile=shared.project_profile,
         structure_profile=shared.structure_profile,
-        sandbox=shared.sandbox_result,
         code_index=code_index,
     )
     runner._persist_result_bundle(
-        ctx, shared.doc_context, shared.project_profile, shared.sandbox_result
+        ctx, shared.doc_context, shared.project_profile
     )
 
 
@@ -335,7 +306,6 @@ STEPS: tuple[Step, ...] = (
     Step("framework", "Analyzing Framework", _framework),
     Step("structure", "Analyzing Structure", _structure),
     Step("index", "Indexing codebase", _dispatch_index),
-    Step("sandbox", "Running sandbox analysis", _sandbox),
     Step("synthesize", "Synthesizing answer", _synthesize),
     Step("persist", "Saving job outputs", _persist),
 )
@@ -373,8 +343,6 @@ def build_steps(route: dict[str, Any]) -> list[dict[str, Any]]:
         steps.append({"key": "structure", "label": "Analyzing Structure", "status": "pending"})
     if route.get("language_dispatch"):
         steps.append({"key": "index", "label": "Indexing codebase", "status": "pending"})
-    if route.get("sandbox"):
-        steps.append({"key": "sandbox", "label": "Running sandbox analysis", "status": "pending"})
     for action in route.get("post_process", []) or []:
         action_name = action.get("action") if isinstance(action, dict) else str(action)
         steps.append(

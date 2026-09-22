@@ -48,7 +48,6 @@ _PROJECT_ROUTES = frozenset(
         "code_explain",
         "code_refactor",
         "debug",
-        "sandbox_analyze",
         "structure_analyze",
         "index_code",
     }

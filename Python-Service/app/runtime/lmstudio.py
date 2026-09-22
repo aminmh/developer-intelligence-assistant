@@ -10,7 +10,7 @@ a minimal 1-token chat probe so the selected model ends up resident in the MLX
 engine (pre-load) and the first real answer is not cold.
 
 This module is deliberately stdlib-only (``urllib``), mirroring
-``sandbox_runtime.py`` — no extra HTTP dependency.
+No extra HTTP dependency is required.
 """
 
 from __future__ import annotations

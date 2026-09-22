@@ -129,12 +129,6 @@ async def lifespan(app: FastAPI):
         shutdown()
     except Exception:
         pass
-    try:
-        from runtime.remote_sandbox import remote_sandbox_manager
-
-        remote_sandbox_manager.close_tunnel()
-    except Exception:
-        pass
 
 
 tags_metadata = [
@@ -177,13 +171,11 @@ app = FastAPI(
 
 from inspection.http import router as inspection_router  # noqa: E402 — after app exists
 from routers.developer_logs import router as developer_logs_router  # noqa: E402 — after app exists
-from routers.sandbox import router as sandbox_router  # noqa: E402 — after app exists
 from routers.system import router as system_router  # noqa: E402 — after app exists
 from routers.evaluator import router as evaluator_router  # noqa: E402 — after app exists
 
 app.include_router(inspection_router)
 app.include_router(developer_logs_router)
-app.include_router(sandbox_router)
 app.include_router(system_router)
 app.include_router(evaluator_router)
 
@@ -624,7 +616,7 @@ def workspace_destroy(workspace_id: str):
     tags=["Upload & TUS"],
     summary="List Retained Workspaces",
     description=(
-        "Retained (bounded-LRU) extracted workspaces from sandbox analyses — "
+        "Retained (bounded-LRU) extracted workspaces for analysis — "
         "used by the inspect file reads and manual cleanup. Newest first."
     ),
 )
@@ -1845,22 +1837,6 @@ def _coerce_setting(key: str, value):
     default = RAG_CONFIG_DEFAULTS.get(key)
     if key == "logDeletionMode":
         return value if value in {"soft", "hard"} else default
-    if key == "sandboxExecutionMode":
-        return value if value in {"local", "remote"} else default
-    if key == "sandboxRemoteSshAlias":
-        from runtime.remote_sandbox import validate_alias
-        if value in (None, ""):
-            return ""
-        try:
-            return validate_alias(value)
-        except ValueError:
-            return default
-    if key == "sandboxJobsRoot":
-        from runtime.remote_sandbox import validate_jobs_root
-        try:
-            return validate_jobs_root(value)
-        except ValueError:
-            return default
     if isinstance(default, int) and not isinstance(value, bool):
         try:
             return int(value)
@@ -1924,18 +1900,6 @@ def update_settings(body: dict):
             status_code=400,
             detail="contextPreviewMode must be one of off, inline, gate",
         )
-    if "sandboxRemoteSshAlias" in incoming and incoming["sandboxRemoteSshAlias"] not in (None, ""):
-        from runtime.remote_sandbox import validate_alias
-        try:
-            validate_alias(incoming["sandboxRemoteSshAlias"])
-        except ValueError as exc:
-            raise HTTPException(status_code=400, detail=str(exc)) from exc
-    if "sandboxJobsRoot" in incoming:
-        from runtime.remote_sandbox import validate_jobs_root
-        try:
-            validate_jobs_root(incoming["sandboxJobsRoot"])
-        except ValueError as exc:
-            raise HTTPException(status_code=400, detail=str(exc)) from exc
     updates = {}
     for key in RAG_CONFIG_DEFAULTS:
         if key not in incoming:
@@ -2072,28 +2036,6 @@ def _job_summary(job: dict | None) -> dict | None:
     """
     if not job:
         return None
-    sandbox = job.get("sandbox") or {}
-    probes = []
-    for p in sandbox.get("probes") or []:
-        if not isinstance(p, dict):
-            continue
-        probes.append(
-            {
-                "name": p.get("name"),
-                "status": p.get("status"),
-                "exit_code": p.get("exit_code"),
-                "command": p.get("command"),
-                "reason": p.get("reason"),
-            }
-        )
-    install = sandbox.get("install")
-    if isinstance(install, dict):
-        install = {
-            "status": install.get("status"),
-            "exit_code": install.get("exit_code"),
-            "error": install.get("error"),
-            "reason": install.get("reason"),
-        }
     steps = []
     for s in job.get("steps") or []:
         if isinstance(s, dict):
@@ -2125,13 +2067,6 @@ def _job_summary(job: dict | None) -> dict | None:
             "routes": len(profile.get("routes") or []),
             "routes_source": profile.get("routes_source"),
             "summary": profile.get("summary"),
-        },
-        "sandbox": {
-            "staged": sandbox.get("staged"),
-            "runtime_image": sandbox.get("runtime_image"),
-            "source": sandbox.get("source"),
-            "install": install,
-            "probes": probes,
         },
         "output_preview": (str(output)[:500] + ("…" if output and len(str(output)) > 500 else ""))
         if output
@@ -2173,40 +2108,11 @@ def orchestration_summary(job_id: str):
                 "output": bundle.get("output"),
                 "project_profile": bundle.get("project_profile"),
                 "structure_profile": bundle.get("structure_profile"),
-                "sandbox": bundle.get("sandbox"),
             }
     summary = _job_summary(job)
     if summary is None:
         return {"status": "unknown"}
     return summary
-
-
-@app.post(
-    "/project/analyze",
-    tags=["Analysis"],
-    summary="Start Sandbox Analysis",
-    description=(
-        "Launches a sandbox_analyze orchestration job: framework profile, "
-        "dependency install + runsc probes inside the gVisor backend, and a "
-        "durable result bundle. Returns a job_id for polling."
-    ),
-)
-def start_project_analyze(body: dict):
-    filename = body.get("filename", "")
-    prompt = body.get("prompt", "")
-    skip_index = bool(body.get("skip_index", False))
-    if not filename:
-        raise HTTPException(status_code=400, detail="Missing filename")
-    job_id = str(uuid.uuid4())
-    orchestrator.start_job(
-        job_id,
-        "sandbox_analyze",
-        filename,
-        prompt or "Analyze this project in the sandbox.",
-        skip_index=skip_index,
-        entities=body.get("entities") or {},
-    )
-    return {"job_id": job_id}
 
 
 @app.post(
@@ -2216,8 +2122,7 @@ def start_project_analyze(body: dict):
     description=(
         "Launches a deterministic static structure-profile job: a multi-language "
         "census of the extracted workspace (framework / language / database / "
-        "architecture) with no sandbox. deep=true delegates to the full "
-        "sandbox_analyze route instead. Returns a job_id for polling."
+        "architecture). Returns a job_id for polling."
     ),
 )
 def start_structure_analyze(body: dict):
@@ -2225,23 +2130,13 @@ def start_structure_analyze(body: dict):
     if not filename:
         raise HTTPException(status_code=400, detail="Missing filename")
     prompt = body.get("prompt", "")
-    deep = bool(body.get("deep", False))
     job_id = str(uuid.uuid4())
-    if deep:
-        orchestrator.start_job(
-            job_id,
-            "sandbox_analyze",
-            filename,
-            prompt or "Analyze this project in the sandbox.",
-            entities=body.get("entities") or {},
-        )
-    else:
-        orchestrator.start_job(
-            job_id,
-            "structure_analyze",
-            filename,
-            prompt or "Analyze this project structure.",
-        )
+    orchestrator.start_job(
+        job_id,
+        "structure_analyze",
+        filename,
+        prompt or "Analyze this project structure.",
+    )
     return {"job_id": job_id}
 
 

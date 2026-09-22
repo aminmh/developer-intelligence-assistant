@@ -4,7 +4,7 @@ Avoids global singletons: the agent and its collaborators are constructed
 explicitly, which keeps tests isolated and future remote execution possible.
 
 TODO(scope-B): the Agent itself is resolved from this container — registered
-llm/repository/registry/sandbox implementations get injected on construction.
+llm/repository/registry implementations get injected on construction.
 """
 
 from __future__ import annotations

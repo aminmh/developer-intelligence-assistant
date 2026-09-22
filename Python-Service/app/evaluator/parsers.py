@@ -1,7 +1,7 @@
 """Native database telemetry parsers.
 
 These parsers are intentionally dependency-free and tolerant of truncated log
-files.  A parser never executes SQL; execution belongs to the sandbox layer.
+files. A parser never executes SQL; execution belongs to the caller.
 """
 
 from __future__ import annotations

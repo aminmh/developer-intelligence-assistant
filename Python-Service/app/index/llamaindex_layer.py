@@ -27,7 +27,7 @@ import time
 import uuid
 from typing import Any, Dict, List, Optional
 
-from index.embeddings import get_llamaindex_embed_model
+from index.embeddings import embed_texts, get_llamaindex_embed_model
 from qdrant_client import QdrantClient
 from qdrant_client.models import (
     Distance,
@@ -211,7 +211,7 @@ def _point_id_for(node_id: str) -> str:
 
 
 # Collection that carries PERSISTED analysis knowledge (routes/tables/… facts
-# saved from sandbox analyses). Lives as a sibling of the project's ephemeral
+# saved analysis runs). Lives as a sibling of the project's ephemeral
 # chunk_code_<stem> collection — never merged into it (re-indexing wipes
 # chunk_code_* wholesale, knowledge must survive).
 _KNOWLEDGE_PREFIX = "proj_knowledge_"
@@ -791,6 +791,7 @@ class CodePropertyGraph:
             "graph_nodes": graph_nodes,
             "graph_relations": graph_relations,
             "embed_fails": embed_fails,
+            "embedding_error": getattr(self, "_last_embedding_error", None),
             "symbol_definitions": len(symbol_definitions or []),
             "symbol_references": len(symbol_references or []),
         }
@@ -904,6 +905,7 @@ class CodePropertyGraph:
     ) -> tuple[int, int]:
         qdrant = self._get_qdrant()
         embed_model = self._get_embed_model()
+        self._last_embedding_error: str | None = None
 
         try:
             qdrant.delete_collection(collection_name)
@@ -921,9 +923,20 @@ class CodePropertyGraph:
 
             try:
                 embedding = embed_model.get_text_embedding(text)
-            except Exception:
-                embed_fails += 1
-                continue
+            except Exception as exc:
+                # LlamaIndex's Ollama adapter has changed endpoint behavior
+                # across releases. Retry through the project's canonical
+                # stdlib embedding dispatcher before declaring the chunk lost.
+                try:
+                    if type(embed_model).__module__.startswith("llama_index"):
+                        embedding = embed_texts([text])[0]
+                    else:
+                        raise exc
+                except Exception as fallback_exc:
+                    embed_fails += 1
+                    if self._last_embedding_error is None:
+                        self._last_embedding_error = str(fallback_exc)[:500]
+                    continue
 
             if vector_size is None:
                 vector_size = len(embedding)

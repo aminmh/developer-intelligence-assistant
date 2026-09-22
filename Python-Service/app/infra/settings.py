@@ -91,10 +91,6 @@ class Settings(BaseModel):
     workspace_root: str = os.getenv("WORKSPACE_ROOT", "/app/workspaces")
     php_cli_root: str = os.getenv("PHP_CLI_ROOT", "/opt/php-cli")
 
-    sandbox_docker_host: str = os.getenv("DOCKER_HOST", "")
-    sandbox_jobs_root: str = os.getenv("JOBS_ROOT", "/jobs")
-    sandbox_execution_mode: str = os.getenv("SANDBOX_EXECUTION_MODE", "local")
-    sandbox_remote_ssh_alias: str = os.getenv("SANDBOX_REMOTE_SSH_ALIAS", "")
 
     lsp_timeout: float = float(os.getenv("LSP_TIMEOUT", "10"))
     lsp_max_retries: int = int(os.getenv("LSP_MAX_RETRIES", "2"))
@@ -147,10 +143,6 @@ class RuntimeSettings:
         "doc_gitmcp_timeout": "docGitmcpTimeoutS",
         "qdrant_url": "qdrantUrl",
         "qdrant_api_key": "qdrantApiKey",
-        "sandbox_docker_host": "sandboxDockerHost",
-        "sandbox_jobs_root": "sandboxJobsRoot",
-        "sandbox_execution_mode": "sandboxExecutionMode",
-        "sandbox_remote_ssh_alias": "sandboxRemoteSshAlias",
         "temperature": "temperature",
         "top_p": "topP",
         "context_preview_mode": "contextPreviewMode",

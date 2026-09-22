@@ -3,7 +3,7 @@ store, Qdrant/Neo4j and the HTTP layer.
 
 Flow:
   * orchestrator finishes a job → ``write_bundle`` stores the FULL result
-    (profile, doc context, sandbox runtime probes, output) under
+    (profile, doc context, output) under
     ANALYSES_DIR/jobs/<job_id>/bundle.json — survives restarts (orchestrator
     status files are ephemeral and never re-read).
   * developer clicks "Save analysis" → ``persist_analysis(job_id, label)``
@@ -179,7 +179,6 @@ def persist_analysis(job_id: str, label: str = "") -> dict[str, Any] | None:
         return None
 
     profile = bundle.get("project_profile") or {}
-    runtime = bundle.get("sandbox") or {}
     filename = bundle.get("filename") or "unknown.zip"
     collection = knowledge_collection(filename)
 
@@ -194,15 +193,13 @@ def persist_analysis(job_id: str, label: str = "") -> dict[str, Any] | None:
                 build_knowledge_chunks,
             )
 
-            chunks = build_knowledge_chunks(profile, project_stem(filename), runtime=runtime)
+            chunks = build_knowledge_chunks(profile, project_stem(filename))
             if chunks:
                 from index.llamaindex_layer import CodePropertyGraph
 
                 ingest = CodePropertyGraph().ingest(chunks, collection) or {}
                 link = link_knowledge_to_graph(chunks, collection)
-            grounding_md = build_grounding_md(
-                profile, runtime=runtime, filename=filename
-            )
+            grounding_md = build_grounding_md(profile, filename=filename)
         else:
             grounding_md = ""
     except Exception as exc:  # noqa: BLE001 — persistence must not hard-fail the run
@@ -211,7 +208,7 @@ def persist_analysis(job_id: str, label: str = "") -> dict[str, Any] | None:
         )
         ingest = {"ingested": 0, "error": str(exc)[:300]}
 
-    counts = build_counts(profile, runtime)
+    counts = build_counts(profile, None)
     from projects.project_context import analysis_summary
 
     summary = (
@@ -235,7 +232,7 @@ def persist_analysis(job_id: str, label: str = "") -> dict[str, Any] | None:
         summary=str(summary),
         profile=profile,
         grounding_md=str(grounding_md),
-        runtime=runtime,
+        runtime=None,
         counts=counts,
     )
     row = analysis_store.get(session_id) or {}

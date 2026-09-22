@@ -1,9 +1,7 @@
 """Workspace abstraction — a path-safe directory view handed to plugins.
 
-The sandbox boundary (spec §22) means plugins must never touch paths outside
-the workspace root. ``Workspace`` enforces that: every access resolves and
-validates containment. TODO(scope-B): an ephemeral-workspace factory that
-copies a project into a fresh sandbox staging area before execution.
+Plugins must never touch paths outside the workspace root. ``Workspace``
+enforces that: every access resolves and validates containment.
 """
 
 from __future__ import annotations

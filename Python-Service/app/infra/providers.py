@@ -1,7 +1,7 @@
 """Resource-provider protocols + thin adapters over the real implementations.
 
-Every swappable external capability — LLM chat, embeddings, library-doc
-retrieval, sandbox backend — is behind a small Protocol here. Adapters are
+Every swappable external capability — LLM chat, embeddings, and library-doc
+retrieval — is behind a small Protocol here. Adapters are
 **thin wrappers**: they carry no logic and read settings at call time, so the
 existing env/dynamic settings keep working unchanged and existing tests
 continue to cover the real behavior. Swapping a provider (e.g. Ollama →
@@ -64,17 +64,6 @@ class DocRetriever(Protocol):
     ) -> dict[str, Any]: ...
 
 
-@runtime_checkable
-class SandboxBackend(Protocol):
-    def status(self) -> dict[str, Any]: ...
-
-    def analyze(self, workspace_path: str, project_id: str, *, framework: str = "php",
-                probes: list[str] | None = None) -> dict[str, Any]: ...
-
-    def run_command(self, project_id: str, command: str, *, framework: str = "php",
-                    cwd: str | None = None) -> dict[str, Any]: ...
-
-
 # --- adapters ---------------------------------------------------------------
 
 
@@ -126,31 +115,6 @@ class DocRetrieverAdapter:
         )
 
 
-class SandboxBackendAdapter:
-    """Wraps runtime/sandbox_runtime.py status + sandbox/executor.py."""
-
-    name = "sandbox"
-
-    def status(self) -> dict[str, Any]:
-        from runtime import sandbox_runtime
-
-        return sandbox_runtime.sandbox_available()
-
-    def analyze(self, workspace_path, project_id, *, framework="php", probes=None):
-        from sandbox import executor
-
-        return executor.default_executor().analyze(
-            workspace_path, project_id, framework=framework, probes=probes
-        )
-
-    def run_command(self, project_id, command, *, framework="php", cwd=None):
-        from sandbox import executor
-
-        return executor.default_executor().run_command(
-            project_id, command, framework=framework, cwd=cwd
-        )
-
-
 # --- registry ---------------------------------------------------------------
 
 _BuiltinProvider = Callable[[], Any]
@@ -158,7 +122,6 @@ _BUILTINS: dict[str, _BuiltinProvider] = {
     "llm": LlmAdapter,
     "embeddings": EmbeddingAdapter,
     "doc_retriever": DocRetrieverAdapter,
-    "sandbox": SandboxBackendAdapter,
 }
 
 _instances: dict[str, Any] = {}
@@ -193,7 +156,3 @@ def embeddings() -> EmbeddingProvider:
 
 def doc_retriever() -> DocRetriever:
     return provider("doc_retriever")
-
-
-def sandbox() -> SandboxBackend:
-    return provider("sandbox")
