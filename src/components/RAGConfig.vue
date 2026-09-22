@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { Database, Layers3, Palette, Server, Sliders, Wrench } from 'lucide-vue-next';
+import { Database, Layers3, Palette, Sliders, Wrench } from 'lucide-vue-next';
 import { ref } from 'vue';
 import type { AppearancePreferences, RAGConfig } from '../types';
 import AppearanceCard from './config/AppearanceCard.vue';
@@ -11,7 +11,6 @@ import ModelImportCard from './config/ModelImportCard.vue';
 import DocRetrievalCard from './config/DocRetrievalCard.vue';
 import DomainConceptsCard from './config/DomainConceptsCard.vue';
 import PreviewCard from './config/PreviewCard.vue';
-import SandboxRunnerCard from './config/SandboxRunnerCard.vue';
 import RerankerCard from './config/RerankerCard.vue';
 import LlmToolsCard from './config/LlmToolsCard.vue';
 
@@ -20,7 +19,7 @@ const props = defineProps<{
   appearance: AppearancePreferences;
 }>();
 
-const activeSection = ref<'appearance' | 'models' | 'retrieval' | 'sandbox' | 'tools'>('appearance');
+const activeSection = ref<'appearance' | 'models' | 'retrieval' | 'tools'>('appearance');
 
 const emit = defineEmits<{
   (e: 'saveConfig'): void;
@@ -82,15 +81,6 @@ const updateAppearance = <K extends keyof AppearancePreferences>(
           <Database class="w-4 h-4" />
           Retrieval & Context
         </button>
-        <button
-          type="button"
-          class="flex items-center justify-center gap-2 rounded-xl px-3 py-2.5 text-xs font-semibold transition-all"
-          :class="activeSection === 'sandbox' ? 'bg-indigo-600 text-white shadow-md shadow-indigo-600/20' : 'text-slate-400 hover:bg-slate-800/60 hover:text-white'"
-          @click="activeSection = 'sandbox'"
-        >
-          <Server class="w-4 h-4" />
-          Sandbox
-        </button>
       </div>
 
       <AppearanceCard
@@ -114,7 +104,6 @@ const updateAppearance = <K extends keyof AppearancePreferences>(
         <PreviewCard :config="config" :update-field="updateField" />
       </template>
 
-      <SandboxRunnerCard v-else-if="activeSection === 'sandbox'" :config="config" :update-field="updateField" />
       <LlmToolsCard v-else-if="activeSection === 'tools'" />
 
       <!-- Action Footer -->

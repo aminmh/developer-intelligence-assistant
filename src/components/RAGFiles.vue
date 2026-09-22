@@ -144,7 +144,7 @@ const handleIndexFile = () => {
       <div class="bg-slate-900/30 border border-slate-800 rounded-2xl overflow-hidden">
         <div class="px-6 py-4 border-b border-slate-800 bg-[#0c101f]/30 flex items-center justify-between">
           <h4 class="text-xs font-bold tracking-wider uppercase text-slate-400">Indexed Files ({{ files.length }})</h4>
-          <span class="text-[10px] text-slate-500 font-mono">Storage: Node Sandbox</span>
+          <span class="text-[10px] text-slate-500 font-mono">Storage: Node service</span>
         </div>
 
         <!-- Empty state -->

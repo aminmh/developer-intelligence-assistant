@@ -6,10 +6,6 @@ export interface RAGConfig {
   ollamaEvalModel: string;
   qdrantUrl: string;
   qdrantApiKey: string;
-  sandboxDockerHost: string;
-  sandboxJobsRoot: string;
-  sandboxExecutionMode: 'local' | 'remote';
-  sandboxRemoteSshAlias: string;
   llmRemoteBaseUrl: string;
   llmRemoteModel: string;
   llmRemoteApiKey: string;
@@ -218,28 +214,6 @@ export interface ExtractedDefinitionsResponse {
   total: number;
   offset: number;
   limit: number;
-}
-
-// --- Sandbox analysis persistence (Python backend analysis_service) --------
-
-export interface SandboxProbe {
-  name: string;
-  status: 'done' | 'skipped' | 'failed' | 'unavailable';
-  exit_code?: number;
-  command?: string;
-  image?: string;
-  reason?: string;
-  stdout?: string;
-}
-
-export interface SandboxResult {
-  staged?: boolean;
-  source?: string;
-  runtime_image?: string;
-  install?: { status: string; exit_code?: number; error?: string; reason?: string; stdout?: string };
-  probes?: SandboxProbe[];
-  status?: string;
-  error?: string;
 }
 
 export interface AnalysisSession {

@@ -5,7 +5,6 @@ import {
   Settings, 
   Terminal, 
   BookOpen, 
-  FlaskConical,
   X,
   CheckCircle,
   AlertTriangle,
@@ -24,7 +23,6 @@ import { useAppearancePreferences } from './composables/useAppearancePreferences
 import RAGChat from './components/RAGChat.vue';
 import RAGFiles from './components/RAGFiles.vue';
 import RAGConfigComponent from './components/RAGConfig.vue';
-import SandboxAnalyses from './components/SandboxAnalyses.vue';
 import LogsView from './components/LogsView.vue';
 import DefinitionsView from './components/DefinitionsView.vue';
 import DatabaseSchemaView from './components/DatabaseSchemaView.vue';
@@ -32,7 +30,7 @@ import DomainKnowledgeView from './components/DomainKnowledgeView.vue';
 import type { DomainConcept, AnalysisSession } from './types';
 import type { PipelineStep } from './components/PipelineProgress.vue';
 
-const activeTab = ref<'chat' | 'files' | 'sandbox' | 'config' | 'logs' | 'definitions' | 'schema' | 'domain'>('chat');
+const activeTab = ref<'chat' | 'files' | 'config' | 'logs' | 'definitions' | 'schema' | 'domain'>('chat');
 const sidebarCollapsed = ref(false);
 const appearance = useAppearancePreferences();
 
@@ -49,10 +47,6 @@ const config = ref<RAGConfig>({
   ollamaEvalModel: 'gemma3-4b',
   qdrantUrl: '',
   qdrantApiKey: '',
-  sandboxDockerHost: '',
-  sandboxJobsRoot: '/jobs',
-  sandboxExecutionMode: 'local',
-  sandboxRemoteSshAlias: '',
   llmRemoteBaseUrl: '',
   llmRemoteModel: '',
   llmRemoteApiKey: '',
@@ -886,16 +880,6 @@ onMounted(async () => {
         </button>
 
         <button 
-          @click="activeTab = 'sandbox'" 
-          class="w-full flex items-center gap-3 py-3 rounded-xl text-sm font-medium transition-all"
-          :class="[sidebarCollapsed ? 'justify-center px-2' : 'px-4', activeTab === 'sandbox' ? 'bg-indigo-600 text-white shadow-md shadow-indigo-600/20' : 'text-slate-400 hover:text-white hover:bg-slate-800/50']"
-          title="Sandbox Analyzer"
-        >
-          <FlaskConical class="w-4 h-4" />
-          <span v-if="!sidebarCollapsed">Sandbox Analyzer</span>
-        </button>
-
-        <button 
           @click="activeTab = 'config'" 
           class="w-full flex items-center gap-3 py-3 rounded-xl text-sm font-medium transition-all"
           :class="[sidebarCollapsed ? 'justify-center px-2' : 'px-4', activeTab === 'config' ? 'bg-indigo-600 text-white shadow-md shadow-indigo-600/20' : 'text-slate-400 hover:text-white hover:bg-slate-800/50']"
@@ -975,7 +959,6 @@ onMounted(async () => {
           <h2 class="text-sm font-semibold text-white">
             <span v-if="activeTab === 'chat'">Codebase Chat</span>
             <span v-else-if="activeTab === 'files'">Document Chunker & Vector Indexer</span>
-            <span v-else-if="activeTab === 'sandbox'">Sandbox Project Analysis</span>
             <span v-else-if="activeTab === 'config'">RAG Pipeline Configurations</span>
             <span v-else-if="activeTab === 'logs'">Developer Logs</span>
             <span v-else-if="activeTab === 'definitions'">Extracted Definitions</span>
@@ -989,7 +972,7 @@ onMounted(async () => {
           <div class="flex items-center gap-2 text-xs text-slate-400 bg-slate-900 px-3 py-1.5 rounded-lg border border-slate-800">
             <span class="w-2 h-2 rounded-full bg-emerald-500 animate-pulse"></span>
             <span>RAG System:</span>
-            <span class="font-mono text-slate-200 uppercase">Sandbox Mode</span>
+            <span class="font-mono text-slate-200 uppercase">Ready</span>
           </div>
         </div>
       </header>
@@ -1030,11 +1013,6 @@ onMounted(async () => {
         @uploadFiles="processFiles"
         @deleteFile="deleteFile"
         @indexFile="indexFile"
-      />
-
-      <SandboxAnalyses
-        v-else-if="activeTab === 'sandbox'"
-        :files="files"
       />
 
       <RAGConfigComponent

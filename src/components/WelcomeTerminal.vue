@@ -15,7 +15,7 @@ Codebase intelligence for understanding, searching, and explaining projects.
 [ok] Search indexed code with semantic RAG
 [ok] Analyze Laravel structure, routes, models, and migrations
 [ok] Explore schema, domain knowledge, definitions, and logs
-[ok] Run sandbox checks and inspect runtime behavior
+[ok] Inspect project structure and runtime behavior
 [ok] Tune configuration and model controls
 
 status: ready`;
