@@ -110,14 +110,24 @@ class Storage:
             return None
 
     def put_rag_file(self, session_id: str, filename: str, data: bytes) -> str:
-        client = self._get_client()
         key = f"{RAG_UPLOADS_PREFIX}/{session_id}/{filename}"
+        return self._put_archive(key, data, self._content_type(filename))
+
+    def put_snapshot_archive(self, snapshot_key: str, checksum: str, data: bytes) -> str:
+        """Immutable CI archive namespace, outside mutable legacy upload lists."""
+        import re
+        if not all(re.fullmatch(r"[0-9a-f]{64}", value) for value in (snapshot_key, checksum)):
+            raise ValueError("Invalid source archive identity")
+        return self._put_archive(f"telemetry-sources/{snapshot_key}/{checksum}.zip", data, "application/zip")
+
+    def _put_archive(self, key: str, data: bytes, content_type: str) -> str:
+        client = self._get_client()
         client.put_object(
             self.tus_bucket,
             key,
             data=io.BytesIO(data),
             length=len(data),
-            content_type=self._content_type(filename),
+            content_type=content_type,
         )
         return key
 

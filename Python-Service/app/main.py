@@ -169,6 +169,9 @@ app = FastAPI(
     redoc_url="/redoc",
 )
 
+from telemetry.http import router as telemetry_router
+app.include_router(telemetry_router)
+
 from inspection.http import router as inspection_router  # noqa: E402 — after app exists
 from routers.developer_logs import router as developer_logs_router  # noqa: E402 — after app exists
 from routers.system import router as system_router  # noqa: E402 — after app exists

@@ -9,6 +9,7 @@ from index.embeddings import get_llamaindex_embed_model
 from index.graph_store import InMemoryCodeGraph
 from index.models import EdgeModel, ParameterModel, SymbolModel
 from infra.settings import settings
+from telemetry.symbols import from_chunk
 
 # Embeddings come from the configured embedding server (Ollama by default, or
 # an OpenAI-compatible endpoint like LM Studio when embeddingBaseUrl is set).
@@ -16,6 +17,9 @@ Settings.embed_model = get_llamaindex_embed_model()
 
 
 def build_symbol_id(chunk: Dict[str, Any]) -> str:
+    canonical = from_chunk(chunk)
+    if canonical is not None:
+        return canonical
     class_name = chunk.get("class") or "__global__"
     name = chunk.get("name") or "__unknown__"
     file = chunk.get("file") or "__unknown_file__"
@@ -187,6 +191,8 @@ class CodeIntelligenceIndex:
 
         chunks = payload.get("chunks", [])
         symbols = [chunk_to_symbol(chunk) for chunk in chunks]
+        if len({symbol.symbol_id for symbol in symbols}) != len(symbols):
+            raise ValueError("Ambiguous duplicate symbol identity")
 
         for symbol in symbols:
             self.graph.add_symbol(symbol)

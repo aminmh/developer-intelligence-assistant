@@ -122,6 +122,10 @@ final class ChunkCollector extends NodeVisitorAbstract
 
     public function leaveNode(Node $node): void
     {
+        if ($node instanceof Node\Expr\Closure || $node instanceof Node\Expr\ArrowFunction) {
+            $this->chunks[] = $this->buildClosureChunk($node);
+            return;
+        }
         if ($node instanceof Node\Stmt\Property || $node instanceof Node\Stmt\ClassConst || $node instanceof Node\Stmt\Const_) {
             $this->chunks[] = $this->buildMemberDeclarationChunk($node);
             return;
@@ -140,6 +144,23 @@ final class ChunkCollector extends NodeVisitorAbstract
     }
 
     // ─── Chunk construction ────────────────────────────────────────────────────
+
+    private function buildClosureChunk(Node\Expr\Closure|Node\Expr\ArrowFunction $node): CodeChunk
+    {
+        $start = $node->getStartLine();
+        $end = $node->getEndLine();
+        $className = $this->classStack ? end($this->classStack) : null;
+        $classFqn = $className ? ($this->currentNamespace ? $this->currentNamespace . '\\' : '') . $className : null;
+        $kind = $node instanceof Node\Expr\ArrowFunction ? 'arrow_function' : 'closure';
+        $symbol = 'closure@' . $this->filePath . ':' . $start;
+        return new CodeChunk(
+            code: $this->sourceSlice($start, $end), type: $kind, name: '{closure}',
+            className: $className, classFqn: $classFqn, namespace: $this->currentNamespace,
+            file: $this->filePath, startLine: $start, endLine: $end, parameters: [], returnType: null,
+            calls: [], docblock: $this->extractNodeDocblock($node), modifiers: [],
+            nodeType: $kind, symbolName: '{closure}', fqSymbolName: $symbol, parentSymbol: $classFqn,
+        );
+    }
 
     private function buildChunk(Function_|ClassMethod $node): CodeChunk
     {

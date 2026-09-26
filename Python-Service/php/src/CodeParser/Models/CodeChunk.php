@@ -2,6 +2,9 @@
 
 namespace App\CodeParser\Models;
 
+use App\Telemetry\SymbolId;
+use InvalidArgumentException;
+
 /** A source-oriented, AST-bounded retrieval chunk. */
 final readonly class CodeChunk
 {
@@ -31,7 +34,7 @@ final readonly class CodeChunk
         $symbolName = $this->symbolName !== '' ? $this->symbolName : $this->name;
         $fqSymbolName = $this->fqSymbolName !== '' ? $this->fqSymbolName
             : ($this->classFqn ? $this->classFqn . ($this->name !== '' ? '::' . $this->name : '') : $this->name);
-        return [
+        $metadata = [
             'schema_version' => $this->schemaVersion, 'chunk_id' => $chunkId, 'file_path' => $this->file,
             'language' => $this->language, 'node_type' => $nodeType, 'symbol_name' => $symbolName,
             'fq_symbol_name' => $fqSymbolName, 'namespace' => $this->namespace, 'class_name' => $this->className,
@@ -48,6 +51,13 @@ final readonly class CodeChunk
             'modifiers' => $this->modifiers, 'parameters' => $this->parameters, 'return_type' => $this->returnType,
             'calls' => $this->flattenCalls(), 'callers' => [], 'has_docblock' => $this->docblock !== null,
         ];
+        try {
+            $symbolId = SymbolId::fromChunk($metadata);
+            if ($symbolId !== null) $metadata['symbol_id'] = $symbolId;
+        } catch (InvalidArgumentException $error) {
+            $metadata['symbol_identity_error'] = $error->getMessage();
+        }
+        return $metadata;
     }
 
     /** @return string[] */

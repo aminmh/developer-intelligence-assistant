@@ -42,6 +42,8 @@ from qdrant_client.models import (
 from infra.settings import settings
 from infra.settings_store import settings_store
 from infra.exception_logger import get_exception_logger
+from telemetry.snapshot import Snapshot, identity_metadata, prepare_chunks
+from telemetry.symbols import from_chunk, normalize as canonical_symbol
 
 # Heavy raw attributes kept out of LLM-visible metadata (token bloat), but still
 # available for relationship generation during ingestion.
@@ -426,6 +428,12 @@ def _flatten_call_values(calls: Any) -> List[str]:
 
 
 def _chunk_node_id(chunk: Dict[str, Any]) -> str:
+    if chunk.get("storage_id"):
+        return chunk["storage_id"]
+    if (chunk.get("node_type") or chunk.get("type")) in ("closure", "arrow_function"):
+        # Closure chunks are new in Phase 0 and have no legacy persisted IDs.
+        # Using the old class/name hash would collapse every {closure}.
+        return hashlib.sha1(from_chunk(chunk).encode("utf-8")).hexdigest()
     fqn = chunk.get("class_fqn") or chunk.get("class")
     name = chunk.get("name")
     return node_id_for(fqn, name)
@@ -571,6 +579,7 @@ def _graph_properties(chunk: Dict[str, Any], collection_name: str) -> Dict[str, 
     """Graph node properties — structure only, no code body."""
     return _strip_none(
         {
+            **identity_metadata(chunk),
             "schema_version": chunk.get("schema_version", "ast-chunk-v1"),
             "chunk_id": chunk.get("chunk_id"),
             "language": chunk.get("language", "php"),
@@ -613,6 +622,7 @@ def _payload(chunk: Dict[str, Any], collection_name: str) -> Dict[str, Any]:
     """Qdrant point payload — full retrieval context including code body."""
     return _strip_none(
         {
+            **identity_metadata(chunk),
             "schema_version": chunk.get("schema_version", "ast-chunk-v1"),
             "chunk_id": chunk.get("chunk_id"),
             "language": chunk.get("language", "php"),
@@ -737,6 +747,7 @@ class CodePropertyGraph:
         collection_name: str,
         symbol_definitions: Optional[List[Dict[str, Any]]] = None,
         symbol_references: Optional[List[Dict[str, Any]]] = None,
+        snapshot: Snapshot | None = None,
     ) -> Dict[str, Any]:
         """Ingest code chunks into the Neo4j graph and Qdrant vectors.
 
@@ -746,12 +757,18 @@ class CodePropertyGraph:
         """
         if not isinstance(chunks, list):
             chunks = []
+        if snapshot is None and collection_name.startswith("snapshot_"):
+            raise ValueError("Snapshot collections require explicit snapshot indexing")
 
         chunks = enrich_chunks_with_symbol_index(
             chunks,
             symbol_definitions or [],
             symbol_references or [],
         )
+        if snapshot is not None:
+            if collection_name != snapshot.collection:
+                raise ValueError("Snapshot collection does not match its scope")
+            chunks = prepare_chunks(chunks, snapshot)
 
         # Dedup by deterministic node id (idempotent re-runs).
         unique: Dict[str, Dict[str, Any]] = {}
@@ -759,6 +776,8 @@ class CodePropertyGraph:
             if not isinstance(c, dict):
                 continue
             nid = _chunk_node_id(c)
+            if nid in unique and (c.get("node_type") or c.get("type")) in ("closure", "arrow_function"):
+                raise ValueError("Ambiguous duplicate closure identity")
             unique.setdefault(nid, c)
         deduped = list(unique.values())
 
@@ -771,12 +790,20 @@ class CodePropertyGraph:
                 "graph_relations": 0,
             }
 
-        graph_nodes, graph_relations = self._ingest_graph(deduped, collection_name)
-        ingested, embed_fails = self._ingest_vectors(deduped, collection_name)
+        if snapshot is not None:
+            if not deduped:
+                raise ValueError("Snapshot has no indexable source")
+            graph_nodes, graph_relations = self._ingest_graph(deduped, collection_name, strict=True)
+            ingested, embed_fails = self._ingest_vectors(deduped, collection_name, replace=False)
+            if graph_nodes != len(deduped) or ingested != len(deduped) or embed_fails:
+                raise RuntimeError("Snapshot persistence is incomplete")
+        else:
+            graph_nodes, graph_relations = self._ingest_graph(deduped, collection_name)
+            ingested, embed_fails = self._ingest_vectors(deduped, collection_name)
 
         # Refresh the typo-correction domain dictionary so newly indexed
         # class/method names become correctable (best-effort).
-        if ingested:
+        if ingested and snapshot is None:
             try:
                 from rag.query_normalizer import regenerate_domain_dictionary
 
@@ -797,10 +824,12 @@ class CodePropertyGraph:
         }
 
     def _ingest_graph(
-        self, chunks: List[Dict[str, Any]], collection_name: str
+        self, chunks: List[Dict[str, Any]], collection_name: str, *, strict: bool = False
     ) -> tuple[int, int]:
         store = self._get_graph_store()
         if store is None:
+            if strict:
+                raise RuntimeError("Snapshot graph store unavailable")
             return 0, 0
 
         known_ids = {_chunk_node_id(c) for c in chunks}
@@ -822,9 +851,27 @@ class CodePropertyGraph:
             str(c.get("fq_symbol_name") or c.get("class_fqn") or c.get("name") or ""): _chunk_node_id(c)
             for c in chunks
         }
+        canonical_ids = {c["symbol_id"]: _chunk_node_id(c) for c in chunks if c.get("symbol_id")}
         for c in chunks:
             src = _chunk_node_id(c)
-            for target in c.get("calls", []) or []:
+            for target in _flatten_call_values(c.get("calls")):
+                if strict:
+                    try:
+                        if "::" in target:
+                            owner, method = target.split("::", 1)
+                            kind = "function" if owner in ("__function", "__global__") else "method"
+                            symbol = canonical_symbol({"kind": kind, "class": owner,
+                                                       "method": method, "name": method})
+                        else:
+                            symbol = canonical_symbol({"kind": "function", "name": target})
+                    except ValueError:
+                        continue
+                    dst = canonical_ids.get(symbol)
+                    if dst is not None and (src, dst) not in seen_rels:
+                        seen_rels.add((src, dst))
+                        rel_rows.append({"source_id": src, "target_id": dst,
+                                         "label": "CALLS", "collection": collection_name})
+                    continue
                 if not isinstance(target, str) or "::" not in target:
                     continue
                 t_fqn, t_method = target.split("::", 1)
@@ -863,8 +910,12 @@ class CodePropertyGraph:
                         structure_rows.append({"source_id": src, "target_id": target_id, "kind": kind, "collection": collection_name})
 
         try:
-            store.structured_query(_NODE_UPSERT_CYPHER, param_map={"data": node_rows})
+            result = store.structured_query(_NODE_UPSERT_CYPHER, param_map={"data": node_rows})
+            if strict and (not result or result[0].get("count") != len(node_rows)):
+                raise RuntimeError("Snapshot graph node count mismatch")
         except Exception as exc:
+            if strict:
+                raise
             get_exception_logger().error(
                 "Neo4j node upsert failed for collection %s: %s",
                 collection_name,
@@ -874,10 +925,14 @@ class CodePropertyGraph:
 
         if rel_rows:
             try:
-                store.structured_query(
+                result = store.structured_query(
                     _REL_UPSERT_CYPHER, param_map={"data": rel_rows}
                 )
+                if strict and (not result or result[0].get("count") != len(rel_rows)):
+                    raise RuntimeError("Snapshot graph call count mismatch")
             except Exception as exc:
+                if strict:
+                    raise
                 get_exception_logger().error(
                     "Neo4j relation upsert failed for collection %s: %s",
                     collection_name,
@@ -887,11 +942,15 @@ class CodePropertyGraph:
 
         if structure_rows:
             try:
-                store.structured_query(
+                result = store.structured_query(
                     _STRUCTURE_REL_UPSERT_CYPHER,
                     param_map={"data": structure_rows},
                 )
+                if strict and (not result or result[0].get("count") != len(structure_rows)):
+                    raise RuntimeError("Snapshot graph structure count mismatch")
             except Exception as exc:
+                if strict:
+                    raise
                 get_exception_logger().error(
                     "Neo4j structure relation upsert failed for collection %s: %s",
                     collection_name,
@@ -901,16 +960,17 @@ class CodePropertyGraph:
         return len(node_rows), len(rel_rows) + len(structure_rows)
 
     def _ingest_vectors(
-        self, chunks: List[Dict[str, Any]], collection_name: str
+        self, chunks: List[Dict[str, Any]], collection_name: str, *, replace: bool = True
     ) -> tuple[int, int]:
         qdrant = self._get_qdrant()
         embed_model = self._get_embed_model()
         self._last_embedding_error: str | None = None
 
-        try:
-            qdrant.delete_collection(collection_name)
-        except Exception:
-            pass
+        if replace:
+            try:
+                qdrant.delete_collection(collection_name)
+            except Exception:
+                pass
 
         points: List[PointStruct] = []
         embed_fails = 0
@@ -1085,6 +1145,10 @@ class CodePropertyGraph:
         collection_names = {c.name for c in collections}
         target_collections: List[str] = []
         if collection_name:
+            if collection_name.startswith("snapshot_"):
+                from telemetry.registry import default_registry
+                if not default_registry().is_ready_collection(collection_name):
+                    raise ValueError("Snapshot is not ready for retrieval")
             if collection_name in collection_names:
                 target_collections.append(collection_name)
             # Persisted analysis knowledge rides in a SIBLING collection
@@ -1102,6 +1166,10 @@ class CodePropertyGraph:
                 target_collections.append(sibling)
         else:
             for col in collections:
+                # Explicit snapshot consumers must first resolve registry readiness.
+                # Never expose staging/failed snapshots through legacy broad search.
+                if col.name.startswith("snapshot_"):
+                    continue
                 if col.name in ("code_symbols", "developer_assistant_rag"):
                     continue
                 target_collections.append(col.name)

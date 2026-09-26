@@ -21,7 +21,8 @@ import re
 from typing import Any
 
 from inspection import cli as php_cli
-from inspection.graph import InspectionGraph, node_key, node_properties
+from inspection.graph import InspectionGraph, canonical_definition, node_key, node_properties
+from telemetry.snapshot import Snapshot, storage_id
 from inspection.queries import SymbolGraphQuery
 
 logger = logging.getLogger(__name__)
@@ -63,6 +64,7 @@ class InspectionService:
         stem: str,
         exclude: list[str] | None = None,
         exported: dict[str, list[dict[str, Any]]] | None = None,
+        snapshot: Snapshot | None = None,
     ) -> dict[str, Any]:
         """Export defs + refs and materialize the sym_<stem> symbol graph.
 
@@ -74,6 +76,10 @@ class InspectionService:
         already happened — re-callable once the store is back).
         """
         collection = sym_collection_for(stem)
+        if snapshot is None and collection.startswith("sym_snapshot_"):
+            raise ValueError("Snapshot collections require explicit snapshot indexing")
+        if snapshot is not None:
+            collection = "sym_" + snapshot.collection
         if exported is not None:
             payload = exported
         else:
@@ -92,7 +98,22 @@ class InspectionService:
 
         nodes = [self._def_node(d, collection) for d in defs]
         node_rows = [n for n in nodes if n is not None]
+        scoped_ids = {}
+        if snapshot is not None:
+            for record, node in zip(defs, nodes):
+                if node is None:
+                    continue
+                symbol = canonical_definition(record)
+                identity = symbol or f"declaration:{record.get('kind')}:{record.get('fqn')}"
+                scoped = storage_id(snapshot.project_id, snapshot.commit_sha, identity)
+                if scoped in scoped_ids.values() or node["id"] in scoped_ids:
+                    raise ValueError("Ambiguous duplicate inspection definition")
+                scoped_ids[node["id"]] = scoped
+                node["id"] = scoped
+                node["properties"].update(snapshot.metadata())
         written = self._graph.upsert_nodes(node_rows) if node_rows else 0
+        if snapshot is not None and written != len(node_rows):
+            raise RuntimeError("Snapshot inspection nodes incomplete")
 
         if not written:
             return {
@@ -122,7 +143,11 @@ class InspectionService:
                         "kind": rel.get("kind", ""),
                     }
                 )
+        if snapshot is not None:
+            _scope_edges(decl_rows, scoped_ids)
         relations = self._graph.upsert_declaration_relations(decl_rows)
+        if snapshot is not None and relations != len(decl_rows):
+            raise RuntimeError("Snapshot inspection declarations incomplete")
 
         # Use-sites → REFERENCES edges (only when both ends are known).
         def_keys = {_node_key_for_record(d) for d in defs}
@@ -150,7 +175,11 @@ class InspectionService:
                 }
             )
             linked += 1
+        if snapshot is not None:
+            _scope_edges(ref_rows, scoped_ids)
         links = self._graph.upsert_references(ref_rows)
+        if snapshot is not None and links != len(ref_rows):
+            raise RuntimeError("Snapshot inspection references incomplete")
 
         return {
             "collection": collection,
@@ -240,6 +269,12 @@ class InspectionService:
         if target is None:
             return None
         return _node_key_for_record(target)
+
+
+def _scope_edges(rows: list[dict], ids: dict[str, str]) -> None:
+    for row in rows:
+        row["source_id"] = ids[row["source_id"]]
+        row["target_id"] = ids[row["target_id"]]
 
 
 def _def_index(defs: list[dict[str, Any]]) -> dict[str, dict[str, Any]]:

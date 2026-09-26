@@ -22,6 +22,7 @@ from typing import Any
 
 from infra.exception_logger import get_exception_logger
 from infra.settings import settings
+from telemetry.symbols import normalize
 
 _NODE_UPSERT_CYPHER = """
 UNWIND $data AS row
@@ -190,4 +191,19 @@ def node_properties(
         }
     )
     props.setdefault("file", "")
+    try:
+        canonical = canonical_definition(record)
+        if canonical is not None:
+            props["symbol_id"] = canonical
+    except ValueError:
+        props["symbol_identity_error"] = "invalid_symbol_identity"
     return props
+
+
+def canonical_definition(record: dict[str, Any]) -> str | None:
+    if record.get("kind") == "method":
+        owner, _, method = str(record.get("fqn") or "").rpartition("::")
+        return normalize({"kind": "method", "class": owner, "method": method})
+    if record.get("kind") == "function":
+        return normalize({"kind": "function", "name": record.get("fqn")})
+    return None

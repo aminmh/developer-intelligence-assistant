@@ -9,7 +9,7 @@ class ParameterModel(BaseModel):
 
 
 class SymbolModel(BaseModel):
-    symbol_id: str = Field(description="Unique identifier for the symbol (class_name::name@file:line).")
+    symbol_id: str = Field(description="Canonical PHP symbol identity; legacy IDs remain readable.")
     kind: str = Field(description="Symbol kind (e.g. function, method, class).")
     name: str = Field(description="Method or function name.")
     class_name: Optional[str] = Field(None, description="Fully-qualified class name, if the symbol belongs to a class.")

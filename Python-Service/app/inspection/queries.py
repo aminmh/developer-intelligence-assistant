@@ -73,6 +73,7 @@ ORDER BY c.file, r.line
 _LIST_PROJECTS = """
 MATCH (s:PhpSymbol)
 WHERE s.collection STARTS WITH 'sym_'
+  AND NOT s.collection STARTS WITH 'sym_snapshot_'
 RETURN s.collection AS collection, count(s) AS definitions
 ORDER BY s.collection
 """
@@ -128,6 +129,9 @@ def _node_row(node: Any) -> dict[str, Any]:
     """Neo4j record node → plain definition dict."""
     props = _props(node)
     return {
+        **({"id": props["id"], "symbol_id": props.get("symbol_id"),
+            "project_id": props["project_id"], "commit_sha": props.get("commit_sha")}
+           if props.get("project_id") and props.get("id") else {}),
         "kind": props.get("kind", ""),
         "name": props.get("name", ""),
         "fqn": props.get("fqn", ""),
@@ -159,6 +163,11 @@ class SymbolGraphQuery:
         self._graph = graph
 
     def _run(self, cypher: str, params: dict[str, Any]) -> list[Any]:
+        collection = params.get("collection", "")
+        if collection.startswith("sym_snapshot_"):
+            from telemetry.registry import default_registry
+            if not default_registry().is_ready_collection(collection.removeprefix("sym_")):
+                return []
         store = self._graph._get_store()
         if store is None:
             return []
@@ -225,7 +234,7 @@ class SymbolGraphQuery:
             return []
         rows = self._run(
             _FIND_IMPLEMENTATIONS,
-            {"collection": collection, "target_id": node_key(
+            {"collection": collection, "target_id": target[0].get("id") or node_key(
                 target[0]["kind"], target[0]["fqn"], target[0]["name"]
             )},
         )
@@ -243,7 +252,7 @@ class SymbolGraphQuery:
             return []
         rows = self._run(
             _FIND_REFERENCES,
-            {"collection": collection, "target_id": node_key(
+            {"collection": collection, "target_id": target[0].get("id") or node_key(
                 target[0]["kind"], target[0]["fqn"], target[0]["name"]
             )},
         )
@@ -265,7 +274,7 @@ class SymbolGraphQuery:
         if not target:
             return {"callees": [], "callers": []}
         t = target[0]
-        key = node_key(t["kind"], t["fqn"], t["name"])
+        key = t.get("id") or node_key(t["kind"], t["fqn"], t["name"])
         callee_rows = self._run(_CALLEES, {"collection": collection, "source_id": key})
         caller_rows = self._run(_CALLERS, {"collection": collection, "source_id": key})
         callees = []
