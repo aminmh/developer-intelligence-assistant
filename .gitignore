@@ -2,3 +2,4 @@
 minio-data
 .claude
 qdrant-data
+telemetry-dev/host/certs/

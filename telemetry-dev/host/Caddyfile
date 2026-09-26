@@ -1,0 +1,28 @@
+{
+	admin off
+}
+
+:9443 {
+	tls /etc/caddy/identity/server.crt /etc/caddy/identity/server.key {
+		client_auth {
+			mode require_and_verify
+			trust_pool file {
+				pem_file /etc/caddy/identity/ca.pem
+			}
+		}
+	}
+
+	@host_deployments {
+		method POST
+		path /telemetry/host/deployments
+	}
+	handle @host_deployments {
+		reverse_proxy python-api:9002 {
+			header_up X-Verified-Client-Cert-SHA256 {http.request.tls.client.fingerprint}
+		}
+	}
+
+	handle {
+		respond "not found" 404
+	}
+}

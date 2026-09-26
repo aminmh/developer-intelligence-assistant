@@ -26,6 +26,8 @@ services:
       TELEMETRY_RETENTION_HOURS: ${TELEMETRY_RETENTION_HOURS:-168}
       TELEMETRY_RECORDING_PERCENT: ${TELEMETRY_RECORDING_PERCENT:-100}
       TELEMETRY_OTLP_ENDPOINT: ${TELEMETRY_OTLP_ENDPOINT:-http://host.docker.internal:24318}
+      TELEMETRY_CI_PROJECT_TOKENS: ${TELEMETRY_CI_PROJECT_TOKENS:-}
+      TELEMETRY_HOST_SCOPES: ${TELEMETRY_HOST_SCOPES:-}
       # MinIO/S3 storage (rag uploads) — formerly owned by php-ast.
       AWS_ENDPOINT: http://minio:9000
       AWS_ACCESS_KEY_ID: ${MINIO_ROOT_USER}
@@ -45,6 +47,24 @@ services:
       - default
       - devassistant_net
       - telemetry_runtime
+
+  # The only ingress intended for per-host deployment reports. Host agents
+  # join telemetry_ingress; the published port is loopback-only for local use.
+  telemetry-caddy:
+    image: caddy:2.10.2-alpine
+    ports:
+      - "${TELEMETRY_INGRESS_BIND:-127.0.0.1}:${TELEMETRY_INGRESS_PORT:-9443}:9443"
+    volumes:
+      - ./telemetry-dev/host/Caddyfile:/etc/caddy/Caddyfile:ro
+      - ${TELEMETRY_INGRESS_CERT_DIR:-./telemetry-dev/host/certs/ingress}:/etc/caddy/identity:ro
+      - telemetry-caddy-data:/data
+      - telemetry-caddy-config:/config
+    depends_on:
+      - python-api
+    networks:
+      - default
+      - telemetry_ingress
+    restart: unless-stopped
 
   # tusd config note: -hooks-enabled-events is intentionally set to post-finish
   # only. The hook is handled by python-api, which verifies the upload session's
@@ -201,10 +221,15 @@ volumes:
   qdrant-data:
   neo4j-data:
   telemetry-runtime-data:
+  telemetry-caddy-data:
+  telemetry-caddy-config:
 
 networks:
   default: {}
   devassistant_net:
     external: true
   telemetry_runtime:
+    internal: true
+  telemetry_ingress:
+    name: devassistant_telemetry_ingress
     internal: true
