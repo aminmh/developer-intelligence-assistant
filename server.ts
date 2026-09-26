@@ -101,11 +101,17 @@ async function authorizeAttachedUpload(
   uploadSessionId: unknown,
   projectId: unknown,
   commitSha: unknown,
+  allowNonUploadContext: boolean,
 ): Promise<boolean> {
   if (typeof filename !== 'string' || !filename) return true;
+  const user = (res.locals as any).authUser;
   // Filename-only requests are the retained legacy and saved-analysis paths.
   // New project-scoped uploads always carry their authoritative upload session.
-  if (!uploadSessionId && !projectId && !commitSha) return true;
+  if (!uploadSessionId && !projectId && !commitSha) {
+    if (allowNonUploadContext || authIsBootstrapAdmin(user)) return true;
+    res.status(403).json({ success: false, error: 'Unattributed legacy uploads are restricted to the bootstrap administrator.' });
+    return false;
+  }
   if (typeof uploadSessionId !== 'string' || !uploadSessionId) {
     res.status(400).json({ success: false, error: 'An uploaded archive session is required.' });
     return false;
@@ -117,7 +123,6 @@ async function authorizeAttachedUpload(
     res.status(404).json({ success: false, error: 'Uploaded archive not found.' });
     return false;
   }
-  const user = (res.locals as any).authUser;
   if (file.project_id && file.commit_sha) {
     if (projectId !== file.project_id || commitSha !== file.commit_sha) {
       res.status(403).json({ success: false, error: 'Upload project identity does not match the archive record.' });
@@ -129,6 +134,9 @@ async function authorizeAttachedUpload(
     }
   } else if (projectId || commitSha) {
     res.status(409).json({ success: false, error: 'Legacy uploads cannot be assigned an inferred project identity.' });
+    return false;
+  } else if (!authIsBootstrapAdmin(user)) {
+    res.status(403).json({ success: false, error: 'Unattributed legacy uploads are restricted to the bootstrap administrator.' });
     return false;
   }
   return true;
@@ -1144,7 +1152,9 @@ async function startServer() {
       }
 
       const user = (res.locals as any).authUser;
-      const visibleFiles = files.filter((file) => !file.projectId || authRoleFor(user, file.projectId));
+      const visibleFiles = files.filter((file) => file.projectId
+        ? Boolean(authRoleFor(user, file.projectId))
+        : authIsBootstrapAdmin(user));
       res.json({ success: true, files: visibleFiles });
     } catch (error: any) {
       res.status(500).json({ success: false, error: error.message });
@@ -1295,7 +1305,8 @@ async function startServer() {
   app.post('/api/query', async (req, res) => {
     try {
       const { query, filename, use_remote, upload_session_id, project_id, commit_sha } = req.body;
-      if (!await authorizeAttachedUpload(res, filename, upload_session_id, project_id, commit_sha)) return;
+      if (!await authorizeAttachedUpload(res, filename, upload_session_id, project_id, commit_sha,
+        Boolean(req.body?.domain_analysis_id))) return;
       if (!query || query.trim() === '') {
         return res.status(400).json({ success: false, error: 'Query parameter is required.' });
       }
@@ -1407,7 +1418,8 @@ async function startServer() {
   app.post('/api/query/stream', async (req, res) => {
     try {
       const { query, filename, use_remote, route, upload_session_id, project_id, commit_sha } = req.body;
-      if (!await authorizeAttachedUpload(res, filename, upload_session_id, project_id, commit_sha)) return;
+      if (!await authorizeAttachedUpload(res, filename, upload_session_id, project_id, commit_sha,
+        Boolean(req.body?.domain_analysis_id))) return;
       if (!query || query.trim() === '') {
         return res.status(400).json({ success: false, error: 'Query parameter is required.' });
       }
