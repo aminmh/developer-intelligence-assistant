@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { Activity, AlertTriangle, ArrowUpRight, CheckCircle2, RefreshCw, Server, XCircle } from 'lucide-vue-next';
+import { Activity, AlertTriangle, ArrowUpRight, BookOpen, CheckCircle2, RefreshCw, Server, XCircle } from 'lucide-vue-next';
 import { computed, onMounted, onUnmounted, ref, watch } from 'vue';
 import { makeRequest } from '../ui/makeRequest';
 import type { RuntimeProjectRecord, RuntimeSnapshotData } from '../types';
@@ -15,6 +15,15 @@ const loadingProjects = ref(false);
 const loadingDetail = ref(false);
 const error = ref('');
 const deadOnly = ref(false);
+const showGuide = ref(false);
+const dockerLabelSnippet = [
+  'labels:',
+  '  com.devassistant.telemetry.enabled: "true"',
+  '  com.devassistant.telemetry.project: billing',
+  '  com.devassistant.telemetry.environment: staging',
+  '  com.devassistant.telemetry.commit: "${GIT_COMMIT_SHA}"',
+  '  com.devassistant.telemetry.service: api',
+].join('\n');
 let refreshTimer: ReturnType<typeof setInterval> | undefined;
 
 const options = computed(() => projects.value.filter((project) => project.commit_sha)
@@ -94,7 +103,8 @@ onUnmounted(() => { if (refreshTimer) clearInterval(refreshTimer); });
         <h3 class="flex items-center gap-2 text-lg font-bold text-white"><Activity class="h-5 w-5 text-cyan-400" />Runtime</h3>
         <p class="mt-1 text-xs text-slate-500">Live deployments, span flow, code matching, routes, and database tables.</p>
       </div>
-      <div class="flex gap-2">
+      <div class="flex flex-wrap items-center gap-2">
+        <button type="button" @click="showGuide = !showGuide" class="rounded-xl border border-cyan-500/30 px-3 py-2 text-xs text-cyan-200 hover:bg-cyan-500/10"><BookOpen class="mr-1 inline h-3.5 w-3.5" />{{ showGuide ? 'Hide guide' : 'Get Started' }}</button>
         <select v-model="selectedKey" class="max-w-[24rem] rounded-xl border border-slate-800 bg-[#11162d] px-3 py-2 text-xs text-slate-200">
           <option value="">Select project commit</option>
           <option v-for="item in options" :key="item.key" :value="item.key">{{ item.project_id }} · {{ item.commit_sha?.slice(0, 12) }}</option>
@@ -107,10 +117,42 @@ onUnmounted(() => { if (refreshTimer) clearInterval(refreshTimer); });
     <div v-else-if="!options.length" class="rounded-2xl border border-dashed border-slate-700 p-10 text-center">
       <Server class="mx-auto h-7 w-7 text-slate-600" />
       <p class="mt-3 text-sm text-slate-300">No project snapshots are registered yet.</p>
-      <p class="mt-1 text-xs text-slate-500">Upload and index a ZIP with its project ID and full commit SHA, then configure the host deployment reporter to list running containers.</p>
+      <p class="mt-1 text-xs text-slate-500">Open Get Started to learn how to register a snapshot, report labeled Docker containers, and send application spans.</p>
     </div>
 
-    <template v-else-if="detail">
+    <section v-if="showGuide" class="rounded-2xl border border-cyan-500/20 bg-cyan-500/[0.04] p-5">
+      <div class="flex items-start gap-3">
+        <BookOpen class="mt-0.5 h-5 w-5 shrink-0 text-cyan-300" />
+        <div class="min-w-0 flex-1 space-y-4">
+          <div>
+            <h4 class="text-sm font-semibold text-white">Get started with Runtime</h4>
+            <p class="mt-1 text-xs leading-5 text-slate-400">Runtime combines host-reported Docker deployments with sampled OpenTelemetry spans. Container reports show what is running; spans add code, route, and database activity. The app does not discover arbitrary containers or instrument application code automatically.</p>
+          </div>
+          <ol class="grid gap-4 lg:grid-cols-3">
+            <li class="rounded-xl border border-slate-800 bg-slate-950/40 p-4">
+              <p class="text-xs font-semibold text-cyan-200">1. Register the project version</p>
+              <p class="mt-2 text-[11px] leading-5 text-slate-400">Upload and index a clean source snapshot using the project ID and full commit SHA used to build the Docker image. Runtime is selected by that exact project and commit.</p>
+            </li>
+            <li class="rounded-xl border border-slate-800 bg-slate-950/40 p-4">
+              <p class="text-xs font-semibold text-cyan-200">2. Report running containers</p>
+              <p class="mt-2 text-[11px] leading-5 text-slate-400">Deploy the per-host telemetry agent and authorize its certificate for the project/environment. Add these opt-in labels to each Compose service you want listed:</p>
+              <pre class="mt-2 overflow-x-auto rounded-lg bg-black/30 p-2 text-[10px] leading-4 text-slate-300"><code>{{ dockerLabelSnippet }}</code></pre>
+              <p class="mt-2 text-[10px] leading-4 text-slate-500">Project and commit must match the indexed snapshot. Host agent setup and mTLS scope are documented in <code>api/telemetry-agent/README.md</code>.</p>
+            </li>
+            <li class="rounded-xl border border-slate-800 bg-slate-950/40 p-4">
+              <p class="text-xs font-semibold text-cyan-200">3. Send application spans (optional)</p>
+              <p class="mt-2 text-[11px] leading-5 text-slate-400">Start the local Collector and instrument the app to export OTLP/HTTP to <code>http://localhost:24318/v1/traces</code> from the host or <code>http://host.docker.internal:24318/v1/traces</code> from a container.</p>
+              <pre class="mt-2 overflow-x-auto rounded-lg bg-black/30 p-2 text-[10px] leading-4 text-slate-300"><code>cd api
+docker compose --profile runtime up -d</code></pre>
+              <p class="mt-2 text-[10px] leading-4 text-slate-500">Spans need project ID, full commit SHA, canonical symbol ID, <code>indexer.dirty=false</code>, and schema version <code>indexer-telemetry-v1</code>. See <code>api/docs/telemetry/attributes.md</code>; instrumentation is not bundled.</p>
+            </li>
+          </ol>
+          <p class="border-t border-slate-800 pt-3 text-[10px] leading-4 text-slate-500">The host agent reconciles containers about every 60 seconds. This view refreshes every 30 seconds or when you select Refresh. Span counts are sampled observations within the configured retention window, not exact production call totals. Container visibility works without spans; code matching, routes, and table activity need spans.</p>
+        </div>
+      </div>
+    </section>
+
+    <template v-if="options.length && detail && !error">
       <div class="flex flex-wrap items-center gap-2 rounded-xl border border-slate-800 bg-slate-900/30 p-3 text-[11px]">
         <span class="font-mono text-slate-200">{{ detail.project_id }} @ {{ detail.commit_sha }}</span>
         <span class="ml-auto rounded-full border px-2 py-1" :class="detail.snapshot.state === 'ready' ? 'border-emerald-500/20 bg-emerald-500/5 text-emerald-300' : 'border-amber-500/20 bg-amber-500/5 text-amber-300'">{{ detail.snapshot.state }}</span>
