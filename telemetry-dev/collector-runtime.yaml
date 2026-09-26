@@ -1,0 +1,76 @@
+# Local receiver for project spans. This separate pipeline preserves the
+# synthetic-only Phase 0 sanitizer in collector.yaml.
+receivers:
+  otlp:
+    protocols:
+      http:
+        endpoint: 0.0.0.0:4318
+
+processors:
+  memory_limiter:
+    check_interval: 1s
+    limit_mib: 384
+    spike_limit_mib: 64
+  filter/runtime_privacy:
+    error_mode: propagate
+    traces:
+      span:
+        - 'Len(span.links) > 0'
+        - 'attributes["indexer.project_id"] == nil'
+        - 'attributes["vcs.ref.head.revision"] == nil'
+        - 'attributes["indexer.dirty"] != false'
+        - 'attributes["indexer.schema.version"] != "indexer-telemetry-v1"'
+      spanevent:
+        - 'true'
+  transform/runtime_privacy:
+    error_mode: propagate
+    trace_statements:
+      - context: resource
+        statements:
+          - 'keep_keys(attributes, ["service.name", "service.version", "service.namespace", "deployment.environment.name", "container.id", "container.image.name", "container.image.id"])'
+      - context: scope
+        statements:
+          - 'limit(attributes, 0, [])'
+          - 'set(name, "devassistant.runtime")'
+          - 'set(version, "1")'
+      - context: span
+        statements:
+          - 'keep_keys(attributes, ["indexer.project_id", "vcs.ref.head.revision", "indexer.symbol_id", "indexer.dirty", "indexer.schema.version", "http.route", "http.request.method", "db.system.name", "db.operation.name", "db.collection.name", "indexer.db.table"])'
+          - 'set(name, "runtime.span")'
+          - 'set(status.message, "")'
+          - 'set(trace_state, "")'
+  probabilistic_sampler/runtime_recording:
+    sampling_percentage: ${env:TELEMETRY_RECORDING_PERCENT:-100}
+    hash_seed: 42
+  batch:
+    timeout: 1s
+    send_batch_size: 128
+
+exporters:
+  clickhouse:
+    endpoint: tcp://telemetry-clickhouse:9000
+    username: ${env:TELEMETRY_CLICKHOUSE_USER}
+    password: ${env:TELEMETRY_CLICKHOUSE_PASSWORD}
+    database: telemetry
+    traces_table_name: otel_traces
+    create_schema: true
+    ttl: ${env:TELEMETRY_RETENTION_HOURS}h
+    async_insert: false
+    sending_queue:
+      enabled: true
+      queue_size: 512
+    retry_on_failure:
+      enabled: true
+      max_elapsed_time: 30s
+
+service:
+  telemetry:
+    logs:
+      level: error
+    metrics:
+      level: none
+  pipelines:
+    traces:
+      receivers: [otlp]
+      processors: [memory_limiter, filter/runtime_privacy, transform/runtime_privacy, probabilistic_sampler/runtime_recording, batch]
+      exporters: [clickhouse]

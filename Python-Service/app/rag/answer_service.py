@@ -57,7 +57,7 @@ class AnswerService:
             preview_only=preview_only,
             preview_mode=preview_mode,
         )
-        return self._response(results, generated, preview_mode)
+        return self._response(results, generated, preview_mode, body.get("runtime_symbol_metrics"))
 
     def stream(self, body: dict, trace_id: str | None = None) -> Iterator[str]:
         query = self._query(body)
@@ -85,6 +85,8 @@ class AnswerService:
                 preview_only=preview_only,
                 preview_mode=preview_mode,
             ):
+                if event.get("type") == "done":
+                    event["matches"] = self._matches(results, body.get("runtime_symbol_metrics"))
                 yield f"data: {json.dumps(event)}\n\n"
         except Exception as exc:  # noqa: BLE001 — preserve SSE error contract
             self._report_stream_error(exc)
@@ -115,21 +117,8 @@ class AnswerService:
         return results, contexts, extra_context
 
     @staticmethod
-    def _response(results: list, generated: dict, preview_mode: str) -> dict:
-        matches = []
-        for index, result in enumerate(results):
-            payload = result.get("payload") or {}
-            name = f"{payload.get('class') or ''}::{payload.get('name') or ''}".strip(":")
-            matches.append({
-                "chunk": {
-                    "id": payload.get("node_id") or f"c{index}",
-                    "fileId": payload.get("file") or "",
-                    "fileName": name.strip() or payload.get("file") or "symbol",
-                    "text": payload.get("code") or "",
-                    "index": index,
-                },
-                "score": result.get("score", 0.0),
-            })
+    def _response(results: list, generated: dict, preview_mode: str, runtime_metrics: Any = None) -> dict:
+        matches = AnswerService._matches(results, runtime_metrics)
         response = {
             "success": True,
             "answer": None,
@@ -154,3 +143,29 @@ class AnswerService:
             if generated.get("preview_only"):
                 response["preview_only"] = True
         return response
+
+    @staticmethod
+    def _matches(results: list, runtime_metrics: Any = None) -> list[dict]:
+        runtime_metrics = runtime_metrics if isinstance(runtime_metrics, dict) else {}
+        matches = []
+        for index, result in enumerate(results):
+            payload = result.get("payload") or {}
+            name = f"{payload.get('class') or ''}::{payload.get('name') or ''}".strip(":")
+            symbol_id = payload.get("symbol_id")
+            match = {
+                "chunk": {
+                    "id": payload.get("node_id") or f"c{index}",
+                    "fileId": payload.get("file") or "",
+                    "fileName": name.strip() or payload.get("file") or "symbol",
+                    "text": payload.get("code") or "",
+                    "index": index,
+                },
+                "score": result.get("score", 0.0),
+            }
+            if symbol_id:
+                match["symbol_id"] = symbol_id
+                metric = runtime_metrics.get(symbol_id)
+                if isinstance(metric, dict):
+                    match["runtime_usage"] = metric
+            matches.append(match)
+        return matches

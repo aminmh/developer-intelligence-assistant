@@ -87,6 +87,59 @@ class SnapshotRegistry:
             return db.execute("SELECT 1 FROM deployments WHERE project_id=? AND commit_sha=? AND state='running' LIMIT 1",
                               (project_id, commit_sha)).fetchone() is not None
 
+    def runtime_projects(self) -> list[dict]:
+        """List source snapshots with their current, allow-listed deployments."""
+        with self._connect() as db:
+            snapshots = db.execute("""SELECT project_id, commit_sha, state, updated_at, metadata
+                FROM snapshots ORDER BY project_id, updated_at DESC""").fetchall()
+            deployments = db.execute("""SELECT container_id, project_id, environment, service,
+                commit_sha, image_id, state, updated_at FROM deployments
+                WHERE state='running' ORDER BY project_id, service, container_id""").fetchall()
+        active: dict[str, list[dict]] = {}
+        for row in deployments:
+            active.setdefault(row["project_id"], []).append(dict(row))
+        result = []
+        for row in snapshots:
+            containers = active.get(row["project_id"], [])
+            metadata = json.loads(row["metadata"])
+            matching = [item for item in containers if item["commit_sha"] == row["commit_sha"]]
+            result.append({
+                **metadata,
+                "state": row["state"],
+                "updated_at": row["updated_at"],
+                "containers": matching,
+                "running_containers": len(matching),
+                "running_project_containers": len(containers),
+                "running_commit_shas": sorted({item["commit_sha"] for item in containers}),
+                "deployment_mismatch": bool(containers) and not matching,
+            })
+        known = {row["project_id"] for row in snapshots}
+        for project_id, containers in active.items():
+            if project_id in known:
+                continue
+            result.append({
+                "project_id": project_id,
+                "commit_sha": None,
+                "state": "awaiting_source",
+                "containers": containers,
+                "running_containers": 0,
+                "running_project_containers": len(containers),
+                "running_commit_shas": sorted({item["commit_sha"] for item in containers}),
+                "deployment_mismatch": True,
+            })
+        return result
+
+    def running_deployments(self, project_id: str, commit_sha: str | None = None) -> list[dict]:
+        query = """SELECT container_id, project_id, environment, service, commit_sha,
+            image_id, state, updated_at FROM deployments WHERE project_id=? AND state='running'"""
+        values: tuple = (project_id,)
+        if commit_sha:
+            query += " AND commit_sha=?"
+            values += (commit_sha,)
+        query += " ORDER BY environment, service, container_id"
+        with self._connect() as db:
+            return [dict(row) for row in db.execute(query, values).fetchall()]
+
     def report_deployments(self, host_id: str, containers: list[dict], *, inventory: bool = False) -> list[tuple[str, str]]:
         """Idempotently upsert allow-listed records; inventory also closes missing host mappings."""
         now = datetime.now(timezone.utc).isoformat()

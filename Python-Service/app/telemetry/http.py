@@ -15,6 +15,7 @@ from telemetry.source import MAX_ARCHIVE_BYTES, SourceService
 
 router = APIRouter(prefix="/telemetry/projects", tags=["Telemetry snapshots"])
 host_router = APIRouter(prefix="/telemetry/host", tags=["Telemetry deployments"])
+runtime_router = APIRouter(prefix="/telemetry/runtime", tags=["Runtime telemetry"])
 MAX_HOST_REPORT_BYTES = 2 * 1024 * 1024
 
 
@@ -38,6 +39,38 @@ def get_registry() -> SnapshotRegistry:
 def get_storage():
     from index.storage import storage
     return storage
+
+
+def authorize_internal(request: Request) -> None:
+    expected = os.environ.get("RAG_CALLBACK_SECRET", "")
+    provided = request.headers.get("x-internal-secret", "")
+    if (not expected or len(expected) < 32
+            or not hmac.compare_digest(provided.encode(), expected.encode())):
+        raise HTTPException(401, "Internal service credentials required")
+
+
+@runtime_router.get("/projects")
+def runtime_projects(request: Request) -> list[dict]:
+    authorize_internal(request)
+    return get_registry().runtime_projects()
+
+
+@runtime_router.get("/projects/{project_id}/snapshots/{commit_sha}")
+def runtime_snapshot(project_id: str, commit_sha: str, request: Request) -> dict:
+    authorize_internal(request)
+    try:
+        validate_scope(project_id, commit_sha)
+        from telemetry.runtime import project_runtime
+        return project_runtime(project_id, commit_sha, get_registry())
+    except ValueError as exc:
+        raise HTTPException(422, "Invalid project snapshot identity") from exc
+
+
+@runtime_router.get("/settings")
+def runtime_settings(request: Request) -> dict:
+    authorize_internal(request)
+    from telemetry.runtime import telemetry_settings
+    return telemetry_settings()
 
 
 def check_request(request: Request, project_id: str, commit_sha: str) -> None:

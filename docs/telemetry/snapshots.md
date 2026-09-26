@@ -113,3 +113,29 @@ framework introspection commands and runtime trait mappings belong to Phase 2.
 The optional stack is `docker-compose.telemetry.yml`; see `telemetry-dev/README.md`.
 Source indexing requires the existing MinIO, Neo4j, Qdrant and embedding backend;
 the optional raw telemetry stack does not replace the app's data stores.
+
+## Phase 1 runtime read API
+
+The opt-in `runtime` profile in the main `docker-compose.yml` adds ClickHouse
+and a privacy-filtering OTLP Collector while reusing the existing Neo4j service.
+The Python API reads scoped aggregates from ClickHouse through
+`GET /telemetry/runtime/projects/{project_id}/snapshots/{commit_sha}`; the
+authenticated Express API exposes the same data under `/api/runtime`. The
+internal routes require `RAG_CALLBACK_SECRET`, and browser access is scoped by
+the persisted project membership role. `/api/runtime/settings` is admin-only.
+Raw spans remain in ClickHouse. The read path only joins symbol IDs to the
+immutable `sym_snapshot_<scope>` symbol collection; it does not write telemetry
+edges into Neo4j or Qdrant.
+
+For local development, configure the `TELEMETRY_*` variables from
+`.env.example`, keep `TELEMETRY_RECORDING_RATIO` and
+`TELEMETRY_RECORDING_PERCENT` aligned, then start `docker compose --profile
+runtime up -d`. Configure `TELEMETRY_RECORDING_PERCENT` to set sampling.
+Application exporters must send allow-listed identity and route
+/ database fields to `http://localhost:24318/v1/traces` from the host, or
+`http://host.docker.internal:24318/v1/traces` from a Docker container. No
+application method instrumentation is bundled: each PHP application must emit
+canonical symbol IDs and the current full commit SHA. The Runtime tab reports
+no observations until those spans arrive. Do not expose this local receiver to
+the network; production ingress and exporter credentials need separate
+deployment configuration.

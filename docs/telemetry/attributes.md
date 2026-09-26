@@ -42,19 +42,38 @@ details before export; do not rely on ClickHouse TTL as a privacy control.
 
 The Phase 0 development Collector accepts only its synthetic canary identity,
 strips unapproved fields, empties events and status detail, and drops spans with
-links. This is a sanitizer smoke fixture, not a production receiver policy or
-an application telemetry exporter. Runtime SDKs, production mTLS deployment,
-sampling, and framework instrumentation are later-phase work.
+links. This remains a sanitizer smoke fixture, not a production receiver policy.
+Phase 1 adds a separate opt-in local runtime Collector; it does not change the
+synthetic-only pipeline.
 
 ## Sampling and counts
 
 Phase 0 emits no application evidence, aggregate metrics, or sampled counts.
-Future dashboards must identify whether a value is an exact hook count,
-pre-sampling aggregate, or sampled span observation. Collector tail sampling
-cannot restore spans already discarded by SDK head sampling. Initial validation
-must use full recording; any reduced-head-sampling profile must disclose
-incomplete coverage and error capture.
+Phase 1 dashboards identify observations as counts from retained sampled spans;
+they do not represent exact production call counts. The runtime Collector uses
+`TELEMETRY_RECORDING_PERCENT` (0–100; default 100) for probabilistic sampling.
+Settings shows the Collector value; keep every app SDK sampler aligned with it.
+Collector tail sampling cannot restore spans already discarded by SDK head
+sampling. Reduced sampling means incomplete coverage and error capture.
 
-Raw span retention in the optional local stack is seven days. Production
-cross-host ingestion requires mutually authenticated TLS and independently
-managed credentials. No telemetry is exported to Neo4j or Qdrant in Phase 0.
+Raw span retention in the optional local stack defaults to seven days and is
+configured by `TELEMETRY_RETENTION_HOURS`. Production cross-host ingestion
+requires mutually authenticated TLS and independently managed credentials. Raw
+spans stay in ClickHouse; runtime aggregates do not write to Neo4j or Qdrant.
+
+## Phase 1 runtime attributes
+
+Start the separate local runtime pipeline with `docker compose --profile runtime
+up -d` from `api/`. It accepts OTLP/HTTP at loopback port 24318, applies an
+allow-list, and stores raw traces in ClickHouse. Application instrumentation
+must send the required identity attributes above plus reviewed `http.route`,
+`http.request.method`, `db.operation.name`, and `indexer.db.table` attributes.
+The runtime summary joins `indexer.symbol_id` to the exact immutable `PhpSymbol`
+snapshot for the same project and full commit SHA. Caller, route, and table
+relationships are inferred only within a shared trace ID; they remain
+observations, not static graph edges.
+
+The local pipeline is a development receiver and has no remote authentication.
+Do not expose port 24318 outside the local host. Host deployment reports still
+require the separately configured verified-client-certificate ingress described
+in `snapshots.md`.
