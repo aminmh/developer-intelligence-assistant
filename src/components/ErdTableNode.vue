@@ -42,16 +42,18 @@ const table = computed<ErdTable | null>(() => {
   return null;
 });
 const selected = computed(() => Boolean(node.value?.getData()?.selected));
+const runtimeOperations = computed(() => Number(node.value?.getData()?.runtimeOperations || 0));
+const busy = computed(() => runtimeOperations.value >= 100);
 </script>
 
 <template>
-  <article v-if="table" class="erd-table-node" :class="{ 'erd-table-node--selected': selected }">
+  <article v-if="table" class="erd-table-node" :class="{ 'erd-table-node--selected': selected, 'erd-table-node--busy': busy }">
     <header class="erd-table-node__header">
       <span class="erd-table-node__heading">
         <span class="erd-table-node__icon" aria-hidden="true">▦</span>
         <span class="erd-table-node__title" :title="table.name">{{ table.name }}</span>
       </span>
-      <span class="erd-table-node__count">{{ table.fields.length }} cols</span>
+      <span class="erd-table-node__count">{{ busy ? `BUSY · ${runtimeOperations.toLocaleString()}` : `${table.fields.length} cols` }}</span>
     </header>
     <div class="erd-table-node__body">
       <div v-for="field in table.fields" :key="field.id" class="erd-table-node__row">
@@ -79,6 +81,15 @@ const selected = computed(() => Boolean(node.value?.getData()?.selected));
 .erd-table-node--selected {
   border-color: #a5b4fc;
   border-width: 2px;
+}
+
+.erd-table-node--busy {
+  border-color: #f97316;
+  box-shadow: 0 0 0 2px rgba(249, 115, 22, 0.24), 0 12px 24px rgba(0, 0, 0, 0.2);
+}
+
+.erd-table-node--busy .erd-table-node__header {
+  background: #431407;
 }
 
 .erd-table-node__header {

@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { Database, Layers3, Palette, Sliders, Wrench } from 'lucide-vue-next';
+import { Activity, Database, Layers3, Palette, Sliders, Wrench } from 'lucide-vue-next';
 import { ref } from 'vue';
 import type { AppearancePreferences, RAGConfig } from '../types';
 import AppearanceCard from './config/AppearanceCard.vue';
@@ -13,13 +13,14 @@ import DomainConceptsCard from './config/DomainConceptsCard.vue';
 import PreviewCard from './config/PreviewCard.vue';
 import RerankerCard from './config/RerankerCard.vue';
 import LlmToolsCard from './config/LlmToolsCard.vue';
+import RuntimeTelemetryCard from './config/RuntimeTelemetryCard.vue';
 
 const props = defineProps<{
   config: RAGConfig;
   appearance: AppearancePreferences;
 }>();
 
-const activeSection = ref<'appearance' | 'models' | 'retrieval' | 'tools'>('appearance');
+const activeSection = ref<'appearance' | 'models' | 'retrieval' | 'tools' | 'runtime'>('appearance');
 
 const emit = defineEmits<{
   (e: 'saveConfig'): void;
@@ -63,6 +64,7 @@ const updateAppearance = <K extends keyof AppearancePreferences>(
           Appearance
         </button>
         <button type="button" class="flex items-center justify-center gap-2 rounded-xl px-3 py-2.5 text-xs font-semibold transition-all" :class="activeSection === 'tools' ? 'bg-indigo-600 text-white shadow-md shadow-indigo-600/20' : 'text-slate-400 hover:bg-slate-800/60 hover:text-white'" @click="activeSection = 'tools'"><Wrench class="w-4 h-4" />LLM Tools</button>
+        <button type="button" class="flex items-center justify-center gap-2 rounded-xl px-3 py-2.5 text-xs font-semibold transition-all" :class="activeSection === 'runtime' ? 'bg-indigo-600 text-white shadow-md shadow-indigo-600/20' : 'text-slate-400 hover:bg-slate-800/60 hover:text-white'" @click="activeSection = 'runtime'"><Activity class="w-4 h-4" />Runtime telemetry</button>
         <button
           type="button"
           class="flex items-center justify-center gap-2 rounded-xl px-3 py-2.5 text-xs font-semibold transition-all"
@@ -105,6 +107,7 @@ const updateAppearance = <K extends keyof AppearancePreferences>(
       </template>
 
       <LlmToolsCard v-else-if="activeSection === 'tools'" />
+      <RuntimeTelemetryCard v-else-if="activeSection === 'runtime'" />
 
       <!-- Action Footer -->
       <div class="pt-4 border-t border-slate-800 flex justify-start">

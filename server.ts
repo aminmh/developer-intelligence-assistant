@@ -79,6 +79,27 @@ function contextsFromMatches(matches: any[]): string[] {
   return (matches ?? []).map((m) => m?.chunk?.text ?? '').filter((t) => t);
 }
 
+const runtimeAnswerCache = new Map<string, { expires: number; data: any }>();
+async function runtimeAnswerContext(projectId: string, commitSha: string): Promise<any | null> {
+  const key = `${projectId}:${commitSha}`;
+  const cached = runtimeAnswerCache.get(key);
+  if (cached && cached.expires > Date.now()) return cached.data;
+  try {
+    const endpoint = `${PYTHON_API_URL}/telemetry/runtime/projects/${encodeURIComponent(projectId)}/snapshots/${encodeURIComponent(commitSha)}`;
+    const response = await fetch(endpoint, { headers: { 'X-Internal-Secret': INTERNAL_SECRET }, signal: AbortSignal.timeout(8000) });
+    if (!response.ok) return null;
+    const data = await response.json();
+    runtimeAnswerCache.set(key, { expires: Date.now() + 30_000, data });
+    return data;
+  } catch {
+    return null;
+  }
+}
+
+function runtimeQuestion(query: string): boolean {
+  return /\b(used|usage|used by|calls?|called by|hot|dead code|unused|slow|latency|failure|fails|route|endpoint|table|database|break|impact|runtime|running)\b/i.test(query);
+}
+
 function indexedProjectKey(filename: string, projectId?: string, commitSha?: string): string {
   return projectId && commitSha
     ? `snapshot:${projectId}:${commitSha}`
@@ -636,6 +657,51 @@ async function startServer() {
       return res.status(pyRes.status).json(data);
     } catch (error: any) {
       return res.status(500).json({ detail: error?.message || 'Failed to load extracted definitions.' });
+    }
+  });
+
+  app.get('/api/runtime/projects', async (_req, res) => {
+    try {
+      const pyRes = await fetch(`${PYTHON_API_URL}/telemetry/runtime/projects`, {
+        headers: { 'X-Internal-Secret': INTERNAL_SECRET },
+      });
+      const data = await pyRes.json().catch(() => []);
+      if (!pyRes.ok || !Array.isArray(data)) {
+        return res.status(pyRes.status || 502).json({ detail: 'Runtime project inventory is unavailable.' });
+      }
+      const user = (res.locals as any).authUser;
+      const projects = data.filter((project: any) => typeof project.project_id === 'string'
+        && (authIsBootstrapAdmin(user) || Boolean(authRoleFor(user, project.project_id))));
+      return res.json({ projects });
+    } catch {
+      return res.status(502).json({ detail: 'Runtime project inventory is unavailable.' });
+    }
+  });
+
+  app.get('/api/runtime/projects/:projectId/snapshots/:commitSha', async (req, res) => {
+    try {
+      const user = (res.locals as any).authUser;
+      if (!authIsBootstrapAdmin(user) && !authRoleFor(user, req.params.projectId)) {
+        return res.status(403).json({ detail: 'Project access denied.' });
+      }
+      const url = new URL(`${PYTHON_API_URL}/telemetry/runtime/projects/${encodeURIComponent(req.params.projectId)}/snapshots/${encodeURIComponent(req.params.commitSha)}`);
+      const pyRes = await fetch(url, { headers: { 'X-Internal-Secret': INTERNAL_SECRET } });
+      const data = await pyRes.json().catch(() => ({ detail: 'Runtime snapshot is unavailable.' }));
+      return res.status(pyRes.status).json(data);
+    } catch {
+      return res.status(502).json({ detail: 'Runtime snapshot is unavailable.' });
+    }
+  });
+
+  app.get('/api/runtime/settings', async (_req, res) => {
+    try {
+      const pyRes = await fetch(`${PYTHON_API_URL}/telemetry/runtime/settings`, {
+        headers: { 'X-Internal-Secret': INTERNAL_SECRET },
+      });
+      const data = await pyRes.json().catch(() => ({ detail: 'Runtime settings are unavailable.' }));
+      return res.status(pyRes.status).json(data);
+    } catch {
+      return res.status(502).json({ detail: 'Runtime settings are unavailable.' });
     }
   });
 
@@ -1425,6 +1491,23 @@ async function startServer() {
       }
 
       const pythonUrl = process.env.PYTHON_API_URL || 'http://localhost:9002';
+      let runtimeExtraContext = '';
+      let runtimeSymbolMetrics: Record<string, any> = {};
+      if (project_id && commit_sha && runtimeQuestion(query)) {
+        const runtimeData = await runtimeAnswerContext(project_id, commit_sha);
+        if (runtimeData?.telemetry) {
+          const telemetry = runtimeData.telemetry;
+          runtimeSymbolMetrics = Object.fromEntries((telemetry.symbols || []).map((row: any) => [row.symbol_id, row]));
+          const lines = [
+            `Runtime evidence for ${project_id} at commit ${commit_sha} (last ${telemetry.retention_hours} retained hours): ${telemetry.total_spans} spans, ${telemetry.match_percent}% matched to indexed symbols, ${telemetry.error_spans} error spans.`,
+            ...(telemetry.symbols || []).slice(0, 100).map((row: any) => `Symbol ${row.symbol_id}: ${row.runs} observed calls, p95 ${row.p95_ms} ms, ${row.failures} failures, last seen ${row.last_seen || 'unknown'}.`),
+            ...(telemetry.routes || []).slice(0, 50).map((row: any) => `Route ${row.method} ${row.route}: ${row.requests} requests.`),
+            ...(telemetry.tables || []).slice(0, 50).map((row: any) => `Database table ${row.table_name}, ${row.operation || 'operation'}: ${row.operations} observed operations.`),
+            'These counts cover retained and sampled telemetry only. No observations do not prove code is unused.',
+          ];
+          runtimeExtraContext = lines.join('\n').slice(0, 24_000);
+        }
+      }
       const queryId = crypto.randomUUID();
       queryToOwner.set(queryId, (res.locals as any).authUser.sub);
 
@@ -1456,6 +1539,7 @@ async function startServer() {
         // other keys ride along) while pinning computed fields below.
         body: JSON.stringify({
           ...req.body,
+          ...(runtimeExtraContext ? { extra_context: [req.body.extra_context, runtimeExtraContext].filter((value) => typeof value === 'string' && value.trim()).join('\n\n'), runtime_symbol_metrics: runtimeSymbolMetrics } : {}),
           query,
           use_remote: !!use_remote,
           route: routeName,

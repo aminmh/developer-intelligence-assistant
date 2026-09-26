@@ -13,6 +13,7 @@ const props = defineProps<{
   search?: string;
   selectedTableId?: string;
   selectedRefId?: string;
+  busyTableCounts?: Record<string, number>;
 }>();
 
 const emit = defineEmits<{
@@ -50,6 +51,7 @@ const nodeFor = (table: ErdTable, visible: boolean) => {
         nullable: field.nullable,
       })),
       selected: props.selectedTableId === table.id,
+      runtimeOperations: props.busyTableCounts?.[table.name.toLowerCase()] || 0,
     },
     ports: {
       groups: {
@@ -164,7 +166,7 @@ onMounted(() => {
   emit('ready', graph);
   rebuild();
 });
-watch(() => [props.schema, props.search, props.selectedTableId, props.selectedRefId], rebuild, { deep: true });
+watch(() => [props.schema, props.search, props.selectedTableId, props.selectedRefId, props.busyTableCounts], rebuild, { deep: true });
 onBeforeUnmount(() => { graph?.dispose(); graph = null; });
 </script>
 

@@ -12,6 +12,7 @@ import {
   Code2,
   Database,
   Network,
+  Activity,
   PanelLeftClose,
   PanelLeftOpen
 } from 'lucide-vue-next';
@@ -27,11 +28,12 @@ import LogsView from './components/LogsView.vue';
 import DefinitionsView from './components/DefinitionsView.vue';
 import DatabaseSchemaView from './components/DatabaseSchemaView.vue';
 import DomainKnowledgeView from './components/DomainKnowledgeView.vue';
+import RuntimeView from './components/RuntimeView.vue';
 import type { DomainConcept, AnalysisSession } from './types';
 import type { PipelineStep } from './components/PipelineProgress.vue';
 
-type AppTab = 'chat' | 'files' | 'config' | 'logs' | 'definitions' | 'schema' | 'domain';
-const VALID_TABS: AppTab[] = ['chat', 'files', 'config', 'logs', 'definitions', 'schema', 'domain'];
+type AppTab = 'chat' | 'files' | 'config' | 'logs' | 'definitions' | 'schema' | 'domain' | 'runtime';
+const VALID_TABS: AppTab[] = ['chat', 'files', 'config', 'logs', 'definitions', 'schema', 'domain', 'runtime'];
 const tabFromUrl = (): AppTab => {
   const value = new URLSearchParams(window.location.search).get('tab');
   return VALID_TABS.includes(value as AppTab) ? value as AppTab : 'chat';
@@ -61,6 +63,17 @@ watch(activeTab, (tab) => {
 const syncTabFromHistory = () => {
   handlingHistoryNavigation = true;
   activeTab.value = tabFromUrl();
+  handlingHistoryNavigation = false;
+};
+const openDefinitionDeepLink = (projectId: string, commitSha: string, symbolId: string) => {
+  const url = new URL(window.location.href);
+  url.searchParams.set('tab', 'definitions');
+  url.searchParams.set('project_id', projectId);
+  url.searchParams.set('commit_sha', commitSha);
+  url.searchParams.set('symbol_id', symbolId);
+  window.history.pushState(window.history.state, '', url);
+  handlingHistoryNavigation = true;
+  activeTab.value = 'definitions';
   handlingHistoryNavigation = false;
 };
 const activeSourceFields = () => {
@@ -365,6 +378,7 @@ const streamAnswer = async (text: string, domainRequest?: DomainContextRequest) 
           if (!m.content) m.content = `❌ **Error:** ${evt.detail}`;
         } else if (evt.type === 'done') {
           m.content = evt.answer || m.content;
+          m.matches = evt.matches || m.matches;
           m.llmUsed = llmUsed;
           m.durationMs = evt.duration_ms;
           m.usage = evt.usage || null;
@@ -1020,6 +1034,16 @@ onUnmounted(() => window.removeEventListener('popstate', syncTabFromHistory));
           <span v-if="!sidebarCollapsed">Domain Knowledge</span>
         </button>
 
+        <button
+          @click="activeTab = 'runtime'"
+          class="w-full flex items-center gap-3 py-2.5 text-sm font-medium rounded-xl transition-all duration-200"
+          :class="[sidebarCollapsed ? 'justify-center px-2' : 'px-4', activeTab === 'runtime' ? 'bg-indigo-600 text-white shadow-md shadow-indigo-600/20' : 'text-slate-400 hover:text-white hover:bg-slate-800/50']"
+          title="Runtime telemetry"
+        >
+          <Activity class="w-4 h-4" />
+          <span v-if="!sidebarCollapsed">Runtime</span>
+        </button>
+
       </nav>
 
       <!-- Footer developer banner -->
@@ -1070,6 +1094,7 @@ onUnmounted(() => window.removeEventListener('popstate', syncTabFromHistory));
             <span v-else-if="activeTab === 'definitions'">Extracted Definitions</span>
             <span v-else-if="activeTab === 'schema'">Database Schema</span>
             <span v-else-if="activeTab === 'domain'">Domain Knowledge</span>
+            <span v-else-if="activeTab === 'runtime'">Runtime telemetry</span>
           </h2>
         </div>
         
@@ -1137,6 +1162,8 @@ onUnmounted(() => window.removeEventListener('popstate', syncTabFromHistory));
       <DatabaseSchemaView v-else-if="activeTab === 'schema'" />
 
       <DomainKnowledgeView v-else-if="activeTab === 'domain'" @ask-about-concept="askAboutDomainConcept" />
+
+      <RuntimeView v-else-if="activeTab === 'runtime'" @open-definition="openDefinitionDeepLink" />
 
     </main>
 

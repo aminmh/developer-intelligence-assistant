@@ -96,6 +96,88 @@ export interface SearchMatch {
   chunk: FileChunk;
   score: number;
   viaGraph?: boolean;
+  symbol_id?: string;
+  runtime_usage?: RuntimeSymbolMetric | null;
+}
+
+export interface RuntimeSymbolMetric {
+  symbol_id: string;
+  runs: number;
+  last_seen: string | null;
+  p95_ms: number;
+  failures: number;
+  callers?: Array<{ caller_symbol_id: string; calls: number }>;
+  routes?: Array<{ route: string; calls: number }>;
+  tables?: Array<{ table_name: string; calls: number }>;
+}
+
+export interface RuntimeContainer {
+  container_id: string;
+  project_id: string;
+  environment: string;
+  service: string;
+  commit_sha: string;
+  image_id: string;
+  state: 'running' | 'stopped';
+  updated_at: string;
+}
+
+export interface RuntimeProjectRecord {
+  project_id: string;
+  commit_sha: string | null;
+  state: string;
+  updated_at?: string;
+  containers: RuntimeContainer[];
+  running_containers: number;
+  running_project_containers: number;
+  running_commit_shas: string[];
+  deployment_mismatch: boolean;
+  source_archive_sha256?: string;
+}
+
+export interface RuntimeTelemetrySettings {
+  enabled: boolean;
+  store: string;
+  connection: string | null;
+  retention_hours: number;
+  retention_days: number;
+  recording_ratio: number;
+  recording_percent: number;
+  otlp_endpoint: string | null;
+  scope: string;
+  sample_window: string;
+}
+
+export interface RuntimeTelemetryData {
+  available: boolean;
+  reason?: string | null;
+  total_spans: number;
+  symbol_spans: number;
+  matched_spans: number;
+  match_percent: number;
+  error_spans: number;
+  last_seen: string | null;
+  symbols: RuntimeSymbolMetric[];
+  routes: Array<{ method: string; route: string; requests: number; last_seen: string | null }>;
+  tables: Array<{ table_name: string; operation: string; operations: number; last_seen: string | null }>;
+  callers: Array<{ symbol_id: string; caller_symbol_id: string; calls: number }>;
+  symbol_routes: Array<{ symbol_id: string; route: string; calls: number }>;
+  symbol_tables: Array<{ symbol_id: string; table_name: string; calls: number }>;
+  retention_hours: number;
+}
+
+export interface RuntimeSnapshotData {
+  project_id: string;
+  commit_sha: string;
+  snapshot: Record<string, any>;
+  definitions: ExtractedDefinition[];
+  symbol_index_available?: boolean;
+  symbol_index_reason?: string | null;
+  deployments: RuntimeContainer[];
+  matching_deployments: RuntimeContainer[];
+  deployment_mismatch: boolean;
+  telemetry: RuntimeTelemetryData;
+  settings: RuntimeTelemetrySettings;
 }
 
 export interface RetrievalInsightSource {
@@ -196,9 +278,12 @@ export interface IndexedSymbolProject {
   collection: string;
   stem: string;
   definitions: number;
+  project_id?: string | null;
+  commit_sha?: string | null;
 }
 
 export interface ExtractedDefinition {
+  symbol_id?: string | null;
   kind: DefinitionKind | string;
   name: string;
   fqn: string;

@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ref } from 'vue';
+import { computed, onMounted, ref } from 'vue';
 import { 
   FileText, 
   Upload, 
@@ -9,6 +9,8 @@ import {
   CheckCircle2,
 } from 'lucide-vue-next';
 import { UploadedFile } from '../types';
+import type { RuntimeProjectRecord } from '../types';
+import { makeRequest } from '../ui/makeRequest';
 import ConfirmModal from './ConfirmModal.vue';
 
 const props = defineProps<{
@@ -30,6 +32,25 @@ const dragOver = ref(false);
 const showDeleteConfirm = ref(false);
 const selectedFile = ref<UploadedFile | null>(null);
 const activeFileId = ref<string | null>(null);
+const runtimeProjects = ref<RuntimeProjectRecord[]>([]);
+const runtimeLoadError = ref('');
+const deploymentByScope = computed(() => new Map(runtimeProjects.value
+  .filter((row) => row.commit_sha)
+  .map((row) => [`${row.project_id}:${row.commit_sha}`, row])));
+const runtimeFor = (file: UploadedFile) => file.projectId && file.commitSha
+  ? deploymentByScope.value.get(`${file.projectId}:${file.commitSha}`) || null
+  : null;
+const loadRuntimeProjects = async () => {
+  try {
+    const response = await makeRequest('/api/runtime/projects');
+    const data = await response.json();
+    if (!response.ok) throw new Error(data.detail || 'Runtime deployment status is unavailable.');
+    runtimeProjects.value = data.projects || [];
+  } catch (cause: any) {
+    runtimeLoadError.value = cause?.message || 'Runtime deployment status is unavailable.';
+  }
+};
+onMounted(loadRuntimeProjects);
 
 const handleFileUpload = (event: Event) => {
   const target = event.target as HTMLInputElement;
@@ -175,6 +196,9 @@ const handleIndexFile = () => {
                   <p class="text-[10px] text-slate-500 font-mono">
                     <template v-if="file.projectId && file.commitSha">{{ file.projectId }} · {{ file.commitSha }}</template>
                     <template v-else>Legacy upload · no project/commit attribution</template>
+                  </p>
+                  <p v-if="file.projectId && file.commitSha" class="text-[10px] mt-0.5" :class="runtimeFor(file)?.deployment_mismatch ? 'text-amber-300' : runtimeFor(file)?.running_project_containers ? 'text-emerald-300' : 'text-slate-500'">
+                    {{ runtimeFor(file)?.deployment_mismatch ? 'Warning: running deployment uses a different commit' : runtimeFor(file)?.running_project_containers ? `Running in Docker · ${runtimeFor(file)?.running_project_containers} container(s)` : runtimeLoadError ? 'Runtime deployment status unavailable' : 'No running Docker deployment reported' }}
                   </p>
                   <p v-if="file.status === 'failed'" class="text-[10px] text-red-400 mt-0.5 truncate" :title="file.error">
                     Failed: {{ file.error || 'Indexing failed.' }}

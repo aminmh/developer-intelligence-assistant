@@ -250,6 +250,9 @@ export function installOidcAuth(app: express.Express): void {
       if (req.path.startsWith('/config') && !isAdmin(user)) {
         return res.status(403).json({ error: 'Administrator access required.' });
       }
+      if (req.path.startsWith('/runtime/settings') && !isAdmin(user)) {
+        return res.status(403).json({ error: 'Administrator access required.' });
+      }
       const safeMethod = ['GET', 'HEAD'].includes(req.method);
       if (!safeMethod && !(req.method === 'POST' && readOnlyPost) && !isAdmin(user)) {
         return res.status(403).json({ error: 'Project scope or administrator access is required.' });

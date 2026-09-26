@@ -387,6 +387,9 @@ const chatLocked = computed(() => props.loading || !!props.gatePreview);
               <p class="text-[11px] text-slate-400 line-clamp-4 leading-relaxed font-mono">
                 {{ match.chunk.text }}
               </p>
+              <p v-if="match.runtime_usage" class="mt-2 border-t border-slate-800 pt-2 text-[10px] text-cyan-300">
+                Runtime: {{ Number(match.runtime_usage.runs).toLocaleString() }} calls · p95 {{ Number(match.runtime_usage.p95_ms).toFixed(1) }} ms · {{ Number(match.runtime_usage.failures).toLocaleString() }} failures · last seen {{ match.runtime_usage.last_seen ? new Date(match.runtime_usage.last_seen).toLocaleString() : 'unknown' }}
+              </p>
             </div>
           </div>
         </div>
