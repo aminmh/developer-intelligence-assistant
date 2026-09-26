@@ -24,6 +24,47 @@ const dockerLabelSnippet = [
   '  com.devassistant.telemetry.commit: "${GIT_COMMIT_SHA}"',
   '  com.devassistant.telemetry.service: api',
 ].join('\n');
+const ciTokenSnippet = 'TELEMETRY_CI_PROJECT_TOKENS={"billing":"replace-with-a-32-plus-character-random-token"}';
+const snapshotUploadSnippet = [
+  'CI_COMMIT_SHA="$(git rev-parse HEAD)"',
+  'git archive --format=zip --output=source.zip "$CI_COMMIT_SHA"',
+  'curl --fail-with-body --request PUT \\',
+  '  --header "Authorization: Bearer $INDEXER_CI_TOKEN" \\',
+  "  --header 'Content-Type: application/zip' \\",
+  '  --data-binary @source.zip \\',
+  '  "$INDEXER_API/telemetry/projects/$INDEXER_PROJECT/snapshots/$CI_COMMIT_SHA/source"',
+  '',
+  '# Check snapshot state',
+  'curl --fail-with-body \\',
+  '  --header "Authorization: Bearer $INDEXER_CI_TOKEN" \\',
+  '  "$INDEXER_API/telemetry/projects/$INDEXER_PROJECT/snapshots/$CI_COMMIT_SHA"',
+].join('\n');
+const hostScopeSnippet = 'TELEMETRY_HOST_SCOPES={"fingerprint-from-host.crt":{"projects":{"billing":["staging"]}}}';
+const fingerprintCommand = "openssl x509 -in host.crt -noout -fingerprint -sha256 | sed 's/.*=//;s/://g' | tr '[:upper:]' '[:lower:]'";
+const localAgentSnippet = [
+  'cd api',
+  'docker compose up -d python-api telemetry-caddy',
+  '',
+  'BACKEND_URL=https://telemetry-caddy:9443 \\',
+  'HOST_IDENTITY_DIR="$PWD/telemetry-dev/host/certs/agent" \\',
+  'docker compose -f telemetry-agent/docker-compose.yml \\',
+  '  -f telemetry-agent/docker-compose.local.yml up -d --build',
+].join('\n');
+const remoteAgentSnippet = [
+  'cd api/telemetry-agent',
+  'HOST_IDENTITY_DIR=/etc/devassistant/telemetry-identity \\',
+  'BACKEND_URL=https://telemetry.example.internal \\',
+  'DOCKER_SOCK_GID="$(stat -c \'%g\' /var/run/docker.sock)" \\',
+  'docker compose up -d --build',
+].join('\n');
+const runtimeCollectorSnippet = 'cd api\ndocker compose --profile runtime up -d';
+const spanAttributesSnippet = [
+  'indexer.project_id: billing',
+  'vcs.ref.head.revision: 0123456789abcdef0123456789abcdef01234567',
+  'indexer.symbol_id: canonical-symbol-id-from-the-indexer',
+  'indexer.dirty: false',
+  'indexer.schema.version: indexer-telemetry-v1',
+].join('\n');
 let refreshTimer: ReturnType<typeof setInterval> | undefined;
 
 const options = computed(() => projects.value.filter((project) => project.commit_sha)
@@ -128,23 +169,55 @@ onUnmounted(() => { if (refreshTimer) clearInterval(refreshTimer); });
             <h4 class="text-sm font-semibold text-white">Get started with Runtime</h4>
             <p class="mt-1 text-xs leading-5 text-slate-400">Runtime combines host-reported Docker deployments with sampled OpenTelemetry spans. Container reports show what is running; spans add code, route, and database activity. The app does not discover arbitrary containers or instrument application code automatically.</p>
           </div>
-          <ol class="grid gap-4 lg:grid-cols-3">
+          <ol class="space-y-3">
             <li class="rounded-xl border border-slate-800 bg-slate-950/40 p-4">
-              <p class="text-xs font-semibold text-cyan-200">1. Register the project version</p>
-              <p class="mt-2 text-[11px] leading-5 text-slate-400">Upload and index a clean source snapshot using the project ID and full commit SHA used to build the Docker image. Runtime is selected by that exact project and commit.</p>
+              <p class="text-xs font-semibold text-cyan-200">1. Upload and index the project version</p>
+              <p class="mt-2 text-[11px] leading-5 text-slate-400">Choose a stable project slug such as <code>billing</code>. Use the same slug in CI, Docker labels, host scope, and spans. Upload a repository-root ZIP for the exact full lowercase 40-character SHA-1 or 64-character SHA-256 commit used to build the image.</p>
+              <details class="mt-3 rounded-lg border border-slate-800 bg-black/20 p-3">
+                <summary class="cursor-pointer text-[11px] font-medium text-slate-300">Show project token and CI upload example</summary>
+                <div class="mt-3 space-y-2 text-[10px] leading-4 text-slate-400">
+                  <p>On the API backend, provision a unique high-entropy token (at least 32 characters) for the project. Keep the real token in a secret manager; the value shown is a placeholder.</p>
+                  <pre class="overflow-x-auto rounded-lg bg-black/30 p-2 text-slate-300"><code>{{ ciTokenSnippet }}</code></pre>
+                  <p>In protected CI variables, set <code>INDEXER_API</code>, <code>INDEXER_PROJECT=billing</code>, and <code>INDEXER_CI_TOKEN</code>. Then archive and upload the commit:</p>
+                  <pre class="overflow-x-auto rounded-lg bg-black/30 p-2 text-slate-300"><code>{{ snapshotUploadSnippet }}</code></pre>
+                  <p>Upload returns before indexing finishes. The matching labeled deployment must report the same project and SHA for indexing to proceed. Wait for <code>ready</code> before relying on code matches.</p>
+                </div>
+              </details>
             </li>
             <li class="rounded-xl border border-slate-800 bg-slate-950/40 p-4">
-              <p class="text-xs font-semibold text-cyan-200">2. Report running containers</p>
-              <p class="mt-2 text-[11px] leading-5 text-slate-400">Deploy the per-host telemetry agent and authorize its certificate for the project/environment. Add these opt-in labels to each Compose service you want listed:</p>
-              <pre class="mt-2 overflow-x-auto rounded-lg bg-black/30 p-2 text-[10px] leading-4 text-slate-300"><code>{{ dockerLabelSnippet }}</code></pre>
-              <p class="mt-2 text-[10px] leading-4 text-slate-500">Project and commit must match the indexed snapshot. Host agent setup and mTLS scope are documented in <code>api/telemetry-agent/README.md</code>.</p>
+              <p class="text-xs font-semibold text-cyan-200">2. Authorize a host and report containers</p>
+              <p class="mt-2 text-[11px] leading-5 text-slate-400">Each Docker host needs a unique client certificate. The API ingress must trust its CA, require mTLS, and forward the verified certificate fingerprint. The backend then grants that fingerprint only the project/environment pairs it needs.</p>
+              <details class="mt-3 rounded-lg border border-slate-800 bg-black/20 p-3">
+                <summary class="cursor-pointer text-[11px] font-medium text-slate-300">Show certificate scope, labels, and agent setup</summary>
+                <div class="mt-3 space-y-2 text-[10px] leading-4 text-slate-400">
+                  <p>For local development, run the bootstrap from the repository root; it prints the host certificate fingerprint. Production hosts should use operator-managed certificates, not this development CA.</p>
+                  <pre class="overflow-x-auto rounded-lg bg-black/30 p-2 text-slate-300"><code>./api/telemetry-dev/host/bootstrap-dev-certs.sh</code></pre>
+                  <p>For a managed host certificate, get the same lowercase, colon-free SHA-256 fingerprint with:</p>
+                  <pre class="overflow-x-auto rounded-lg bg-black/30 p-2 text-slate-300"><code>{{ fingerprintCommand }}</code></pre>
+                  <p>Add that fingerprint to <code>TELEMETRY_HOST_SCOPES</code> on the API backend. This example allows only the <code>staging</code> environment for project <code>billing</code>:</p>
+                  <pre class="overflow-x-auto rounded-lg bg-black/30 p-2 text-slate-300"><code>{{ hostScopeSnippet }}</code></pre>
+                  <p>Use the same project slug, environment, and full commit on the Compose service. Only opted-in containers are reported:</p>
+                  <pre class="overflow-x-auto rounded-lg bg-black/30 p-2 text-slate-300"><code>{{ dockerLabelSnippet }}</code></pre>
+                  <p>For the local Mac/Linux setup, start the API ingress and host agent:</p>
+                  <pre class="overflow-x-auto rounded-lg bg-black/30 p-2 text-slate-300"><code>{{ localAgentSnippet }}</code></pre>
+                  <p>On Linux, set <code>DOCKER_SOCK_GID="$(stat -c '%g' /var/run/docker.sock)"</code> before the agent command; on macOS use <code>stat -f '%g'</code>. For a remote host, place <code>ca.pem</code>, <code>host.crt</code>, and <code>host.key</code> in a protected identity directory, and configure the API Caddy ingress to trust that client CA:</p>
+                  <pre class="overflow-x-auto rounded-lg bg-black/30 p-2 text-slate-300"><code>{{ remoteAgentSnippet }}</code></pre>
+                  <p>Give each host a unique certificate and least-privilege project/environment scope. See <code>api/telemetry-agent/README.md</code> for certificate rotation and production ingress details.</p>
+                </div>
+              </details>
             </li>
             <li class="rounded-xl border border-slate-800 bg-slate-950/40 p-4">
-              <p class="text-xs font-semibold text-cyan-200">3. Send application spans (optional)</p>
-              <p class="mt-2 text-[11px] leading-5 text-slate-400">Start the local Collector and instrument the app to export OTLP/HTTP to <code>http://localhost:24318/v1/traces</code> from the host or <code>http://host.docker.internal:24318/v1/traces</code> from a container.</p>
-              <pre class="mt-2 overflow-x-auto rounded-lg bg-black/30 p-2 text-[10px] leading-4 text-slate-300"><code>cd api
-docker compose --profile runtime up -d</code></pre>
-              <p class="mt-2 text-[10px] leading-4 text-slate-500">Spans need project ID, full commit SHA, canonical symbol ID, <code>indexer.dirty=false</code>, and schema version <code>indexer-telemetry-v1</code>. See <code>api/docs/telemetry/attributes.md</code>; instrumentation is not bundled.</p>
+              <p class="text-xs font-semibold text-cyan-200">3. Enable code, route, and database activity (optional)</p>
+              <p class="mt-2 text-[11px] leading-5 text-slate-400">Container reports work without application spans. For code matching and route/table activity, start the local Collector and instrument the app to export OTLP/HTTP to <code>http://localhost:24318/v1/traces</code> from the host or <code>http://host.docker.internal:24318/v1/traces</code> from a container.</p>
+              <details class="mt-3 rounded-lg border border-slate-800 bg-black/20 p-3">
+                <summary class="cursor-pointer text-[11px] font-medium text-slate-300">Show Collector command and span attributes</summary>
+                <div class="mt-3 space-y-2 text-[10px] leading-4 text-slate-400">
+                  <pre class="overflow-x-auto rounded-lg bg-black/30 p-2 text-slate-300"><code>{{ runtimeCollectorSnippet }}</code></pre>
+                  <p>Each source-attributed span must include the project and full commit identity plus the canonical PHP symbol ID from the indexer:</p>
+                  <pre class="overflow-x-auto rounded-lg bg-black/30 p-2 text-slate-300"><code>{{ spanAttributesSnippet }}</code></pre>
+                  <p>Add <code>http.route</code> and <code>http.request.method</code> to request spans, and <code>db.operation.name</code> plus <code>indexer.db.table</code> to database spans. Do not send raw SQL or request data. App instrumentation is not bundled; see <code>api/docs/telemetry/attributes.md</code>.</p>
+                </div>
+              </details>
             </li>
           </ol>
           <div class="rounded-2xl border border-slate-700 bg-[#0b1020] p-4">
