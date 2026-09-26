@@ -61,6 +61,8 @@ class JobContext:
     route: dict[str, Any]
     workspace_path: str | None = None
     skip_index: bool = False
+    upload_session_id: str | None = None
+    snapshot_identity: dict[str, str] | None = None
 
 
 class Orchestrator:
@@ -116,6 +118,8 @@ class Orchestrator:
         prompt: str,
         skip_index: bool = False,
         entities: dict[str, Any] | None = None,
+        upload_session_id: str | None = None,
+        snapshot_identity: dict[str, str] | None = None,
     ) -> None:
         route = self.get_route(route_name) or {"tool": "auto", "prompt_template": "chat"}
         steps = self._build_steps(route)
@@ -131,13 +135,21 @@ class Orchestrator:
             "updated_at": time.time(),
             "skip_index": skip_index,
             "entities": entities or {},
+            "upload_session_id": upload_session_id,
+            "snapshot_identity": snapshot_identity,
+            "project_id": (snapshot_identity or {}).get("project_id"),
+            "commit_sha": (snapshot_identity or {}).get("commit_sha"),
         }
         with self._lock:
             self._jobs[job_id] = job
         self._write_status(job_id)
         thread = threading.Thread(
             target=self._run_job,
-            args=(JobContext(job_id, route_name, filename, prompt, route, skip_index),),
+            args=(JobContext(
+                job_id, route_name, filename, prompt, route,
+                skip_index=skip_index, upload_session_id=upload_session_id,
+                snapshot_identity=snapshot_identity,
+            ),),
             daemon=True,
         )
         thread.start()
@@ -201,7 +213,7 @@ class Orchestrator:
         ws = self._call(
             f"{DEFAULT_PYTHON_API_URL.rstrip('/')}/api/workspace/prepare",
             method="POST",
-            json_body={"filename": ctx.filename},
+            json_body={"filename": ctx.filename, "upload_session_id": ctx.upload_session_id},
         ) or {}
         workspace_path = ws.get("extracted_path") if isinstance(ws, dict) else None
         file_count = ws.get("file_count") if isinstance(ws, dict) else None
@@ -835,7 +847,22 @@ class Orchestrator:
             return {"error": "No chunk list to ingest"}
 
         job = self.get_job(job_id) or {}
-        collection_name = args.get("collection_name") or project_collection_name(job.get("filename", ""))
+        snapshot = None
+        identity = job.get("snapshot_identity")
+        if identity:
+            from telemetry.snapshot import Snapshot
+            from telemetry.symbols import from_chunk
+
+            snapshot = Snapshot(
+                identity["project_id"], identity["commit_sha"], identity["source_archive_sha256"]
+            )
+            for chunk in result:
+                chunk.update(snapshot.metadata())
+                chunk["symbol_id"] = from_chunk(chunk)
+        collection_name = (
+            snapshot.collection if snapshot
+            else args.get("collection_name") or project_collection_name(job.get("filename", ""))
+        )
 
         # Session-scoped dedup: if this project was already indexed, skip the
         # (expensive) re-embedding. Still return the collection name so retrieval
@@ -854,12 +881,20 @@ class Orchestrator:
         # Coarse, honest phase hints only — ingest batches inside llamaindex
         # internals, so 20/60 are the only externally observable checkpoints.
         self._report_job_progress(job_id, key, 20, "Recreating vector collection")
-        ingested = CodePropertyGraph().ingest(
-            result,
-            collection_name,
-            symbol_definitions=symbol_definitions,
-            symbol_references=symbol_references,
-        )
+        def ingest_snapshot() -> dict[str, Any]:
+            return CodePropertyGraph().ingest(
+                result,
+                collection_name,
+                symbol_definitions=symbol_definitions,
+                symbol_references=symbol_references,
+                snapshot=snapshot,
+            )
+
+        if snapshot is not None:
+            from telemetry.source import index_uploaded_snapshot
+            ingested = index_uploaded_snapshot(snapshot, ingest_snapshot)
+        else:
+            ingested = ingest_snapshot()
         self._report_job_progress(job_id, key, 60, "Embedding chunks")
         self._report_job_progress(job_id, key, 100)
         return ingested
@@ -953,6 +988,7 @@ class Orchestrator:
             for key, value in (tool_config.get("args") or {}).items():
                 args[key] = self._resolve_env(value)
             args.setdefault("filename", ctx.filename)
+            args.setdefault("snapshot_identity", ctx.snapshot_identity)
 
             if tool_name == "chunk_code":
                 self._report_step_progress(ctx, "tool", 20, "Parsing code chunks")
@@ -987,8 +1023,10 @@ class Orchestrator:
             "definitions": len(definitions),
             "references": len(references),
         }
+        identity = args.get("snapshot_identity")
         try:
             from inspection.service import inspection_service
+            from telemetry.snapshot import Snapshot
 
             stem = Path(str(args.get("filename") or "project")).stem or "unnamed"
             symbol_index = inspection_service().index(
@@ -998,8 +1036,13 @@ class Orchestrator:
                     "definitions": definitions,
                     "references": references,
                 },
+                snapshot=Snapshot(
+                    identity["project_id"], identity["commit_sha"], identity["source_archive_sha256"]
+                ) if identity else None,
             )
         except Exception as exc:  # noqa: BLE001 — symbol graph is best-effort
+            if identity:
+                raise
             get_exception_logger().warning(
                 "Symbol graph indexing failed for %s: %s", args.get("filename"), exc
             )
@@ -1134,6 +1177,8 @@ class Orchestrator:
                 "status": job.get("status"),
                 "route_name": job.get("route_name"),
                 "filename": job.get("filename"),
+                "project_id": (job.get("snapshot_identity") or {}).get("project_id"),
+                "commit_sha": (job.get("snapshot_identity") or {}).get("commit_sha"),
                 "prompt": job.get("prompt"),
                 "route": job.get("route"),
                 "started_at": job.get("started_at"),

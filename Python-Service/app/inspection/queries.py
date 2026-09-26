@@ -73,9 +73,13 @@ ORDER BY c.file, r.line
 _LIST_PROJECTS = """
 MATCH (s:PhpSymbol)
 WHERE s.collection STARTS WITH 'sym_'
-  AND NOT s.collection STARTS WITH 'sym_snapshot_'
-RETURN s.collection AS collection, count(s) AS definitions
-ORDER BY s.collection
+WITH s.collection AS collection, count(s) AS definitions,
+     collect(DISTINCT s.project_id) AS project_ids,
+     collect(DISTINCT s.commit_sha) AS commit_shas
+RETURN collection, definitions,
+       CASE WHEN size(project_ids) = 1 THEN project_ids[0] ELSE null END AS project_id,
+       CASE WHEN size(commit_shas) = 1 THEN commit_shas[0] ELSE null END AS commit_sha
+ORDER BY collection
 """
 
 _COUNT_DEFINITIONS = """
@@ -185,14 +189,24 @@ class SymbolGraphQuery:
 
     def list_projects(self) -> list[dict[str, Any]]:
         rows = self._run(_LIST_PROJECTS, {})
+        from telemetry.registry import default_registry
+
         return [
             {
                 "collection": row.get("collection", ""),
                 "stem": str(row.get("collection", "")).removeprefix("sym_"),
                 "definitions": int(row.get("definitions", 0) or 0),
+                "project_id": row.get("project_id"),
+                "commit_sha": row.get("commit_sha"),
             }
             for row in rows
             if row.get("collection")
+            and (
+                not str(row.get("collection", "")).startswith("sym_snapshot_")
+                or default_registry().is_ready_collection(
+                    str(row["collection"]).removeprefix("sym_")
+                )
+            )
         ]
 
     def list_definitions(

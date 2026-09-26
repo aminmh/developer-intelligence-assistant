@@ -11,7 +11,7 @@ from typing import Any, Callable
 import zipfile
 
 from infra.php_tools import extract_zip_safely
-from telemetry.registry import SnapshotRegistry
+from telemetry.registry import SnapshotRegistry, default_registry
 from telemetry.snapshot import Snapshot
 from telemetry.symbols import relative_path
 
@@ -127,3 +127,34 @@ class SourceService:
                 # Keep expiry best effort; metadata is retained for an exact reupload.
                 pass
         self.registry.stopped_deployments_before()
+
+
+def index_uploaded_snapshot(snapshot: Snapshot, indexer: Callable[[], dict]) -> dict:
+    """Index a browser upload now and publish it through the snapshot gate."""
+    registry = default_registry()
+    with registry.lock(snapshot.project_id, snapshot.commit_sha):
+        registry.register(snapshot)
+        current = registry.get(snapshot.project_id, snapshot.commit_sha)
+        if current.get("state") == "ready":
+            return {
+                "collection_name": current.get("collection_name", snapshot.collection),
+                "already_indexed": True,
+                "ingested": 0,
+                "chunk_count": 0,
+                "graph_nodes": 0,
+                "graph_relations": 0,
+                "embed_fails": 0,
+            }
+        registry.transition(snapshot, "indexing")
+        try:
+            result = indexer()
+            count = int(result.get("chunk_count", 0) or 0)
+            if (not count or int(result.get("ingested", 0) or 0) != count
+                    or int(result.get("graph_nodes", 0) or 0) != count
+                    or int(result.get("embed_fails", 0) or 0)):
+                raise RuntimeError("Incomplete snapshot indexing")
+            registry.finish_job(snapshot.project_id, snapshot.commit_sha, success=True)
+            return result
+        except Exception:
+            registry.finish_job(snapshot.project_id, snapshot.commit_sha, success=False)
+            raise

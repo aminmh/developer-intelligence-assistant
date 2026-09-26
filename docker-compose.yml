@@ -24,8 +24,6 @@ services:
       AWS_SECRET_ACCESS_KEY: ${MINIO_ROOT_PASSWORD}
       AWS_TUS_BUCKET: tus-uploads
       PHP_CLI_ROOT: /opt/php-cli
-    ports:
-      - 9002:9002
     volumes:
       - "./Python-Service/app/:/app"
       - "./Python-Service/logs/:/app/logs"

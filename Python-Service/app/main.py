@@ -727,9 +727,16 @@ def rag_upload(body: dict):
     filename = body.get("filename")
     content = body.get("content")
     size = int(body.get("size", 0) or 0)
+    project_id = body.get("project_id")
+    commit_sha = body.get("commit_sha")
 
     if not filename:
         raise HTTPException(status_code=400, detail="Missing filename.")
+
+    try:
+        project_id, commit_sha = upload_service.validate_identity(project_id, commit_sha)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
 
     ext = Path(filename).suffix.lower()
     if ext != ".zip":
@@ -743,14 +750,16 @@ def rag_upload(body: dict):
 
     # TUS session mode — no content, just filename + size
     if not content:
-        return upload_service.create_tus_session(filename, size)
+        return upload_service.create_tus_session(filename, size, project_id, commit_sha)
 
     # Direct upload mode — base64 content provided
     try:
-        result = upload_service.store_direct(storage, filename, content)
+        result = upload_service.store_direct(storage, filename, content, project_id, commit_sha)
     except Exception as exc:
         dl_logger.error("Upload store failed: %s", exc, exc_info=True)
         if isinstance(exc, ValueError):
+            if "different archive" in str(exc):
+                raise HTTPException(status_code=409, detail=str(exc)) from exc
             raise HTTPException(status_code=400, detail=str(exc)) from exc
         raise HTTPException(status_code=500, detail="Failed to store upload.")
 
@@ -785,12 +794,35 @@ def rag_parse_code(body: dict):
     if not match:
         raise HTTPException(status_code=404, detail=f"File not found in uploads: {filename}")
 
+    identity = None
+    if match.get("project_id") and match.get("commit_sha"):
+        if body.get("project_id") != match["project_id"] or body.get("commit_sha") != match["commit_sha"]:
+            raise HTTPException(status_code=403, detail="Upload project identity does not match the archive record.")
+        if not match.get("archive_sha256"):
+            raise HTTPException(status_code=409, detail="Upload archive checksum is unavailable.")
+        identity = {
+            "project_id": match["project_id"],
+            "commit_sha": match["commit_sha"],
+            "source_archive_sha256": match["archive_sha256"],
+        }
+    elif body.get("project_id") or body.get("commit_sha"):
+        raise HTTPException(status_code=409, detail="Legacy uploads cannot be assigned an inferred project identity.")
+
     data = storage.get_rag_file_bytes(filename, session_id)
     if data is None:
         raise HTTPException(status_code=500, detail="Failed to read file from index.storage.")
 
-    collection_name = sanitize_collection_name(filename)
+    if identity:
+        from telemetry.snapshot import Snapshot
+        collection_name = Snapshot(
+            identity["project_id"], identity["commit_sha"], identity["source_archive_sha256"]
+        ).collection
+    else:
+        collection_name = sanitize_collection_name(filename)
     already = collection_exists(collection_name)
+    if identity:
+        from telemetry.registry import default_registry
+        already = already and default_registry().is_ready_collection(collection_name)
     download_id = str(uuid.uuid4())
     token = _mint_download_token(download_id, filename)
 
@@ -809,7 +841,7 @@ def rag_parse_code(body: dict):
 
     thread = threading.Thread(
         target=indexing_service.parse_and_index,
-        args=(download_id, filename, data, collection_name),
+        args=(download_id, filename, data, collection_name, identity),
         daemon=True,
     )
     thread.start()
@@ -866,8 +898,20 @@ def tusd_hook(body: dict):
     dest_key = f"{RAG_UPLOADS_PREFIX}/{upload_session_id}/{filename}"
     try:
         storage.copy_object(object_key, dest_key)
+        import hashlib
+        archive_bytes = storage.get_rag_file_bytes(filename, upload_session_id)
+        if archive_bytes is None:
+            raise RuntimeError("Uploaded archive could not be read after transfer")
+        project_id = claims.get("project_id")
+        commit_sha = claims.get("commit_sha")
+        project_id, commit_sha = upload_service.validate_identity(project_id, commit_sha)
+        storage.set_rag_identity(
+            dest_key, project_id, commit_sha, hashlib.sha256(archive_bytes).hexdigest()
+        )
     except Exception as exc:
         dl_logger.error("tusd hook copy failed: %s", exc, exc_info=True)
+        if isinstance(exc, ValueError) and "different archive" in str(exc):
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
         raise HTTPException(status_code=500, detail="Failed to store upload")
 
     dl_logger.info("tusd upload stored: %s", dest_key)
@@ -2023,12 +2067,33 @@ def start_orchestration(body: dict):
     prompt = body.get("prompt", "")
     skip_index = bool(body.get("skip_index", False))
     entities = body.get("entities") or {}
+    upload_session_id = body.get("upload_session_id")
+    snapshot_identity = None
     if not filename or not prompt:
         raise HTTPException(status_code=400, detail="Missing filename or prompt")
 
+    if upload_session_id:
+        from index.storage import storage
+        match = storage.find_rag_file(filename, upload_session_id)
+        if not match:
+            raise HTTPException(status_code=404, detail="Uploaded archive not found.")
+        if match.get("project_id") and match.get("commit_sha"):
+            if body.get("project_id") != match["project_id"] or body.get("commit_sha") != match["commit_sha"]:
+                raise HTTPException(status_code=403, detail="Upload project identity does not match the archive record.")
+            if not match.get("archive_sha256"):
+                raise HTTPException(status_code=409, detail="Upload archive checksum is unavailable.")
+            snapshot_identity = {
+                "project_id": match["project_id"],
+                "commit_sha": match["commit_sha"],
+                "source_archive_sha256": match["archive_sha256"],
+            }
+        elif body.get("project_id") or body.get("commit_sha"):
+            raise HTTPException(status_code=409, detail="Legacy uploads cannot be assigned an inferred project identity.")
+
     job_id = str(uuid.uuid4())
     orchestrator.start_job(
-        job_id, route, filename, prompt, skip_index=skip_index, entities=entities
+        job_id, route, filename, prompt, skip_index=skip_index, entities=entities,
+        upload_session_id=upload_session_id, snapshot_identity=snapshot_identity,
     )
     return {"job_id": job_id}
 

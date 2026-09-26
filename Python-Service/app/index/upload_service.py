@@ -3,8 +3,10 @@
 from __future__ import annotations
 
 import base64
+import hashlib
 import shutil
 import uuid
+import re
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
@@ -18,7 +20,21 @@ from infra.settings import settings
 class UploadService:
     """Own upload token creation, binary storage, and workspace extraction."""
 
-    def create_tus_session(self, filename: str, size: int) -> dict[str, Any]:
+    @staticmethod
+    def validate_identity(project_id: str, commit_sha: str) -> tuple[str, str]:
+        project_id = project_id.strip() if isinstance(project_id, str) else ""
+        commit_sha = commit_sha.strip() if isinstance(commit_sha, str) else ""
+        if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,127}", project_id):
+            raise ValueError("project_id must be a 1-128 character ASCII slug.")
+        if not re.fullmatch(r"(?:[0-9a-f]{40}|[0-9a-f]{64})", commit_sha):
+            raise ValueError("commit_sha must be a full lowercase Git SHA-1 or SHA-256.")
+        return project_id, commit_sha
+
+    def create_tus_session(self, filename: str, size: int, project_id: str | None = None, commit_sha: str | None = None) -> dict[str, Any]:
+        identity = {}
+        if project_id is not None or commit_sha is not None:
+            project_id, commit_sha = self.validate_identity(project_id or "", commit_sha or "")
+            identity = {"project_id": project_id, "commit_sha": commit_sha}
         upload_session_id = str(uuid.uuid4())
         expires_at = datetime.now(timezone.utc) + timedelta(minutes=60)
         token = jwt.encode(
@@ -29,6 +45,7 @@ class UploadService:
                 "maximum_size": size,
                 "upload_kind": "rag-document",
                 "exp": expires_at,
+                **identity,
             },
             settings.upload_token_secret,
             algorithm="HS256",
@@ -38,6 +55,7 @@ class UploadService:
             "tus_endpoint": settings.tus_public_url,
             "upload_token": token,
             "expires_at": expires_at.isoformat(),
+            **identity,
         }
 
     @staticmethod
@@ -47,16 +65,24 @@ class UploadService:
         except Exception as exc:
             raise ValueError("Invalid base64 content.") from exc
 
-    def store_direct(self, storage: Any, filename: str, content: str) -> dict[str, Any]:
+    def store_direct(self, storage: Any, filename: str, content: str, project_id: str | None = None, commit_sha: str | None = None) -> dict[str, Any]:
         decoded = self.decode_content(content)
         upload_session_id = str(uuid.uuid4())
-        storage.put_rag_file(upload_session_id, filename, decoded)
+        if project_id is None and commit_sha is None:
+            storage.put_rag_file(upload_session_id, filename, decoded)
+            identity = {}
+        else:
+            project_id, commit_sha = self.validate_identity(project_id or "", commit_sha or "")
+            storage.put_rag_file(upload_session_id, filename, decoded, project_id, commit_sha)
+            identity = {"project_id": project_id, "commit_sha": commit_sha}
         return {
             "upload_session_id": upload_session_id,
             "filename": filename,
             "type": "zip",
             "text": f"Uploaded ZIP archive: {filename} (binary content, not text-indexed).",
             "size": len(decoded),
+            "archive_sha256": hashlib.sha256(decoded).hexdigest(),
+            **identity,
         }
 
     def extract_workspace(self, workspace_id: str, zip_data: bytes) -> str:
@@ -78,4 +104,3 @@ class UploadService:
 
 
 upload_service = UploadService()
-

@@ -11,6 +11,8 @@ Replaces the former php-ast service's Laravel `Storage` disks:
 from __future__ import annotations
 
 import io
+import hashlib
+import threading
 from datetime import datetime, timezone
 from typing import Any, Optional
 
@@ -29,6 +31,7 @@ class Storage:
     def __init__(self) -> None:
         self._client: Optional[Minio] = None
         self._revision = -1
+        self._identity_lock = threading.RLock()
 
     @property
     def tus_bucket(self) -> str:
@@ -65,15 +68,20 @@ class Storage:
                 session_dir = parts[1]
                 filename = "/".join(parts[2:])
                 last_modified = obj.last_modified.isoformat() if obj.last_modified else None
-                files.append(
-                    {
+                try:
+                    tags = client.get_object_tags(bucket, key).to_dict()
+                except Exception:
+                    tags = {}
+                files.append({
                         "filename": filename,
                         "path": key,
                         "size": obj.size or 0,
                         "last_modified": last_modified,
                         "upload_session_id": session_dir,
-                    }
-                )
+                        "project_id": tags.get("project-id"),
+                        "commit_sha": tags.get("commit-sha"),
+                        "archive_sha256": tags.get("archive-sha256"),
+                    })
         except Exception:
             return []
         return files
@@ -109,9 +117,54 @@ class Storage:
         except Exception:
             return None
 
-    def put_rag_file(self, session_id: str, filename: str, data: bytes) -> str:
-        key = f"{RAG_UPLOADS_PREFIX}/{session_id}/{filename}"
-        return self._put_archive(key, data, self._content_type(filename))
+    def put_rag_file(self, session_id: str, filename: str, data: bytes, project_id: str | None = None, commit_sha: str | None = None) -> str:
+        with self._identity_lock:
+            if project_id is None and commit_sha is None:
+                return self._put_archive(f"{RAG_UPLOADS_PREFIX}/{session_id}/{filename}", data, self._content_type(filename))
+            if not project_id or not commit_sha:
+                raise ValueError("project_id and commit_sha must be provided together")
+            checksum = hashlib.sha256(data).hexdigest()
+            for item in self.list_rag_files():
+                if item.get("project_id") == project_id and item.get("commit_sha") == commit_sha:
+                    if item.get("archive_sha256") != checksum:
+                        raise ValueError("A different archive is already registered for this project and commit.")
+            self._register_snapshot_identity(project_id, commit_sha, checksum)
+            key = f"{RAG_UPLOADS_PREFIX}/{session_id}/{filename}"
+            self._put_archive(key, data, self._content_type(filename))
+            self.set_rag_identity(key, project_id, commit_sha, checksum)
+            return key
+
+    def set_rag_identity(self, key: str, project_id: str, commit_sha: str, checksum: str) -> None:
+        with self._identity_lock:
+            for item in self.list_rag_files():
+                if (item.get("path") != key and item.get("project_id") == project_id
+                        and item.get("commit_sha") == commit_sha
+                        and item.get("archive_sha256") != checksum):
+                    self._get_client().remove_object(self.tus_bucket, key)
+                    raise ValueError("A different archive is already registered for this project and commit.")
+            try:
+                self._register_snapshot_identity(project_id, commit_sha, checksum)
+            except ValueError:
+                self._get_client().remove_object(self.tus_bucket, key)
+                raise
+            self._get_client().set_object_tags(self.tus_bucket, key, {
+                "project-id": project_id,
+                "commit-sha": commit_sha,
+                "archive-sha256": checksum,
+            })
+
+    @staticmethod
+    def _register_snapshot_identity(project_id: str, commit_sha: str, checksum: str) -> None:
+        from telemetry.registry import SnapshotConflict, default_registry
+        from telemetry.snapshot import Snapshot
+
+        snapshot = Snapshot(project_id, commit_sha, checksum)
+        registry = default_registry()
+        with registry.lock(project_id, commit_sha):
+            try:
+                registry.register(snapshot)
+            except SnapshotConflict as exc:
+                raise ValueError("A different archive is already registered for this project and commit.") from exc
 
     def put_snapshot_archive(self, snapshot_key: str, checksum: str, data: bytes) -> str:
         """Immutable CI archive namespace, outside mutable legacy upload lists."""

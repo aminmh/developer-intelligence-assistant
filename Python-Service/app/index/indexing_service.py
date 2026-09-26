@@ -47,25 +47,36 @@ class IndexingService:
         symbol_definitions: list[dict[str, Any]] | None = None,
         symbol_references: list[dict[str, Any]] | None = None,
         workspace_path: str | None = None,
+        snapshot: Any = None,
     ) -> None:
         logger.info("Background indexing started: collection=%s count=%s", collection_name, len(chunks))
         self.write_status(download_id, "embedding", len(chunks), 0, collection_name)
         try:
             from index.llamaindex_layer import CodePropertyGraph
 
-            ingest_kwargs: dict[str, Any] = {}
-            if symbol_definitions or symbol_references:
-                ingest_kwargs = {
-                    "symbol_definitions": symbol_definitions,
-                    "symbol_references": symbol_references,
-                }
-            result = CodePropertyGraph().ingest(chunks, collection_name, **ingest_kwargs)
-            symbol_index = self._index_symbol_graph(
-                workspace_path,
-                filename,
-                symbol_definitions,
-                symbol_references,
-            )
+            def ingest_snapshot() -> dict[str, Any]:
+                ingest_kwargs: dict[str, Any] = {}
+                if symbol_definitions or symbol_references:
+                    ingest_kwargs = {
+                        "symbol_definitions": symbol_definitions,
+                        "symbol_references": symbol_references,
+                    }
+                result = CodePropertyGraph().ingest(chunks, collection_name, snapshot=snapshot, **ingest_kwargs)
+                result["symbol_index"] = self._index_symbol_graph(
+                    workspace_path,
+                    filename,
+                    symbol_definitions,
+                    symbol_references,
+                    snapshot,
+                )
+                return result
+
+            if snapshot is not None:
+                from telemetry.source import index_uploaded_snapshot
+                result = index_uploaded_snapshot(snapshot, ingest_snapshot)
+            else:
+                result = ingest_snapshot()
+            symbol_index = result.get("symbol_index")
             ingested = int(result.get("ingested", 0) or 0)
             logger.info(
                 "Background indexing complete: collection=%s ingested=%s graph_nodes=%s relations=%s",
@@ -84,7 +95,8 @@ class IndexingService:
             self.write_status(download_id, "error", len(chunks), 0, collection_name)
 
     def parse_and_index(
-        self, download_id: str, filename: str, zip_data: bytes, collection_name: str
+        self, download_id: str, filename: str, zip_data: bytes, collection_name: str,
+        identity: dict[str, str] | None = None,
     ) -> None:
         workdir = Path(settings.download_dir) / f"parse_{download_id}"
         try:
@@ -92,6 +104,17 @@ class IndexingService:
             file_count = extract_zip_safely(zip_data, str(workdir))
             logger.info("Parse extracted %s files: %s", file_count, collection_name)
             chunks = run_code_parse(str(workdir))
+            snapshot = None
+            if identity:
+                from telemetry.snapshot import Snapshot
+                from telemetry.symbols import from_chunk
+
+                snapshot = Snapshot(
+                    identity["project_id"], identity["commit_sha"], identity["source_archive_sha256"]
+                )
+                for chunk in chunks:
+                    chunk.update(snapshot.metadata())
+                    chunk["symbol_id"] = from_chunk(chunk)
             try:
                 from inspection.cli import inspect_index
 
@@ -114,9 +137,10 @@ class IndexingService:
                     symbol_definitions=definitions,
                     symbol_references=references,
                     workspace_path=str(workdir),
+                    snapshot=snapshot,
                 )
             else:
-                self.index_chunks_background(download_id, filename, chunks, collection_name)
+                self.index_chunks_background(download_id, filename, chunks, collection_name, snapshot=snapshot)
         except Exception as exc:  # noqa: BLE001 — job failure is reported in status
             logger.error("Parse failed for '%s': %s", collection_name, exc, exc_info=True)
             self.write_status(download_id, "error", 0, 0, collection_name)
@@ -129,6 +153,7 @@ class IndexingService:
         filename: str,
         definitions: list[dict[str, Any]] | None,
         references: list[dict[str, Any]] | None,
+        snapshot: Any = None,
     ) -> dict[str, Any]:
         """Best-effort precise symbol graph indexing alongside vectors."""
         if not workspace_path or not definitions and not references:
@@ -144,8 +169,11 @@ class IndexingService:
                     "definitions": definitions or [],
                     "references": references or [],
                 },
+                snapshot=snapshot,
             )
         except Exception as exc:  # noqa: BLE001 — symbol graph is best-effort
+            if snapshot is not None:
+                raise
             logger.warning("Symbol graph indexing failed for %s: %s", filename, exc)
             return {
                 "indexed": False,
