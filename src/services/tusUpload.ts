@@ -17,11 +17,13 @@ interface RagUploadSession {
   expires_at: string;
 }
 
-async function createRagUploadSession(file: File): Promise<RagUploadSession> {
+export interface UploadIdentity { project_id: string; commit_sha: string }
+
+async function createRagUploadSession(file: File, identity: UploadIdentity): Promise<RagUploadSession> {
   const res = await fetch(`${UPLOAD_API_URL}/api/rag/upload`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ filename: file.name, size: file.size }),
+    body: JSON.stringify({ filename: file.name, size: file.size, ...identity }),
   });
 
   if (!res.ok) {
@@ -39,13 +41,15 @@ async function createRagUploadSession(file: File): Promise<RagUploadSession> {
 // tusd's post-finish webhook reaches python-api.
 export async function uploadViaTus(
   file: File,
+  identity: UploadIdentity,
   onProgress: (progress: TusUploadProgress) => void
 ): Promise<{ uploadSessionId: string }> {
-  const session = await createRagUploadSession(file);
+  const session = await createRagUploadSession(file, identity);
 
   return new Promise((resolve, reject) => {
     const upload = new tus.Upload(file, {
       endpoint: session.tus_endpoint,
+      fingerprint: async (sourceFile) => `${sourceFile.name}:${sourceFile.size}:${identity.project_id}:${identity.commit_sha}`,
       retryDelays: [0, 1000, 3000, 5000, 10000],
       chunkSize: 8 * 1024 * 1024,
       removeFingerprintOnSuccess: true,
@@ -58,7 +62,10 @@ export async function uploadViaTus(
         upload_kind: 'rag-document',
         upload_session_id: session.upload_session_id,
         upload_token: session.upload_token,
-      },      onError: (error) => reject(error),
+        project_id: identity.project_id,
+        commit_sha: identity.commit_sha,
+      },
+      onError: (error) => reject(error),
       onProgress: (bytesUploaded, bytesTotal) => onProgress({ bytesUploaded, bytesTotal }),
       onSuccess: () => resolve({ uploadSessionId: session.upload_session_id }),
     });

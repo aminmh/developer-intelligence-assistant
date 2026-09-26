@@ -172,6 +172,10 @@ const handleIndexFile = () => {
                   <p class="text-[10px] text-slate-500 font-mono">
                     {{ file.chunkCount }} chunk<span v-if="file.chunkCount !== 1">s</span> • {{ file.type.toUpperCase() }} • {{ (file.size / 1024).toFixed(1) }} KB
                   </p>
+                  <p class="text-[10px] text-slate-500 font-mono">
+                    <template v-if="file.projectId && file.commitSha">{{ file.projectId }} · {{ file.commitSha }}</template>
+                    <template v-else>Legacy upload · no project/commit attribution</template>
+                  </p>
                   <p v-if="file.status === 'failed'" class="text-[10px] text-red-400 mt-0.5 truncate" :title="file.error">
                     Failed: {{ file.error || 'Indexing failed.' }}
                   </p>

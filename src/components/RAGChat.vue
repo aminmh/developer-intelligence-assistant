@@ -49,6 +49,7 @@ const props = defineProps<{
   filesCount: number;
   files: UploadedFile[];
   activeFileName: string | null;
+  activeFileId: string | null;
   orchestrationSteps: PipelineStep[];
   generatingAnswer: boolean;
   showSystemMonitor: boolean;
@@ -61,7 +62,7 @@ const props = defineProps<{
 const emit = defineEmits<{
   (e: 'sendMessage', text: string): void;
   (e: 'attachZip', file: File): void;
-  (e: 'selectAttachment', fileName: string): void;
+  (e: 'selectAttachment', fileId: string): void;
   (e: 'clearAttach'): void;
   (e: 'feedback', query: string, route: string): void;
   (e: 'update:useRemote', value: boolean): void;
@@ -509,13 +510,13 @@ const chatLocked = computed(() => props.loading || !!props.gatePreview);
             <div class="flex items-center gap-1.5">
               <FolderOpen class="w-3.5 h-3.5 text-slate-500" />
               <select
-                :value="activeFileName || ''"
+                :value="activeFileId || ''"
                 @change="onSelectFile"
                 :disabled="files.length === 0"
                 class="bg-[#11162d] border border-slate-800 rounded-lg px-2 py-1 text-[10px] font-mono text-slate-300 focus:outline-none focus:border-indigo-500 disabled:opacity-50 max-w-[200px]"
               >
                 <option value="" disabled>Choose from knowledge base…</option>
-                <option v-for="f in files" :key="f.id" :value="f.name">{{ f.name }}</option>
+                <option v-for="f in files" :key="f.id" :value="f.id">{{ f.name }}<template v-if="f.projectId"> · {{ f.projectId }}</template></option>
               </select>
             </div>
           </div>

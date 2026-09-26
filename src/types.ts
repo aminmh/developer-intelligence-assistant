@@ -80,6 +80,8 @@ export interface UploadedFile {
   status: 'ready' | 'processing' | 'failed';
   error?: string;
   uploadSessionId?: string;
+  projectId?: string;
+  commitSha?: string;
 }
 
 export interface FileChunk {

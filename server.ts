@@ -9,6 +9,7 @@ import dotenv from 'dotenv';
 import { RAGService } from './src/server/rag';
 import { UploadedFile } from './src/types';
 import { openDocument, complete as completeDockerfile, format as formatDockerfile, closeSession as closeDockerfileSession, closeAllSessions, bridgeStatus } from './src/server/dockerfileLanguageBridge';
+import { installOidcAuth, authRoleFor, authIsBootstrapAdmin } from './src/server/oidcAuth';
 
 dotenv.config();
 
@@ -38,6 +39,9 @@ const indexedProjects = new Set<string>();
 const evaluationCache = new Map<string, { query: string; answer: string | null; contexts: string[] }>();
 // Orchestration job_id -> queryId, so /api/query/result can attach the answer.
 const jobToQueryId = new Map<string, string>();
+const jobToOwner = new Map<string, string>();
+const queryToOwner = new Map<string, string>();
+const downloadToOwner = new Map<string, string>();
 
 // ============================================================================
 // ROUTE MAP (proxies + passthroughs to the python backend). New endpoints
@@ -73,6 +77,61 @@ const ollamaImportJobs = new Map<string, OllamaImportJob>();
 
 function contextsFromMatches(matches: any[]): string[] {
   return (matches ?? []).map((m) => m?.chunk?.text ?? '').filter((t) => t);
+}
+
+function indexedProjectKey(filename: string, projectId?: string, commitSha?: string): string {
+  return projectId && commitSha
+    ? `snapshot:${projectId}:${commitSha}`
+    : `legacy:${filename}`;
+}
+
+async function findStoredUpload(filename: string, uploadSessionId: string): Promise<any | null> {
+  const response = await fetch(`${PYTHON_API_URL}/api/rag/files`, {
+    headers: { 'X-Internal-Secret': INTERNAL_SECRET },
+  });
+  if (!response.ok) return null;
+  const data = await response.json() as { files?: any[] };
+  return (data.files ?? []).find((file) => file.filename === filename
+    && file.upload_session_id === uploadSessionId) ?? null;
+}
+
+async function authorizeAttachedUpload(
+  res: express.Response,
+  filename: unknown,
+  uploadSessionId: unknown,
+  projectId: unknown,
+  commitSha: unknown,
+): Promise<boolean> {
+  if (typeof filename !== 'string' || !filename) return true;
+  // Filename-only requests are the retained legacy and saved-analysis paths.
+  // New project-scoped uploads always carry their authoritative upload session.
+  if (!uploadSessionId && !projectId && !commitSha) return true;
+  if (typeof uploadSessionId !== 'string' || !uploadSessionId) {
+    res.status(400).json({ success: false, error: 'An uploaded archive session is required.' });
+    return false;
+  }
+  let file: any;
+  try { file = await findStoredUpload(filename, uploadSessionId); }
+  catch { file = null; }
+  if (!file) {
+    res.status(404).json({ success: false, error: 'Uploaded archive not found.' });
+    return false;
+  }
+  const user = (res.locals as any).authUser;
+  if (file.project_id && file.commit_sha) {
+    if (projectId !== file.project_id || commitSha !== file.commit_sha) {
+      res.status(403).json({ success: false, error: 'Upload project identity does not match the archive record.' });
+      return false;
+    }
+    if (!authRoleFor(user, file.project_id)) {
+      res.status(403).json({ success: false, error: 'Project access denied.' });
+      return false;
+    }
+  } else if (projectId || commitSha) {
+    res.status(409).json({ success: false, error: 'Legacy uploads cannot be assigned an inferred project identity.' });
+    return false;
+  }
+  return true;
 }
 
 async function fetchWithTimeout(url: string, timeoutMs: number): Promise<Response> {
@@ -375,7 +434,8 @@ async function startServer() {
 
   // CORS - allow cross-origin requests from any frontend origin
   app.use((req, res, next) => {
-    res.setHeader('Access-Control-Allow-Origin', '*');
+    res.setHeader('Access-Control-Allow-Origin', process.env.WEB_ORIGIN || 'http://localhost:3000');
+    res.setHeader('Access-Control-Allow-Credentials', 'true');
     res.setHeader('Access-Control-Allow-Methods', 'GET, POST, DELETE, PUT, OPTIONS');
     res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization');
     if (req.method === 'OPTIONS') {
@@ -383,6 +443,8 @@ async function startServer() {
     }
     next();
   });
+
+  installOidcAuth(app);
 
   // API ROUTES (Must go FIRST)
   
@@ -526,7 +588,12 @@ async function startServer() {
         headers: { 'X-Internal-Secret': INTERNAL_SECRET },
       });
       const data = await pyRes.json().catch(() => ({ detail: 'Failed to load indexed projects.' }));
-      return res.status(pyRes.status).json(data);
+      if (!pyRes.ok || !Array.isArray(data)) return res.status(pyRes.status).json(data);
+      const user = (res.locals as any).authUser;
+      const visible = data.filter((project: any) => project.project_id
+        ? Boolean(authRoleFor(user, project.project_id))
+        : authIsBootstrapAdmin(user));
+      return res.json(visible);
     } catch (error: any) {
       return res.status(500).json({ detail: error?.message || 'Failed to load indexed projects.' });
     }
@@ -534,6 +601,21 @@ async function startServer() {
 
   app.get('/api/inspect/definitions', async (req, res) => {
     try {
+      const stem = typeof req.query.stem === 'string' ? req.query.stem : '';
+      const collection = typeof req.query.collection === 'string' ? req.query.collection : '';
+      const projectsResponse = await fetch(`${PYTHON_API_URL}/api/inspect/projects`, {
+        headers: { 'X-Internal-Secret': INTERNAL_SECRET },
+      });
+      if (!projectsResponse.ok) return res.status(projectsResponse.status).json({ detail: 'Failed to verify symbol project access.' });
+      const projects = await projectsResponse.json() as any[];
+      const project = projects.find((item) => (collection && item.collection === collection)
+        || (stem && item.stem === stem));
+      const user = (res.locals as any).authUser;
+      if (!project || (project.project_id
+        ? !authRoleFor(user, project.project_id)
+        : !authIsBootstrapAdmin(user))) {
+        return res.status(403).json({ detail: 'Symbol project access denied.' });
+      }
       const query = new URLSearchParams();
       for (const key of ['stem', 'collection', 'search', 'kind', 'file', 'offset', 'limit']) {
         const value = req.query[key];
@@ -1052,6 +1134,8 @@ async function startServer() {
               uploadedAt: f.last_modified ?? new Date().toISOString(),
               status: 'ready',
               uploadSessionId: f.upload_session_id ?? undefined,
+              projectId: f.project_id ?? undefined,
+              commitSha: f.commit_sha ?? undefined,
             });
           }
         }
@@ -1059,9 +1143,23 @@ async function startServer() {
         console.error('[files] Python service unreachable, using local files only:', err.message);
       }
 
-      res.json({ success: true, files });
+      const user = (res.locals as any).authUser;
+      const visibleFiles = files.filter((file) => !file.projectId || authRoleFor(user, file.projectId));
+      res.json({ success: true, files: visibleFiles });
     } catch (error: any) {
       res.status(500).json({ success: false, error: error.message });
+    }
+  });
+
+  app.get('/api/download-jobs/:downloadId/status', async (req, res) => {
+    try {
+      if (downloadToOwner.get(req.params.downloadId) !== (res.locals as any).authUser.sub) {
+        return res.status(403).json({ error: 'Indexing job access denied.' });
+      }
+      const response = await fetch(`${PYTHON_API_URL}/download-jobs/${encodeURIComponent(req.params.downloadId)}/status`);
+      res.status(response.status).json(await response.json());
+    } catch (error: any) {
+      res.status(502).json({ error: error?.message || 'Python service is unavailable.' });
     }
   });
 
@@ -1069,7 +1167,7 @@ async function startServer() {
   // Documents are not supported; only project ZIP archives are accepted.
   app.post('/api/upload', async (req, res) => {
     try {
-      const { name, size, content } = req.body;
+      const { name, size, content, project_id, commit_sha } = req.body;
       if (!name || content === undefined) {
         return res.status(400).json({ success: false, error: 'Missing name or content in payload.' });
       }
@@ -1078,7 +1176,7 @@ async function startServer() {
       const pyRes = await fetch(`${PYTHON_API_URL}/api/rag/upload`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ filename: name, content, size: size || 0 }),
+        body: JSON.stringify({ filename: name, content, size: size || 0, project_id, commit_sha }),
       });
 
       const pyData = await pyRes.json().catch(() => ({}));
@@ -1097,6 +1195,8 @@ async function startServer() {
           uploadedAt: new Date().toISOString(),
           status: 'ready',
           uploadSessionId: pyData.upload_session_id,
+          projectId: pyData.project_id,
+          commitSha: pyData.commit_sha,
         },
       });
     } catch (error: any) {
@@ -1127,7 +1227,11 @@ async function startServer() {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(req.body),
       });
-      res.status(pyRes.status).json(await pyRes.json());
+      const data = await pyRes.json() as any;
+      if (pyRes.ok && data.download_id) {
+        downloadToOwner.set(data.download_id, (res.locals as any).authUser.sub);
+      }
+      res.status(pyRes.status).json(data);
     } catch (error: any) {
       res.status(502).json({ success: false, error: error.message });
     }
@@ -1143,6 +1247,21 @@ async function startServer() {
       const file = files.find(f => f.id === fileId);
       const fileName = file?.name ?? req.body?.filename ?? null;
       const uploadSessionId = file?.uploadSessionId ?? null;
+
+      let storedFile: any = null;
+      const listResponse = await fetch(`${PYTHON_API_URL}/api/rag/files`);
+      if (listResponse.ok) {
+        const listed = await listResponse.json() as { files?: any[] };
+        storedFile = (listed.files ?? []).find((item) => item.upload_session_id === (uploadSessionId ?? fileId)) ?? null;
+      }
+      const user = (res.locals as any).authUser;
+      if (storedFile?.project_id) {
+        if (req.body?.project_id !== storedFile.project_id || !authRoleFor(user, storedFile.project_id)) {
+          return res.status(403).json({ success: false, error: 'Project access denied.' });
+        }
+      } else if (!authIsBootstrapAdmin(user)) {
+        return res.status(403).json({ success: false, error: 'Administrator access is required to delete an unattributed legacy upload.' });
+      }
 
       const deleted = file ? await RAGService.deleteFile(fileId) : true;
 
@@ -1175,7 +1294,8 @@ async function startServer() {
   // Query RAG system (Semantic retrieval + LLM prompt generation)
   app.post('/api/query', async (req, res) => {
     try {
-      const { query, filename, use_remote } = req.body;
+      const { query, filename, use_remote, upload_session_id, project_id, commit_sha } = req.body;
+      if (!await authorizeAttachedUpload(res, filename, upload_session_id, project_id, commit_sha)) return;
       if (!query || query.trim() === '') {
         return res.status(400).json({ success: false, error: 'Query parameter is required.' });
       }
@@ -1183,6 +1303,7 @@ async function startServer() {
       const pythonUrl = process.env.PYTHON_API_URL || 'http://localhost:9002';
       let classification = { route: 'chat', confidence: 0 };
       const queryId = crypto.randomUUID();
+      queryToOwner.set(queryId, (res.locals as any).authUser.sub);
 
       // Classify if filename attached
       if (filename) {
@@ -1218,14 +1339,18 @@ async function startServer() {
             body: JSON.stringify({
               route: classification.route,
               filename,
+              upload_session_id,
+              project_id,
+              commit_sha,
               prompt: query,
-              skip_index: indexedProjects.has(filename),
+              skip_index: indexedProjects.has(indexedProjectKey(filename, project_id, commit_sha)),
               entities,
             }),
           });
           if (oRes.ok) {
             const { job_id } = await oRes.json();
             jobToQueryId.set(job_id, queryId);
+            jobToOwner.set(job_id, (res.locals as any).authUser.sub);
             jobToUseRemote.set(job_id, !!use_remote);
             evaluationCache.set(queryId, { query, answer: null, contexts: [] });
             return res.json({
@@ -1281,13 +1406,15 @@ async function startServer() {
   // Used for chat/knowledge routes where the project is already indexed.
   app.post('/api/query/stream', async (req, res) => {
     try {
-      const { query, filename, use_remote, route } = req.body;
+      const { query, filename, use_remote, route, upload_session_id, project_id, commit_sha } = req.body;
+      if (!await authorizeAttachedUpload(res, filename, upload_session_id, project_id, commit_sha)) return;
       if (!query || query.trim() === '') {
         return res.status(400).json({ success: false, error: 'Query parameter is required.' });
       }
 
       const pythonUrl = process.env.PYTHON_API_URL || 'http://localhost:9002';
       const queryId = crypto.randomUUID();
+      queryToOwner.set(queryId, (res.locals as any).authUser.sub);
 
       // Route is provided by the client (chat/knowledge) or classified here.
       let routeName: string = route || 'chat';
@@ -1374,6 +1501,9 @@ async function startServer() {
       if (!job_id) {
         return res.status(400).json({ success: false, error: 'Missing job_id.' });
       }
+      if (jobToOwner.get(job_id) !== (res.locals as any).authUser.sub) {
+        return res.status(403).json({ success: false, error: 'Query job access denied.' });
+      }
       const wantRemote = use_remote !== undefined ? !!use_remote : (jobToUseRemote.get(job_id) ?? false);
 
       const pythonUrl = process.env.PYTHON_API_URL || 'http://localhost:9002';
@@ -1393,7 +1523,7 @@ async function startServer() {
       // collection. Do not mark it indexed, otherwise a later code question
       // will incorrectly pass skip_index=true and never create the collection.
       if (isDone && status.filename && status.collection_name) {
-        indexedProjects.add(status.filename);
+        indexedProjects.add(indexedProjectKey(status.filename, status.project_id, status.commit_sha));
       }
 
       // Return steps for frontend progress
@@ -1551,6 +1681,9 @@ async function startServer() {
   app.get('/api/query/:queryId/insights', async (req, res) => {
     try {
       const traceId = req.params.queryId;
+      if (queryToOwner.get(traceId) !== (res.locals as any).authUser.sub) {
+        return res.status(403).json({ success: false, error: 'Query access denied.' });
+      }
       const pyRes = await fetch(`${PYTHON_API_URL}/retrieval-insights/${encodeURIComponent(traceId)}`, {
         headers: { 'X-Internal-Secret': INTERNAL_SECRET },
       });
@@ -1592,6 +1725,9 @@ async function startServer() {
   // Evaluate a single response (reference-free RAGAS metrics)
   app.post('/api/query/:queryId/evaluate', async (req, res) => {
     try {
+      if (queryToOwner.get(req.params.queryId) !== (res.locals as any).authUser.sub) {
+        return res.status(403).json({ success: false, error: 'Query access denied.' });
+      }
       const entry = evaluationCache.get(req.params.queryId);
       if (!entry) {
         return res.status(404).json({ success: false, error: 'Response not found.' });

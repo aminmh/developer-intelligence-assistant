@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ref, watch, onMounted } from 'vue';
+import { ref, watch, onMounted, onUnmounted } from 'vue';
 import { 
   FileText, 
   Settings, 
@@ -30,9 +30,65 @@ import DomainKnowledgeView from './components/DomainKnowledgeView.vue';
 import type { DomainConcept, AnalysisSession } from './types';
 import type { PipelineStep } from './components/PipelineProgress.vue';
 
-const activeTab = ref<'chat' | 'files' | 'config' | 'logs' | 'definitions' | 'schema' | 'domain'>('chat');
+type AppTab = 'chat' | 'files' | 'config' | 'logs' | 'definitions' | 'schema' | 'domain';
+const VALID_TABS: AppTab[] = ['chat', 'files', 'config', 'logs', 'definitions', 'schema', 'domain'];
+const tabFromUrl = (): AppTab => {
+  const value = new URLSearchParams(window.location.search).get('tab');
+  return VALID_TABS.includes(value as AppTab) ? value as AppTab : 'chat';
+};
+const activeTab = ref<AppTab>(tabFromUrl());
+const uploadProjectId = ref('');
+const uploadCommitSha = ref('');
+const authChecked = ref(false);
+const authUser = ref<{ sub: string; email?: string; name?: string } | null>(null);
+const authProjects = ref<Array<{ project_id: string; role: 'viewer' | 'operator' | 'admin' }>>([]);
+const memberPanelOpen = ref(false);
+const memberSubject = ref('');
+const memberRole = ref<'viewer' | 'operator' | 'admin'>('viewer');
+const members = ref<Array<{ subject: string; role: 'viewer' | 'operator' | 'admin' }>>([]);
 const sidebarCollapsed = ref(false);
 const appearance = useAppearancePreferences();
+let handlingHistoryNavigation = false;
+
+watch(activeTab, (tab) => {
+  if (handlingHistoryNavigation) return;
+  const url = new URL(window.location.href);
+  if (tab === 'chat') url.searchParams.delete('tab');
+  else url.searchParams.set('tab', tab);
+  window.history.pushState(window.history.state, '', url);
+}, { flush: 'sync' });
+
+const syncTabFromHistory = () => {
+  handlingHistoryNavigation = true;
+  activeTab.value = tabFromUrl();
+  handlingHistoryNavigation = false;
+};
+const activeSourceFields = () => {
+  const file = files.value.find((item) => item.id === activeFileId.value);
+  return file ? { upload_session_id: file.uploadSessionId || file.id, project_id: file.projectId, commit_sha: file.commitSha } : {};
+};
+
+const loadProjectMembers = async () => {
+  if (!uploadProjectId.value.trim()) return;
+  const response = await makeRequest(`/api/auth/projects/${encodeURIComponent(uploadProjectId.value.trim())}/members`);
+  if (response.ok) members.value = (await response.json()).members ?? [];
+};
+const saveProjectMember = async () => {
+  if (!memberSubject.value.trim() || !uploadProjectId.value.trim()) return;
+  const response = await makeRequest(`/api/auth/projects/${encodeURIComponent(uploadProjectId.value.trim())}/members/${encodeURIComponent(memberSubject.value.trim())}`, {
+    method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ role: memberRole.value }),
+  });
+  if (response.ok) { memberSubject.value = ''; await loadProjectMembers(); }
+  else triggerToast((await response.json().catch(() => ({}))).error || 'Membership update failed.', false);
+};
+const deleteProjectMember = async (subject: string) => {
+  const response = await makeRequest(`/api/auth/projects/${encodeURIComponent(uploadProjectId.value.trim())}/members/${encodeURIComponent(subject)}`, { method: 'DELETE' });
+  if (response.ok) await loadProjectMembers();
+};
+const logout = async () => {
+  await makeRequest('/api/auth/logout', { method: 'POST' });
+  authUser.value = null;
+};
 
 const toggleSidebar = () => {
   sidebarCollapsed.value = !sidebarCollapsed.value;
@@ -134,6 +190,7 @@ const {
   indexingProgress,
   indexedFileIds,
   activeFileName,
+  activeFileId,
   fetchFiles,
   pollWhileProcessing,
   processFiles,
@@ -142,7 +199,16 @@ const {
   attachZip,
   clearAttach,
   selectAttachment,
-} = useProjectFiles({ triggerToast });
+} = useProjectFiles({
+  triggerToast,
+  getUploadIdentity: () => {
+    const project_id = uploadProjectId.value.trim();
+    const commit_sha = uploadCommitSha.value.trim();
+    return project_id && /^(?:[0-9a-f]{40}|[0-9a-f]{64})$/.test(commit_sha)
+      ? { project_id, commit_sha }
+      : null;
+  },
+});
 
 const mapSteps = (raw: any[]): PipelineStep[] =>
   raw.map((s: any) => {
@@ -257,7 +323,7 @@ const streamAnswer = async (text: string, domainRequest?: DomainContextRequest) 
     const res = await makeRequest('/api/query/stream', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ query: text, use_remote: useRemote.value, ...domainRequestFields(domainRequest) }),
+      body: JSON.stringify({ query: text, use_remote: useRemote.value, ...activeSourceFields(), ...domainRequestFields(domainRequest) }),
     });
     if (!res.ok || !res.body) {
       throw new Error(`Stream unavailable (${res.status})`);
@@ -603,6 +669,7 @@ const sendMessage = async (text: string, domainRequest?: DomainContextRequest) =
           limit: 4,
           filename: requestFilename,
           use_remote: useRemote.value,
+          ...activeSourceFields(),
           ...domainRequestFields(domainRequest),
         }),
       });
@@ -642,6 +709,7 @@ const sendMessage = async (text: string, domainRequest?: DomainContextRequest) =
         limit: 4,
         filename: requestFilename || undefined,
         use_remote: useRemote.value,
+        ...activeSourceFields(),
         ...domainRequestFields(domainRequest),
       }),
     });
@@ -667,6 +735,7 @@ const sendMessage = async (text: string, domainRequest?: DomainContextRequest) =
               job_id: jobId,
               user_query: text,
               use_remote: useRemote.value,
+              ...activeSourceFields(),
               ...domainRequestFields(domainRequest),
             }),
           });
@@ -795,6 +864,17 @@ const submitFeedback = async (query: string, route: string) => {
 };
 
 onMounted(async () => {
+  window.addEventListener('popstate', syncTabFromHistory);
+  try {
+    const authResponse = await makeRequest('/api/auth/me');
+    if (authResponse.ok) {
+      const identity = await authResponse.json();
+      authUser.value = identity.user;
+      authProjects.value = identity.projects ?? [];
+    }
+  } catch { /* the sign-in surface below handles an unavailable API */ }
+  authChecked.value = true;
+  if (!authUser.value) return;
   sidebarCollapsed.value = localStorage.getItem('dev-assistant-sidebar-collapsed') === 'true';
   fetchConfig();
   await fetchFiles();
@@ -802,11 +882,22 @@ onMounted(async () => {
     pollWhileProcessing();
   }
 });
+
+onUnmounted(() => window.removeEventListener('popstate', syncTabFromHistory));
 </script>
 
 <template>
-  <div
-    class="app-shell flex h-screen w-screen overflow-hidden font-sans"
+  <div v-if="!authChecked" class="flex h-screen items-center justify-center bg-slate-950 text-sm text-slate-400">Checking sign-in…</div>
+  <div v-else-if="!authUser" class="flex h-screen items-center justify-center bg-slate-950 p-6 text-center">
+    <div class="max-w-md rounded-2xl border border-slate-800 bg-slate-900/60 p-8">
+      <BookOpen class="mx-auto h-8 w-8 text-indigo-400" />
+      <h1 class="mt-4 text-lg font-semibold text-white">Sign in to Developer Assistant</h1>
+      <p class="mt-2 text-sm text-slate-400">Use your configured organization identity provider to continue.</p>
+      <a href="/api/auth/login" class="mt-6 inline-flex rounded-lg bg-indigo-600 px-4 py-2 text-sm font-semibold text-white hover:bg-indigo-500">Continue with SSO</a>
+      <p class="mt-4 text-xs text-slate-600">If sign-in is unavailable, the server administrator must configure OIDC and the bootstrap admin subject.</p>
+    </div>
+  </div>
+  <div v-else class="app-shell flex h-screen w-screen overflow-hidden font-sans"
     :data-theme="appearance.resolvedTheme"
     :data-palette="appearance.preferences.palette"
     :data-accent="appearance.preferences.accent"
@@ -953,6 +1044,21 @@ onMounted(async () => {
     <main class="app-main flex-1 flex flex-col min-w-0 relative">
       
       <!-- Top navbar -->
+      <div class="flex flex-wrap items-center gap-2 border-b border-slate-800/70 bg-slate-950/40 px-4 py-2">
+        <label class="text-[10px] text-slate-500" for="upload-project-id">Upload identity</label>
+        <input id="upload-project-id" v-model="uploadProjectId" class="w-36 rounded-md border border-slate-800 bg-slate-900 px-2 py-1 text-xs text-slate-200" placeholder="project-id" />
+        <input v-model="uploadCommitSha" class="min-w-64 flex-1 rounded-md border border-slate-800 bg-slate-900 px-2 py-1 font-mono text-[10px] text-slate-200" placeholder="full lowercase commit SHA (40 or 64 chars)" />
+        <button v-if="authProjects.some((project) => project.project_id === uploadProjectId && project.role === 'admin' || project.project_id === '*' && project.role === 'admin')" @click="memberPanelOpen = !memberPanelOpen; if (memberPanelOpen) loadProjectMembers()" class="rounded-md border border-slate-700 px-2 py-1 text-[10px] text-slate-300">Project access</button>
+        <span class="text-[10px] text-slate-500">{{ authUser.email || authUser.name || authUser.sub }}</span>
+        <button @click="logout" class="rounded-md px-2 py-1 text-[10px] text-slate-400 hover:text-white">Sign out</button>
+      </div>
+      <div v-if="memberPanelOpen" class="flex flex-wrap items-center gap-2 border-b border-slate-800 bg-slate-900/60 px-4 py-2">
+        <span class="text-[10px] text-slate-400">Project members</span>
+        <input v-model="memberSubject" class="w-48 rounded-md border border-slate-800 bg-slate-950 px-2 py-1 text-xs text-slate-200" placeholder="OIDC subject" />
+        <select v-model="memberRole" class="rounded-md border border-slate-800 bg-slate-950 px-2 py-1 text-xs text-slate-200"><option value="viewer">viewer</option><option value="operator">operator</option><option value="admin">admin</option></select>
+        <button @click="saveProjectMember" class="rounded-md bg-indigo-600 px-2 py-1 text-[10px] text-white">Add / update</button>
+        <span v-for="member in members" :key="member.subject" class="flex items-center gap-1 rounded border border-slate-800 px-2 py-1 text-[10px] text-slate-300">{{ member.subject }} · {{ member.role }}<button @click="deleteProjectMember(member.subject)" class="ml-1 text-rose-400">×</button></span>
+      </div>
       <header class="app-header h-16 px-6 flex items-center justify-between select-none backdrop-blur">
         <div class="flex items-center gap-2">
           <BookOpen class="w-4 h-4 text-indigo-400" />
@@ -985,6 +1091,7 @@ onMounted(async () => {
         :filesCount="files.length"
         :files="files"
         :activeFileName="activeFileName"
+        :activeFileId="activeFileId"
         :orchestrationSteps="orchestrationSteps"
         :generatingAnswer="generatingAnswer"
         :showSystemMonitor="appearance.preferences.showSystemMonitor"

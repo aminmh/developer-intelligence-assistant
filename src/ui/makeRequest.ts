@@ -6,5 +6,5 @@ const apiBaseUrl = import.meta.env.VITE_API_URL || '';
 export const makeRequest = async (path: string, options: RequestInit = {}) => {
   const base = apiBaseUrl.replace(/\/+$/, '');
   const url = base ? `${base}${path}` : path;
-  return fetch(url, options);
+  return fetch(url, { credentials: 'include', ...options });
 };

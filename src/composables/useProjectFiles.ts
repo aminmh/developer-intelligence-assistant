@@ -2,6 +2,7 @@ import { ref, type Ref } from 'vue';
 import { uploadViaTus } from '../services/tusUpload';
 import { UploadedFile } from '../types';
 import { makeRequest } from '../ui/makeRequest';
+import type { UploadIdentity } from '../services/tusUpload';
 
 // Files at or above this size use the resumable TUS upload path instead of the
 // inline base64/JSON POST, so a dropped connection doesn't mean starting over.
@@ -13,6 +14,7 @@ export interface ProjectFilesToast {
 
 export interface UseProjectFilesOptions {
   triggerToast: ProjectFilesToast;
+  getUploadIdentity: () => UploadIdentity | null;
 }
 
 export interface ProjectFileState {
@@ -23,6 +25,7 @@ export interface ProjectFileState {
   indexingProgress: Ref<{ total: number; indexed: number; status: string }>;
   indexedFileIds: Ref<Set<string>>;
   activeFileName: Ref<string | null>;
+  activeFileId: Ref<string | null>;
   fetchFiles: () => Promise<void>;
   pollWhileProcessing: () => Promise<void>;
   processFiles: (fileList: FileList) => Promise<void>;
@@ -41,7 +44,7 @@ export interface ProjectFileState {
  * semantics. `App.vue` remains responsible for global toasts and lifecycle
  * startup, while this module owns file/indexing state and mutations.
  */
-export function useProjectFiles({ triggerToast }: UseProjectFilesOptions): ProjectFileState {
+export function useProjectFiles({ triggerToast, getUploadIdentity }: UseProjectFilesOptions): ProjectFileState {
   const files = ref<UploadedFile[]>([]);
   const uploading = ref(false);
   // Per-file upload progress (0-1) for files going through the TUS path.
@@ -50,6 +53,7 @@ export function useProjectFiles({ triggerToast }: UseProjectFilesOptions): Proje
   const indexingProgress = ref({ total: 0, indexed: 0, status: '' });
   const indexedFileIds = ref<Set<string>>(new Set());
   const activeFileName = ref<string | null>(null);
+  const activeFileId = ref<string | null>(null);
 
   const fetchFiles = async () => {
     try {
@@ -76,7 +80,9 @@ export function useProjectFiles({ triggerToast }: UseProjectFilesOptions): Proje
 
   const uploadLargeFile = async (file: File) => {
     try {
-      await uploadViaTus(file, (progress) => {
+      const identity = getUploadIdentity();
+      if (!identity) throw new Error('Enter a project ID and full commit SHA before uploading.');
+      await uploadViaTus(file, identity, (progress) => {
         uploadProgress.value = {
           ...uploadProgress.value,
           [file.name]: progress.bytesUploaded / progress.bytesTotal,
@@ -102,6 +108,12 @@ export function useProjectFiles({ triggerToast }: UseProjectFilesOptions): Proje
 
     for (let i = 0; i < fileList.length; i++) {
       const file = fileList[i];
+      const identity = getUploadIdentity();
+      if (!identity) {
+        triggerToast('Enter a project ID and full commit SHA before uploading.', false);
+        failCount += fileList.length - i;
+        break;
+      }
 
       if (file.size >= UPLOAD_THRESHOLD_BYTES) {
         // Large files: resumable direct-to-tusd upload, indexed asynchronously.
@@ -128,6 +140,7 @@ export function useProjectFiles({ triggerToast }: UseProjectFilesOptions): Proje
             name: file.name,
             size: file.size,
             content,
+            ...identity,
           }),
         });
 
@@ -157,10 +170,11 @@ export function useProjectFiles({ triggerToast }: UseProjectFilesOptions): Proje
 
   const deleteFile = async (id: string, name: string) => {
     try {
+      const file = files.value.find((item) => item.id === id);
       const res = await makeRequest(`/api/files/${id}`, {
         method: 'DELETE',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ filename: name }),
+        body: JSON.stringify({ filename: name, project_id: file?.projectId }),
       });
       const data = await res.json();
       if (data.success || data.message) {
@@ -180,10 +194,12 @@ export function useProjectFiles({ triggerToast }: UseProjectFilesOptions): Proje
     indexingProgress.value = { total: 0, indexed: 0, status: '' };
     triggerToast(`Parsing "${name}" — extracting PHP code...`, true);
     try {
+      const file = files.value.find((item) => item.id === id);
+      const identity = file?.projectId && file.commitSha ? { project_id: file.projectId, commit_sha: file.commitSha } : {};
       const res = await makeRequest('/api/rag/parse-code', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ filename: name }),
+        body: JSON.stringify({ filename: name, upload_session_id: file?.uploadSessionId || id, ...identity }),
       });
       const data = await res.json();
       if (data.already_indexed) {
@@ -202,10 +218,9 @@ export function useProjectFiles({ triggerToast }: UseProjectFilesOptions): Proje
       // Poll Python indexing progress directly, preserving the existing
       // browser-to-Python path and cadence.
       const downloadId = data.download_id;
-      const pythonUrl = 'http://localhost:9002';
       const poll = setInterval(async () => {
         try {
-          const sRes = await fetch(`${pythonUrl}/download-jobs/${downloadId}/status`);
+          const sRes = await makeRequest(`/api/download-jobs/${encodeURIComponent(downloadId)}/status`);
           const status = await sRes.json();
           indexingProgress.value = status;
           if (status.status === 'done') {
@@ -243,6 +258,8 @@ export function useProjectFiles({ triggerToast }: UseProjectFilesOptions): Proje
 
   const attachZip = async (file: File) => {
     try {
+      const identity = getUploadIdentity();
+      if (!identity) throw new Error('Enter a project ID and full commit SHA before uploading.');
       const base64 = await new Promise<string>((resolve, reject) => {
         const reader = new FileReader();
         reader.onload = () => resolve((reader.result as string).split(',')[1]);
@@ -253,11 +270,12 @@ export function useProjectFiles({ triggerToast }: UseProjectFilesOptions): Proje
       const res = await makeRequest('/api/upload', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ name: file.name, size: file.size, content: base64 }),
+        body: JSON.stringify({ name: file.name, size: file.size, content: base64, ...identity }),
       });
       const data = await res.json();
       if (data.success) {
         activeFileName.value = file.name;
+        activeFileId.value = data.file?.id || null;
         triggerToast(`Project "${file.name}" attached — will be indexed on first query.`, true);
         await fetchFiles();
       } else {
@@ -270,10 +288,13 @@ export function useProjectFiles({ triggerToast }: UseProjectFilesOptions): Proje
 
   const clearAttach = () => {
     activeFileName.value = null;
+    activeFileId.value = null;
   };
 
-  const selectAttachment = (fileName: string) => {
-    activeFileName.value = fileName;
+  const selectAttachment = (fileId: string) => {
+    const file = files.value.find((item) => item.id === fileId);
+    activeFileId.value = file?.id ?? null;
+    activeFileName.value = file?.name ?? null;
   };
 
   return {
@@ -284,6 +305,7 @@ export function useProjectFiles({ triggerToast }: UseProjectFilesOptions): Proje
     indexingProgress,
     indexedFileIds,
     activeFileName,
+    activeFileId,
     fetchFiles,
     pollWhileProcessing,
     processFiles,
