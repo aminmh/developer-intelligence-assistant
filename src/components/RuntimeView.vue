@@ -147,6 +147,28 @@ docker compose --profile runtime up -d</code></pre>
               <p class="mt-2 text-[10px] leading-4 text-slate-500">Spans need project ID, full commit SHA, canonical symbol ID, <code>indexer.dirty=false</code>, and schema version <code>indexer-telemetry-v1</code>. See <code>api/docs/telemetry/attributes.md</code>; instrumentation is not bundled.</p>
             </li>
           </ol>
+          <div class="rounded-2xl border border-slate-700 bg-[#0b1020] p-4">
+            <div class="mb-3 flex flex-wrap items-center justify-between gap-2">
+              <div>
+                <h5 class="text-xs font-semibold text-slate-200">Example Runtime view</h5>
+                <p class="mt-1 font-mono text-[10px] text-slate-500">billing @ c4a8e21… · staging</p>
+              </div>
+              <span class="rounded-full border border-indigo-500/20 bg-indigo-500/5 px-2 py-1 text-[9px] uppercase tracking-wide text-indigo-300">Example only</span>
+            </div>
+            <div class="grid grid-cols-2 gap-2 md:grid-cols-5">
+              <article class="rounded-xl border border-slate-800 bg-slate-900/50 p-3"><p class="text-[9px] uppercase text-slate-500">Running containers</p><p class="mt-1 text-lg font-semibold text-white">2</p><p class="text-[9px] text-slate-500">2 match this commit</p></article>
+              <article class="rounded-xl border border-slate-800 bg-slate-900/50 p-3"><p class="text-[9px] uppercase text-slate-500">Observed spans</p><p class="mt-1 text-lg font-semibold text-white">1,024</p><p class="text-[9px] text-slate-500">sample window</p></article>
+              <article class="rounded-xl border border-slate-800 bg-slate-900/50 p-3"><p class="text-[9px] uppercase text-slate-500">Matched to code</p><p class="mt-1 text-lg font-semibold text-cyan-300">82%</p><p class="text-[9px] text-slate-500">840 / 1,024 spans</p><div class="mt-2 h-1.5 overflow-hidden rounded-full bg-slate-800"><div class="h-full w-[82%] rounded-full bg-cyan-400"></div></div><div class="mt-1 flex justify-between text-[8px] text-slate-600"><span>0%</span><span>100%</span></div></article>
+              <article class="rounded-xl border border-slate-800 bg-slate-900/50 p-3"><p class="text-[9px] uppercase text-slate-500">Possible dead code</p><p class="mt-1 text-lg font-semibold text-amber-300">14</p><p class="text-[9px] text-slate-500">not observed</p></article>
+              <article class="rounded-xl border border-slate-800 bg-slate-900/50 p-3"><p class="text-[9px] uppercase text-slate-500">Hot symbols</p><p class="mt-1 text-lg font-semibold text-orange-300">3</p><p class="text-[9px] text-slate-500">100+ calls</p></article>
+            </div>
+            <div class="mt-3 rounded-xl border border-slate-800 bg-slate-900/30 p-3">
+              <p class="mb-2 text-[9px] font-semibold uppercase tracking-wide text-slate-500">Reported containers</p>
+              <div class="flex flex-wrap items-center gap-2 border-t border-slate-800 py-2 text-[10px]"><CheckCircle2 class="h-3 w-3 text-emerald-400" /><span class="font-semibold text-slate-200">api</span><span class="text-slate-500">staging</span><span class="ml-auto font-mono text-slate-500">c4a8e21…</span></div>
+              <div class="flex flex-wrap items-center gap-2 border-t border-slate-800 py-2 text-[10px]"><CheckCircle2 class="h-3 w-3 text-emerald-400" /><span class="font-semibold text-slate-200">worker</span><span class="text-slate-500">staging</span><span class="ml-auto font-mono text-slate-500">c4a8e21…</span></div>
+            </div>
+            <p class="mt-2 text-[9px] leading-4 text-slate-500">82% means 82 of every 100 observed spans matched an indexed symbol in this example; it is a match rate, not a health score.</p>
+          </div>
           <p class="border-t border-slate-800 pt-3 text-[10px] leading-4 text-slate-500">The host agent reconciles containers about every 60 seconds. This view refreshes every 30 seconds or when you select Refresh. Span counts are sampled observations within the configured retention window, not exact production call totals. Container visibility works without spans; code matching, routes, and table activity need spans.</p>
         </div>
       </div>
