@@ -20,7 +20,7 @@ const dockerLabelSnippet = [
   'labels:',
   '  com.devassistant.telemetry.enabled: "true"',
   '  com.devassistant.telemetry.project: billing',
-  '  com.devassistant.telemetry.environment: staging',
+  '  com.devassistant.telemetry.environment: development',
   '  com.devassistant.telemetry.commit: "${GIT_COMMIT_SHA}"',
   '  com.devassistant.telemetry.service: api',
 ].join('\n');
@@ -39,8 +39,12 @@ const snapshotUploadSnippet = [
   '  --header "Authorization: Bearer $INDEXER_CI_TOKEN" \\',
   '  "$INDEXER_API/telemetry/projects/$INDEXER_PROJECT/snapshots/$CI_COMMIT_SHA"',
 ].join('\n');
-const hostScopeSnippet = 'TELEMETRY_HOST_SCOPES={"fingerprint-from-host.crt":{"projects":{"billing":["staging"]}}}';
-const fingerprintCommand = "openssl x509 -in host.crt -noout -fingerprint -sha256 | sed 's/.*=//;s/://g' | tr '[:upper:]' '[:lower:]'";
+const hostScopeSnippet = 'TELEMETRY_HOST_SCOPES={"fingerprint-from-host.crt":{"projects":{"billing":["development"]}}}';
+const localProjectComposeSnippet = [
+  '# In your project directory, after adding the telemetry labels to services:',
+  'export GIT_COMMIT_SHA="$(git rev-parse HEAD)"',
+  'docker compose up -d',
+].join('\n');
 const localAgentSnippet = [
   'cd api',
   'docker compose up -d python-api telemetry-caddy',
@@ -49,13 +53,6 @@ const localAgentSnippet = [
   'HOST_IDENTITY_DIR="$PWD/telemetry-dev/host/certs/agent" \\',
   'docker compose -f telemetry-agent/docker-compose.yml \\',
   '  -f telemetry-agent/docker-compose.local.yml up -d --build',
-].join('\n');
-const remoteAgentSnippet = [
-  'cd api/telemetry-agent',
-  'HOST_IDENTITY_DIR=/etc/devassistant/telemetry-identity \\',
-  'BACKEND_URL=https://telemetry.example.internal \\',
-  'DOCKER_SOCK_GID="$(stat -c \'%g\' /var/run/docker.sock)" \\',
-  'docker compose up -d --build',
 ].join('\n');
 const runtimeCollectorSnippet = 'cd api\ndocker compose --profile runtime up -d';
 const spanAttributesSnippet = [
@@ -67,8 +64,27 @@ const spanAttributesSnippet = [
 ].join('\n');
 let refreshTimer: ReturnType<typeof setInterval> | undefined;
 
-const options = computed(() => projects.value.filter((project) => project.commit_sha)
-  .map((project) => ({ ...project, key: `${project.project_id}:${project.commit_sha}` })));
+const options = computed(() => {
+  const byKey = new Map<string, RuntimeProjectRecord & { key: string; commit_sha: string }>();
+  for (const project of projects.value) {
+    const commits = [...new Set([...(project.running_commit_shas || []), project.commit_sha]
+      .filter((commit): commit is string => typeof commit === 'string' && commit.length > 0))];
+    for (const commit_sha of commits) {
+      const key = `${project.project_id}:${commit_sha}`;
+      const current = byKey.get(key);
+      const option = {
+        ...project,
+        key,
+        commit_sha,
+        state: project.commit_sha === commit_sha ? project.state : 'awaiting_source',
+      };
+      // Prefer the real snapshot row when it exists; otherwise make active
+      // deployments selectable even before their source snapshot is uploaded.
+      if (!current || project.commit_sha === commit_sha) byKey.set(key, option);
+    }
+  }
+  return [...byKey.values()];
+});
 const selected = computed(() => options.value.find((item) => item.key === selectedKey.value) || null);
 const metricsBySymbol = computed(() => new Map((detail.value?.telemetry.symbols || []).map((item) => [item.symbol_id, item])));
 const symbols = computed(() => {
@@ -142,13 +158,13 @@ onUnmounted(() => { if (refreshTimer) clearInterval(refreshTimer); });
     <header class="flex flex-wrap items-center justify-between gap-3">
       <div>
         <h3 class="flex items-center gap-2 text-lg font-bold text-white"><Activity class="h-5 w-5 text-cyan-400" />Runtime</h3>
-        <p class="mt-1 text-xs text-slate-500">Live deployments, span flow, code matching, routes, and database tables.</p>
+        <p class="mt-1 text-xs text-slate-500">Opt-in local Docker deployments, span flow, code matching, routes, and database tables.</p>
       </div>
       <div class="flex flex-wrap items-center gap-2">
         <button type="button" @click="showGuide = !showGuide" class="rounded-xl border border-cyan-500/30 px-3 py-2 text-xs text-cyan-200 hover:bg-cyan-500/10"><BookOpen class="mr-1 inline h-3.5 w-3.5" />{{ showGuide ? 'Hide guide' : 'Get Started' }}</button>
         <select v-model="selectedKey" class="max-w-[24rem] rounded-xl border border-slate-800 bg-[#11162d] px-3 py-2 text-xs text-slate-200">
-          <option value="">Select project commit</option>
-          <option v-for="item in options" :key="item.key" :value="item.key">{{ item.project_id }} · {{ item.commit_sha?.slice(0, 12) }}</option>
+          <option value="">Select Docker project / commit</option>
+          <option v-for="item in options" :key="item.key" :value="item.key">{{ item.project_id }} · {{ item.commit_sha.slice(0, 12) }}{{ item.state === 'awaiting_source' ? ' · Docker only' : '' }}</option>
         </select>
         <button type="button" @click="refresh" :disabled="loadingProjects || loadingDetail" class="rounded-xl border border-slate-700 px-3 py-2 text-xs text-slate-300 hover:bg-slate-800"><RefreshCw class="mr-1 inline h-3.5 w-3.5" :class="loadingProjects || loadingDetail ? 'animate-spin' : ''" />Refresh</button>
       </div>
@@ -157,8 +173,8 @@ onUnmounted(() => { if (refreshTimer) clearInterval(refreshTimer); });
     <div v-if="error" class="rounded-xl border border-rose-500/25 bg-rose-950/20 p-4 text-xs text-rose-300">{{ error }}</div>
     <div v-else-if="!options.length" class="rounded-2xl border border-dashed border-slate-700 p-10 text-center">
       <Server class="mx-auto h-7 w-7 text-slate-600" />
-      <p class="mt-3 text-sm text-slate-300">No project snapshots are registered yet.</p>
-      <p class="mt-1 text-xs text-slate-500">Open Get Started to learn how to register a snapshot, report labeled Docker containers, and send application spans.</p>
+      <p class="mt-3 text-sm text-slate-300">No Docker containers are reporting yet.</p>
+      <p class="mt-1 text-xs text-slate-500">Start the local host agent and opt in your Compose services. Open Get Started for setup steps; a source snapshot is optional for container visibility.</p>
     </div>
 
     <section v-if="showGuide" class="rounded-2xl border border-cyan-500/20 bg-cyan-500/[0.04] p-5">
@@ -167,42 +183,38 @@ onUnmounted(() => { if (refreshTimer) clearInterval(refreshTimer); });
         <div class="min-w-0 flex-1 space-y-4">
           <div>
             <h4 class="text-sm font-semibold text-white">Get started with Runtime</h4>
-            <p class="mt-1 text-xs leading-5 text-slate-400">Runtime combines host-reported Docker deployments with sampled OpenTelemetry spans. Container reports show what is running; spans add code, route, and database activity. The app does not discover arbitrary containers or instrument application code automatically.</p>
+            <p class="mt-1 text-xs leading-5 text-slate-400">Start with your local Docker containers: opt-in labels plus the host agent report what is running. You do not need to upload source code to see containers. Snapshots and OpenTelemetry spans add code, route, and database activity.</p>
           </div>
           <ol class="space-y-3">
             <li class="rounded-xl border border-slate-800 bg-slate-950/40 p-4">
-              <p class="text-xs font-semibold text-cyan-200">1. Upload and index the project version</p>
-              <p class="mt-2 text-[11px] leading-5 text-slate-400">Choose a stable project slug such as <code>billing</code>. Use the same slug in CI, Docker labels, host scope, and spans. Upload a repository-root ZIP for the exact full lowercase 40-character SHA-1 or 64-character SHA-256 commit used to build the image.</p>
-              <details class="mt-3 rounded-lg border border-slate-800 bg-black/20 p-3">
-                <summary class="cursor-pointer text-[11px] font-medium text-slate-300">Show project token and CI upload example</summary>
+              <p class="text-xs font-semibold text-cyan-200">1. Listen to your local Docker project</p>
+              <p class="mt-2 text-[11px] leading-5 text-slate-400">This is the step you need for a local container list. Add the labels below to the Compose services you want to observe, then run <code>docker compose up -d</code> again from that project. Only opted-in containers are reported.</p>
+              <details open class="mt-3 rounded-lg border border-slate-800 bg-black/20 p-3">
+                <summary class="cursor-pointer text-[11px] font-medium text-slate-300">Local setup: labels, certificate scope, and host agent</summary>
                 <div class="mt-3 space-y-2 text-[10px] leading-4 text-slate-400">
-                  <p>On the API backend, provision a unique high-entropy token (at least 32 characters) for the project. Keep the real token in a secret manager; the value shown is a placeholder.</p>
-                  <pre class="overflow-x-auto rounded-lg bg-black/30 p-2 text-slate-300"><code>{{ ciTokenSnippet }}</code></pre>
-                  <p>In protected CI variables, set <code>INDEXER_API</code>, <code>INDEXER_PROJECT=billing</code>, and <code>INDEXER_CI_TOKEN</code>. Then archive and upload the commit:</p>
-                  <pre class="overflow-x-auto rounded-lg bg-black/30 p-2 text-slate-300"><code>{{ snapshotUploadSnippet }}</code></pre>
-                  <p>Upload returns before indexing finishes. The matching labeled deployment must report the same project and SHA for indexing to proceed. Wait for <code>ready</code> before relying on code matches.</p>
+                  <p>Use a stable project slug such as <code>billing</code>, a lowercase full Git SHA for the running image, and an environment such as <code>development</code>. The command below assumes the image was built from the current <code>HEAD</code>. If containers are already running, add the labels and run Compose again so it recreates those services with them.</p>
+                  <pre class="overflow-x-auto rounded-lg bg-black/30 p-2 text-slate-300"><code>{{ dockerLabelSnippet }}</code></pre>
+                  <pre class="overflow-x-auto rounded-lg bg-black/30 p-2 text-slate-300"><code>{{ localProjectComposeSnippet }}</code></pre>
+                  <p>From the repository root, create the local development CA and host identity. Add the printed fingerprint to <code>TELEMETRY_HOST_SCOPES</code> in <code>api/.env</code> before starting the API:</p>
+                  <pre class="overflow-x-auto rounded-lg bg-black/30 p-2 text-slate-300"><code>./api/telemetry-dev/host/bootstrap-dev-certs.sh</code></pre>
+                  <pre class="overflow-x-auto rounded-lg bg-black/30 p-2 text-slate-300"><code>{{ hostScopeSnippet }}</code></pre>
+                  <p>Then start the local mTLS ingress and agent. On Linux, export <code>DOCKER_SOCK_GID="$(stat -c '%g' /var/run/docker.sock)"</code> before this command; on macOS use <code>stat -f '%g'</code>.</p>
+                  <pre class="overflow-x-auto rounded-lg bg-black/30 p-2 text-slate-300"><code>{{ localAgentSnippet }}</code></pre>
+                  <p>After the agent reports, choose <code>billing · commit · Docker only</code> in the Runtime selector. No source snapshot is needed for the container list. The agent reconciles about every 60 seconds; use Refresh to reload sooner. For remote hosts, use managed certificates and follow <code>api/telemetry-agent/README.md</code>.</p>
                 </div>
               </details>
             </li>
             <li class="rounded-xl border border-slate-800 bg-slate-950/40 p-4">
-              <p class="text-xs font-semibold text-cyan-200">2. Authorize a host and report containers</p>
-              <p class="mt-2 text-[11px] leading-5 text-slate-400">Each Docker host needs a unique client certificate. The API ingress must trust its CA, require mTLS, and forward the verified certificate fingerprint. The backend then grants that fingerprint only the project/environment pairs it needs.</p>
+              <p class="text-xs font-semibold text-cyan-200">2. Add a source snapshot (optional, for code matching)</p>
+              <p class="mt-2 text-[11px] leading-5 text-slate-400">A snapshot connects observed spans to indexed functions and methods. It is not required to list running containers. Use the same project slug and full commit SHA that you placed on the running image.</p>
               <details class="mt-3 rounded-lg border border-slate-800 bg-black/20 p-3">
-                <summary class="cursor-pointer text-[11px] font-medium text-slate-300">Show certificate scope, labels, and agent setup</summary>
+                <summary class="cursor-pointer text-[11px] font-medium text-slate-300">Show project token and CI upload example</summary>
                 <div class="mt-3 space-y-2 text-[10px] leading-4 text-slate-400">
-                  <p>For local development, run the bootstrap from the repository root; it prints the host certificate fingerprint. Production hosts should use operator-managed certificates, not this development CA.</p>
-                  <pre class="overflow-x-auto rounded-lg bg-black/30 p-2 text-slate-300"><code>./api/telemetry-dev/host/bootstrap-dev-certs.sh</code></pre>
-                  <p>For a managed host certificate, get the same lowercase, colon-free SHA-256 fingerprint with:</p>
-                  <pre class="overflow-x-auto rounded-lg bg-black/30 p-2 text-slate-300"><code>{{ fingerprintCommand }}</code></pre>
-                  <p>Add that fingerprint to <code>TELEMETRY_HOST_SCOPES</code> on the API backend. This example allows only the <code>staging</code> environment for project <code>billing</code>:</p>
-                  <pre class="overflow-x-auto rounded-lg bg-black/30 p-2 text-slate-300"><code>{{ hostScopeSnippet }}</code></pre>
-                  <p>Use the same project slug, environment, and full commit on the Compose service. Only opted-in containers are reported:</p>
-                  <pre class="overflow-x-auto rounded-lg bg-black/30 p-2 text-slate-300"><code>{{ dockerLabelSnippet }}</code></pre>
-                  <p>For the local Mac/Linux setup, start the API ingress and host agent:</p>
-                  <pre class="overflow-x-auto rounded-lg bg-black/30 p-2 text-slate-300"><code>{{ localAgentSnippet }}</code></pre>
-                  <p>On Linux, set <code>DOCKER_SOCK_GID="$(stat -c '%g' /var/run/docker.sock)"</code> before the agent command; on macOS use <code>stat -f '%g'</code>. For a remote host, place <code>ca.pem</code>, <code>host.crt</code>, and <code>host.key</code> in a protected identity directory, and configure the API Caddy ingress to trust that client CA:</p>
-                  <pre class="overflow-x-auto rounded-lg bg-black/30 p-2 text-slate-300"><code>{{ remoteAgentSnippet }}</code></pre>
-                  <p>Give each host a unique certificate and least-privilege project/environment scope. See <code>api/telemetry-agent/README.md</code> for certificate rotation and production ingress details.</p>
+                  <p>Provision a separate high-entropy bearer token (at least 32 characters) for the project on the API backend. Keep the real token in a secret manager; the value below is a placeholder.</p>
+                  <pre class="overflow-x-auto rounded-lg bg-black/30 p-2 text-slate-300"><code>{{ ciTokenSnippet }}</code></pre>
+                  <p>Set <code>INDEXER_API</code>, <code>INDEXER_PROJECT=billing</code>, and <code>INDEXER_CI_TOKEN</code> as protected CI variables. The archive must be repository-rooted and match the deployed commit:</p>
+                  <pre class="overflow-x-auto rounded-lg bg-black/30 p-2 text-slate-300"><code>{{ snapshotUploadSnippet }}</code></pre>
+                  <p>Upload returns while indexing runs. The snapshot becomes ready after its matching deployment report and indexing finish.</p>
                 </div>
               </details>
             </li>
@@ -250,11 +262,11 @@ onUnmounted(() => { if (refreshTimer) clearInterval(refreshTimer); });
     <template v-if="options.length && detail && !error">
       <div class="flex flex-wrap items-center gap-2 rounded-xl border border-slate-800 bg-slate-900/30 p-3 text-[11px]">
         <span class="font-mono text-slate-200">{{ detail.project_id }} @ {{ detail.commit_sha }}</span>
-        <span class="ml-auto rounded-full border px-2 py-1" :class="detail.snapshot.state === 'ready' ? 'border-emerald-500/20 bg-emerald-500/5 text-emerald-300' : 'border-amber-500/20 bg-amber-500/5 text-amber-300'">{{ detail.snapshot.state }}</span>
+        <span class="ml-auto rounded-full border px-2 py-1" :class="detail.snapshot.state === 'ready' ? 'border-emerald-500/20 bg-emerald-500/5 text-emerald-300' : 'border-amber-500/20 bg-amber-500/5 text-amber-300'">{{ detail.snapshot.state === 'awaiting_source' ? 'Docker only · no source snapshot' : detail.snapshot.state }}</span>
         <span v-if="detail.deployment_mismatch" class="inline-flex items-center gap-1 rounded-full border border-amber-500/20 bg-amber-500/5 px-2 py-1 text-amber-300"><AlertTriangle class="h-3 w-3" />Running code uses another commit</span>
       </div>
 
-      <div class="grid grid-cols-2 gap-3 xl:grid-cols-5">
+      <div v-if="detail.snapshot.state !== 'awaiting_source'" class="grid grid-cols-2 gap-3 xl:grid-cols-5">
         <article class="rounded-2xl border border-slate-800 bg-slate-900/30 p-4"><p class="text-[10px] uppercase text-slate-500">Running containers</p><p class="mt-2 text-2xl font-semibold text-white">{{ detail.deployments.length }}</p><p class="mt-1 text-[10px] text-slate-500">{{ detail.matching_deployments.length }} match this commit</p></article>
         <article class="rounded-2xl border border-slate-800 bg-slate-900/30 p-4"><p class="text-[10px] uppercase text-slate-500">Observed spans</p><p class="mt-2 text-2xl font-semibold text-white">{{ formatCount(detail.telemetry.total_spans) }}</p><p class="mt-1 text-[10px] text-slate-500">Last received {{ formatTime(detail.telemetry.last_seen) }}</p></article>
         <article class="rounded-2xl border border-slate-800 bg-slate-900/30 p-4"><p class="text-[10px] uppercase text-slate-500">Matched to code</p><p class="mt-2 text-2xl font-semibold text-white">{{ detail.telemetry.match_percent }}%</p><p class="mt-1 text-[10px] text-slate-500">{{ formatCount(detail.telemetry.matched_spans) }} / {{ formatCount(detail.telemetry.total_spans) }} spans</p></article>
@@ -262,8 +274,13 @@ onUnmounted(() => { if (refreshTimer) clearInterval(refreshTimer); });
         <article class="rounded-2xl border border-slate-800 bg-slate-900/30 p-4"><p class="text-[10px] uppercase text-slate-500">Hot symbols</p><p class="mt-2 text-2xl font-semibold text-orange-300">{{ formatCount(hotCount) }}</p><p class="mt-1 text-[10px] text-slate-500">100+ observed calls in window</p></article>
       </div>
 
-      <div v-if="detail.telemetry.reason" class="rounded-xl border border-amber-500/20 bg-amber-500/5 p-4 text-xs text-amber-200">{{ detail.telemetry.reason }} Start the local runtime telemetry profile and instrument the PHP application with the Phase 1 identity attributes. The synthetic Phase 0 collector does not accept application spans.</div>
-      <div v-if="detail.symbol_index_available === false" class="rounded-xl border border-amber-500/20 bg-amber-500/5 p-4 text-xs text-amber-200">{{ detail.symbol_index_reason || 'The symbol index is unavailable.' }} Runtime spans may still be present, but code-match and dead-code views require the indexed snapshot.</div>
+      <div v-else class="rounded-xl border border-cyan-500/20 bg-cyan-500/5 p-4 text-xs text-cyan-100">
+        <p class="font-semibold">Docker-only view is active</p>
+        <p class="mt-1 text-slate-400">The host agent is reporting {{ detail.deployments.length }} running container(s) for this project. Source upload and application spans are optional; add a source snapshot only when you want code matching and code-level views.</p>
+      </div>
+
+      <div v-if="detail.snapshot.state !== 'awaiting_source' && detail.telemetry.reason" class="rounded-xl border border-amber-500/20 bg-amber-500/5 p-4 text-xs text-amber-200">{{ detail.telemetry.reason }} Start the local runtime telemetry profile and instrument the PHP application with the Phase 1 identity attributes. The synthetic Phase 0 collector does not accept application spans.</div>
+      <div v-if="detail.snapshot.state !== 'awaiting_source' && detail.symbol_index_available === false" class="rounded-xl border border-amber-500/20 bg-amber-500/5 p-4 text-xs text-amber-200">{{ detail.symbol_index_reason || 'The symbol index is unavailable.' }} Runtime spans may still be present, but code-match and dead-code views require the indexed snapshot.</div>
 
       <section class="rounded-2xl border border-slate-800 bg-slate-900/30 p-4 space-y-3">
         <div class="flex flex-wrap items-center justify-between gap-2"><h4 class="text-xs font-semibold uppercase tracking-wide text-slate-300">Containers</h4><span class="text-[10px] text-slate-500">Deployment reports refresh every 60 seconds at the host agent</span></div>
@@ -273,7 +290,7 @@ onUnmounted(() => { if (refreshTimer) clearInterval(refreshTimer); });
         </div>
       </section>
 
-      <div class="grid gap-4 xl:grid-cols-2">
+      <div v-if="detail.snapshot.state !== 'awaiting_source'" class="grid gap-4 xl:grid-cols-2">
         <section class="rounded-2xl border border-slate-800 bg-slate-900/30 p-4 space-y-3">
           <div class="flex items-center justify-between gap-2"><h4 class="text-xs font-semibold uppercase tracking-wide text-slate-300">Dead-code candidates</h4><label class="flex items-center gap-2 text-[10px] text-slate-400"><input v-model="deadOnly" type="checkbox" class="accent-amber-500" />Show only unobserved</label></div>
           <p class="text-[10px] text-slate-500">Absence here means no matching spans in retained telemetry; it does not prove code is unused.</p>
