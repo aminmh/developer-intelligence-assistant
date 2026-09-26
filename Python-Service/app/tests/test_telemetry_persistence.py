@@ -176,28 +176,55 @@ def test_inspection_reads_use_stored_ids_and_require_ready(tmp_path, monkeypatch
 
 def test_real_source_parser_to_snapshot_persistence(tmp_path, monkeypatch):
     from telemetry.source import SourceService
+    from infra.settings import settings
     from inspection.graph import InspectionGraph
     from index import llamaindex_layer
-    from test_telemetry_source import archive, Storage
+    if not (Path(settings.php_cli_root) / "bin" / "code-parse").is_file():
+        pytest.skip("PHP CLI parser binary is unavailable in this environment")
     graph, store, vectors = index_with_local_vectors(monkeypatch)
     monkeypatch.setattr(llamaindex_layer, "CodePropertyGraph", lambda: graph)
     monkeypatch.setattr(InspectionGraph, "_get_store", lambda self: store)
+    from test_telemetry_source import archive, Storage, deploy
     registry = SnapshotRegistry(tmp_path)
     service = SourceService(registry, Storage())
     code = '<?php namespace App; class Orders { function store() { $this->save(); } function save() {} }'
-    state = service.upload("parser", "a" * 40, archive(code))
+    service.upload("parser", "a" * 40, archive(code))
+    deploy(registry, "parser", "a" * 40)
+    assert service.process_one()
+    state = registry.get("parser", "a" * 40)
     assert state["state"] == "ready"
     records, _ = vectors.scroll(state["collection_name"], with_payload=True)
     assert {r.payload.get("symbol_id") for r in records if r.payload.get("symbol_id")} == {
         "App\\Orders::store", "App\\Orders::save"}
 
 
+def test_deferred_worker_publishes_ready_after_complete_snapshot_index(tmp_path):
+    from telemetry.source import SourceService
+    from test_telemetry_source import archive, Storage, deploy
+    registry = SnapshotRegistry(tmp_path)
+    def complete_index(workspace, snapshot):
+        assert Path(workspace, "src/example.php").is_file()
+        assert snapshot.project_id == "parser"
+        return {"chunk_count": 1, "ingested": 1, "graph_nodes": 1, "embed_fails": 0}
+    service = SourceService(registry, Storage(), complete_index)
+    service.upload("parser", "a" * 40, archive("<?php function example() {}"))
+    deploy(registry, "parser", "a" * 40)
+    assert service.process_one()
+    state = registry.get("parser", "a" * 40)
+    assert state["state"] == "ready"
+    assert state["collection_name"].startswith("snapshot_")
+
+
 def test_partial_php_parse_cannot_be_ready(tmp_path, monkeypatch):
     from infra.php_cli import PhpCli, PhpCommandResult
     from telemetry.source import SourceService
-    from test_telemetry_source import archive, Storage
+    from test_telemetry_source import archive, Storage, deploy
     monkeypatch.setattr(PhpCli, "run", lambda *a, **kw: PhpCommandResult((), 2, "[]", "partial"))
     registry = SnapshotRegistry(tmp_path)
-    state = SourceService(registry, Storage()).upload("partial", "a" * 40, archive())
+    service = SourceService(registry, Storage())
+    service.upload("partial", "a" * 40, archive())
+    deploy(registry, "partial", "a" * 40)
+    assert service.process_one()
+    state = registry.get("partial", "a" * 40)
     assert state["state"] == "failed"
     assert "collection_name" not in state

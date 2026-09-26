@@ -37,7 +37,11 @@ Set `TELEMETRY_SNAPSHOT_ROOT` to a durable local POSIX filesystem directory
 shared by backend worker processes (default sibling of workspace root).
 
 `GET /telemetry/projects/{project_id}/snapshots/{commit_sha}` returns
-`awaiting_source` when no matching source has arrived. Auth is project scoped.
+`awaiting_source` when no matching source has arrived. A source archive without
+a live matching deployment reports `awaiting_deployment`; once both exist it
+reports `queued`, then `indexing`, and only publishes `ready` after strict
+parser, vector, graph and inspection persistence checks succeed. Auth is
+project scoped.
 
 `PUT /telemetry/projects/{project_id}/snapshots/{commit_sha}/source` accepts raw
 repository-root ZIP bytes with `Content-Type: application/zip` and
@@ -59,12 +63,13 @@ curl --fail-with-body --request PUT \
   "$INDEXER_API/telemetry/projects/$INDEXER_PROJECT/snapshots/$CI_COMMIT_SHA/source"
 ```
 
-Response states: `awaiting_source → storing → indexing → ready`, or `failed`.
-Uploads currently execute indexing synchronously in the backend thread pool;
-configure proxy/CI request timeouts for the project size. GET can observe state
-while indexing. HTTP 503 reports failed indexing without source/error-message
-contents. Retry the exact bytes to resume after failure or backend interruption.
-Per-snapshot process locks prevent concurrent retries from double-indexing.
+Uploads stage exact bytes in MinIO and return the pending state without waiting
+for indexing. A durable SQLite job is drained by the backend lifespan worker;
+the shared snapshot directory and process lock let a restarted worker reclaim
+an interrupted job without two backend processes indexing the same snapshot.
+Failed indexing never returns `ready`; retry the exact bytes to resume after a
+failure. GET can observe each pending state without exposing the archive key or
+indexing diagnostics.
 
 Ready retries perform no writes. Different bytes for the same clean
 project/commit return 409, including after a failed attempt. The existing MinIO
@@ -77,8 +82,22 @@ Only successful complete parsing, graph/vector ingestion and inspection graph
 ingestion publish `ready`. Failed snapshots may leave staged graph/vector rows;
 they are excluded from legacy discovery and readiness-gated retrieval. Ready
 collections are returned explicitly by status. Snapshot retry upserts its own
-collection; it never clears legacy data or another commit's data. Retention or
-deletion of snapshots needs a separate reviewed lifecycle policy.
+collection; it never clears legacy data or another commit's data. Unmatched,
+unindexed archive bytes expire after 30 days; checksum and state metadata remain
+so the exact archive can be reuploaded. Stopped deployment mappings remain for
+seven days. Ready snapshots and saved analyses are retained.
+
+## Host deployment discovery
+
+See `../telemetry-agent/README.md` for the per-host read-only Docker API proxy,
+opt-in labels, agent deployment, and backend host-scope configuration. The
+backend accepts deployment reports at `POST /telemetry/host/deployments`; host
+identity is taken only from `X-Verified-Client-Cert-SHA256`. Configure ingress
+to require and verify client certificates, strip any incoming copy of that
+header, and set it from the verified peer certificate fingerprint. Do not
+expose the backend route directly to hosts or the public network. Production
+discovery remains disabled until that ingress identity path is verified end
+to end.
 
 CI uploads accept clean snapshots only. Dirty development telemetry is marked
 dirty and approximately attributed to the nearest clean commit in later

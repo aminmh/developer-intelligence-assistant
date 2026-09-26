@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import hashlib
+import fcntl
 import io
 from pathlib import Path
 import stat
@@ -78,12 +79,31 @@ class SourceService:
             current = self.registry.get(project_id, commit_sha)
             if current["state"] == "ready":
                 return current
-            try:
+            if not self.registry.archive_key(project_id, commit_sha):
                 self.registry.transition(snapshot, "storing")
-                # Reuse the app's MinIO archive owner, with a deterministic
-                # session unique to the snapshot. Never overwrite legacy ZIPs.
                 key = self.storage.put_snapshot_archive(snapshot.key, snapshot.source_archive_sha256, data)
-                self.registry.transition(snapshot, "indexing", archive_key=key)
+                self.registry.transition(snapshot, "awaiting_deployment", archive_key=key)
+            self.registry.queue_if_deployable(project_id, commit_sha)
+            return self.registry.get(project_id, commit_sha)
+
+    def process_one(self) -> bool:
+        """Run one durable job. A running job is reclaimable after process restart."""
+        with (self.registry.root / "index-worker.lock").open("a") as lock:
+            try:
+                fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except BlockingIOError:
+                return False
+            job = self.registry.claim_job()
+            if job is None:
+                return False
+            project_id, commit_sha = job
+            current = self.registry.get(project_id, commit_sha)
+            snapshot = Snapshot(project_id, commit_sha, current["source_archive_sha256"])
+            try:
+                key = self.registry.archive_key(project_id, commit_sha)
+                if not key:
+                    raise RuntimeError("Staged archive expired")
+                data = self.storage.get_snapshot_archive(key)
                 with tempfile.TemporaryDirectory(prefix="source_", dir=self.registry.root) as workspace:
                     extract_zip_safely(data, workspace)
                     result = self.indexer(workspace, snapshot)
@@ -91,9 +111,19 @@ class SourceService:
                 if (not count or result.get("ingested") != count
                         or result.get("graph_nodes") != count or result.get("embed_fails", 0)):
                     raise RuntimeError("Incomplete snapshot indexing")
-                self.registry.transition(snapshot, "ready")
+                self.registry.finish_job(project_id, commit_sha, success=True)
             except Exception:
-                # Parser/DB/embedding diagnostics may include source values.
-                # Status is deliberately a bounded code, never exception text.
-                self.registry.transition(snapshot, "failed", error_code="snapshot_indexing_failed")
-            return self.registry.get(project_id, commit_sha)
+                self.registry.finish_job(project_id, commit_sha, success=False)
+            finally:
+                fcntl.flock(lock, fcntl.LOCK_UN)
+            return True
+
+    def expire_unmatched(self) -> None:
+        for project_id, commit_sha, key in self.registry.expired_archives():
+            try:
+                self.storage.delete_snapshot_archive(key)
+                self.registry.forget_expired_archive(project_id, commit_sha, key)
+            except Exception:
+                # Keep expiry best effort; metadata is retained for an exact reupload.
+                pass
+        self.registry.stopped_deployments_before()

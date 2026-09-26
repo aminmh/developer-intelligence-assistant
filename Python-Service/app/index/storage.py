@@ -120,6 +120,20 @@ class Storage:
             raise ValueError("Invalid source archive identity")
         return self._put_archive(f"telemetry-sources/{snapshot_key}/{checksum}.zip", data, "application/zip")
 
+    def get_snapshot_archive(self, key: str) -> bytes:
+        """Read a previously staged immutable snapshot archive."""
+        response = self._get_client().get_object(self.tus_bucket, key)
+        try:
+            return response.read()
+        finally:
+            response.close()
+            response.release_conn()
+
+    def delete_snapshot_archive(self, key: str) -> None:
+        if not key.startswith("telemetry-sources/") or ".." in key.split("/"):
+            raise ValueError("Invalid snapshot archive key")
+        self._get_client().remove_object(self.tus_bucket, key)
+
     def _put_archive(self, key: str, data: bytes, content_type: str) -> str:
         client = self._get_client()
         client.put_object(

@@ -105,6 +105,29 @@ service = CodeIntelligenceIndex()
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    import asyncio
+
+    async def telemetry_jobs():
+        import time
+        from index.storage import storage
+        from telemetry.registry import default_registry
+        from telemetry.source import SourceService
+        service = SourceService(default_registry(), storage)
+        next_maintenance = 0.0
+        while True:
+            try:
+                worked = await asyncio.to_thread(service.process_one)
+                if time.monotonic() >= next_maintenance:
+                    await asyncio.to_thread(service.expire_unmatched)
+                    next_maintenance = time.monotonic() + 3600
+                if not worked:
+                    await asyncio.sleep(2)
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                await asyncio.sleep(5)
+
+    telemetry_task = asyncio.create_task(telemetry_jobs())
     try:
         if Path(settings.report_path).is_file():
             service.rebuild(settings.report_path)
@@ -122,6 +145,12 @@ async def lifespan(app: FastAPI):
             pass
 
     yield
+
+    telemetry_task.cancel()
+    try:
+        await telemetry_task
+    except asyncio.CancelledError:
+        pass
 
     try:
         from lsp import shutdown
@@ -169,8 +198,9 @@ app = FastAPI(
     redoc_url="/redoc",
 )
 
-from telemetry.http import router as telemetry_router
+from telemetry.http import router as telemetry_router, host_router as telemetry_host_router
 app.include_router(telemetry_router)
+app.include_router(telemetry_host_router)
 
 from inspection.http import router as inspection_router  # noqa: E402 — after app exists
 from routers.developer_logs import router as developer_logs_router  # noqa: E402 — after app exists

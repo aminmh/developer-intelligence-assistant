@@ -4,6 +4,7 @@ from __future__ import annotations
 import hmac
 import json
 import os
+import re
 
 from fastapi import APIRouter, HTTPException, Request
 from starlette.concurrency import run_in_threadpool
@@ -13,6 +14,8 @@ from telemetry.snapshot import validate_scope
 from telemetry.source import MAX_ARCHIVE_BYTES, SourceService
 
 router = APIRouter(prefix="/telemetry/projects", tags=["Telemetry snapshots"])
+host_router = APIRouter(prefix="/telemetry/host", tags=["Telemetry deployments"])
+MAX_HOST_REPORT_BYTES = 2 * 1024 * 1024
 
 
 def authorize(request: Request, project_id: str) -> None:
@@ -30,6 +33,11 @@ def authorize(request: Request, project_id: str) -> None:
 
 def get_registry() -> SnapshotRegistry:
     return default_registry()
+
+
+def get_storage():
+    from index.storage import storage
+    return storage
 
 
 def check_request(request: Request, project_id: str, commit_sha: str) -> None:
@@ -56,15 +64,90 @@ async def upload(project_id: str, commit_sha: str, request: Request) -> dict:
         if len(data) + len(block) > MAX_ARCHIVE_BYTES:
             raise HTTPException(413, "Source archive exceeds limit")
         data.extend(block)
-    from index.storage import storage
-    service = SourceService(get_registry(), storage)
+    service = SourceService(get_registry(), get_storage())
     try:
         result = await run_in_threadpool(service.upload, project_id, commit_sha, bytes(data))
     except SnapshotConflict as exc:
         raise HTTPException(409, str(exc)) from exc
     except ValueError as exc:
         raise HTTPException(422, str(exc)) from exc
-    if result["state"] == "failed":
-        from fastapi.responses import JSONResponse
-        return JSONResponse(status_code=503, content=result)
     return result
+
+
+def _host_scopes() -> dict:
+    try:
+        value = json.loads(os.environ.get("TELEMETRY_HOST_SCOPES", "{}"))
+        return value if isinstance(value, dict) else {}
+    except (ValueError, TypeError):
+        return {}
+
+
+def _host_identity(request: Request) -> tuple[str, dict]:
+    # Ingress must remove this header from client requests and set it only from
+    # the verified mTLS peer certificate.
+    fingerprint = request.headers.get("x-verified-client-cert-sha256", "").lower().replace(":", "")
+    scopes = _host_scopes()
+    if not re.fullmatch(r"[0-9a-f]{64}", fingerprint) or fingerprint not in scopes:
+        raise HTTPException(401, "Verified host certificate required")
+    configured = scopes[fingerprint]
+    if not isinstance(configured, dict):
+        raise HTTPException(403, "Host has no deployment scope")
+    return fingerprint, configured
+
+
+@host_router.post("/deployments")
+async def report_deployments(request: Request) -> dict:
+    host_id, scope = _host_identity(request)
+    payload = bytearray()
+    async for block in request.stream():
+        if len(payload) + len(block) > MAX_HOST_REPORT_BYTES:
+            raise HTTPException(413, "Deployment report exceeds limit")
+        payload.extend(block)
+    try:
+        body = json.loads(payload)
+        containers = body["containers"]
+        inventory = body.get("inventory", False)
+    except (ValueError, KeyError, TypeError):
+        raise HTTPException(422, "Invalid deployment report")
+    if not isinstance(containers, list) or len(containers) > 2000 or not isinstance(inventory, bool):
+        raise HTTPException(422, "Invalid deployment report")
+    allowed = scope.get("projects", {})
+    if not isinstance(allowed, dict):
+        raise HTTPException(403, "Host has no deployment scope")
+    clean = []
+    for item in containers:
+        if not isinstance(item, dict):
+            raise HTTPException(422, "Invalid deployment record")
+        # Deliberately project only the approved fields; never persist raw Docker labels.
+        record = {name: item.get(name) for name in
+                  ("container_id", "project_id", "environment", "service", "commit_sha", "image_id", "state")}
+        try:
+            if (not isinstance(record["container_id"], str) or not re.fullmatch(r"[0-9a-f]{12,64}", record["container_id"])
+                    or not isinstance(record["image_id"], str) or not re.fullmatch(r"sha256:[0-9a-f]{64}", record["image_id"])
+                    or record["state"] not in {"running", "stopped"}):
+                raise ValueError
+            validate_scope(record["project_id"], record["commit_sha"])
+            if not isinstance(record["environment"], str) or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,63}", record["environment"]):
+                raise ValueError
+            if not isinstance(record["service"], str) or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,127}", record["service"]):
+                raise ValueError
+        except (ValueError, TypeError):
+            raise HTTPException(422, "Invalid deployment record")
+        envs = allowed.get(record["project_id"], [])
+        if not isinstance(envs, list) or not all(isinstance(value, str) for value in envs):
+            raise HTTPException(403, "Host has no deployment scope")
+        if record["environment"] not in envs:
+            raise HTTPException(403, "Deployment is outside host scope")
+        clean.append(record)
+    event_id = body.get("event_id")
+    registry = get_registry()
+    if event_id is not None:
+        if not isinstance(event_id, str) or not re.fullmatch(r"[A-Za-z0-9_.:-]{1,128}", event_id):
+            raise HTTPException(422, "Invalid event ID")
+        if registry.has_event(host_id, event_id):
+            return {"accepted": True, "duplicate": True}
+    pairs = registry.report_deployments(host_id, clean, inventory=inventory)
+    queued = sum(registry.queue_if_deployable(project, commit) for project, commit in pairs)
+    if event_id is not None:
+        registry.mark_event(host_id, event_id)
+    return {"accepted": True, "containers": len(clean), "queued": queued}
