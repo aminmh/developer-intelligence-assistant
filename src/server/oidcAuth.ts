@@ -16,6 +16,7 @@ const COOKIE = 'devassistant_session';
 const FLOW_COOKIE = 'devassistant_oidc_flow';
 const SESSION_TTL_MS = Number(process.env.SESSION_TTL_MS || 8 * 60 * 60 * 1000);
 const issuer = (process.env.OIDC_ISSUER || '').replace(/\/+$/, '');
+const internalIssuer = (process.env.OIDC_INTERNAL_ISSUER || issuer).replace(/\/+$/, '');
 const clientId = process.env.OIDC_CLIENT_ID || '';
 const clientSecret = process.env.OIDC_CLIENT_SECRET || '';
 const redirectUri = process.env.OIDC_REDIRECT_URI || '';
@@ -39,8 +40,20 @@ function writeStore(store: Store): void {
   try { fs.chmodSync(storePath, 0o600); } catch { /* best effort on non-POSIX filesystems */ }
 }
 function configured(): boolean {
-  const localIssuer = /^https?:\/\/(localhost|127\.0\.0\.1)(:\d+)?$/.test(issuer);
-  return Boolean(issuer && (issuer.startsWith('https://') || localIssuer) && clientId && clientSecret && redirectUri && bootstrapAdmin && sessionSecret.length >= 32);
+  let parsedIssuer: URL;
+  let parsedInternalIssuer: URL;
+  try {
+    parsedIssuer = new URL(issuer);
+    parsedInternalIssuer = new URL(internalIssuer);
+  } catch { return false; }
+  const localIssuer = parsedIssuer.protocol === 'http:' && ['localhost', '127.0.0.1'].includes(parsedIssuer.hostname);
+  const internalIsLocal = parsedInternalIssuer.protocol === 'http:' && ['localhost', '127.0.0.1', 'keycloak'].includes(parsedInternalIssuer.hostname);
+  return Boolean((parsedIssuer.protocol === 'https:' || localIssuer)
+    && (parsedInternalIssuer.protocol === 'https:' || internalIsLocal)
+    && parsedIssuer.pathname === parsedInternalIssuer.pathname
+    && !parsedIssuer.username && !parsedIssuer.password && !parsedIssuer.search && !parsedIssuer.hash
+    && !parsedInternalIssuer.username && !parsedInternalIssuer.password && !parsedInternalIssuer.search && !parsedInternalIssuer.hash
+    && clientId && clientSecret && redirectUri && bootstrapAdmin && sessionSecret.length >= 32);
 }
 function parseCookies(req: Request): Record<string, string> {
   return Object.fromEntries((req.headers.cookie || '').split(';').map((part) => {
@@ -83,10 +96,15 @@ function roleFor(user: User, projectId: string, store = readStore()): Role | nul
 let discoveryCache: { expires: number; value: any } | null = null;
 async function discovery(): Promise<any> {
   if (discoveryCache && discoveryCache.expires > Date.now()) return discoveryCache.value;
-  const response = await fetch(`${issuer}/.well-known/openid-configuration`, { headers: { Accept: 'application/json' } });
+  const response = await fetch(`${internalIssuer}/.well-known/openid-configuration`, { headers: { Accept: 'application/json' } });
   if (!response.ok) throw new Error('OIDC discovery failed');
-  const value = await response.json();
-  if (value.issuer !== issuer || !value.authorization_endpoint || !value.token_endpoint || !value.jwks_uri) throw new Error('Invalid OIDC discovery document');
+  const metadata = await response.json();
+  if (metadata.issuer !== issuer || !metadata.authorization_endpoint || !metadata.token_endpoint || !metadata.jwks_uri) throw new Error('Invalid OIDC discovery document');
+  const internalEndpoint = (endpoint: unknown): string => {
+    if (typeof endpoint !== 'string' || !endpoint.startsWith(`${issuer}/`)) throw new Error('Invalid OIDC back-channel endpoint');
+    return `${internalIssuer}${endpoint.slice(issuer.length)}`;
+  };
+  const value = { ...metadata, token_endpoint: internalEndpoint(metadata.token_endpoint), jwks_uri: internalEndpoint(metadata.jwks_uri) };
   discoveryCache = { expires: Date.now() + 10 * 60_000, value };
   return value;
 }

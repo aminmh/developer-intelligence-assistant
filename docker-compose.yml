@@ -1,4 +1,35 @@
 services:
+  keycloak:
+    image: quay.io/keycloak/keycloak:26.7.4
+    container_name: developer-assistant-keycloak
+    env_file:
+      - .env
+    environment:
+      KC_BOOTSTRAP_ADMIN_USERNAME: ${KEYCLOAK_ADMIN_USERNAME:-admin}
+      KC_BOOTSTRAP_ADMIN_PASSWORD: ${KEYCLOAK_ADMIN_PASSWORD:?Set KEYCLOAK_ADMIN_PASSWORD in web/.env}
+      KC_HOSTNAME: http://localhost:8180
+      KC_HTTP_ENABLED: "true"
+      KC_HEALTH_ENABLED: "true"
+    entrypoint:
+      - /bin/sh
+      - -ec
+    command:
+      - >-
+        mkdir -p /opt/keycloak/data/import;
+        sed -e "s|__OIDC_CLIENT_SECRET__|$${OIDC_CLIENT_SECRET}|g"
+        -e "s|__KEYCLOAK_BOOTSTRAP_PASSWORD__|$${KEYCLOAK_BOOTSTRAP_PASSWORD}|g"
+        /opt/keycloak/realm-template/developer-assistant-realm.json
+        > /opt/keycloak/data/import/developer-assistant-realm.json;
+        exec /opt/keycloak/bin/kc.sh start-dev --import-realm
+    ports:
+      - "127.0.0.1:8180:8080"
+    volumes:
+      - keycloak-data:/opt/keycloak/data
+      - ./keycloak:/opt/keycloak/realm-template:ro
+    restart: unless-stopped
+    networks:
+      - devassistant_net
+
   web:
     build:
       context: .
@@ -12,6 +43,7 @@ services:
     environment:
       OLLAMA_URL: http://host.docker.internal:11434
       PYTHON_API_URL: http://python-api:9002
+      OIDC_INTERNAL_ISSUER: http://keycloak:8080/realms/developer-assistant
       OLLAMA_IMPORT_ROOT: /ollama-imports
       OLLAMA_IMPORT_HOST_ROOT: ${OLLAMA_IMPORT_HOST_ROOT:-./ollama-imports}
     ports:
@@ -48,6 +80,7 @@ services:
       NODE_ENV: development
       OLLAMA_URL: http://host.docker.internal:11434
       PYTHON_API_URL: http://python-api:9002
+      OIDC_INTERNAL_ISSUER: http://keycloak:8080/realms/developer-assistant
       OLLAMA_IMPORT_ROOT: /ollama-imports
       OLLAMA_IMPORT_HOST_ROOT: ${OLLAMA_IMPORT_HOST_ROOT:-./ollama-imports}
     ports:
@@ -73,3 +106,4 @@ networks:
 
 volumes:
   web-dev-node-modules:
+  keycloak-data:
