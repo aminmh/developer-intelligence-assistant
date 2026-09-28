@@ -41,7 +41,7 @@ up: network
 	$(COMPOSE) up -d
 
 down:
-	$(COMPOSE) down
+	$(COMPOSE) --profile runtime-host down
 
 stop:
 	$(COMPOSE) stop
