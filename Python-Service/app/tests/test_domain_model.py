@@ -80,6 +80,25 @@ def test_missing_profile_uses_same_filename_profile_sibling():
     assert source_id == "structure"
 
 
+def test_parent_materialization_does_not_duplicate_an_existing_model():
+    result = build_domain_model(
+        {
+            "framework": "laravel",
+            "models": [
+                {"name": "BaseModel", "table": "base_models"},
+                {"name": "Invoice", "extends": ["BaseModel"]},
+            ],
+        },
+        "analysis-parent-dedup",
+        include_domain_concepts=False,
+        generated_at="now",
+    )
+
+    names = [entity["name"] for entity in result["entities"]]
+    assert names.count("BaseModel") == 1
+    assert {node["id"] for node in result["antv_x6"]["nodes"]} == {"node-basemodel", "node-invoice"}
+
+
 def test_laravel_parser_and_uml_preserve_class_contract():
     source = '''
     namespace App\\Models;

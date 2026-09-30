@@ -367,7 +367,12 @@ def build_domain_model(profile: dict[str, Any] | None, analysis_id: str, *, proj
 
     def ensure(name: str, table: str = "", namespace: str = "", provenance: str = "project_profile") -> dict[str, Any]:
         name = _short_name(name) or _short_name(table) or "Entity"
-        key = _entity_key(name, table)
+        # Class names are the canonical identity of the domain model. A model
+        # first discovered with a derived table key must still be the same node
+        # when later materialized as a parent/interface by class name alone.
+        # Keying by table in that case produced duplicate visual nodes (for
+        # example, ``AbstractTenantAwareModel`` appeared once per path).
+        key = name
         if key not in entities:
             entities[key] = {
                 "name": name,
@@ -384,6 +389,10 @@ def build_domain_model(profile: dict[str, Any] | None, analysis_id: str, *, proj
                 "provenance": [provenance],
             }
         item = entities[key]
+        if namespace and not item.get("namespace"):
+            item["namespace"] = namespace
+        if table and (not item.get("table") or item.get("table") == name):
+            item["table"] = table
         if table:
             by_table.setdefault(table, item["name"])
         by_name.setdefault(name, item["name"])
