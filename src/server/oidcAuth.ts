@@ -240,6 +240,10 @@ export function installOidcAuth(app: express.Express): void {
     const projectId = String(req.params.projectId || req.body?.project_id || req.query.project_id || '').trim();
     const readOnlyPost = ['/query', '/query/stream', '/query/result', '/answer'].includes(req.path)
       || /^\/query\/[^/]+\/evaluate$/.test(req.path);
+    if (req.method === 'POST' && req.path === '/runtime/setup-authorization') {
+      if (!authCanRunRuntimeSetup(user)) return res.status(403).json({ error: 'Operator or administrator access is required to set up Runtime.' });
+      return next();
+    }
     if (projectId) {
       const role = roleFor(user, projectId);
       if (!role) return res.status(403).json({ error: 'Project access denied.' });
@@ -265,6 +269,10 @@ export function installOidcAuth(app: express.Express): void {
 export function authRoleFor(user: User, projectId: string): Role | null { return roleFor(user, projectId); }
 export function authStoreSnapshot(): Store { return readStore(); }
 export function authIsBootstrapAdmin(user: User): boolean { return Boolean(bootstrapAdmin && user.sub === bootstrapAdmin); }
+export function authCanRunRuntimeSetup(user: User): boolean {
+  if (authIsBootstrapAdmin(user)) return true;
+  return readStore().memberships.some((row) => row.subject === user.sub && (row.role === 'operator' || row.role === 'admin'));
+}
 function isAdmin(user: User): boolean {
   return authIsBootstrapAdmin(user) || readStore().memberships.some((row) => row.subject === user.sub && row.role === 'admin');
 }

@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { Activity, AlertTriangle, ArrowUpRight, BookOpen, CheckCircle2, RefreshCw, Server, XCircle } from 'lucide-vue-next';
+import { Activity, AlertTriangle, ArrowUpRight, BookOpen, CheckCircle2, RefreshCw, Server, Trash2, XCircle } from 'lucide-vue-next';
 import { computed, onMounted, onUnmounted, ref, watch } from 'vue';
 import { makeRequest } from '../ui/makeRequest';
 import type { RuntimeProjectRecord, RuntimeSnapshotData } from '../types';
@@ -14,16 +14,12 @@ const detail = ref<RuntimeSnapshotData | null>(null);
 const loadingProjects = ref(false);
 const loadingDetail = ref(false);
 const error = ref('');
+const setupState = ref<'idle' | 'starting' | 'running' | 'complete' | 'cancelled' | 'error'>('idle');
+const setupMessage = ref('');
+const activeOperation = ref<'setup' | 'cleanup' | 'remove' | ''>('');
+const savedSetup = ref<any>(null);
 const deadOnly = ref(false);
 const showGuide = ref(false);
-const dockerLabelSnippet = [
-  'labels:',
-  '  com.devassistant.telemetry.enabled: "true"',
-  '  com.devassistant.telemetry.project: billing',
-  '  com.devassistant.telemetry.environment: development',
-  '  com.devassistant.telemetry.commit: "${GIT_COMMIT_SHA}"',
-  '  com.devassistant.telemetry.service: api',
-].join('\n');
 const ciTokenSnippet = 'TELEMETRY_CI_PROJECT_TOKENS={"billing":"replace-with-a-32-plus-character-random-token"}';
 const snapshotUploadSnippet = [
   'CI_COMMIT_SHA="$(git rev-parse HEAD)"',
@@ -39,20 +35,10 @@ const snapshotUploadSnippet = [
   '  --header "Authorization: Bearer $INDEXER_CI_TOKEN" \\',
   '  "$INDEXER_API/telemetry/projects/$INDEXER_PROJECT/snapshots/$CI_COMMIT_SHA"',
 ].join('\n');
-const hostScopeSnippet = 'TELEMETRY_HOST_SCOPES={"fingerprint-from-host.crt":{"projects":{"billing":["development"]}}}';
-const localProjectComposeSnippet = [
-  '# In your project directory, after adding the telemetry labels to services:',
-  'export GIT_COMMIT_SHA="$(git rev-parse HEAD)"',
-  'docker compose up -d',
-].join('\n');
-const localAgentSnippet = [
-  'cd api',
-  'docker compose up -d python-api telemetry-caddy',
-  '',
-  'BACKEND_URL=https://telemetry-caddy:9443 \\',
-  'HOST_IDENTITY_DIR="$PWD/telemetry-dev/host/certs/agent" \\',
-  'docker compose -f telemetry-agent/docker-compose.yml \\',
-  '  -f telemetry-agent/docker-compose.local.yml up -d --build',
+const runtimeSetupCommands = [
+  './devassistant.sh runtime setup',
+  './devassistant.sh runtime status',
+  './devassistant.sh runtime cleanup',
 ].join('\n');
 const runtimeCollectorSnippet = 'cd api\ndocker compose --profile runtime up -d';
 const spanAttributesSnippet = [
@@ -135,6 +121,180 @@ const loadDetail = async () => {
 };
 
 const refresh = async () => { await loadProjects(); await loadDetail(); };
+const getRuntimeHelperAuth = async () => {
+  const response = await makeRequest('/api/runtime/setup-authorization', { method: 'POST' });
+  const data = await response.json();
+  if (!response.ok) throw new Error(data.detail || 'Runtime setup authorization is unavailable.');
+  return data.token as string;
+};
+const getLocalContainerRemovalAuth = async (projectId: string) => {
+  const response = await makeRequest('/api/runtime/local-container-removal-authorization', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ project_id: projectId }),
+  });
+  const data = await response.json();
+  if (!response.ok) throw new Error(data.detail || 'Local Runtime container removal is not authorized.');
+  return data.token as string;
+};
+const loadSavedSetup = async (showExistingNotice = true) => {
+  try {
+    const token = await getRuntimeHelperAuth();
+    const response = await fetch('http://127.0.0.1:47831/setup-state', {
+      headers: { Authorization: `Bearer ${token}` }, cache: 'no-store',
+    });
+    const data = await response.json().catch(() => ({}));
+    if (response.ok) {
+      savedSetup.value = data.configured ? data : null;
+      if (data.configured && showExistingNotice) {
+        setupState.value = 'complete';
+        setupMessage.value = `Existing setup: ${data.project_id} · ${data.environment} (${data.phase}).`;
+      }
+    }
+  } catch {
+    // Runtime inventory remains available to users who cannot run host setup.
+  }
+};
+const startRuntimeSetup = async () => {
+  if (savedSetup.value) {
+    setupState.value = 'error';
+    setupMessage.value = 'A local setup is already recorded. Run ./devassistant.sh runtime status or cleanup before setting up another Compose project.';
+    return;
+  }
+  activeOperation.value = 'setup';
+  setupState.value = 'starting';
+  setupMessage.value = 'Authorizing local Runtime setup…';
+  try {
+    let token = await getRuntimeHelperAuth();
+    const helperUrl = 'http://127.0.0.1:47831';
+    let authorizationAt = Date.now();
+    const headers = () => ({ Authorization: `Bearer ${token}` });
+    const startResponse = await fetch(`${helperUrl}/setup`, { method: 'POST', headers: headers(), cache: 'no-store' });
+    const started = await startResponse.json().catch(() => ({}));
+    if (!startResponse.ok) throw new Error(started.detail || 'Could not start the local Runtime setup helper. Run ./devassistant.sh up and try again.');
+    setupState.value = 'running';
+    while (true) {
+      if (Date.now() - authorizationAt > 120_000) {
+        token = await getRuntimeHelperAuth();
+        authorizationAt = Date.now();
+      }
+      const statusResponse = await fetch(`${helperUrl}/status`, { headers: headers(), cache: 'no-store' });
+      const status = await statusResponse.json().catch(() => ({}));
+      if (!statusResponse.ok) throw new Error(status.detail || 'Could not read Runtime setup progress.');
+      setupMessage.value = status.message || 'Runtime setup is running…';
+      if (status.status === 'complete') { setupState.value = 'complete'; await loadSavedSetup(); await refresh(); break; }
+      if (status.status === 'cancelled') { setupState.value = 'cancelled'; break; }
+      if (status.status === 'error') { setupState.value = 'error'; break; }
+      await new Promise((resolve) => setTimeout(resolve, 1200));
+    }
+  } catch (cause: any) {
+    setupState.value = 'error';
+    setupMessage.value = cause?.message || 'Runtime setup failed.';
+  }
+};
+const cleanupRuntime = async () => {
+  activeOperation.value = 'cleanup';
+  setupState.value = 'starting';
+  setupMessage.value = 'Authorizing local Runtime cleanup…';
+  try {
+    let token = await getRuntimeHelperAuth();
+    const helperUrl = 'http://127.0.0.1:47831';
+    let authorizationAt = Date.now();
+    const headers = () => ({ Authorization: `Bearer ${token}` });
+    const startResponse = await fetch(`${helperUrl}/cleanup`, { method: 'POST', headers: headers(), cache: 'no-store' });
+    const started = await startResponse.json().catch(() => ({}));
+    if (startResponse.status === 404) throw new Error('The local Runtime helper is out of date. Run ./devassistant.sh up to restart it, then reload this page.');
+    if (!startResponse.ok) throw new Error(started.detail || 'Could not start local Runtime cleanup.');
+    setupState.value = 'running';
+    while (true) {
+      if (Date.now() - authorizationAt > 120_000) {
+        token = await getRuntimeHelperAuth();
+        authorizationAt = Date.now();
+      }
+      const statusResponse = await fetch(`${helperUrl}/status`, { headers: headers(), cache: 'no-store' });
+      const status = await statusResponse.json().catch(() => ({}));
+      if (!statusResponse.ok) throw new Error(status.detail || 'Could not read Runtime cleanup progress.');
+      setupMessage.value = status.message || 'Runtime cleanup is running…';
+      if (status.status === 'complete') {
+        setupState.value = 'complete';
+        await loadSavedSetup(false);
+        // Cleanup recreates selected services before stopping the host reporter;
+        // give its event reconciliation a moment to close the old deployment rows.
+        if (activeOperation.value === 'cleanup') await new Promise((resolve) => setTimeout(resolve, 1500));
+        await refresh();
+        break;
+      }
+      if (status.status === 'cancelled') { setupState.value = 'cancelled'; await loadSavedSetup(false); break; }
+      if (status.status === 'error') { setupState.value = 'error'; await loadSavedSetup(false); break; }
+      await new Promise((resolve) => setTimeout(resolve, 1200));
+    }
+  } catch (cause: any) {
+    setupState.value = 'error';
+    setupMessage.value = cause?.message || 'Runtime cleanup failed.';
+  }
+};
+const removeLocalContainers = async () => {
+  const projectId = selected.value?.project_id;
+  if (!projectId || !selected.value?.can_remove) return;
+  activeOperation.value = 'remove';
+  setupState.value = 'starting';
+  setupMessage.value = `Authorizing local container removal for ${projectId}…`;
+  try {
+    let token = await getLocalContainerRemovalAuth(projectId);
+    const helperUrl = 'http://127.0.0.1:47831';
+    let authorizationAt = Date.now();
+    const headers = () => ({ Authorization: `Bearer ${token}` });
+    const startResponse = await fetch(`${helperUrl}/remove-project-containers`, {
+      method: 'POST',
+      headers: { ...headers(), 'Content-Type': 'application/json' },
+      body: JSON.stringify({ project_id: projectId }),
+      cache: 'no-store',
+    });
+    const started = await startResponse.json().catch(() => ({}));
+    if (startResponse.status === 404) throw new Error('The local Runtime helper is out of date. Run ./devassistant.sh up to restart it, then reload this page.');
+    const resumingExistingRemoval = startResponse.status === 409;
+    if (!startResponse.ok && !resumingExistingRemoval) throw new Error(started.detail || 'Could not start local container removal.');
+    if (resumingExistingRemoval) setupMessage.value = 'Reconnecting to the active local container removal…';
+    setupState.value = 'running';
+    while (true) {
+      if (Date.now() - authorizationAt > 120_000) {
+        token = await getLocalContainerRemovalAuth(projectId);
+        authorizationAt = Date.now();
+      }
+      const statusResponse = await fetch(`${helperUrl}/status`, { headers: headers(), cache: 'no-store' });
+      const status = await statusResponse.json().catch(() => ({}));
+      if (!statusResponse.ok) {
+        throw new Error(resumingExistingRemoval
+          ? started.detail || status.detail || 'Could not reconnect to local container removal.'
+          : status.detail || 'Could not read local container removal progress.');
+      }
+      setupMessage.value = status.message || 'Local container removal is running…';
+      if (Array.isArray(status.failed_containers) && status.failed_containers.length) {
+        setupMessage.value += ` Container IDs: ${status.failed_containers.join(', ')}.`;
+      }
+      if (status.status === 'complete') {
+        setupState.value = 'complete';
+        await refresh();
+        break;
+      }
+      if (status.status === 'cancelled') {
+        setupState.value = 'cancelled';
+        await refresh();
+        break;
+      }
+      if (status.status === 'error') {
+        setupState.value = 'error';
+        await refresh();
+        break;
+      }
+      await new Promise((resolve) => setTimeout(resolve, 1200));
+    }
+  } catch (cause: any) {
+    setupState.value = 'error';
+    setupMessage.value = cause?.message || 'Local container removal failed.';
+    await refresh();
+  }
+};
 const formatCount = (value: number | string) => Number(value || 0).toLocaleString();
 const formatTime = (value?: string | null) => value ? new Date(value).toLocaleString() : 'No observed calls';
 const symbolMetric = (symbolId: string) => metricsBySymbol.value.get(symbolId);
@@ -147,7 +307,7 @@ const openDefinition = (symbolId?: string | null) => {
 
 watch(selectedKey, loadDetail);
 onMounted(async () => {
-  await refresh();
+  await Promise.all([refresh(), loadSavedSetup()]);
   refreshTimer = setInterval(refresh, 30_000);
 });
 onUnmounted(() => { if (refreshTimer) clearInterval(refreshTimer); });
@@ -161,14 +321,23 @@ onUnmounted(() => { if (refreshTimer) clearInterval(refreshTimer); });
         <p class="mt-1 text-xs text-slate-500">Opt-in local Docker deployments, span flow, code matching, routes, and database tables.</p>
       </div>
       <div class="flex flex-wrap items-center gap-2">
+        <button type="button" @click="startRuntimeSetup" :disabled="!!savedSetup || setupState === 'starting' || setupState === 'running'" class="rounded-xl border border-emerald-500/30 px-3 py-2 text-xs text-emerald-200 hover:bg-emerald-500/10 disabled:opacity-50"><Activity class="mr-1 inline h-3.5 w-3.5" :class="(setupState === 'starting' || setupState === 'running') && activeOperation === 'setup' ? 'animate-pulse' : ''" />{{ (setupState === 'starting' || setupState === 'running') && activeOperation === 'setup' ? 'Setting up…' : 'Set up Runtime' }}</button>
+        <button type="button" @click="cleanupRuntime" :disabled="setupState === 'starting' || setupState === 'running'" title="Opens one grouped approval for all applicable cleanup actions; declining retains recovery state." class="rounded-xl border border-rose-500/30 px-3 py-2 text-xs text-rose-200 hover:bg-rose-500/10 disabled:opacity-50"><Activity class="mr-1 inline h-3.5 w-3.5" :class="(setupState === 'starting' || setupState === 'running') && activeOperation === 'cleanup' ? 'animate-pulse' : ''" />{{ (setupState === 'starting' || setupState === 'running') && activeOperation === 'cleanup' ? 'Cleaning up…' : 'Clean up Runtime' }}</button>
         <button type="button" @click="showGuide = !showGuide" class="rounded-xl border border-cyan-500/30 px-3 py-2 text-xs text-cyan-200 hover:bg-cyan-500/10"><BookOpen class="mr-1 inline h-3.5 w-3.5" />{{ showGuide ? 'Hide guide' : 'Get Started' }}</button>
-        <select v-model="selectedKey" class="max-w-[24rem] rounded-xl border border-slate-800 bg-[#11162d] px-3 py-2 text-xs text-slate-200">
+        <select v-model="selectedKey" :disabled="setupState === 'starting' || setupState === 'running'" class="max-w-[24rem] rounded-xl border border-slate-800 bg-[#11162d] px-3 py-2 text-xs text-slate-200 disabled:opacity-50">
           <option value="">Select Docker project / commit</option>
           <option v-for="item in options" :key="item.key" :value="item.key">{{ item.project_id }} · {{ item.commit_sha.slice(0, 12) }}{{ item.state === 'awaiting_source' ? ' · Docker only' : '' }}</option>
         </select>
-        <button type="button" @click="refresh" :disabled="loadingProjects || loadingDetail" class="rounded-xl border border-slate-700 px-3 py-2 text-xs text-slate-300 hover:bg-slate-800"><RefreshCw class="mr-1 inline h-3.5 w-3.5" :class="loadingProjects || loadingDetail ? 'animate-spin' : ''" />Refresh</button>
+        <button v-if="selected?.can_remove" type="button" @click="removeLocalContainers" :disabled="setupState === 'starting' || setupState === 'running'" title="Stops and removes only matching local containers. Runtime history and remote containers remain." class="rounded-xl border border-rose-500/30 px-3 py-2 text-xs text-rose-200 hover:bg-rose-500/10 disabled:opacity-50"><Trash2 class="mr-1 inline h-3.5 w-3.5" :class="(setupState === 'starting' || setupState === 'running') && activeOperation === 'remove' ? 'animate-pulse' : ''" />{{ (setupState === 'starting' || setupState === 'running') && activeOperation === 'remove' ? 'Removing containers…' : 'Remove local containers' }}</button>
+        <button type="button" @click="refresh" :disabled="loadingProjects || loadingDetail || setupState === 'starting' || setupState === 'running'" class="rounded-xl border border-slate-700 px-3 py-2 text-xs text-slate-300 hover:bg-slate-800 disabled:opacity-50"><RefreshCw class="mr-1 inline h-3.5 w-3.5" :class="loadingProjects || loadingDetail ? 'animate-spin' : ''" />Refresh</button>
       </div>
     </header>
+
+    <div v-if="setupState !== 'idle'" class="rounded-xl border p-3 text-xs" :class="setupState === 'error' ? 'border-rose-500/25 bg-rose-950/20 text-rose-300' : setupState === 'complete' ? 'border-emerald-500/25 bg-emerald-950/20 text-emerald-300' : setupState === 'cancelled' ? 'border-amber-500/25 bg-amber-950/20 text-amber-300' : 'border-cyan-500/25 bg-cyan-950/20 text-cyan-200'">
+      <span class="font-semibold">{{ setupState === 'complete' ? (activeOperation === 'cleanup' ? 'Cleanup complete' : activeOperation === 'remove' ? 'Local container removal complete' : savedSetup ? 'Existing setup record' : 'Setup complete') : setupState === 'cancelled' ? (activeOperation === 'cleanup' ? 'Cleanup cancelled' : activeOperation === 'remove' ? 'Local container removal cancelled' : 'Setup cancelled') : setupState === 'error' ? (activeOperation === 'cleanup' ? 'Cleanup needs attention' : activeOperation === 'remove' ? 'Local container removal needs attention' : 'Setup failed') : activeOperation === 'cleanup' ? 'Runtime cleanup' : activeOperation === 'remove' ? 'Local container removal' : 'Runtime setup' }}</span>
+      <span class="ml-2">{{ setupMessage }}</span>
+      <span v-if="savedSetup" class="mt-1 block">Compose project: {{ savedSetup.compose_project || 'unknown' }} · Services: {{ (savedSetup.services || []).join(', ') || 'none recorded' }}. Available containers are shown in the Runtime inventory below.</span>
+    </div>
 
     <div v-if="error" class="rounded-xl border border-rose-500/25 bg-rose-950/20 p-4 text-xs text-rose-300">{{ error }}</div>
     <div v-else-if="!options.length" class="rounded-2xl border border-dashed border-slate-700 p-10 text-center">
@@ -188,19 +357,13 @@ onUnmounted(() => { if (refreshTimer) clearInterval(refreshTimer); });
           <ol class="space-y-3">
             <li class="rounded-xl border border-slate-800 bg-slate-950/40 p-4">
               <p class="text-xs font-semibold text-cyan-200">1. Listen to your local Docker project</p>
-              <p class="mt-2 text-[11px] leading-5 text-slate-400">This is the step you need for a local container list. Add the labels below to the Compose services you want to observe, then run <code>docker compose up -d</code> again from that project. Only opted-in containers are reported.</p>
+              <p class="mt-2 text-[11px] leading-5 text-slate-400">Use Set up Runtime above or run the setup command below from a terminal opened at this repository checkout. The native dialogs discover local Compose projects, ask which services to track, show a compact Compose summary, and request one grouped approval before changing files or recreating services. Only opted-in containers are reported.</p>
               <details open class="mt-3 rounded-lg border border-slate-800 bg-black/20 p-3">
-                <summary class="cursor-pointer text-[11px] font-medium text-slate-300">Local setup: labels, certificate scope, and host agent</summary>
+                <summary class="cursor-pointer text-[11px] font-medium text-slate-300">Local setup commands and access</summary>
                 <div class="mt-3 space-y-2 text-[10px] leading-4 text-slate-400">
-                  <p>Use a stable project slug such as <code>billing</code>, a lowercase full Git SHA for the running image, and an environment such as <code>development</code>. The command below assumes the image was built from the current <code>HEAD</code>. If containers are already running, add the labels and run Compose again so it recreates those services with them.</p>
-                  <pre class="overflow-x-auto rounded-lg bg-black/30 p-2 text-slate-300"><code>{{ dockerLabelSnippet }}</code></pre>
-                  <pre class="overflow-x-auto rounded-lg bg-black/30 p-2 text-slate-300"><code>{{ localProjectComposeSnippet }}</code></pre>
-                  <p>From the repository root, create the local development CA and host identity. Add the printed fingerprint to <code>TELEMETRY_HOST_SCOPES</code> in <code>api/.env</code> before starting the API:</p>
-                  <pre class="overflow-x-auto rounded-lg bg-black/30 p-2 text-slate-300"><code>./api/telemetry-dev/host/bootstrap-dev-certs.sh</code></pre>
-                  <pre class="overflow-x-auto rounded-lg bg-black/30 p-2 text-slate-300"><code>{{ hostScopeSnippet }}</code></pre>
-                  <p>Then start the local mTLS ingress and agent. On Linux, export <code>DOCKER_SOCK_GID="$(stat -c '%g' /var/run/docker.sock)"</code> before this command; on macOS use <code>stat -f '%g'</code>.</p>
-                  <pre class="overflow-x-auto rounded-lg bg-black/30 p-2 text-slate-300"><code>{{ localAgentSnippet }}</code></pre>
-                  <p>After the agent reports, choose <code>billing · commit · Docker only</code> in the Runtime selector. No source snapshot is needed for the container list. The agent reconciles about every 60 seconds; use Refresh to reload sooner. For remote hosts, use managed certificates and follow <code>api/telemetry-agent/README.md</code>.</p>
+                  <pre class="overflow-x-auto rounded-lg bg-black/30 p-2 text-slate-300"><code>{{ runtimeSetupCommands }}</code></pre>
+                  <p>The browser never reads your Docker daemon or local project files. The helper keeps Docker project discovery separate, then shows a compact Compose summary and one grouped checklist covering the setup actions. Recovery state is written before mutations. It stores a private recovery record in your local state directory.</p>
+                  <p>After setup, choose the project and commit here. No source snapshot is needed to list containers. The agent reconciles about every 60 seconds; use Refresh to reload sooner. Snapshots and spans are optional additions for code matching and route/database activity. For remote hosts, use managed certificates and follow <code>api/telemetry-agent/README.md</code>.</p>
                 </div>
               </details>
             </li>

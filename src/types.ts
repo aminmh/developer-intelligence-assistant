@@ -124,6 +124,7 @@ export interface RuntimeContainer {
 
 export interface RuntimeProjectRecord {
   project_id: string;
+  can_remove?: boolean;
   commit_sha: string | null;
   state: string;
   updated_at?: string;

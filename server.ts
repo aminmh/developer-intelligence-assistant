@@ -9,7 +9,7 @@ import dotenv from 'dotenv';
 import { RAGService } from './src/server/rag';
 import { UploadedFile } from './src/types';
 import { openDocument, complete as completeDockerfile, format as formatDockerfile, closeSession as closeDockerfileSession, closeAllSessions, bridgeStatus } from './src/server/dockerfileLanguageBridge';
-import { installOidcAuth, authRoleFor, authIsBootstrapAdmin } from './src/server/oidcAuth';
+import { installOidcAuth, authRoleFor, authIsBootstrapAdmin, authCanRunRuntimeSetup } from './src/server/oidcAuth';
 
 dotenv.config();
 
@@ -475,6 +475,51 @@ async function startServer() {
 
   installOidcAuth(app);
 
+  app.post('/api/runtime/setup-authorization', (req, res) => {
+    const user = (res.locals as any).authUser;
+    const origin = req.get('origin') || '';
+    const allowedOrigin = process.env.WEB_ORIGIN || 'http://localhost:3000';
+    const sharedSecret = process.env.RAG_CALLBACK_SECRET || '';
+    if (origin !== allowedOrigin) return res.status(403).json({ detail: 'Runtime setup requests must come from the configured application origin.' });
+    if (!authCanRunRuntimeSetup(user)) return res.status(403).json({ detail: 'Operator or administrator access is required to set up Runtime.' });
+    if (sharedSecret.length < 32) return res.status(503).json({ detail: 'Runtime setup authorization is not configured.' });
+    const encode = (value: unknown) => Buffer.from(JSON.stringify(value)).toString('base64url');
+    const header = encode({ alg: 'HS256', typ: 'JWT' });
+    const claims = encode({ aud: 'runtime-helper', origin, exp: Math.floor(Date.now() / 1000) + 300, jti: crypto.randomUUID() });
+    const signingKey = crypto.createHmac('sha256', sharedSecret).update('devassistant-runtime-helper-v1').digest();
+    const signature = crypto.createHmac('sha256', signingKey).update(`${header}.${claims}`).digest('base64url');
+    return res.json({ token: `${header}.${claims}.${signature}`, expires_in: 300 });
+  });
+
+  app.post('/api/runtime/local-container-removal-authorization', (req, res) => {
+    const user = (res.locals as any).authUser;
+    const origin = req.get('origin') || '';
+    const allowedOrigin = process.env.WEB_ORIGIN || 'http://localhost:3000';
+    const sharedSecret = process.env.RAG_CALLBACK_SECRET || '';
+    const projectId = req.body?.project_id;
+    if (origin !== allowedOrigin) return res.status(403).json({ detail: 'Runtime removal requests must come from the configured application origin.' });
+    if (typeof projectId !== 'string' || !/^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$/.test(projectId)) {
+      return res.status(400).json({ detail: 'A valid Runtime project ID is required.' });
+    }
+    if (!user || (!authIsBootstrapAdmin(user) && authRoleFor(user, projectId) !== 'admin')) {
+      return res.status(403).json({ detail: 'Project administrator access is required to remove local Runtime containers.' });
+    }
+    if (sharedSecret.length < 32) return res.status(503).json({ detail: 'Runtime removal authorization is not configured.' });
+    const encode = (value: unknown) => Buffer.from(JSON.stringify(value)).toString('base64url');
+    const header = encode({ alg: 'HS256', typ: 'JWT' });
+    const claims = encode({
+      aud: 'runtime-helper',
+      origin,
+      operation: 'runtime-local-container-removal',
+      project_id: projectId,
+      exp: Math.floor(Date.now() / 1000) + 300,
+      jti: crypto.randomUUID(),
+    });
+    const signingKey = crypto.createHmac('sha256', sharedSecret).update('devassistant-runtime-helper-v1').digest();
+    const signature = crypto.createHmac('sha256', signingKey).update(`${header}.${claims}`).digest('base64url');
+    return res.json({ token: `${header}.${claims}.${signature}`, expires_in: 300 });
+  });
+
   // API ROUTES (Must go FIRST)
   
   // Get current configurations (Python service is the source of truth)
@@ -671,7 +716,11 @@ async function startServer() {
       }
       const user = (res.locals as any).authUser;
       const projects = data.filter((project: any) => typeof project.project_id === 'string'
-        && (authIsBootstrapAdmin(user) || Boolean(authRoleFor(user, project.project_id))));
+        && (authIsBootstrapAdmin(user) || Boolean(authRoleFor(user, project.project_id))))
+        .map((project: any) => ({
+          ...project,
+          can_remove: authIsBootstrapAdmin(user) || authRoleFor(user, project.project_id) === 'admin',
+        }));
       return res.json({ projects });
     } catch {
       return res.status(502).json({ detail: 'Runtime project inventory is unavailable.' });
