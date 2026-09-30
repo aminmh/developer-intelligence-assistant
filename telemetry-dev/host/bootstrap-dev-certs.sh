@@ -4,8 +4,10 @@ set -eu
 out_dir="${1:-$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)/certs}"
 umask 077
 if [ -e "$out_dir" ]; then
-  echo "Refusing to overwrite existing host identity material in $out_dir" >&2
-  exit 1
+  if [ -L "$out_dir" ] || [ ! -d "$out_dir" ] || find "$out_dir" -mindepth 1 ! -type d -print | grep -q .; then
+    echo "Refusing to overwrite existing host identity material in $out_dir" >&2
+    exit 1
+  fi
 fi
 mkdir -p "$out_dir/ingress" "$out_dir/agent"
 work_dir="$(mktemp -d)"
@@ -14,7 +16,10 @@ cd "$work_dir"
 
 openssl genrsa -out ca.key 4096
 openssl req -x509 -new -nodes -key ca.key -sha256 -days 3650 \
-  -subj "/CN=DevAssistant Telemetry Development CA" -out ca.pem
+  -subj "/CN=DevAssistant Telemetry Development CA" \
+  -addext "basicConstraints=critical,CA:TRUE" \
+  -addext "keyUsage=critical,keyCertSign,cRLSign" \
+  -addext "subjectKeyIdentifier=hash" -out ca.pem
 
 openssl genrsa -out server.key 2048
 openssl req -new -key server.key -subj "/CN=caddy" -out server.csr

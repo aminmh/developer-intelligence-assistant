@@ -85,7 +85,8 @@ collections are returned explicitly by status. Snapshot retry upserts its own
 collection; it never clears legacy data or another commit's data. Unmatched,
 unindexed archive bytes expire after 30 days; checksum and state metadata remain
 so the exact archive can be reuploaded. Stopped deployment mappings remain for
-seven days. Ready snapshots and saved analyses are retained.
+seven days. Ready snapshots and saved analyses are retained by default; explicit
+Runtime project removal is defined below.
 
 ## Host deployment discovery
 
@@ -139,3 +140,35 @@ canonical symbol IDs and the current full commit SHA. The Runtime tab reports
 no observations until those spans arrive. Do not expose this local receiver to
 the network; production ingress and exporter credentials need separate
 deployment configuration.
+
+## Local Runtime project containers
+
+The authenticated Runtime UI may provide a local-container removal action for
+the selected project ID. The selected commit is only a view filter: the action
+matches all local containers for that project across commits. Only a project
+administrator may start it. A short-lived, origin-validated helper
+authorization is scoped to the project.
+
+One native grouped checklist approval covers stopping running and removing
+running or stopped containers on the local Docker daemon that carry both exact
+labels `com.devassistant.telemetry.enabled=true` and
+`com.devassistant.telemetry.project=<project_id>`. The helper verifies that its
+Docker context uses a local socket or named pipe, rechecks both labels before
+each mutation, and reports partial failures. The dialog identifies the
+project and local container count. Continue remains unavailable until every
+required item is checked.
+
+The action removes containers only. It leaves images, volumes, networks,
+remote containers, Runtime snapshots and spans, source archives, indexes,
+deployment history, memberships, CI credentials, Compose files, host/project
+authorization, certificates, and the local helper setup recovery record
+untouched. The project can therefore remain in the Runtime dropdown because
+stored snapshots or remote deployment reports remain; a later local Compose
+start can also recreate the local containers. The host agent's Docker proxy
+remains read-only. Removing a container discards its writable layer; named
+volumes and images remain. Use Clean up Runtime separately to restore Compose
+files and remove the local host/project setup scope.
+
+After the helper operation, the UI refreshes Runtime inventory and preserves
+the project selection. A later inventory report closes removed-container
+deployment records; Runtime data is retained by this action.

@@ -13,6 +13,12 @@ from typing import Iterator
 from telemetry.snapshot import Snapshot, storage_id, validate_scope
 
 
+# The host reporter reconciles every 60 seconds. Treat a running row without a
+# recent heartbeat as stale so a stopped Docker container cannot remain visible
+# indefinitely when the reporter or its event stream is interrupted.
+ACTIVE_DEPLOYMENT_MAX_AGE_SECONDS = 180
+
+
 class SnapshotConflict(ValueError):
     """A clean project/commit already owns different source bytes."""
 
@@ -84,8 +90,9 @@ class SnapshotRegistry:
 
     def has_deployment(self, project_id: str, commit_sha: str) -> bool:
         with self._connect() as db:
-            return db.execute("SELECT 1 FROM deployments WHERE project_id=? AND commit_sha=? AND state='running' LIMIT 1",
-                              (project_id, commit_sha)).fetchone() is not None
+            return db.execute("SELECT 1 FROM deployments WHERE project_id=? AND commit_sha=? AND state='running' "
+                              "AND datetime(updated_at) >= datetime('now', ?) LIMIT 1",
+                              (project_id, commit_sha, f"-{ACTIVE_DEPLOYMENT_MAX_AGE_SECONDS} seconds")).fetchone() is not None
 
     def runtime_projects(self) -> list[dict]:
         """List source snapshots with their current, allow-listed deployments."""
@@ -94,7 +101,8 @@ class SnapshotRegistry:
                 FROM snapshots ORDER BY project_id, updated_at DESC""").fetchall()
             deployments = db.execute("""SELECT container_id, project_id, environment, service,
                 commit_sha, image_id, state, updated_at FROM deployments
-                WHERE state='running' ORDER BY project_id, service, container_id""").fetchall()
+                WHERE state='running' AND datetime(updated_at) >= datetime('now', ?) ORDER BY project_id, service, container_id""",
+                (f"-{ACTIVE_DEPLOYMENT_MAX_AGE_SECONDS} seconds",)).fetchall()
         active: dict[str, list[dict]] = {}
         for row in deployments:
             active.setdefault(row["project_id"], []).append(dict(row))
@@ -131,8 +139,9 @@ class SnapshotRegistry:
 
     def running_deployments(self, project_id: str, commit_sha: str | None = None) -> list[dict]:
         query = """SELECT container_id, project_id, environment, service, commit_sha,
-            image_id, state, updated_at FROM deployments WHERE project_id=? AND state='running'"""
-        values: tuple = (project_id,)
+            image_id, state, updated_at FROM deployments WHERE project_id=? AND state='running'
+            AND datetime(updated_at) >= datetime('now', ?)"""
+        values: tuple = (project_id, f"-{ACTIVE_DEPLOYMENT_MAX_AGE_SECONDS} seconds")
         if commit_sha:
             query += " AND commit_sha=?"
             values += (commit_sha,)
@@ -179,7 +188,9 @@ class SnapshotRegistry:
             row = db.execute("SELECT state,archive_key FROM snapshots WHERE project_id=? AND commit_sha=?", (project_id, commit_sha)).fetchone()
             if not row or not row["archive_key"] or row["state"] == "ready":
                 return False
-            if not db.execute("SELECT 1 FROM deployments WHERE project_id=? AND commit_sha=? AND state='running' LIMIT 1", (project_id, commit_sha)).fetchone():
+            if not db.execute("SELECT 1 FROM deployments WHERE project_id=? AND commit_sha=? AND state='running' "
+                              "AND datetime(updated_at) >= datetime('now', ?) LIMIT 1",
+                              (project_id, commit_sha, f"-{ACTIVE_DEPLOYMENT_MAX_AGE_SECONDS} seconds")).fetchone():
                 db.execute("UPDATE snapshots SET state='awaiting_deployment',updated_at=CURRENT_TIMESTAMP WHERE project_id=? AND commit_sha=? AND state NOT IN ('awaiting_deployment','failed','ready')", (project_id, commit_sha))
                 return False
             db.execute("INSERT OR IGNORE INTO index_jobs(project_id,commit_sha) VALUES(?,?)", (project_id, commit_sha))

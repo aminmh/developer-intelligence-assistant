@@ -52,6 +52,8 @@ services:
   # join telemetry_ingress; the published port is loopback-only for local use.
   telemetry-caddy:
     image: caddy:2.10.2-alpine
+    # Runtime setup provisions the mTLS identity before enabling this ingress.
+    profiles: [runtime-host]
     ports:
       - "${TELEMETRY_INGRESS_BIND:-127.0.0.1}:${TELEMETRY_INGRESS_PORT:-9443}:9443"
     volumes:

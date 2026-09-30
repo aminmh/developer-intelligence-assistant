@@ -23,6 +23,15 @@ def deploy(registry, project="one", commit=SHA):
         "environment": "staging", "service": "web", "commit_sha": commit, "image_id": IMAGE, "state": "running"}])
 
 
+def test_stale_running_deployment_is_not_reported_as_active(tmp_path):
+    registry = SnapshotRegistry(tmp_path)
+    deploy(registry, project="skiplanner_2")
+    with registry._connect() as db:
+        db.execute("UPDATE deployments SET updated_at='2026-09-27 00:00:00' WHERE project_id='skiplanner_2'")
+    assert registry.running_deployments("skiplanner_2") == []
+    assert all(item["project_id"] != "skiplanner_2" for item in registry.runtime_projects())
+
+
 def archive(code="<?php function example() {}", path="src/example.php"):
     buffer = io.BytesIO()
     with zipfile.ZipFile(buffer, "w") as out:

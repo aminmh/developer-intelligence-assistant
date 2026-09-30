@@ -98,8 +98,12 @@ web/src/
 web/server.ts             # express: proxying + orchestration glue (route map header)
 ```
 
-The former Sandbox executor/runtime is retired. Application container management
-is outside telemetry scope. The optional `api/docker-compose.telemetry.yml`
-provides a separate Collector/ClickHouse/Neo4j development stack. Phase 0 stores
-sanitized raw spans only; discovery, app instrumentation and runtime aggregation
-remain later review-gated phases. See `api/docs/telemetry/` for contracts.
+The former Sandbox executor/runtime is retired. Runtime telemetry does not
+manage containers on the backend: an explicitly approved project removal may
+stop and remove only matching opt-in containers on the local host through the
+loopback helper. Remote host agents remain read-only. The optional
+`api/docker-compose.telemetry.yml` provides a separate Collector/ClickHouse/Neo4j
+development stack. Phase 0 stores sanitized raw spans; optional Phase 1 host
+discovery and runtime aggregation use the documented opt-in stack, while
+application instrumentation remains opt-in per application. See
+`api/docs/telemetry/` for contracts.
