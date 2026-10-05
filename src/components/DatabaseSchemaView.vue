@@ -1,7 +1,8 @@
 <script setup lang="ts">
-import { computed, onMounted, ref, watch } from 'vue';
+import { computed, onMounted, onUnmounted, ref, watch } from 'vue';
 import { AlertTriangle, ChevronDown, ChevronRight, Database, Download, Focus, KeyRound, Link2, Maximize2, Minus, PanelRightClose, PanelRightOpen, Plus, RefreshCw, Search, Sparkles, Trash2, X } from 'lucide-vue-next';
 import { makeRequest } from '../ui/makeRequest';
+import { subscribeRuntimeUpdates } from '../ui/runtimeEvents';
 import type { AnalysisSession, ErdRef, ErdTable, NormalizedSchema, RuntimeProjectRecord, RuntimeSnapshotData, SchemaVisualizationResponse } from '../types';
 import { layoutSchema, normalizeSavedSchema, parseSchemaInput, schemaToDbml, schemaToJson, type SchemaInputFormat } from '../utils/erdTransformer';
 import ConfirmModal from './ConfirmModal.vue';
@@ -29,7 +30,7 @@ const runtimeProjects = ref<RuntimeProjectRecord[]>([]);
 const runtimeScope = ref('');
 const runtimeData = ref<RuntimeSnapshotData | null>(null);
 const runtimeError = ref('');
-const runtimeOptions = computed(() => runtimeProjects.value.filter((item) => item.commit_sha));
+const runtimeOptions = computed(() => runtimeProjects.value.filter((item) => item.commit_sha && item.revision_id));
 const tableRuntime = computed(() => runtimeData.value?.telemetry.tables.filter((row) => row.table_name.toLowerCase() === selectedTable.value?.name.toLowerCase()) || []);
 const tableSymbols = computed(() => runtimeData.value?.telemetry.symbol_tables.filter((row) => row.table_name.toLowerCase() === selectedTable.value?.name.toLowerCase()) || []);
 const tableRoutes = computed(() => {
@@ -53,12 +54,15 @@ const loadRuntime = async () => {
     }
     if (!runtimeScope.value && runtimeOptions.value.length) {
       const params = new URLSearchParams(window.location.search);
-      const project = runtimeOptions.value.find((item) => item.project_id === params.get('project_id') && item.commit_sha === params.get('commit_sha')) || runtimeOptions.value[0];
-      runtimeScope.value = `${project.project_id}:${project.commit_sha}`;
+      const project = runtimeOptions.value.find((item) => item.project_id === params.get('project_id')
+        && (params.get('revision_id')
+          ? item.revision_id === params.get('revision_id')
+          : item.commit_sha === params.get('commit_sha'))) || runtimeOptions.value[0];
+      runtimeScope.value = `${project.project_id}:${project.revision_id}`;
     }
-    const [projectId, commitSha] = runtimeScope.value.split(':');
-    if (!projectId || !commitSha) { runtimeData.value = null; return; }
-    const response = await makeRequest(`/api/runtime/projects/${encodeURIComponent(projectId)}/snapshots/${encodeURIComponent(commitSha)}`);
+    const [projectId, revisionId] = runtimeScope.value.split(':');
+    if (!projectId || !revisionId) { runtimeData.value = null; return; }
+    const response = await makeRequest(`/api/runtime/projects/${encodeURIComponent(projectId)}/revisions/${encodeURIComponent(revisionId)}`);
     const data = await response.json();
     if (!response.ok) throw new Error(data.detail || 'Runtime table usage unavailable.');
     runtimeData.value = data;
@@ -68,11 +72,11 @@ const loadRuntime = async () => {
   }
 };
 const openSymbol = (symbolId: string) => {
-  const [projectId, commitSha] = runtimeScope.value.split(':');
-  if (!projectId || !commitSha) return;
+  const [projectId, revisionId] = runtimeScope.value.split(':');
+  if (!projectId || !revisionId) return;
   const url = new URL(window.location.href);
   url.searchParams.set('tab', 'definitions'); url.searchParams.set('project_id', projectId);
-  url.searchParams.set('commit_sha', commitSha); url.searchParams.set('symbol_id', symbolId);
+  url.searchParams.set('revision_id', revisionId); url.searchParams.delete('commit_sha'); url.searchParams.set('symbol_id', symbolId);
   window.history.pushState(window.history.state, '', url);
   window.dispatchEvent(new PopStateEvent('popstate'));
 };
@@ -134,7 +138,8 @@ const parseImport = async () => {
   selectedTableId.value = '';
   selectedRefId.value = '';
   try {
-    schema.value = await layoutSchema(parseSchemaInput(inputText.value, { format: inputFormat.value, source: { kind: inputFormat.value } }));
+    const parsed = await parseSchemaInput(inputText.value, { format: inputFormat.value, source: { kind: inputFormat.value } });
+    schema.value = await layoutSchema(parsed);
   } catch (cause: any) {
     schema.value = null;
     error.value = cause?.message || 'Could not parse schema input.';
@@ -201,13 +206,18 @@ const deleteAnalysis = async () => {
 watch(selectedAnalysisId, () => { if (sourceType.value === 'saved') void loadSaved(); });
 watch(sourceType, (value) => { if (value === 'saved') void loadSaved(); });
 watch(runtimeScope, () => { void loadRuntime(); });
-onMounted(async () => { await Promise.all([loadAnalyses(), loadRuntime()]); });
+let stopRuntimeUpdates: (() => void) | undefined;
+onMounted(async () => {
+  await Promise.all([loadAnalyses(), loadRuntime()]);
+  stopRuntimeUpdates = subscribeRuntimeUpdates(() => { void loadRuntime(); });
+});
+onUnmounted(() => stopRuntimeUpdates?.());
 </script>
 
 <template>
   <section class="flex flex-1 min-h-0 flex-col gap-4 overflow-hidden p-5">
     <div class="flex flex-wrap items-center justify-between gap-3"><div><h3 class="flex items-center gap-2 text-lg font-bold text-white"><Database class="h-5 w-5 text-indigo-400" /> Database Schema</h3><p class="mt-1 text-xs text-slate-500">Column-level ERD powered by X6. Saved analyses remain available alongside session-local imports.</p></div><button type="button" @click="loadAnalyses" class="rounded-xl border border-slate-700 px-3 py-2 text-xs text-slate-300 hover:bg-slate-800"><RefreshCw :class="loadingAnalyses ? 'animate-spin' : ''" class="mr-1 inline h-3.5 w-3.5" />Refresh</button></div>
-    <div class="grid grid-cols-1 gap-2 rounded-2xl border border-slate-800 bg-slate-900/30 p-3 xl:grid-cols-[250px_minmax(0,1fr)]"><div class="flex min-w-0 gap-1"><select v-model="selectedAnalysisId" class="min-w-0 flex-1 rounded-xl border border-slate-800 bg-[#11162d] px-3 py-2 text-xs text-slate-300"><option value="">Select saved analysis</option><option v-for="analysis in analyses" :key="analysis.id" :value="analysis.id">{{ analysis.label || analysis.filename }} · {{ analysis.created_at }}</option></select><button v-if="selectedAnalysis" type="button" @click="requestDeleteAnalysis" :disabled="deletingAnalysis" title="Remove selected analyzed project" class="shrink-0 rounded-xl border border-rose-500/30 px-2.5 py-2 text-rose-300 hover:bg-rose-500/10 disabled:opacity-50"><Trash2 class="h-3.5 w-3.5" /></button></div><div class="flex flex-wrap items-center gap-2"><select v-model="sourceType" class="rounded-xl border border-slate-800 bg-[#11162d] px-3 py-2 text-xs text-slate-300"><option value="saved">Saved analysis</option><option value="sql">SQL DDL</option><option value="dbml">DBML</option><option value="json">Normalized JSON</option></select><select v-if="sourceType !== 'saved'" v-model="inputFormat" class="rounded-xl border border-slate-800 bg-[#11162d] px-3 py-2 text-xs text-slate-300"><option value="sql">MySQL / PostgreSQL / SQLite</option><option value="dbml">DBML</option><option value="json">JSON</option></select><button v-if="sourceType !== 'saved'" type="button" @click="parseImport" :disabled="parsing" class="rounded-xl border border-indigo-400/30 bg-indigo-500/20 px-3 py-2 text-xs text-indigo-200">{{ parsing ? 'Parsing…' : 'Import' }}</button><button v-if="sourceType !== 'saved'" type="button" @click="loadSample" class="rounded-xl border border-slate-700 px-3 py-2 text-xs text-slate-300">Sample</button><button v-if="sourceType !== 'saved'" type="button" @click="clearImport" class="rounded-xl border border-slate-700 px-3 py-2 text-xs text-slate-300">Clear</button><select v-model="runtimeScope" class="max-w-full rounded-xl border border-slate-800 bg-[#11162d] px-3 py-2 text-xs text-slate-300"><option value="">Runtime project for table usage</option><option v-for="item in runtimeOptions" :key="item.project_id + item.commit_sha" :value="item.project_id + ':' + item.commit_sha">{{ item.project_id }} · {{ item.commit_sha?.slice(0, 12) }}</option></select></div></div>
+    <div class="grid grid-cols-1 gap-2 rounded-2xl border border-slate-800 bg-slate-900/30 p-3 xl:grid-cols-[250px_minmax(0,1fr)]"><div class="flex min-w-0 gap-1"><select v-model="selectedAnalysisId" class="min-w-0 flex-1 rounded-xl border border-slate-800 bg-[#11162d] px-3 py-2 text-xs text-slate-300"><option value="">Select saved analysis</option><option v-for="analysis in analyses" :key="analysis.id" :value="analysis.id">{{ analysis.label || analysis.filename }} · {{ analysis.created_at }}</option></select><button v-if="selectedAnalysis" type="button" @click="requestDeleteAnalysis" :disabled="deletingAnalysis" title="Remove selected analyzed project" class="shrink-0 rounded-xl border border-rose-500/30 px-2.5 py-2 text-rose-300 hover:bg-rose-500/10 disabled:opacity-50"><Trash2 class="h-3.5 w-3.5" /></button></div><div class="flex flex-wrap items-center gap-2"><select v-model="sourceType" class="rounded-xl border border-slate-800 bg-[#11162d] px-3 py-2 text-xs text-slate-300"><option value="saved">Saved analysis</option><option value="sql">SQL DDL</option><option value="dbml">DBML</option><option value="json">Normalized JSON</option></select><select v-if="sourceType !== 'saved'" v-model="inputFormat" class="rounded-xl border border-slate-800 bg-[#11162d] px-3 py-2 text-xs text-slate-300"><option value="sql">MySQL / PostgreSQL / SQLite</option><option value="dbml">DBML</option><option value="json">JSON</option></select><button v-if="sourceType !== 'saved'" type="button" @click="parseImport" :disabled="parsing" class="rounded-xl border border-indigo-400/30 bg-indigo-500/20 px-3 py-2 text-xs text-indigo-200">{{ parsing ? 'Parsing…' : 'Import' }}</button><button v-if="sourceType !== 'saved'" type="button" @click="loadSample" class="rounded-xl border border-slate-700 px-3 py-2 text-xs text-slate-300">Sample</button><button v-if="sourceType !== 'saved'" type="button" @click="clearImport" class="rounded-xl border border-slate-700 px-3 py-2 text-xs text-slate-300">Clear</button><select v-model="runtimeScope" class="max-w-full rounded-xl border border-slate-800 bg-[#11162d] px-3 py-2 text-xs text-slate-300"><option value="">Runtime project for table usage</option><option v-for="item in runtimeOptions" :key="item.project_id + item.revision_id" :value="item.project_id + ':' + item.revision_id">{{ item.project_id }} · {{ item.revision_id ? `Revision ${item.revision_id.slice(4, 12)}` : 'Revision unavailable' }}</option></select></div></div>
     <div v-if="runtimeError" class="rounded-xl border border-amber-500/20 bg-amber-500/5 p-3 text-xs text-amber-200">{{ runtimeError }}</div>
     <div v-if="sourceType !== 'saved'" class="grid grid-cols-1 gap-3 xl:grid-cols-[minmax(0,1fr)_320px]"><textarea v-model="inputText" class="min-h-28 rounded-2xl border border-slate-800 bg-[#0b1020] p-3 text-xs font-mono text-slate-200 outline-none focus:border-indigo-400/60" :placeholder="inputFormat === 'dbml' ? 'Table users { id int [pk] }' : inputFormat === 'json' ? '{ &quot;tables&quot;: [], &quot;refs&quot;: [] }' : 'CREATE TABLE users (...);'" /><div class="rounded-2xl border border-slate-800 bg-slate-900/30 p-3 text-xs text-slate-500">Imports are session-local. Unsupported or ambiguous references stay visible as warnings instead of being guessed.</div></div>
     <div v-if="error" class="rounded-xl border border-rose-500/30 bg-rose-950/20 p-4 text-xs text-rose-300">{{ error }}</div><div v-else-if="loading" class="flex flex-1 items-center justify-center rounded-2xl border border-slate-800 bg-slate-900/30 text-sm text-slate-500">Loading schema graph…</div><div v-else-if="!schema" class="flex flex-1 flex-col items-center justify-center gap-3 rounded-2xl border border-dashed border-slate-700 p-10 text-center text-sm text-slate-500">Choose a saved analysis or import SQL, DBML, or normalized JSON.<button type="button" @click="loadSample" class="rounded-xl border border-slate-700 px-3 py-2 text-xs text-slate-300">Load sample schema</button></div>

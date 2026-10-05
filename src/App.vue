@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ref, watch, onMounted, onUnmounted } from 'vue';
+import { defineAsyncComponent, ref, watch, onMounted, onUnmounted } from 'vue';
 import { 
   FileText, 
   Settings, 
@@ -22,15 +22,16 @@ import { useProjectFiles } from './composables/useProjectFiles';
 import { useAppearancePreferences } from './composables/useAppearancePreferences';
 
 import RAGChat from './components/RAGChat.vue';
-import RAGFiles from './components/RAGFiles.vue';
-import RAGConfigComponent from './components/RAGConfig.vue';
-import LogsView from './components/LogsView.vue';
-import DefinitionsView from './components/DefinitionsView.vue';
-import DatabaseSchemaView from './components/DatabaseSchemaView.vue';
-import DomainKnowledgeView from './components/DomainKnowledgeView.vue';
-import RuntimeView from './components/RuntimeView.vue';
 import type { DomainConcept, AnalysisSession } from './types';
 import type { PipelineStep } from './components/PipelineProgress.vue';
+
+const RAGFiles = defineAsyncComponent(() => import('./components/RAGFiles.vue'));
+const RAGConfigComponent = defineAsyncComponent(() => import('./components/RAGConfig.vue'));
+const LogsView = defineAsyncComponent(() => import('./components/LogsView.vue'));
+const DefinitionsView = defineAsyncComponent(() => import('./components/DefinitionsView.vue'));
+const DatabaseSchemaView = defineAsyncComponent(() => import('./components/DatabaseSchemaView.vue'));
+const DomainKnowledgeView = defineAsyncComponent(() => import('./components/DomainKnowledgeView.vue'));
+const RuntimeView = defineAsyncComponent(() => import('./components/RuntimeView.vue'));
 
 type AppTab = 'chat' | 'files' | 'config' | 'logs' | 'definitions' | 'schema' | 'domain' | 'runtime';
 const VALID_TABS: AppTab[] = ['chat', 'files', 'config', 'logs', 'definitions', 'schema', 'domain', 'runtime'];
@@ -65,11 +66,12 @@ const syncTabFromHistory = () => {
   activeTab.value = tabFromUrl();
   handlingHistoryNavigation = false;
 };
-const openDefinitionDeepLink = (projectId: string, commitSha: string, symbolId: string) => {
+const openDefinitionDeepLink = (projectId: string, revisionId: string, symbolId: string) => {
   const url = new URL(window.location.href);
   url.searchParams.set('tab', 'definitions');
   url.searchParams.set('project_id', projectId);
-  url.searchParams.set('commit_sha', commitSha);
+  url.searchParams.set('revision_id', revisionId);
+  url.searchParams.delete('commit_sha');
   url.searchParams.set('symbol_id', symbolId);
   window.history.pushState(window.history.state, '', url);
   handlingHistoryNavigation = true;

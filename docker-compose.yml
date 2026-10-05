@@ -55,6 +55,8 @@ services:
     networks:
       - default
       - devassistant_net
+    depends_on:
+      - keycloak
 
   web-dev:
     build:
@@ -78,6 +80,7 @@ services:
       - .env
     environment:
       NODE_ENV: development
+      NODE_OPTIONS: --max-old-space-size=2304
       OLLAMA_URL: http://host.docker.internal:11434
       PYTHON_API_URL: http://python-api:9002
       OIDC_INTERNAL_ISSUER: http://keycloak:8080/realms/developer-assistant
@@ -98,6 +101,8 @@ services:
     networks:
       - default
       - devassistant_net
+    depends_on:
+      - keycloak
 
 networks:
   default: {}

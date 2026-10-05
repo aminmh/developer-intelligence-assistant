@@ -1,7 +1,8 @@
 <script setup lang="ts">
-import { computed, onMounted, ref, watch } from 'vue';
+import { computed, onMounted, onUnmounted, ref, watch } from 'vue';
 import { ChevronDown, ChevronRight, Code2, RefreshCw, Search } from 'lucide-vue-next';
 import { makeRequest } from '../ui/makeRequest';
+import { subscribeRuntimeUpdates } from '../ui/runtimeEvents';
 import type { DefinitionKind, ExtractedDefinition, ExtractedDefinitionsResponse, IndexedSymbolProject, RuntimeSnapshotData } from '../types';
 
 const projects = ref<IndexedSymbolProject[]>([]);
@@ -21,6 +22,15 @@ const runtimeFilter = ref<'all' | 'unobserved' | 'hot'>('all');
 const runtimeScopeKey = ref('');
 const runtimeMetrics = computed(() => new Map((runtimeData.value?.telemetry.symbols || []).map((item) => [item.symbol_id, item])));
 const selectedProject = computed(() => projects.value.find((project) => project.collection === selectedStem.value) || null);
+const runtimePath = (project: IndexedSymbolProject) => {
+  if (!project.project_id) return null;
+  if (project.revision_id) {
+    return `/api/runtime/projects/${encodeURIComponent(project.project_id)}/revisions/${encodeURIComponent(project.revision_id)}`;
+  }
+  return project.commit_sha
+    ? `/api/runtime/projects/${encodeURIComponent(project.project_id)}/snapshots/${encodeURIComponent(project.commit_sha)}`
+    : null;
+};
 
 const definitionMetric = (definition: ExtractedDefinition) => {
   if (definition.symbol_id && runtimeMetrics.value.has(definition.symbol_id)) return runtimeMetrics.value.get(definition.symbol_id)!;
@@ -83,7 +93,12 @@ const toggle = (definition: ExtractedDefinition) => {
     const url = new URL(window.location.href);
     url.searchParams.set('tab', 'definitions');
     url.searchParams.set('project_id', selectedProject.value.project_id);
-    url.searchParams.set('commit_sha', selectedProject.value.commit_sha);
+    if (selectedProject.value.revision_id) {
+      url.searchParams.set('revision_id', selectedProject.value.revision_id);
+      url.searchParams.delete('commit_sha');
+    } else if (selectedProject.value.commit_sha) {
+      url.searchParams.set('commit_sha', selectedProject.value.commit_sha);
+    }
     if (next.has(key)) url.searchParams.set('symbol_id', definition.symbol_id);
     else if (url.searchParams.get('symbol_id') === definition.symbol_id) url.searchParams.delete('symbol_id');
     window.history.pushState(window.history.state, '', url);
@@ -98,11 +113,26 @@ const loadProjects = async () => {
     const response = await makeRequest('/api/inspect/projects');
     const data = await response.json() as IndexedSymbolProject[] & { detail?: string };
     if (!response.ok) throw new Error(data.detail || 'Failed to load indexed projects.');
-    projects.value = Array.isArray(data) ? data : [];
+    const indexedProjects = Array.isArray(data) ? data : [];
+    let runtimeProjects: Array<{ project_id: string; commit_sha?: string | null; revision_id?: string | null }> = [];
+    try {
+      const runtimeResponse = await makeRequest('/api/runtime/projects');
+      const runtimeData = await runtimeResponse.json();
+      if (runtimeResponse.ok && Array.isArray(runtimeData.projects)) runtimeProjects = runtimeData.projects;
+    } catch {
+      // Static definitions remain available if Runtime inventory is offline.
+    }
+    projects.value = indexedProjects.map((project) => {
+      const runtimeProject = runtimeProjects.find((item) => item.project_id === project.project_id
+        && item.commit_sha === project.commit_sha);
+      return { ...project, revision_id: runtimeProject?.revision_id || null };
+    });
     if (!selectedStem.value && projects.value.length) {
       const params = new URLSearchParams(window.location.search);
       const deepLinked = projects.value.find((project) => project.project_id === params.get('project_id')
-        && project.commit_sha === params.get('commit_sha'));
+        && (params.get('revision_id')
+          ? project.revision_id === params.get('revision_id')
+          : project.commit_sha === params.get('commit_sha')));
       selectedStem.value = deepLinked?.collection || projects.value[0].collection;
     }
   } catch (cause: any) {
@@ -114,12 +144,13 @@ const loadDefinitions = async () => {
   if (!selectedStem.value) { definitions.value = []; total.value = 0; return; }
   const project = selectedProject.value;
   if (project?.project_id && project.commit_sha) {
-    const scopeKey = `${project.project_id}:${project.commit_sha}`;
+    const scopeKey = `${project.project_id}:${project.revision_id || project.commit_sha}`;
     if (runtimeScopeKey.value !== scopeKey) {
       loading.value = true;
       error.value = '';
       try {
-        const path = `/api/runtime/projects/${encodeURIComponent(project.project_id)}/snapshots/${encodeURIComponent(project.commit_sha)}`;
+        const path = runtimePath(project);
+        if (!path) throw new Error('The selected project has no runtime identity.');
         const response = await makeRequest(path);
         const data = await response.json();
         if (!response.ok) throw new Error(data.detail || 'Failed to load runtime symbol data.');
@@ -169,6 +200,19 @@ const loadDefinitions = async () => {
 };
 
 const refresh = async () => { runtimeScopeKey.value = ''; await loadProjects(); await loadDefinitions(); };
+const refreshRuntimeMetrics = async () => {
+  const project = selectedProject.value;
+  if (!project?.project_id || !project.commit_sha) return;
+  try {
+    const path = runtimePath(project);
+    if (!path) return;
+    const response = await makeRequest(path);
+    if (!response.ok) return;
+    runtimeData.value = await response.json() as RuntimeSnapshotData;
+  } catch {
+    // Keep the last available runtime values while the backend reconnects.
+  }
+};
 const resetPage = () => { offset.value = 0; if (selectedProject.value?.project_id) runtimeScopeKey.value = ''; loadDefinitions(); };
 const previousPage = () => { offset.value = Math.max(0, offset.value - limit); loadDefinitions(); };
 const nextPage = () => { if (offset.value + limit < total.value) { offset.value += limit; loadDefinitions(); } };
@@ -179,7 +223,12 @@ const formatLastSeen = (value?: string | null) => value ? new Date(value).toLoca
 watch(selectedStem, () => { offset.value = 0; expanded.value = new Set(); runtimeScopeKey.value = ''; runtimeData.value = null; loadDefinitions(); });
 watch([search, kind, file], resetPage);
 watch(runtimeFilter, resetPage);
-onMounted(refresh);
+let stopRuntimeUpdates: (() => void) | undefined;
+onMounted(() => {
+  void refresh();
+  stopRuntimeUpdates = subscribeRuntimeUpdates(() => { void refreshRuntimeMetrics(); });
+});
+onUnmounted(() => stopRuntimeUpdates?.());
 </script>
 
 <template>
@@ -195,7 +244,7 @@ onMounted(refresh);
     <div class="grid grid-cols-1 lg:grid-cols-4 gap-2 rounded-2xl border border-slate-800 bg-slate-900/30 p-4">
       <select v-model="selectedStem" class="bg-[#11162d] border border-slate-800 rounded-xl px-3 py-2 text-xs text-slate-300 lg:col-span-1">
         <option value="">Select indexed project</option>
-        <option v-for="project in projects" :key="project.collection" :value="project.collection">{{ project.stem }} · {{ project.definitions }} definitions</option>
+        <option v-for="project in projects" :key="project.collection" :value="project.collection">{{ project.stem }} · {{ project.definitions }} definitions{{ project.revision_id ? ` · Revision ${project.revision_id.slice(4, 12)}` : '' }}</option>
       </select>
       <div class="relative"><Search class="absolute left-3 top-2.5 w-3.5 h-3.5 text-slate-500" /><input v-model="search" placeholder="Search name, FQN, owner…" class="w-full bg-[#11162d] border border-slate-800 rounded-xl pl-9 pr-3 py-2 text-xs text-slate-200" /></div>
       <select v-model="kind" class="bg-[#11162d] border border-slate-800 rounded-xl px-3 py-2 text-xs text-slate-300"><option v-for="item in kinds" :key="item.value" :value="item.value">{{ item.label }}</option></select>

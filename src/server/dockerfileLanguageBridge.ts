@@ -1,6 +1,7 @@
 import { spawn, ChildProcessWithoutNullStreams } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
 import { createRequire } from 'node:module';
+import path from 'node:path';
 import { StreamMessageReader, StreamMessageWriter, createMessageConnection, MessageConnection } from 'vscode-jsonrpc/node';
 
 export type Position = { line: number; character: number };
@@ -16,7 +17,7 @@ const SESSION_ID = /^[A-Za-z0-9_-]{8,100}$/;
 type Session = { id: string; uri: string; version: number; text: string; process: ChildProcessWithoutNullStreams; connection: MessageConnection; diagnostics: DockerDiagnostic[] };
 
 const sessions = new Map<string, Session>();
-const require = createRequire(import.meta.url);
+const require = createRequire(path.resolve(process.argv[1] || 'server.ts'));
 const languageServerBin = require.resolve('dockerfile-language-server-nodejs/bin/docker-langserver');
 
 function validText(value: unknown): value is string {

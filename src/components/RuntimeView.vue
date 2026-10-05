@@ -2,10 +2,11 @@
 import { Activity, AlertTriangle, ArrowUpRight, BookOpen, CheckCircle2, RefreshCw, Server, Trash2, XCircle } from 'lucide-vue-next';
 import { computed, onMounted, onUnmounted, ref, watch } from 'vue';
 import { makeRequest } from '../ui/makeRequest';
+import { subscribeRuntimeUpdates } from '../ui/runtimeEvents';
 import type { RuntimeProjectRecord, RuntimeSnapshotData } from '../types';
 
 const emit = defineEmits<{
-  (event: 'openDefinition', projectId: string, commitSha: string, symbolId: string): void;
+  (event: 'openDefinition', projectId: string, revisionId: string, symbolId: string): void;
 }>();
 
 const projects = ref<RuntimeProjectRecord[]>([]);
@@ -36,37 +37,40 @@ const snapshotUploadSnippet = [
   '  "$INDEXER_API/telemetry/projects/$INDEXER_PROJECT/snapshots/$CI_COMMIT_SHA"',
 ].join('\n');
 const runtimeSetupCommands = [
-  './devassistant.sh runtime setup',
-  './devassistant.sh runtime status',
-  './devassistant.sh runtime cleanup',
+  'just runtime-setup',
+  'just runtime-status',
+  'just runtime-cleanup',
 ].join('\n');
 const runtimeCollectorSnippet = 'cd api\ndocker compose --profile runtime up -d';
 const spanAttributesSnippet = [
   'indexer.project_id: billing',
-  'vcs.ref.head.revision: 0123456789abcdef0123456789abcdef01234567',
+  'indexer.revision_id: rev_0123456789abcdef0123456789abcdef',
   'indexer.symbol_id: canonical-symbol-id-from-the-indexer',
-  'indexer.dirty: false',
-  'indexer.schema.version: indexer-telemetry-v1',
+  'indexer.code_dirty: false',
+  'indexer.schema.version: indexer-telemetry-v2',
 ].join('\n');
-let refreshTimer: ReturnType<typeof setInterval> | undefined;
+let stopRuntimeUpdates: (() => void) | undefined;
 
 const options = computed(() => {
   const byKey = new Map<string, RuntimeProjectRecord & { key: string; commit_sha: string }>();
   for (const project of projects.value) {
-    const commits = [...new Set([...(project.running_commit_shas || []), project.commit_sha]
+    const commits = [...new Set([project.commit_sha, ...(project.running_commit_shas || [])]
       .filter((commit): commit is string => typeof commit === 'string' && commit.length > 0))];
     for (const commit_sha of commits) {
-      const key = `${project.project_id}:${commit_sha}`;
+      const isSnapshot = project.commit_sha === commit_sha;
+      const revision_id = isSnapshot ? project.revision_id : null;
+      const key = revision_id ? `${project.project_id}:${revision_id}` : `${project.project_id}:docker-only`;
       const current = byKey.get(key);
       const option = {
         ...project,
         key,
         commit_sha,
-        state: project.commit_sha === commit_sha ? project.state : 'awaiting_source',
+        revision_id,
+        state: isSnapshot ? project.state : 'awaiting_source',
       };
       // Prefer the real snapshot row when it exists; otherwise make active
       // deployments selectable even before their source snapshot is uploaded.
-      if (!current || project.commit_sha === commit_sha) byKey.set(key, option);
+      if (!current || isSnapshot) byKey.set(key, option);
     }
   }
   return [...byKey.values()];
@@ -106,8 +110,11 @@ const loadDetail = async () => {
   loadingDetail.value = true;
   error.value = '';
   try {
-    const { project_id, commit_sha } = selected.value;
-    const path = `/api/runtime/projects/${encodeURIComponent(project_id)}/snapshots/${encodeURIComponent(commit_sha)}`;
+    const { project_id, commit_sha, revision_id } = selected.value;
+    const identityPath = revision_id
+      ? `revisions/${encodeURIComponent(revision_id)}`
+      : `snapshots/${encodeURIComponent(commit_sha)}`;
+    const path = `/api/runtime/projects/${encodeURIComponent(project_id)}/${identityPath}`;
     const response = await makeRequest(path);
     const data = await response.json();
     if (!response.ok) throw new Error(data.detail || 'Could not load runtime snapshot.');
@@ -157,8 +164,11 @@ const loadSavedSetup = async (showExistingNotice = true) => {
 };
 const startRuntimeSetup = async () => {
   if (savedSetup.value) {
-    setupState.value = 'error';
-    setupMessage.value = 'A local setup is already recorded. Run ./devassistant.sh runtime status or cleanup before setting up another Compose project.';
+    const phase = savedSetup.value.phase || 'incomplete';
+    setupState.value = phase === 'active' ? 'complete' : 'error';
+    setupMessage.value = phase === 'active'
+      ? `Runtime is already active for ${savedSetup.value.project_id} · ${savedSetup.value.environment}. Clean it up before setting up a different project.`
+      : `Runtime recovery is in phase '${phase}'. Run just runtime-status, then Clean up Runtime before starting another setup.`;
     return;
   }
   activeOperation.value = 'setup';
@@ -171,7 +181,7 @@ const startRuntimeSetup = async () => {
     const headers = () => ({ Authorization: `Bearer ${token}` });
     const startResponse = await fetch(`${helperUrl}/setup`, { method: 'POST', headers: headers(), cache: 'no-store' });
     const started = await startResponse.json().catch(() => ({}));
-    if (!startResponse.ok) throw new Error(started.detail || 'Could not start the local Runtime setup helper. Run ./devassistant.sh up and try again.');
+    if (!startResponse.ok) throw new Error(started.detail || 'Could not start the local Runtime setup helper. Run just up and try again.');
     setupState.value = 'running';
     while (true) {
       if (Date.now() - authorizationAt > 120_000) {
@@ -203,7 +213,7 @@ const cleanupRuntime = async () => {
     const headers = () => ({ Authorization: `Bearer ${token}` });
     const startResponse = await fetch(`${helperUrl}/cleanup`, { method: 'POST', headers: headers(), cache: 'no-store' });
     const started = await startResponse.json().catch(() => ({}));
-    if (startResponse.status === 404) throw new Error('The local Runtime helper is out of date. Run ./devassistant.sh up to restart it, then reload this page.');
+    if (startResponse.status === 404) throw new Error('The local Runtime helper is out of date. Run just up to restart it, then reload this page.');
     if (!startResponse.ok) throw new Error(started.detail || 'Could not start local Runtime cleanup.');
     setupState.value = 'running';
     while (true) {
@@ -251,7 +261,7 @@ const removeLocalContainers = async () => {
       cache: 'no-store',
     });
     const started = await startResponse.json().catch(() => ({}));
-    if (startResponse.status === 404) throw new Error('The local Runtime helper is out of date. Run ./devassistant.sh up to restart it, then reload this page.');
+    if (startResponse.status === 404) throw new Error('The local Runtime helper is out of date. Run just up to restart it, then reload this page.');
     const resumingExistingRemoval = startResponse.status === 409;
     if (!startResponse.ok && !resumingExistingRemoval) throw new Error(started.detail || 'Could not start local container removal.');
     if (resumingExistingRemoval) setupMessage.value = 'Reconnecting to the active local container removal…';
@@ -302,15 +312,15 @@ const callersFor = (symbolId: string) => (detail.value?.telemetry.callers || [])
 const routesFor = (symbolId: string) => (detail.value?.telemetry.symbol_routes || []).filter((row) => row.symbol_id === symbolId);
 const tablesFor = (symbolId: string) => (detail.value?.telemetry.symbol_tables || []).filter((row) => row.symbol_id === symbolId);
 const openDefinition = (symbolId?: string | null) => {
-  if (selected.value && symbolId) emit('openDefinition', selected.value.project_id, selected.value.commit_sha!, symbolId);
+  if (selected.value?.revision_id && symbolId) emit('openDefinition', selected.value.project_id, selected.value.revision_id, symbolId);
 };
 
 watch(selectedKey, loadDetail);
 onMounted(async () => {
   await Promise.all([refresh(), loadSavedSetup()]);
-  refreshTimer = setInterval(refresh, 30_000);
+  stopRuntimeUpdates = subscribeRuntimeUpdates(() => { void refresh(); });
 });
-onUnmounted(() => { if (refreshTimer) clearInterval(refreshTimer); });
+onUnmounted(() => stopRuntimeUpdates?.());
 </script>
 
 <template>
@@ -322,11 +332,11 @@ onUnmounted(() => { if (refreshTimer) clearInterval(refreshTimer); });
       </div>
       <div class="flex flex-wrap items-center gap-2">
         <button type="button" @click="startRuntimeSetup" :disabled="!!savedSetup || setupState === 'starting' || setupState === 'running'" class="rounded-xl border border-emerald-500/30 px-3 py-2 text-xs text-emerald-200 hover:bg-emerald-500/10 disabled:opacity-50"><Activity class="mr-1 inline h-3.5 w-3.5" :class="(setupState === 'starting' || setupState === 'running') && activeOperation === 'setup' ? 'animate-pulse' : ''" />{{ (setupState === 'starting' || setupState === 'running') && activeOperation === 'setup' ? 'Setting up…' : 'Set up Runtime' }}</button>
-        <button type="button" @click="cleanupRuntime" :disabled="setupState === 'starting' || setupState === 'running'" title="Opens one grouped approval for all applicable cleanup actions; declining retains recovery state." class="rounded-xl border border-rose-500/30 px-3 py-2 text-xs text-rose-200 hover:bg-rose-500/10 disabled:opacity-50"><Activity class="mr-1 inline h-3.5 w-3.5" :class="(setupState === 'starting' || setupState === 'running') && activeOperation === 'cleanup' ? 'animate-pulse' : ''" />{{ (setupState === 'starting' || setupState === 'running') && activeOperation === 'cleanup' ? 'Cleaning up…' : 'Clean up Runtime' }}</button>
+        <button type="button" @click="cleanupRuntime" :disabled="setupState === 'starting' || setupState === 'running'" title="Checkbox acknowledgements are optional; Continue approves all applicable cleanup actions. Cancel preserves recovery state." class="rounded-xl border border-rose-500/30 px-3 py-2 text-xs text-rose-200 hover:bg-rose-500/10 disabled:opacity-50"><Activity class="mr-1 inline h-3.5 w-3.5" :class="(setupState === 'starting' || setupState === 'running') && activeOperation === 'cleanup' ? 'animate-pulse' : ''" />{{ (setupState === 'starting' || setupState === 'running') && activeOperation === 'cleanup' ? 'Cleaning up…' : 'Clean up Runtime' }}</button>
         <button type="button" @click="showGuide = !showGuide" class="rounded-xl border border-cyan-500/30 px-3 py-2 text-xs text-cyan-200 hover:bg-cyan-500/10"><BookOpen class="mr-1 inline h-3.5 w-3.5" />{{ showGuide ? 'Hide guide' : 'Get Started' }}</button>
         <select v-model="selectedKey" :disabled="setupState === 'starting' || setupState === 'running'" class="max-w-[24rem] rounded-xl border border-slate-800 bg-[#11162d] px-3 py-2 text-xs text-slate-200 disabled:opacity-50">
-          <option value="">Select Docker project / commit</option>
-          <option v-for="item in options" :key="item.key" :value="item.key">{{ item.project_id }} · {{ item.commit_sha.slice(0, 12) }}{{ item.state === 'awaiting_source' ? ' · Docker only' : '' }}</option>
+          <option value="">Select project / indexed revision</option>
+          <option v-for="item in options" :key="item.key" :value="item.key">{{ item.project_id }} · {{ item.revision_id ? `Revision ${item.revision_id.slice(4, 12)}` : 'Docker only · no indexed revision' }}</option>
         </select>
         <button v-if="selected?.can_remove" type="button" @click="removeLocalContainers" :disabled="setupState === 'starting' || setupState === 'running'" title="Stops and removes only matching local containers. Runtime history and remote containers remain." class="rounded-xl border border-rose-500/30 px-3 py-2 text-xs text-rose-200 hover:bg-rose-500/10 disabled:opacity-50"><Trash2 class="mr-1 inline h-3.5 w-3.5" :class="(setupState === 'starting' || setupState === 'running') && activeOperation === 'remove' ? 'animate-pulse' : ''" />{{ (setupState === 'starting' || setupState === 'running') && activeOperation === 'remove' ? 'Removing containers…' : 'Remove local containers' }}</button>
         <button type="button" @click="refresh" :disabled="loadingProjects || loadingDetail || setupState === 'starting' || setupState === 'running'" class="rounded-xl border border-slate-700 px-3 py-2 text-xs text-slate-300 hover:bg-slate-800 disabled:opacity-50"><RefreshCw class="mr-1 inline h-3.5 w-3.5" :class="loadingProjects || loadingDetail ? 'animate-spin' : ''" />Refresh</button>
@@ -363,17 +373,17 @@ onUnmounted(() => { if (refreshTimer) clearInterval(refreshTimer); });
                 <div class="mt-3 space-y-2 text-[10px] leading-4 text-slate-400">
                   <pre class="overflow-x-auto rounded-lg bg-black/30 p-2 text-slate-300"><code>{{ runtimeSetupCommands }}</code></pre>
                   <p>The browser never reads your Docker daemon or local project files. The helper keeps Docker project discovery separate, then shows a compact Compose summary and one grouped checklist covering the setup actions. Recovery state is written before mutations. It stores a private recovery record in your local state directory.</p>
-                  <p>After setup, choose the project and commit here. No source snapshot is needed to list containers. The agent reconciles about every 60 seconds; use Refresh to reload sooner. Snapshots and spans are optional additions for code matching and route/database activity. For remote hosts, use managed certificates and follow <code>api/telemetry-agent/README.md</code>.</p>
+                  <p>After setup, choose the project and indexed revision here. No source snapshot is needed to list containers. The agent reconciles about every 60 seconds; use Refresh to reload sooner. Snapshots and spans are optional additions for code matching and route/database activity. For remote hosts, use managed certificates and follow <code>api/telemetry-agent/README.md</code>.</p>
                 </div>
               </details>
             </li>
             <li class="rounded-xl border border-slate-800 bg-slate-950/40 p-4">
               <p class="text-xs font-semibold text-cyan-200">2. Add a source snapshot (optional, for code matching)</p>
-              <p class="mt-2 text-[11px] leading-5 text-slate-400">A snapshot connects observed spans to indexed functions and methods. It is not required to list running containers. Use the same project slug and full commit SHA that you placed on the running image.</p>
+              <p class="mt-2 text-[11px] leading-5 text-slate-400">A source snapshot connects observed spans to indexed functions and methods. Git SHA remains an internal source-upload and deployment key; Developer Assistant assigns an immutable revision ID when it registers the snapshot. Use the Gum PHP installer to index this project directly or select a ready revision and configure the PHP app.</p>
               <details class="mt-3 rounded-lg border border-slate-800 bg-black/20 p-3">
-                <summary class="cursor-pointer text-[11px] font-medium text-slate-300">Show project token and CI upload example</summary>
+                <summary class="cursor-pointer text-[11px] font-medium text-slate-300">Show external CI upload setup</summary>
                 <div class="mt-3 space-y-2 text-[10px] leading-4 text-slate-400">
-                  <p>Provision a separate high-entropy bearer token (at least 32 characters) for the project on the API backend. Keep the real token in a secret manager; the value below is a placeholder.</p>
+                  <p>For local indexing, the Gum flow creates and stores the project token after confirmation. This example is only for external CI: provision a separate high-entropy bearer token (at least 32 characters) for the project on the API backend. Keep the real token in a secret manager; the value below is a placeholder.</p>
                   <pre class="overflow-x-auto rounded-lg bg-black/30 p-2 text-slate-300"><code>{{ ciTokenSnippet }}</code></pre>
                   <p>Set <code>INDEXER_API</code>, <code>INDEXER_PROJECT=billing</code>, and <code>INDEXER_CI_TOKEN</code> as protected CI variables. The archive must be repository-rooted and match the deployed commit:</p>
                   <pre class="overflow-x-auto rounded-lg bg-black/30 p-2 text-slate-300"><code>{{ snapshotUploadSnippet }}</code></pre>
@@ -388,7 +398,7 @@ onUnmounted(() => { if (refreshTimer) clearInterval(refreshTimer); });
                 <summary class="cursor-pointer text-[11px] font-medium text-slate-300">Show Collector command and span attributes</summary>
                 <div class="mt-3 space-y-2 text-[10px] leading-4 text-slate-400">
                   <pre class="overflow-x-auto rounded-lg bg-black/30 p-2 text-slate-300"><code>{{ runtimeCollectorSnippet }}</code></pre>
-                  <p>Each source-attributed span must include the project and full commit identity plus the canonical PHP symbol ID from the indexer:</p>
+                  <p>Each source-attributed span must include the project and immutable revision identity plus the canonical PHP symbol ID from the indexer:</p>
                   <pre class="overflow-x-auto rounded-lg bg-black/30 p-2 text-slate-300"><code>{{ spanAttributesSnippet }}</code></pre>
                   <p>Add <code>http.route</code> and <code>http.request.method</code> to request spans, and <code>db.operation.name</code> plus <code>indexer.db.table</code> to database spans. Do not send raw SQL or request data. App instrumentation is not bundled; see <code>api/docs/telemetry/attributes.md</code>.</p>
                 </div>
@@ -399,12 +409,12 @@ onUnmounted(() => { if (refreshTimer) clearInterval(refreshTimer); });
             <div class="mb-3 flex flex-wrap items-center justify-between gap-2">
               <div>
                 <h5 class="text-xs font-semibold text-slate-200">Example Runtime view</h5>
-                <p class="mt-1 font-mono text-[10px] text-slate-500">billing @ c4a8e21… · staging</p>
+                <p class="mt-1 font-mono text-[10px] text-slate-500">billing @ rev_01234567… · staging</p>
               </div>
               <span class="rounded-full border border-indigo-500/20 bg-indigo-500/5 px-2 py-1 text-[9px] uppercase tracking-wide text-indigo-300">Example only</span>
             </div>
             <div class="grid grid-cols-2 gap-2 md:grid-cols-5">
-              <article class="rounded-xl border border-slate-800 bg-slate-900/50 p-3"><p class="text-[9px] uppercase text-slate-500">Running containers</p><p class="mt-1 text-lg font-semibold text-white">2</p><p class="text-[9px] text-slate-500">2 match this commit</p></article>
+              <article class="rounded-xl border border-slate-800 bg-slate-900/50 p-3"><p class="text-[9px] uppercase text-slate-500">Running containers</p><p class="mt-1 text-lg font-semibold text-white">2</p><p class="text-[9px] text-slate-500">2 match this revision</p></article>
               <article class="rounded-xl border border-slate-800 bg-slate-900/50 p-3"><p class="text-[9px] uppercase text-slate-500">Observed spans</p><p class="mt-1 text-lg font-semibold text-white">1,024</p><p class="text-[9px] text-slate-500">sample window</p></article>
               <article class="rounded-xl border border-slate-800 bg-slate-900/50 p-3"><p class="text-[9px] uppercase text-slate-500">Matched to code</p><p class="mt-1 text-lg font-semibold text-cyan-300">82%</p><p class="text-[9px] text-slate-500">840 / 1,024 spans</p><div class="mt-2 h-1.5 overflow-hidden rounded-full bg-slate-800"><div class="h-full w-[82%] rounded-full bg-cyan-400"></div></div><div class="mt-1 flex justify-between text-[8px] text-slate-600"><span>0%</span><span>100%</span></div></article>
               <article class="rounded-xl border border-slate-800 bg-slate-900/50 p-3"><p class="text-[9px] uppercase text-slate-500">Possible dead code</p><p class="mt-1 text-lg font-semibold text-amber-300">14</p><p class="text-[9px] text-slate-500">not observed</p></article>
@@ -417,23 +427,25 @@ onUnmounted(() => { if (refreshTimer) clearInterval(refreshTimer); });
             </div>
             <p class="mt-2 text-[9px] leading-4 text-slate-500">82% means 82 of every 100 observed spans matched an indexed symbol in this example; it is a match rate, not a health score.</p>
           </div>
-          <p class="border-t border-slate-800 pt-3 text-[10px] leading-4 text-slate-500">The host agent reconciles containers about every 60 seconds. This view refreshes every 30 seconds or when you select Refresh. Span counts are sampled observations within the configured retention window, not exact production call totals. Container visibility works without spans; code matching, routes, and table activity need spans.</p>
+          <p class="border-t border-slate-800 pt-3 text-[10px] leading-4 text-slate-500">The host agent reconciles containers about every 60 seconds. This view updates when the backend reports new runtime data and after you select Refresh. Aggregates use spans received before Collector tail sampling; PHP SDK head sampling may reduce what reaches the Collector. Container visibility works without spans; code matching, routes, and table activity need spans.</p>
         </div>
       </div>
     </section>
 
     <template v-if="options.length && detail && !error">
       <div class="flex flex-wrap items-center gap-2 rounded-xl border border-slate-800 bg-slate-900/30 p-3 text-[11px]">
-        <span class="font-mono text-slate-200">{{ detail.project_id }} @ {{ detail.commit_sha }}</span>
+        <span class="font-mono text-slate-200">{{ detail.project_id }} · {{ detail.revision_id || 'Docker only · no indexed revision' }}</span>
         <span class="ml-auto rounded-full border px-2 py-1" :class="detail.snapshot.state === 'ready' ? 'border-emerald-500/20 bg-emerald-500/5 text-emerald-300' : 'border-amber-500/20 bg-amber-500/5 text-amber-300'">{{ detail.snapshot.state === 'awaiting_source' ? 'Docker only · no source snapshot' : detail.snapshot.state }}</span>
-        <span v-if="detail.deployment_mismatch" class="inline-flex items-center gap-1 rounded-full border border-amber-500/20 bg-amber-500/5 px-2 py-1 text-amber-300"><AlertTriangle class="h-3 w-3" />Running code uses another commit</span>
+        <span v-if="detail.deployment_mismatch" class="inline-flex items-center gap-1 rounded-full border border-amber-500/20 bg-amber-500/5 px-2 py-1 text-amber-300"><AlertTriangle class="h-3 w-3" />Running containers use another revision or unindexed code</span>
       </div>
 
-      <div v-if="detail.snapshot.state !== 'awaiting_source'" class="grid grid-cols-2 gap-3 xl:grid-cols-5">
-        <article class="rounded-2xl border border-slate-800 bg-slate-900/30 p-4"><p class="text-[10px] uppercase text-slate-500">Running containers</p><p class="mt-2 text-2xl font-semibold text-white">{{ detail.deployments.length }}</p><p class="mt-1 text-[10px] text-slate-500">{{ detail.matching_deployments.length }} match this commit</p></article>
+      <div v-if="detail.snapshot.state !== 'awaiting_source'" class="grid grid-cols-2 gap-3 xl:grid-cols-7">
+        <article class="rounded-2xl border border-slate-800 bg-slate-900/30 p-4"><p class="text-[10px] uppercase text-slate-500">Running containers</p><p class="mt-2 text-2xl font-semibold text-white">{{ detail.deployments.length }}</p><p class="mt-1 text-[10px] text-slate-500">{{ detail.matching_deployments.length }} match this revision</p></article>
         <article class="rounded-2xl border border-slate-800 bg-slate-900/30 p-4"><p class="text-[10px] uppercase text-slate-500">Observed spans</p><p class="mt-2 text-2xl font-semibold text-white">{{ formatCount(detail.telemetry.total_spans) }}</p><p class="mt-1 text-[10px] text-slate-500">Last received {{ formatTime(detail.telemetry.last_seen) }}</p></article>
-        <article class="rounded-2xl border border-slate-800 bg-slate-900/30 p-4"><p class="text-[10px] uppercase text-slate-500">Matched to code</p><p class="mt-2 text-2xl font-semibold text-white">{{ detail.telemetry.match_percent }}%</p><p class="mt-1 text-[10px] text-slate-500">{{ formatCount(detail.telemetry.matched_spans) }} / {{ formatCount(detail.telemetry.total_spans) }} spans</p></article>
-        <article class="rounded-2xl border border-slate-800 bg-slate-900/30 p-4"><p class="text-[10px] uppercase text-slate-500">Possible dead code</p><p class="mt-2 text-2xl font-semibold text-amber-300">{{ formatCount(deadCount) }}</p><p class="mt-1 text-[10px] text-slate-500">No calls observed in {{ detail.telemetry.retention_hours / 24 }} retained days</p></article>
+        <article class="rounded-2xl border border-slate-800 bg-slate-900/30 p-4"><p class="text-[10px] uppercase text-slate-500">Matched to code</p><p class="mt-2 text-2xl font-semibold text-white">{{ detail.telemetry.match_percent }}%</p><p class="mt-1 text-[10px] text-slate-500">{{ formatCount(detail.telemetry.matched_spans) }} / {{ formatCount(detail.telemetry.symbol_spans) }} symbol spans</p></article>
+        <article class="rounded-2xl border border-slate-800 bg-slate-900/30 p-4"><p class="text-[10px] uppercase text-slate-500">Unmatched symbols</p><p class="mt-2 text-2xl font-semibold text-amber-300">{{ detail.telemetry.unmatched_percent }}%</p><p class="mt-1 text-[10px] text-slate-500">{{ formatCount(detail.telemetry.unmatched_spans) }} spans need mapping</p></article>
+        <article class="rounded-2xl border border-slate-800 bg-slate-900/30 p-4"><p class="text-[10px] uppercase text-slate-500">Span input</p><p class="mt-2 text-lg font-semibold text-white">{{ detail.telemetry.pipeline_health.replace('_', ' ') }}</p><p class="mt-1 text-[10px] text-slate-500">Rolling p95 window: {{ detail.telemetry.aggregation_window_hours }}h</p></article>
+        <article class="rounded-2xl border border-slate-800 bg-slate-900/30 p-4"><p class="text-[10px] uppercase text-slate-500">Possible dead code</p><p class="mt-2 text-2xl font-semibold text-amber-300">{{ formatCount(deadCount) }}</p><p class="mt-1 text-[10px] text-slate-500">No calls observed in this window</p></article>
         <article class="rounded-2xl border border-slate-800 bg-slate-900/30 p-4"><p class="text-[10px] uppercase text-slate-500">Hot symbols</p><p class="mt-2 text-2xl font-semibold text-orange-300">{{ formatCount(hotCount) }}</p><p class="mt-1 text-[10px] text-slate-500">100+ observed calls in window</p></article>
       </div>
 
@@ -449,14 +461,14 @@ onUnmounted(() => { if (refreshTimer) clearInterval(refreshTimer); });
         <div class="flex flex-wrap items-center justify-between gap-2"><h4 class="text-xs font-semibold uppercase tracking-wide text-slate-300">Containers</h4><span class="text-[10px] text-slate-500">Deployment reports refresh every 60 seconds at the host agent</span></div>
         <div v-if="!detail.deployments.length" class="text-xs text-slate-500">No running containers have reported for this project.</div>
         <div v-for="container in detail.deployments" :key="container.container_id" class="flex flex-wrap items-center gap-2 rounded-xl border border-slate-800 p-3 text-[10px]">
-          <CheckCircle2 class="h-3.5 w-3.5 text-emerald-400" /><span class="font-semibold text-slate-200">{{ container.service }}</span><span class="text-slate-500">{{ container.environment }}</span><span class="font-mono text-slate-500">{{ container.container_id.slice(0, 12) }}</span><span class="ml-auto max-w-full break-all font-mono text-slate-500">{{ container.commit_sha }}</span><XCircle v-if="container.commit_sha !== detail.commit_sha" class="h-3.5 w-3.5 text-amber-400" />
+          <CheckCircle2 class="h-3.5 w-3.5 text-emerald-400" /><span class="font-semibold text-slate-200">{{ container.service }}</span><span class="text-slate-500">{{ container.environment }}</span><span class="font-mono text-slate-500">{{ container.container_id.slice(0, 12) }}</span><span class="ml-auto max-w-full font-mono text-slate-500">{{ container.revision_id ? `Revision ${container.revision_id.slice(4, 12)}` : 'Unindexed code' }}</span><XCircle v-if="container.commit_sha !== detail.commit_sha" class="h-3.5 w-3.5 text-amber-400" />
         </div>
       </section>
 
       <div v-if="detail.snapshot.state !== 'awaiting_source'" class="grid gap-4 xl:grid-cols-2">
         <section class="rounded-2xl border border-slate-800 bg-slate-900/30 p-4 space-y-3">
           <div class="flex items-center justify-between gap-2"><h4 class="text-xs font-semibold uppercase tracking-wide text-slate-300">Dead-code candidates</h4><label class="flex items-center gap-2 text-[10px] text-slate-400"><input v-model="deadOnly" type="checkbox" class="accent-amber-500" />Show only unobserved</label></div>
-          <p class="text-[10px] text-slate-500">Absence here means no matching spans in retained telemetry; it does not prove code is unused.</p>
+          <p class="text-[10px] text-slate-500">Absence here means no matching spans in the current aggregation window; it does not prove code is unused.</p>
           <div class="max-h-80 space-y-1 overflow-auto">
             <button v-for="symbol in symbols.slice(0, 300)" :key="symbol.symbol_id" type="button" @click="openDefinition(symbol.symbol_id)" class="flex w-full items-center gap-2 rounded-lg px-2 py-2 text-left hover:bg-slate-800/50">
               <span class="min-w-0 flex-1 truncate font-mono text-[10px] text-slate-300">{{ symbol.fqn || symbol.name }}</span>

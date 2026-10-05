@@ -117,6 +117,7 @@ export interface RuntimeContainer {
   environment: string;
   service: string;
   commit_sha: string;
+  revision_id?: string | null;
   image_id: string;
   state: 'running' | 'stopped';
   updated_at: string;
@@ -126,6 +127,7 @@ export interface RuntimeProjectRecord {
   project_id: string;
   can_remove?: boolean;
   commit_sha: string | null;
+  revision_id: string | null;
   state: string;
   updated_at?: string;
   containers: RuntimeContainer[];
@@ -142,11 +144,16 @@ export interface RuntimeTelemetrySettings {
   connection: string | null;
   retention_hours: number;
   retention_days: number;
-  recording_ratio: number;
-  recording_percent: number;
+  aggregation_retention_days: number;
+  collector_baseline_ratio: number;
+  collector_baseline_percent: number;
   otlp_endpoint: string | null;
   scope: string;
   sample_window: string;
+  p95_window_hours: number;
+  refresh_minutes: number;
+  aggregation_retention_hours: number;
+  updated_at: string | null;
 }
 
 export interface RuntimeTelemetryData {
@@ -159,17 +166,23 @@ export interface RuntimeTelemetryData {
   error_spans: number;
   last_seen: string | null;
   symbols: RuntimeSymbolMetric[];
-  routes: Array<{ method: string; route: string; requests: number; last_seen: string | null }>;
-  tables: Array<{ table_name: string; operation: string; operations: number; last_seen: string | null }>;
+  routes: Array<{ method: string; route: string; route_id: string; requests: number; p95_ms: number; failures: number; error_rate: number; last_seen: string | null }>;
+  tables: Array<{ table_id: string; table_name: string; operation: string; operations: number; last_seen: string | null }>;
   callers: Array<{ symbol_id: string; caller_symbol_id: string; calls: number }>;
-  symbol_routes: Array<{ symbol_id: string; route: string; calls: number }>;
-  symbol_tables: Array<{ symbol_id: string; table_name: string; calls: number }>;
+  symbol_routes: Array<{ symbol_id: string; route_id: string; method?: string; route: string; calls: number }>;
+  symbol_tables: Array<{ symbol_id: string; table_id: string; table_name: string; calls: number }>;
   retention_hours: number;
+  sampled_trace_retention_hours: number;
+  unmatched_spans: number;
+  unmatched_percent: number;
+  aggregation_window_hours: number;
+  pipeline_health: string;
 }
 
 export interface RuntimeSnapshotData {
   project_id: string;
   commit_sha: string;
+  revision_id: string | null;
   snapshot: Record<string, any>;
   definitions: ExtractedDefinition[];
   symbol_index_available?: boolean;
@@ -281,6 +294,7 @@ export interface IndexedSymbolProject {
   definitions: number;
   project_id?: string | null;
   commit_sha?: string | null;
+  revision_id?: string | null;
 }
 
 export interface ExtractedDefinition {

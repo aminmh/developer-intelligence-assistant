@@ -1,4 +1,3 @@
-import { Parser } from '@dbml/core';
 import { DagreLayout } from '@antv/layout';
 import type {
   ErdField,
@@ -84,11 +83,12 @@ const addRef = (refs: ErdRef[], ref: Omit<ErdRef, 'id'>) => {
   if (!refs.some((item) => item.id === id)) refs.push({ id, ...ref });
 };
 
-function fromDbml(input: string, source: ErdSourceMetadata): NormalizedSchema {
+async function fromDbml(input: string, source: ErdSourceMetadata): Promise<NormalizedSchema> {
   const warnings: ErdWarning[] = [];
   const tables: ErdTable[] = [];
   const refs: ErdRef[] = [];
   try {
+    const { Parser } = await import('@dbml/core');
     const raw = Parser.parseDBMLToJSONv2(input) as any;
     for (const rawTable of raw.tables || []) {
       const name = identifier(rawTable.name);
@@ -311,7 +311,7 @@ function applyRefs(tables: ErdTable[], refs: ErdRef[], warnings: ErdWarning[]) {
   }
 }
 
-export function parseSchemaInput(input: string | unknown, options: TransformOptions = {}): NormalizedSchema {
+export async function parseSchemaInput(input: string | unknown, options: TransformOptions = {}): Promise<NormalizedSchema> {
   const source = options.source || {};
   const format = options.format || (typeof input === 'string' && /^\s*(table|ref|project|enum)\b/im.test(input) ? 'dbml' : typeof input === 'string' ? 'sql' : 'json');
   if (format === 'dbml') return fromDbml(String(input), source);

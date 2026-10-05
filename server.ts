@@ -742,6 +742,21 @@ async function startServer() {
     }
   });
 
+  app.get('/api/runtime/projects/:projectId/revisions/:revisionId', async (req, res) => {
+    try {
+      const user = (res.locals as any).authUser;
+      if (!authIsBootstrapAdmin(user) && !authRoleFor(user, req.params.projectId)) {
+        return res.status(403).json({ detail: 'Project access denied.' });
+      }
+      const url = new URL(`${PYTHON_API_URL}/telemetry/runtime/projects/${encodeURIComponent(req.params.projectId)}/revisions/${encodeURIComponent(req.params.revisionId)}`);
+      const pyRes = await fetch(url, { headers: { 'X-Internal-Secret': INTERNAL_SECRET } });
+      const data = await pyRes.json().catch(() => ({ detail: 'Runtime revision is unavailable.' }));
+      return res.status(pyRes.status).json(data);
+    } catch {
+      return res.status(502).json({ detail: 'Runtime revision is unavailable.' });
+    }
+  });
+
   app.get('/api/runtime/settings', async (_req, res) => {
     try {
       const pyRes = await fetch(`${PYTHON_API_URL}/telemetry/runtime/settings`, {
@@ -751,6 +766,59 @@ async function startServer() {
       return res.status(pyRes.status).json(data);
     } catch {
       return res.status(502).json({ detail: 'Runtime settings are unavailable.' });
+    }
+  });
+
+  app.put('/api/runtime/settings', async (req, res) => {
+    try {
+      const pyRes = await fetch(`${PYTHON_API_URL}/telemetry/runtime/settings`, {
+        method: 'PUT',
+        headers: { 'X-Internal-Secret': INTERNAL_SECRET, 'Content-Type': 'application/json' },
+        body: JSON.stringify(req.body ?? {}),
+      });
+      const data = await pyRes.json().catch(() => ({ detail: 'Runtime settings could not be saved.' }));
+      return res.status(pyRes.status).json(data);
+    } catch {
+      return res.status(502).json({ detail: 'Runtime settings could not be saved.' });
+    }
+  });
+
+  app.get('/api/runtime/events', async (_req, res) => {
+    const controller = new AbortController();
+    res.on('close', () => controller.abort());
+    try {
+      const upstream = await fetch(`${PYTHON_API_URL}/telemetry/runtime/events`, {
+        headers: { 'X-Internal-Secret': INTERNAL_SECRET, Accept: 'text/event-stream' },
+        signal: controller.signal,
+      });
+      if (!upstream.ok || !upstream.body) {
+        return res.status(upstream.status || 502).json({ detail: 'Runtime update stream is unavailable.' });
+      }
+      res.status(200);
+      res.set({
+        'Content-Type': 'text/event-stream',
+        'Cache-Control': 'no-cache, no-transform',
+        Connection: 'keep-alive',
+        'X-Accel-Buffering': 'no',
+      });
+      res.flushHeaders();
+      const reader = upstream.body.getReader();
+      try {
+        while (!controller.signal.aborted) {
+          const { done, value } = await reader.read();
+          if (done) break;
+          if (!res.write(Buffer.from(value))) await new Promise<void>((resolve) => res.once('drain', resolve));
+        }
+      } finally {
+        await reader.cancel().catch(() => undefined);
+        if (!res.writableEnded) res.end();
+      }
+    } catch (error: any) {
+      if (!controller.signal.aborted && !res.headersSent) {
+        res.status(502).json({ detail: error?.message || 'Runtime update stream is unavailable.' });
+      } else if (!res.writableEnded) {
+        res.end();
+      }
     }
   });
 
