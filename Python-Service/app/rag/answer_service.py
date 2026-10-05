@@ -63,7 +63,6 @@ class AnswerService:
         query = self._query(body)
         doc_chunks = self._doc_chunks(body)
         results, contexts, extra_context = self._ground(body, query, trace_id)
-        del results
         preview_mode = self._resolve_preview_mode(body)
         preview_only = preview_mode == "gate" and body.get("preview") is True
         profile = self._resolve_profile(body, query)

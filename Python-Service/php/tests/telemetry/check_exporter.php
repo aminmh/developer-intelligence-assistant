@@ -40,7 +40,8 @@ check(SymbolId::normalize(['kind' => 'table', 'connection' => 'mysql', 'name' =>
 $invalidPath = $chunker->chunkSource('<?php $f = function () {};', '/tmp/source.php')[0]->toMetadata();
 check(!isset($invalidPath['symbol_id']) && isset($invalidPath['symbol_identity_error']), 'Absolute closure path should report identity error');
 $anonymous = $chunker->chunkSource('<?php $c = new class { public function run() {} };', 'src/source.php');
-check(isset($anonymous[0]->toMetadata()['symbol_identity_error']), 'Anonymous class method should report identity error');
+$anonymousMethod = $anonymous[0]->toMetadata();
+check(!isset($anonymousMethod['symbol_id']) && !isset($anonymousMethod['symbol_identity_error']), 'Anonymous class method should remain AST-only');
 $nested = $chunker->chunkSource('<?php namespace App; class Service { public function run() { function helper() {} $a = fn() => 1; } }', 'src/nested.php');
 $nestedIds = array_values(array_filter(array_map(static fn($chunk) => $chunk->toMetadata()['symbol_id'] ?? null, $nested)));
 check(in_array('\\App\\helper', $nestedIds, true), 'Nested named function incorrectly became a method');

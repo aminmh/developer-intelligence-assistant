@@ -68,6 +68,24 @@ def test_scoping_and_ambiguous_closures():
     assert storage_id("ab", "a" * 40, "c") != storage_id("a", "a" * 40, "bc")
 
 
+def test_anonymous_class_methods_are_indexed_without_runtime_identity():
+    chunk = {
+        "node_type": "method",
+        "type": "method",
+        "class_fqn": "(anonymous)",
+        "method_name": "up",
+        "fq_symbol_name": "(anonymous)::up",
+        "file_path": "database/migrations/2025_01_01_000001_create_users_table.php",
+        "start_line": 11,
+        "end_line": 24,
+    }
+
+    assert from_chunk(chunk) is None
+    prepared = prepare_chunks([chunk], Snapshot("pizza", "a" * 40, "c" * 64))[0]
+    assert prepared["symbol_id"] is None
+    assert prepared["storage_id"]
+
+
 @pytest.mark.parametrize("kwargs", [
     {"commit_sha": "abcdef"}, {"project_id": "../escape"}, {"dirty": True},
     {"source_archive_sha256": "bad"}, {"telemetry_schema_version": "future"},

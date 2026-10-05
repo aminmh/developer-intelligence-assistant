@@ -9,14 +9,23 @@ from typing import Any
 
 from telemetry.symbols import from_chunk, relative_path
 
-SCHEMA_VERSION = "indexer-telemetry-v1"
+SCHEMA_VERSION = "indexer-telemetry-v2"
 
 
 def validate_scope(project_id: str, commit_sha: str) -> None:
-    if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,127}", project_id):
-        raise ValueError("Invalid project ID")
+    validate_project_id(project_id)
     if not re.fullmatch(r"(?:[0-9a-f]{40}|[0-9a-f]{64})", commit_sha):
         raise ValueError("Commit must be a full lowercase Git SHA")
+
+
+def validate_project_id(project_id: str) -> None:
+    if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,127}", project_id):
+        raise ValueError("Invalid project ID")
+
+
+def validate_revision_id(revision_id: str) -> None:
+    if not re.fullmatch(r"rev_[0-9a-f]{32}", revision_id):
+        raise ValueError("Invalid immutable revision ID")
 
 
 def storage_id(project_id: str, commit_sha: str, symbol_id: str) -> str:

@@ -55,6 +55,75 @@ MATCH (s:PhpSymbol {id: id})
 RETURN collect(s.id) AS ids
 """
 
+_RUNTIME_SYMBOLS_CYPHER = """
+UNWIND $data AS row
+MATCH (s:PhpSymbol {collection: $collection, symbol_id: row.symbol_id})
+SET s.runtime_count_rolling = row.count, s.runtime_p95_ms = row.p95_ms,
+    s.runtime_error_rate = row.error_rate, s.runtime_last_seen = row.last_seen,
+    s.runtime_window_hours = row.window_hours
+RETURN count(*) AS count
+"""
+
+_RUNTIME_CALLS_CYPHER = """
+OPTIONAL MATCH (caller:PhpSymbol {collection: $collection})-[old:RUNTIME_CALLS]->(callee:PhpSymbol {collection: $collection})
+WHERE NOT any(row IN $data WHERE row.caller_symbol_id = caller.symbol_id AND row.symbol_id = callee.symbol_id)
+WITH collect(old) AS stale
+FOREACH (edge IN stale | DELETE edge)
+WITH 1 AS ready
+UNWIND $data AS row
+MATCH (caller:PhpSymbol {collection: $collection, symbol_id: row.caller_symbol_id})
+MATCH (callee:PhpSymbol {collection: $collection, symbol_id: row.symbol_id})
+MERGE (caller)-[r:RUNTIME_CALLS]->(callee)
+SET r.calls = row.calls, r.last_seen = row.last_seen,
+    r.window_hours = row.window_hours
+RETURN count(*) AS count
+"""
+
+_RUNTIME_ROUTES_CYPHER = """
+OPTIONAL MATCH (route:RuntimeRoute {collection: $collection})-[old:HANDLED_BY]->(method:PhpSymbol {collection: $collection})
+WHERE NOT any(row IN $data WHERE row.id = route.id AND row.symbol_id = method.symbol_id)
+WITH collect(old) AS stale_edges
+FOREACH (edge IN stale_edges | DELETE edge)
+WITH 1 AS ready
+OPTIONAL MATCH (stale:RuntimeRoute {collection: $collection})
+WHERE NOT stale.id IN [row IN $data | row.id]
+WITH collect(stale) AS stale_routes
+FOREACH (route IN stale_routes | DETACH DELETE route)
+WITH 1 AS ready
+UNWIND $data AS row
+MERGE (route:RuntimeRoute {id: row.id})
+SET route += row.properties
+WITH route, row
+MATCH (method:PhpSymbol {collection: $collection, symbol_id: row.symbol_id})
+MERGE (route)-[r:HANDLED_BY]->(method)
+SET r.calls = row.calls, r.p95_ms = row.p95_ms,
+    r.error_rate = row.error_rate, r.last_seen = row.last_seen,
+    r.window_hours = row.window_hours
+RETURN count(*) AS count
+"""
+
+_RUNTIME_TABLES_CYPHER = """
+OPTIONAL MATCH (method:PhpSymbol {collection: $collection})-[old:QUERIES]->(table:RuntimeTable {collection: $collection})
+WHERE NOT any(row IN $data WHERE row.id = table.id AND row.symbol_id = method.symbol_id)
+WITH collect(old) AS stale_edges
+FOREACH (edge IN stale_edges | DELETE edge)
+WITH 1 AS ready
+OPTIONAL MATCH (stale:RuntimeTable {collection: $collection})
+WHERE NOT stale.id IN [row IN $data | row.id]
+WITH collect(stale) AS stale_tables
+FOREACH (table IN stale_tables | DETACH DELETE table)
+WITH 1 AS ready
+UNWIND $data AS row
+MERGE (table:RuntimeTable {id: row.id})
+SET table += row.properties
+WITH table, row
+MATCH (method:PhpSymbol {collection: $collection, symbol_id: row.symbol_id})
+MERGE (method)-[r:QUERIES]->(table)
+SET r.operations = row.operations, r.operation = row.operation,
+    r.last_seen = row.last_seen, r.window_hours = row.window_hours
+RETURN count(*) AS count
+"""
+
 
 def node_key(kind: str, fqn: str, name: str | None = None) -> str:
     """Deterministic node id — stable across re-index runs."""
@@ -152,6 +221,29 @@ class InspectionGraph:
             )
             return set()
 
+    def upsert_runtime_facts(self, collection: str, facts: dict[str, list[dict[str, Any]]]) -> dict[str, int]:
+        """Upsert rolling facts into the commit-scoped PhpSymbol snapshot graph."""
+        store = self._get_store()
+        if store is None:
+            return {"symbols": 0, "calls": 0, "routes": 0, "tables": 0}
+        counts = {"symbols": 0, "calls": 0, "routes": 0, "tables": 0}
+        statements = {
+            "symbols": _RUNTIME_SYMBOLS_CYPHER,
+            "calls": _RUNTIME_CALLS_CYPHER,
+            "routes": _RUNTIME_ROUTES_CYPHER,
+            "tables": _RUNTIME_TABLES_CYPHER,
+        }
+        for name, statement in statements.items():
+            rows = facts.get(name, [])
+            if not rows and name == "symbols":
+                continue
+            try:
+                result = store.structured_query(statement, param_map={"collection": collection, "data": rows})
+                counts[name] = _first_count(result)
+            except Exception as exc:  # noqa: BLE001 — runtime graph projection is retryable
+                get_exception_logger().error("Runtime graph %s upsert failed: %s", name, exc)
+        return counts
+
 
 def _first_count(result: Any) -> int:
     """structured_query returns list[dict]; count(*) is the first column."""
@@ -203,6 +295,10 @@ def node_properties(
 def canonical_definition(record: dict[str, Any]) -> str | None:
     if record.get("kind") == "method":
         owner, _, method = str(record.get("fqn") or "").rpartition("::")
+        # Anonymous migration classes expose up()/down() AST chunks but have
+        # no stable class identity to use in the runtime symbol graph.
+        if not owner:
+            return None
         return normalize({"kind": "method", "class": owner, "method": method})
     if record.get("kind") == "function":
         return normalize({"kind": "function", "name": record.get("fqn")})

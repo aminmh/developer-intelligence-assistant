@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import sys
 import types
 
@@ -50,4 +51,10 @@ def test_answer_service_frames_stream_events(monkeypatch):
     monkeypatch.setitem(sys.modules, "rag.answer", module)
 
     events = list(_service().stream({"query": "stream"}))
-    assert events == ['data: {"type": "done", "answer": "ok"}\n\n']
+    assert len(events) == 1
+    assert events[0].startswith("data: ")
+    assert events[0].endswith("\n\n")
+    payload = json.loads(events[0][len("data: "):])
+    assert payload["type"] == "done"
+    assert payload["answer"] == "ok"
+    assert payload["matches"][0]["chunk"]["fileName"] == "App\\User::find"

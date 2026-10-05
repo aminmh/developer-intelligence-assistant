@@ -80,7 +80,10 @@ def normalize(value: dict[str, Any]) -> str:
 def from_chunk(chunk: dict[str, Any]) -> str | None:
     kind = chunk.get("node_type") or chunk.get("type")
     if kind == "method":
-        return normalize({"kind": kind, "class": chunk.get("class_fqn") or chunk.get("parent_symbol") or chunk.get("class"),
+        class_name = chunk.get("class_fqn") or chunk.get("parent_symbol") or chunk.get("class")
+        if class_name == "(anonymous)":
+            return None
+        return normalize({"kind": kind, "class": class_name,
                           "method": chunk.get("method_name") or chunk.get("name")})
     if kind == "function":
         name = chunk.get("function_name") or chunk.get("name")

@@ -130,8 +130,9 @@ class TestGlobalAndOffModes:
 
     def test_any_project_route_without_context_is_global(self):
         for route in ("code_explain", "code_refactor", "debug",
-                      "sandbox_analyze", "structure_analyze", "index_code"):
+                      "structure_analyze", "index_code"):
             assert _plan(route)["mode"] == "global"
+        assert _plan("sandbox_analyze")["mode"] == "off"
 
     def test_unknown_route_without_context_is_off(self):
         plan = _plan("future_route")

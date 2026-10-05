@@ -7,7 +7,7 @@ def test_index_chunks_background_writes_terminal_status(monkeypatch, tmp_path):
     monkeypatch.setattr(module.settings, "download_dir", str(tmp_path))
     monkeypatch.setattr(
         "index.llamaindex_layer.CodePropertyGraph",
-        type("Graph", (), {"ingest": lambda self, chunks, collection: {"ingested": len(chunks)}}),
+        type("Graph", (), {"ingest": lambda self, chunks, collection, **kwargs: {"ingested": len(chunks)}}),
     )
 
     service = module.IndexingService()
@@ -25,8 +25,11 @@ def test_parse_and_index_cleans_workspace_and_delegates(monkeypatch, tmp_path):
 
     calls = []
     service = module.IndexingService()
-    monkeypatch.setattr(service, "index_chunks_background", lambda *args: calls.append(args))
+    monkeypatch.setattr(service, "index_chunks_background", lambda *args, **kwargs: calls.append((args, kwargs)))
     service.parse_and_index("job-2", "project.zip", b"zip", "project")
 
-    assert calls == [("job-2", "project.zip", [{"name": "x"}], "project")]
+    assert calls == [(
+        ("job-2", "project.zip", [{"name": "x"}], "project"),
+        {"snapshot": None},
+    )]
     assert not (tmp_path / "parse_job-2").exists()

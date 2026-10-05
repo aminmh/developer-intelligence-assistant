@@ -1,9 +1,11 @@
 # Phase 0 telemetry attributes and privacy contract
 
-Schema: `indexer-telemetry-v1`. OpenTelemetry Semantic Conventions are pinned
-to v1.44.0 for Phase 0; upgrade only with an explicit schema review. The
-Collector image is pinned independently. The indexer attributes below are
-project-specific and do not claim to be upstream semantic conventions.
+Schema: `indexer-telemetry-v1` describes the Phase 0 synthetic canary fixture.
+The application Runtime Collector uses `indexer-telemetry-v2`. OpenTelemetry
+Semantic Conventions are pinned to v1.44.0 for Phase 0; upgrade only with an
+explicit schema review. The Collector image is pinned independently. Indexer
+attributes are project-specific and do not claim to be upstream semantic
+conventions.
 
 ## Required identity
 
@@ -19,12 +21,9 @@ Every future exported span must carry these resource attributes:
 | `container.image.name` | string | image name without registry credentials |
 | `container.image.id` | string | immutable image digest when available |
 
-Every span attributed to source must include `indexer.project_id` (provisioned
-project slug), `vcs.ref.head.revision` (full lowercase commit SHA),
-`indexer.symbol_id` (canonical readable ID), `indexer.dirty` (boolean), and
-`indexer.schema.version` (`indexer-telemetry-v1`). Dirty work is approximate
-evidence associated with a nearby clean commit and must never update that
-commit's exact snapshot. No unobserved event carries forward to a new commit.
+The Phase 0 synthetic canary uses `vcs.ref.head.revision` and
+`indexer.schema.version=indexer-telemetry-v1`. Do not use that identity for
+application Runtime telemetry.
 
 HTTP, database, messaging, and exception fields should follow the pinned
 conventions only when explicitly allow-listed by the signal schema. Semantic
@@ -65,13 +64,15 @@ spans stay in ClickHouse; runtime aggregates do not write to Neo4j or Qdrant.
 
 Start the separate local runtime pipeline with `docker compose --profile runtime
 up -d` from `api/`. It accepts OTLP/HTTP at loopback port 24318, applies an
-allow-list, and stores raw traces in ClickHouse. Application instrumentation
-must send the required identity attributes above plus reviewed `http.route`,
-`http.request.method`, `db.operation.name`, and `indexer.db.table` attributes.
-The runtime summary joins `indexer.symbol_id` to the exact immutable `PhpSymbol`
-snapshot for the same project and full commit SHA. Caller, route, and table
-relationships are inferred only within a shared trace ID; they remain
-observations, not static graph edges.
+allow-list, and stores raw traces in ClickHouse. Application resource attributes
+must include `indexer.project_id`, the immutable `indexer.revision_id` assigned
+by Developer Assistant, `indexer.code_dirty=false`, and
+`indexer.schema.version=indexer-telemetry-v2`. The PHP installer selects a ready
+revision and verifies the target Git checkout internally. Git SHA remains
+internal source/deployment provenance. The runtime summary joins
+`indexer.symbol_id` to the exact immutable `PhpSymbol` snapshot for that
+project/revision. Caller, route, and table relationships are inferred only
+within a shared trace ID; they remain observations, not static graph edges.
 
 The local pipeline is a development receiver and has no remote authentication.
 Do not expose port 24318 outside the local host. Host deployment reports still

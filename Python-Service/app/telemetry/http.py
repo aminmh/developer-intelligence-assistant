@@ -7,10 +7,11 @@ import os
 import re
 
 from fastapi import APIRouter, HTTPException, Request
+from fastapi.responses import StreamingResponse
 from starlette.concurrency import run_in_threadpool
 
 from telemetry.registry import SnapshotConflict, SnapshotRegistry, default_registry
-from telemetry.snapshot import validate_scope
+from telemetry.snapshot import validate_project_id, validate_revision_id, validate_scope
 from telemetry.source import MAX_ARCHIVE_BYTES, SourceService
 
 router = APIRouter(prefix="/telemetry/projects", tags=["Telemetry snapshots"])
@@ -66,11 +67,52 @@ def runtime_snapshot(project_id: str, commit_sha: str, request: Request) -> dict
         raise HTTPException(422, "Invalid project snapshot identity") from exc
 
 
+@runtime_router.get("/projects/{project_id}/revisions/{revision_id}")
+def runtime_revision(project_id: str, revision_id: str, request: Request) -> dict:
+    authorize_internal(request)
+    try:
+        validate_project_id(project_id)
+        validate_revision_id(revision_id)
+        from telemetry.runtime import project_runtime_by_revision
+        return project_runtime_by_revision(project_id, revision_id, get_registry())
+    except ValueError as exc:
+        raise HTTPException(422, "Invalid indexed revision identity") from exc
+    except KeyError as exc:
+        raise HTTPException(404, "Indexed revision was not found") from exc
+
+
 @runtime_router.get("/settings")
 def runtime_settings(request: Request) -> dict:
     authorize_internal(request)
     from telemetry.runtime import telemetry_settings
-    return telemetry_settings()
+    return telemetry_settings(get_registry())
+
+
+@runtime_router.put("/settings")
+async def update_runtime_settings(request: Request) -> dict:
+    authorize_internal(request)
+    try:
+        payload = await request.json()
+        from telemetry.runtime import telemetry_settings, update_runtime_sampling_policy
+        update_runtime_sampling_policy(payload, get_registry())
+    except ValueError as exc:
+        raise HTTPException(422, str(exc)) from exc
+    try:
+        from telemetry.policy import refresh_sampling_policy
+        policy = await run_in_threadpool(refresh_sampling_policy, get_registry())
+    except Exception:
+        policy = {"pending": True}
+    return {**telemetry_settings(get_registry()), "policy_refresh": policy}
+
+
+@runtime_router.get("/events")
+async def runtime_update_events(request: Request):
+    authorize_internal(request)
+    from telemetry.events import runtime_events
+    return StreamingResponse(
+        runtime_events(), media_type="text/event-stream",
+        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+    )
 
 
 def check_request(request: Request, project_id: str, commit_sha: str) -> None:
@@ -180,6 +222,8 @@ async def report_deployments(request: Request) -> dict:
         if registry.has_event(host_id, event_id):
             return {"accepted": True, "duplicate": True}
     pairs = registry.report_deployments(host_id, clean, inventory=inventory)
+    from telemetry.events import publish_runtime_update
+    publish_runtime_update()
     queued = sum(registry.queue_if_deployable(project, commit) for project, commit in pairs)
     if event_id is not None:
         registry.mark_event(host_id, event_id)

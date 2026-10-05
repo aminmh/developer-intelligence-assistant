@@ -114,12 +114,35 @@ async def lifespan(app: FastAPI):
         from telemetry.source import SourceService
         service = SourceService(default_registry(), storage)
         next_maintenance = 0.0
+        next_aggregation = 0.0
+        next_policy_refresh = 0.0
         while True:
             try:
                 worked = await asyncio.to_thread(service.process_one)
-                if time.monotonic() >= next_maintenance:
+                now = time.monotonic()
+                if now >= next_maintenance:
                     await asyncio.to_thread(service.expire_unmatched)
-                    next_maintenance = time.monotonic() + 3600
+                    next_maintenance = now + 3600
+                if now >= next_policy_refresh:
+                    try:
+                        from telemetry.policy import refresh_sampling_policy
+                        from telemetry.runtime import runtime_sampling_policy
+                        policy = runtime_sampling_policy(default_registry())
+                        await asyncio.to_thread(refresh_sampling_policy, default_registry())
+                        next_policy_refresh = now + max(60, policy["refresh_minutes"] * 60)
+                    except Exception as exc:
+                        logging.getLogger(__name__).warning("Runtime sampling policy refresh failed: %s", exc)
+                        next_policy_refresh = now + 60
+                if now >= next_aggregation:
+                    try:
+                        from telemetry.aggregation import aggregate_runtime
+                        result = await asyncio.to_thread(aggregate_runtime)
+                        if result.get("processed", 0) > 0:
+                            from telemetry.events import publish_runtime_update
+                            publish_runtime_update()
+                    except Exception as exc:
+                        logging.getLogger(__name__).warning("Runtime aggregation cycle failed: %s", exc)
+                    next_aggregation = now + 300
                 if not worked:
                     await asyncio.sleep(2)
             except asyncio.CancelledError:

@@ -76,17 +76,18 @@ class _FakeHttpResponse:
 
 
 def test_health_llm_never_raises_when_unconfigured(monkeypatch):
-    main = _load_main()
+    _load_main()
+    from routers import system
 
     def refuse(*args, **kwargs):
         raise OSError("connection refused")
 
-    monkeypatch.setattr(main.urllib.request, "urlopen", refuse)
-    monkeypatch.setattr(main.settings, "ollama_base_url", "http://localhost:11434")
-    monkeypatch.setattr(main.settings, "llm_remote_base_url", "")
-    monkeypatch.setattr(main.settings, "llm_remote_api_key", "")
+    monkeypatch.setattr(system.urllib.request, "urlopen", refuse)
+    monkeypatch.setattr(system.settings, "ollama_base_url", "http://localhost:11434")
+    monkeypatch.setattr(system.settings, "llm_remote_base_url", "")
+    monkeypatch.setattr(system.settings, "llm_remote_api_key", "")
 
-    result = main.health_llm()
+    result = system.health_llm()
 
     assert "local" in result
     assert "remote" in result
@@ -97,7 +98,8 @@ def test_health_llm_never_raises_when_unconfigured(monkeypatch):
 
 
 def test_health_llm_reports_reachable_providers(monkeypatch):
-    main = _load_main()
+    _load_main()
+    from routers import system
     captured = {}
 
     def fake_urlopen(req, timeout=2.0):
@@ -108,13 +110,13 @@ def test_health_llm_reports_reachable_providers(monkeypatch):
             return _FakeHttpResponse({"models": [{"name": "a"}, {"name": "b"}]})
         return _FakeHttpResponse({"data": [{"id": "qwen2.5-32b"}]})
 
-    monkeypatch.setattr(main.urllib.request, "urlopen", fake_urlopen)
-    monkeypatch.setattr(main.settings, "ollama_base_url", "http://localhost:11434/")
-    monkeypatch.setattr(main.settings, "llm_remote_base_url", "http://localhost:8000/")
-    monkeypatch.setattr(main.settings, "llm_remote_api_key", "sekret")
-    monkeypatch.setattr(main.settings, "runpod_api_key", "")
+    monkeypatch.setattr(system.urllib.request, "urlopen", fake_urlopen)
+    monkeypatch.setattr(system.settings, "ollama_base_url", "http://localhost:11434/")
+    monkeypatch.setattr(system.settings, "llm_remote_base_url", "http://localhost:8000/")
+    monkeypatch.setattr(system.settings, "llm_remote_api_key", "sekret")
+    monkeypatch.setattr(system.settings, "runpod_api_key", "")
 
-    result = main.health_llm()
+    result = system.health_llm()
 
     assert result["local"]["configured"] is True
     assert result["local"]["reachable"] is True
@@ -128,7 +130,8 @@ def test_health_llm_reports_reachable_providers(monkeypatch):
 
 
 def test_health_llm_sends_no_auth_when_key_unset(monkeypatch):
-    main = _load_main()
+    _load_main()
+    from routers import system
     captured = {}
 
     def fake_urlopen(req, timeout=5.0):
@@ -136,13 +139,13 @@ def test_health_llm_sends_no_auth_when_key_unset(monkeypatch):
         captured["auth"] = req.get_header("Authorization")
         return _FakeHttpResponse({"data": [{"id": "qwen2.5-32b"}]})
 
-    monkeypatch.setattr(main.urllib.request, "urlopen", fake_urlopen)
-    monkeypatch.setattr(main.settings, "ollama_base_url", "http://localhost:11434/")
-    monkeypatch.setattr(main.settings, "llm_remote_base_url", "http://localhost:8000/")
-    monkeypatch.setattr(main.settings, "llm_remote_api_key", "")
-    monkeypatch.setattr(main.settings, "runpod_api_key", "")
+    monkeypatch.setattr(system.urllib.request, "urlopen", fake_urlopen)
+    monkeypatch.setattr(system.settings, "ollama_base_url", "http://localhost:11434/")
+    monkeypatch.setattr(system.settings, "llm_remote_base_url", "http://localhost:8000/")
+    monkeypatch.setattr(system.settings, "llm_remote_api_key", "")
+    monkeypatch.setattr(system.settings, "runpod_api_key", "")
 
-    result = main.health_llm()
+    result = system.health_llm()
 
     assert result["remote"]["configured"] is True
     assert result["remote"]["reachable"] is True

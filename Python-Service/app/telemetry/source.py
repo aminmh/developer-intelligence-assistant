@@ -4,6 +4,7 @@ from __future__ import annotations
 import hashlib
 import fcntl
 import io
+import logging
 from pathlib import Path
 import stat
 import tempfile
@@ -112,7 +113,13 @@ class SourceService:
                         or result.get("graph_nodes") != count or result.get("embed_fails", 0)):
                     raise RuntimeError("Incomplete snapshot indexing")
                 self.registry.finish_job(project_id, commit_sha, success=True)
-            except Exception:
+            except Exception as exc:
+                logging.getLogger(__name__).error(
+                    "Snapshot indexing failed for project=%s revision_id=%s: %s",
+                    project_id,
+                    current.get("revision_id"),
+                    str(exc)[:500],
+                )
                 self.registry.finish_job(project_id, commit_sha, success=False)
             finally:
                 fcntl.flock(lock, fcntl.LOCK_UN)

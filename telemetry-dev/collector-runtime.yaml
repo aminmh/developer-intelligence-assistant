@@ -1,5 +1,4 @@
-# Local receiver for project spans. This separate pipeline preserves the
-# synthetic-only Phase 0 sanitizer in collector.yaml.
+# Runtime pipelines are separate from the synthetic-only Phase 0 collector.
 receivers:
   otlp:
     protocols:
@@ -16,10 +15,10 @@ processors:
     traces:
       span:
         - 'Len(span.links) > 0'
-        - 'attributes["indexer.project_id"] == nil'
-        - 'attributes["vcs.ref.head.revision"] == nil'
-        - 'attributes["indexer.dirty"] != false'
-        - 'attributes["indexer.schema.version"] != "indexer-telemetry-v1"'
+        - 'resource.attributes["indexer.project_id"] == nil'
+        - 'resource.attributes["indexer.revision_id"] == nil'
+        - 'resource.attributes["indexer.code_dirty"] != false'
+        - 'resource.attributes["indexer.schema.version"] != "indexer-telemetry-v2"'
       spanevent:
         - 'true'
   transform/runtime_privacy:
@@ -27,7 +26,7 @@ processors:
     trace_statements:
       - context: resource
         statements:
-          - 'keep_keys(attributes, ["service.name", "service.version", "service.namespace", "deployment.environment.name", "container.id", "container.image.name", "container.image.id"])'
+          - 'keep_keys(attributes, ["service.name", "service.version", "service.namespace", "deployment.environment.name", "container.id", "container.image.name", "container.image.id", "indexer.project_id", "indexer.revision_id", "vcs.ref.head.revision", "indexer.code_dirty", "indexer.schema.version"])'
       - context: scope
         statements:
           - 'limit(attributes, 0, [])'
@@ -35,26 +34,84 @@ processors:
           - 'set(version, "1")'
       - context: span
         statements:
-          - 'keep_keys(attributes, ["indexer.project_id", "vcs.ref.head.revision", "indexer.symbol_id", "indexer.dirty", "indexer.schema.version", "http.route", "http.request.method", "db.system.name", "db.operation.name", "db.collection.name", "indexer.db.table"])'
+          - 'keep_keys(attributes, ["indexer.symbol_id", "indexer.caller.symbol_id", "indexer.route_id", "indexer.table_ids", "indexer.db.table", "indexer.command.name", "indexer.exception.type", "indexer.exception.normalized_message", "indexer.exception.top_frames", "http.route", "http.request.method", "db.system.name", "db.operation.name", "db.collection.name", "server.address", "url.scheme", "rpc.system", "messaging.system"])'
           - 'set(name, "runtime.span")'
           - 'set(status.message, "")'
           - 'set(trace_state, "")'
-  probabilistic_sampler/runtime_recording:
-    sampling_percentage: ${env:TELEMETRY_RECORDING_PERCENT:-100}
-    hash_seed: 42
+  p95policy/runtime:
+    policy_file: /var/lib/devassistant/runtime/sampling-policy.json
+  tail_sampling/runtime:
+    decision_wait: 5s
+    num_traces: 50000
+    expected_new_traces_per_sec: 100
+    policies:
+      - name: retain-errors
+        type: status_code
+        status_code:
+          status_codes: [ERROR]
+      - name: retain-over-p95
+        type: string_attribute
+        string_attribute:
+          key: indexer.sampling.slow
+          values: ["true"]
+      - name: baseline-sample
+        type: probabilistic
+        probabilistic:
+          sampling_percentage: ${env:TELEMETRY_RECORDING_PERCENT:-10}
   batch:
     timeout: 1s
     send_batch_size: 128
 
+connectors:
+  spanmetrics/runtime:
+    aggregation_temporality: AGGREGATION_TEMPORALITY_CUMULATIVE
+    metrics_flush_interval: 60s
+    resource_metrics_key_attributes:
+      - service.name
+      - indexer.project_id
+      - indexer.revision_id
+    dimensions:
+      - name: indexer.symbol_id
+      - name: indexer.caller.symbol_id
+
 exporters:
-  clickhouse:
+  clickhouse/full:
+    endpoint: tcp://telemetry-clickhouse:9000
+    username: ${env:TELEMETRY_CLICKHOUSE_USER}
+    password: ${env:TELEMETRY_CLICKHOUSE_PASSWORD}
+    database: telemetry
+    traces_table_name: otel_spans_full
+    create_schema: true
+    ttl: ${env:TELEMETRY_AGGREGATION_RETENTION_HOURS:-168}h
+    async_insert: false
+    sending_queue:
+      enabled: true
+      queue_size: 512
+    retry_on_failure:
+      enabled: true
+      max_elapsed_time: 30s
+  clickhouse/sampled:
     endpoint: tcp://telemetry-clickhouse:9000
     username: ${env:TELEMETRY_CLICKHOUSE_USER}
     password: ${env:TELEMETRY_CLICKHOUSE_PASSWORD}
     database: telemetry
     traces_table_name: otel_traces
     create_schema: true
-    ttl: ${env:TELEMETRY_RETENTION_HOURS}h
+    ttl: ${env:TELEMETRY_RETENTION_HOURS:-168}h
+    async_insert: false
+    sending_queue:
+      enabled: true
+      queue_size: 512
+    retry_on_failure:
+      enabled: true
+      max_elapsed_time: 30s
+  clickhouse/metrics:
+    endpoint: tcp://telemetry-clickhouse:9000
+    username: ${env:TELEMETRY_CLICKHOUSE_USER}
+    password: ${env:TELEMETRY_CLICKHOUSE_PASSWORD}
+    database: telemetry
+    create_schema: true
+    ttl: ${env:TELEMETRY_RETENTION_HOURS:-168}h
     async_insert: false
     sending_queue:
       enabled: true
@@ -70,7 +127,15 @@ service:
     metrics:
       level: none
   pipelines:
-    traces:
+    traces/full:
       receivers: [otlp]
-      processors: [memory_limiter, filter/runtime_privacy, transform/runtime_privacy, probabilistic_sampler/runtime_recording, batch]
-      exporters: [clickhouse]
+      processors: [memory_limiter, filter/runtime_privacy, transform/runtime_privacy, batch]
+      exporters: [clickhouse/full, spanmetrics/runtime]
+    traces/sampled:
+      receivers: [otlp]
+      processors: [memory_limiter, filter/runtime_privacy, transform/runtime_privacy, p95policy/runtime, tail_sampling/runtime, batch]
+      exporters: [clickhouse/sampled]
+    metrics/runtime:
+      receivers: [spanmetrics/runtime]
+      processors: [memory_limiter, batch]
+      exporters: [clickhouse/metrics]

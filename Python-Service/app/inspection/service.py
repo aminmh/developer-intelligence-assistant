@@ -235,6 +235,8 @@ class InspectionService:
             "class_const", "function", "const",
         ):
             return None
+        if kind == "method" and canonical_definition(record) is None:
+            return None
         fqn = record.get("fqn", "")
         name = record.get("name", "")
         return {

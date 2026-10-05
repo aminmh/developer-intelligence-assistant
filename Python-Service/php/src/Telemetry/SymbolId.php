@@ -29,7 +29,9 @@ final class SymbolId
     {
         $kind = $chunk['node_type'] ?? $chunk['type'] ?? '';
         if ($kind === 'method') {
-            return self::normalize(['kind' => 'method', 'class' => $chunk['class_fqn'] ?? $chunk['parent_symbol'] ?? null,
+            $class = $chunk['class_fqn'] ?? $chunk['parent_symbol'] ?? null;
+            if ($class === '(anonymous)') return null;
+            return self::normalize(['kind' => 'method', 'class' => $class,
                 'method' => $chunk['method_name'] ?? $chunk['name'] ?? null]);
         }
         if ($kind === 'function') {

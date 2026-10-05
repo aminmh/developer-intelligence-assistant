@@ -23,8 +23,11 @@ services:
       TELEMETRY_CLICKHOUSE_PASSWORD: ${TELEMETRY_CLICKHOUSE_PASSWORD:-telemetry-local-dev-only}
       TELEMETRY_CLICKHOUSE_DATABASE: ${TELEMETRY_CLICKHOUSE_DATABASE:-telemetry}
       TELEMETRY_CLICKHOUSE_TABLE: ${TELEMETRY_CLICKHOUSE_TABLE:-otel_traces}
+      TELEMETRY_CLICKHOUSE_FULL_TABLE: ${TELEMETRY_CLICKHOUSE_FULL_TABLE:-otel_spans_full}
       TELEMETRY_RETENTION_HOURS: ${TELEMETRY_RETENTION_HOURS:-168}
-      TELEMETRY_RECORDING_PERCENT: ${TELEMETRY_RECORDING_PERCENT:-100}
+      TELEMETRY_AGGREGATION_RETENTION_HOURS: ${TELEMETRY_AGGREGATION_RETENTION_HOURS:-168}
+      TELEMETRY_RECORDING_PERCENT: ${TELEMETRY_RECORDING_PERCENT:-10}
+      TELEMETRY_SAMPLING_POLICY_PATH: /var/lib/devassistant/runtime/sampling-policy.json
       TELEMETRY_OTLP_ENDPOINT: ${TELEMETRY_OTLP_ENDPOINT:-http://host.docker.internal:24318}
       TELEMETRY_CI_PROJECT_TOKENS: ${TELEMETRY_CI_PROJECT_TOKENS:-}
       TELEMETRY_HOST_SCOPES: ${TELEMETRY_HOST_SCOPES:-}
@@ -38,6 +41,7 @@ services:
       - "./Python-Service/app/:/app"
       - "./Python-Service/logs/:/app/logs"
       - "./Python-Service/php/:/opt/php-cli"
+      - telemetry-policy-data:/var/lib/devassistant/runtime
     depends_on:
       minio:
         condition: service_healthy
@@ -197,16 +201,21 @@ services:
     networks: [telemetry_runtime]
 
   telemetry-collector-runtime:
-    image: ghcr.io/open-telemetry/opentelemetry-collector-releases/opentelemetry-collector-contrib:0.136.0
+    build:
+      context: ./telemetry-dev
+      dockerfile: Dockerfile.collector-runtime
+    image: devassistant/otelcol-runtime:0.136.0-phase3
     profiles: [runtime]
     command: ["--config=/etc/otelcol/collector-runtime.yaml"]
     environment:
       TELEMETRY_CLICKHOUSE_USER: ${TELEMETRY_CLICKHOUSE_USER:-telemetry}
       TELEMETRY_CLICKHOUSE_PASSWORD: ${TELEMETRY_CLICKHOUSE_PASSWORD:-telemetry-local-dev-only}
       TELEMETRY_RETENTION_HOURS: ${TELEMETRY_RETENTION_HOURS:-168}
-      TELEMETRY_RECORDING_PERCENT: ${TELEMETRY_RECORDING_PERCENT:-100}
+      TELEMETRY_AGGREGATION_RETENTION_HOURS: ${TELEMETRY_AGGREGATION_RETENTION_HOURS:-168}
+      TELEMETRY_RECORDING_PERCENT: ${TELEMETRY_RECORDING_PERCENT:-10}
     volumes:
       - ./telemetry-dev/collector-runtime.yaml:/etc/otelcol/collector-runtime.yaml:ro
+      - telemetry-policy-data:/var/lib/devassistant/runtime:ro
     ports:
       - "127.0.0.1:24318:4318"
     depends_on:
@@ -223,6 +232,7 @@ volumes:
   qdrant-data:
   neo4j-data:
   telemetry-runtime-data:
+  telemetry-policy-data:
   telemetry-caddy-data:
   telemetry-caddy-config:
 

@@ -15,7 +15,7 @@ def test_workspace_prepare_failure_is_preserved(monkeypatch):
         "_call",
         lambda *args, **kwargs: {"detail": "File not found: missing.zip"},
     )
-    ctx = SimpleNamespace(job_id="job-1", filename="missing.zip")
+    ctx = SimpleNamespace(job_id="job-1", filename="missing.zip", upload_session_id=None)
 
     with pytest.raises(RuntimeError, match="Workspace preparation failed for missing.zip") as error:
         runner._prepare_workspace(ctx)

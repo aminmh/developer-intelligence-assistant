@@ -10,15 +10,19 @@ Canonical strings are defined by `Python-Service/php/tests/telemetry/README.md`
 and its shared golden fixtures. PHP `App\Telemetry\SymbolId` and Python
 `telemetry.symbols` own normalization. `symbol_id` is readable; graph storage IDs
 are SHA256 of compact UTF-8 JSON `[project_id, commit_sha, symbol_id]`. Qdrant
-uses UUID5(URL namespace, graph storage ID). Neither concatenation nor filename
-is a snapshot identity. Non-runtime class/property summaries use a separate
-typed internal key and do not advertise a runtime `symbol_id`.
+uses UUID5(URL namespace, graph storage ID). These Git-SHA-based IDs are internal
+source collection keys, not the telemetry join identity. Neither concatenation
+nor filename is a snapshot identity. Non-runtime class/property summaries use a
+separate typed internal key and do not advertise a runtime `symbol_id`.
 
 The project ID is a provisioned, case-sensitive ASCII slug (1–128 characters).
-Commit SHA is full lowercase Git SHA1 (40) or SHA256 (64). Archive checksum is
+Commit SHA is full lowercase Git SHA1 (40) or SHA256 (64), retained as internal
+source and deployment provenance. The registry assigns each source snapshot a
+globally unique immutable `revision_id` when it is registered; Runtime
+telemetry joins on `(project_id, revision_id, symbol_id)`. Archive checksum is
 SHA256 of the exact uploaded ZIP bytes. Snapshot metadata carries
 `project_id`, `commit_sha`, `source_archive_sha256`, `dirty=false`, and
-`telemetry_schema_version=indexer-telemetry-v1` in graph/vector properties and
+`telemetry_schema_version=indexer-telemetry-v2` in graph/vector properties and
 the SQLite registry. AST schema version remains separate.
 
 Two declarations with one canonical ID fail indexing; they are never merged.
@@ -120,24 +124,29 @@ the optional raw telemetry stack does not replace the app's data stores.
 The opt-in `runtime` profile in the main `docker-compose.yml` adds ClickHouse
 and a privacy-filtering OTLP Collector while reusing the existing Neo4j service.
 The Python API reads scoped aggregates from ClickHouse through
-`GET /telemetry/runtime/projects/{project_id}/snapshots/{commit_sha}`; the
+`GET /telemetry/runtime/projects/{project_id}/revisions/{revision_id}`; the
 authenticated Express API exposes the same data under `/api/runtime`. The
 internal routes require `RAG_CALLBACK_SECRET`, and browser access is scoped by
 the persisted project membership role. `/api/runtime/settings` is admin-only.
 Raw spans remain in ClickHouse. The read path only joins symbol IDs to the
 immutable `sym_snapshot_<scope>` symbol collection; it does not write telemetry
-edges into Neo4j or Qdrant.
+edges into Neo4j or Qdrant. The commit-addressed snapshot status route remains
+for source-upload provenance and Docker-only container views.
 
 For local development, configure the `TELEMETRY_*` variables from
 `.env.example`, keep `TELEMETRY_RECORDING_RATIO` and
 `TELEMETRY_RECORDING_PERCENT` aligned, then start `docker compose --profile
 runtime up -d`. Configure `TELEMETRY_RECORDING_PERCENT` to set sampling.
-Application exporters must send allow-listed identity and route
-/ database fields to `http://localhost:24318/v1/traces` from the host, or
+Application exporters must send `indexer.project_id`, the generated
+`indexer.revision_id`, `indexer.code_dirty=false`, schema version
+`indexer-telemetry-v2`, and allow-listed route/database fields to
+`http://localhost:24318/v1/traces` from the host, or
 `http://host.docker.internal:24318/v1/traces` from a Docker container. No
 application method instrumentation is bundled: each PHP application must emit
-canonical symbol IDs and the current full commit SHA. The Runtime tab reports
-no observations until those spans arrive. Do not expose this local receiver to
+canonical symbol IDs and use the selected ready revision ID. The installer
+checks the source checkout against the selected indexed snapshot internally;
+developers do not need to enter its Git SHA. The Runtime tab reports no
+observations until matching spans arrive. Do not expose this local receiver to
 the network; production ingress and exporter credentials need separate
 deployment configuration.
 
@@ -155,8 +164,8 @@ labels `com.devassistant.telemetry.enabled=true` and
 `com.devassistant.telemetry.project=<project_id>`. The helper verifies that its
 Docker context uses a local socket or named pipe, rechecks both labels before
 each mutation, and reports partial failures. The dialog identifies the
-project and local container count. Continue remains unavailable until every
-required item is checked.
+project and local container count. Checklist boxes are optional
+acknowledgements; pressing Continue approves the full operation.
 
 The action removes containers only. It leaves images, volumes, networks,
 remote containers, Runtime snapshots and spans, source archives, indexes,

@@ -7,10 +7,11 @@ import json
 import os
 from pathlib import Path
 import sqlite3
+from uuid import uuid4
 from datetime import datetime, timedelta, timezone
 from typing import Iterator
 
-from telemetry.snapshot import Snapshot, storage_id, validate_scope
+from telemetry.snapshot import Snapshot, storage_id, validate_project_id, validate_revision_id, validate_scope
 
 
 # The host reporter reconciles every 60 seconds. Treat a running row without a
@@ -28,13 +29,27 @@ class SnapshotRegistry:
         self.root = Path(root)
         self.root.mkdir(parents=True, exist_ok=True)
         with self._connect() as db:
+            db.execute("BEGIN IMMEDIATE")
             db.execute("""CREATE TABLE IF NOT EXISTS snapshots (
                 project_id TEXT NOT NULL, commit_sha TEXT NOT NULL,
                 checksum TEXT NOT NULL, metadata TEXT NOT NULL,
                 snapshot_key TEXT NOT NULL UNIQUE,
                 state TEXT NOT NULL, archive_key TEXT, error_code TEXT,
+                revision_id TEXT,
                 updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
                 PRIMARY KEY(project_id, commit_sha))""")
+            columns = {row[1] for row in db.execute("PRAGMA table_info(snapshots)")}
+            if "revision_id" not in columns:
+                db.execute("ALTER TABLE snapshots ADD COLUMN revision_id TEXT")
+            missing_revisions = db.execute(
+                "SELECT project_id, commit_sha FROM snapshots WHERE revision_id IS NULL OR revision_id=''"
+            ).fetchall()
+            for row in missing_revisions:
+                db.execute(
+                    "UPDATE snapshots SET revision_id=? WHERE project_id=? AND commit_sha=?",
+                    ("rev_" + uuid4().hex, row["project_id"], row["commit_sha"]),
+                )
+            db.execute("CREATE UNIQUE INDEX IF NOT EXISTS snapshots_revision_id_unique ON snapshots(revision_id)")
             db.execute("""CREATE TABLE IF NOT EXISTS deployments (
                 host_id TEXT NOT NULL, container_id TEXT NOT NULL,
                 project_id TEXT NOT NULL, environment TEXT NOT NULL, service TEXT NOT NULL,
@@ -51,11 +66,38 @@ class SnapshotRegistry:
                 state TEXT NOT NULL DEFAULT 'queued', attempts INTEGER NOT NULL DEFAULT 0,
                 updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
                 PRIMARY KEY(project_id, commit_sha))""")
+            db.execute("""CREATE TABLE IF NOT EXISTS runtime_settings (
+                setting_key TEXT PRIMARY KEY, setting_value TEXT NOT NULL,
+                updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP)""")
 
     def _connect(self) -> sqlite3.Connection:
         db = sqlite3.connect(self.root / "snapshots.sqlite", timeout=30)
         db.row_factory = sqlite3.Row
         return db
+
+    def get_runtime_setting(self, key: str) -> dict | None:
+        with self._connect() as db:
+            row = db.execute(
+                "SELECT setting_value, updated_at FROM runtime_settings WHERE setting_key=?",
+                (key,),
+            ).fetchone()
+        if row is None:
+            return None
+        try:
+            value = json.loads(row["setting_value"])
+        except (TypeError, ValueError):
+            return None
+        return {"value": value, "updated_at": row["updated_at"]}
+
+    def set_runtime_setting(self, key: str, value: dict) -> None:
+        encoded = json.dumps(value, separators=(",", ":"), sort_keys=True)
+        with self._connect() as db:
+            db.execute(
+                """INSERT INTO runtime_settings(setting_key, setting_value) VALUES (?, ?)
+                   ON CONFLICT(setting_key) DO UPDATE SET setting_value=excluded.setting_value,
+                   updated_at=CURRENT_TIMESTAMP""",
+                (key, encoded),
+            )
 
     @contextmanager
     def lock(self, project_id: str, commit_sha: str) -> Iterator[None]:
@@ -77,10 +119,32 @@ class SnapshotRegistry:
         if row is None:
             return {"project_id": project_id, "commit_sha": commit_sha, "state": "awaiting_source"}
         metadata = json.loads(row["metadata"])
-        result = {**metadata, "state": row["state"], "error_code": row["error_code"],
+        result = {**metadata, "revision_id": row["revision_id"], "state": row["state"], "error_code": row["error_code"],
                   "updated_at": row["updated_at"]}
         if row["state"] == "ready":
             result["collection_name"] = "snapshot_" + storage_id(project_id, commit_sha, "")
+        return result
+
+    def get_by_revision_id(self, project_id: str, revision_id: str) -> dict | None:
+        validate_project_id(project_id)
+        validate_revision_id(revision_id)
+        with self._connect() as db:
+            row = db.execute(
+                "SELECT * FROM snapshots WHERE project_id=? AND revision_id=?",
+                (project_id, revision_id),
+            ).fetchone()
+        if row is None:
+            return None
+        metadata = json.loads(row["metadata"])
+        result = {
+            **metadata,
+            "revision_id": row["revision_id"],
+            "state": row["state"],
+            "error_code": row["error_code"],
+            "updated_at": row["updated_at"],
+        }
+        if row["state"] == "ready":
+            result["collection_name"] = "snapshot_" + storage_id(project_id, row["commit_sha"], "")
         return result
 
     def archive_key(self, project_id: str, commit_sha: str) -> str | None:
@@ -97,11 +161,13 @@ class SnapshotRegistry:
     def runtime_projects(self) -> list[dict]:
         """List source snapshots with their current, allow-listed deployments."""
         with self._connect() as db:
-            snapshots = db.execute("""SELECT project_id, commit_sha, state, updated_at, metadata
+            snapshots = db.execute("""SELECT project_id, commit_sha, revision_id, state, updated_at, metadata
                 FROM snapshots ORDER BY project_id, updated_at DESC""").fetchall()
-            deployments = db.execute("""SELECT container_id, project_id, environment, service,
-                commit_sha, image_id, state, updated_at FROM deployments
-                WHERE state='running' AND datetime(updated_at) >= datetime('now', ?) ORDER BY project_id, service, container_id""",
+            deployments = db.execute("""SELECT d.container_id, d.project_id, d.environment, d.service,
+                d.commit_sha, s.revision_id, d.image_id, d.state, d.updated_at FROM deployments d
+                LEFT JOIN snapshots s ON s.project_id=d.project_id AND s.commit_sha=d.commit_sha
+                WHERE d.state='running' AND datetime(d.updated_at) >= datetime('now', ?)
+                ORDER BY d.project_id, d.service, d.container_id""",
                 (f"-{ACTIVE_DEPLOYMENT_MAX_AGE_SECONDS} seconds",)).fetchall()
         active: dict[str, list[dict]] = {}
         for row in deployments:
@@ -113,6 +179,7 @@ class SnapshotRegistry:
             matching = [item for item in containers if item["commit_sha"] == row["commit_sha"]]
             result.append({
                 **metadata,
+                "revision_id": row["revision_id"],
                 "state": row["state"],
                 "updated_at": row["updated_at"],
                 "containers": matching,
@@ -128,6 +195,7 @@ class SnapshotRegistry:
             result.append({
                 "project_id": project_id,
                 "commit_sha": None,
+                "revision_id": None,
                 "state": "awaiting_source",
                 "containers": containers,
                 "running_containers": 0,
@@ -138,12 +206,14 @@ class SnapshotRegistry:
         return result
 
     def running_deployments(self, project_id: str, commit_sha: str | None = None) -> list[dict]:
-        query = """SELECT container_id, project_id, environment, service, commit_sha,
-            image_id, state, updated_at FROM deployments WHERE project_id=? AND state='running'
-            AND datetime(updated_at) >= datetime('now', ?)"""
+        query = """SELECT d.container_id, d.project_id, d.environment, d.service, d.commit_sha,
+            s.revision_id, d.image_id, d.state, d.updated_at FROM deployments d
+            LEFT JOIN snapshots s ON s.project_id=d.project_id AND s.commit_sha=d.commit_sha
+            WHERE d.project_id=? AND d.state='running'
+            AND datetime(d.updated_at) >= datetime('now', ?)"""
         values: tuple = (project_id, f"-{ACTIVE_DEPLOYMENT_MAX_AGE_SECONDS} seconds")
         if commit_sha:
-            query += " AND commit_sha=?"
+            query += " AND d.commit_sha=?"
             values += (commit_sha,)
         query += " ORDER BY environment, service, container_id"
         with self._connect() as db:
@@ -246,9 +316,10 @@ class SnapshotRegistry:
             if row and row["checksum"] != snapshot.source_archive_sha256:
                 raise SnapshotConflict("This clean snapshot already has a different source archive")
             db.execute("""INSERT OR IGNORE INTO snapshots
-                (project_id, commit_sha, checksum, metadata, snapshot_key, state) VALUES (?, ?, ?, ?, ?, 'awaiting_source')""",
+                (project_id, commit_sha, checksum, metadata, snapshot_key, state, revision_id)
+                VALUES (?, ?, ?, ?, ?, 'awaiting_source', ?)""",
                 (snapshot.project_id, snapshot.commit_sha, snapshot.source_archive_sha256,
-                 json.dumps(snapshot.metadata()), snapshot.key))
+                 json.dumps(snapshot.metadata()), snapshot.key, "rev_" + uuid4().hex))
 
     def is_ready_collection(self, collection: str) -> bool:
         with self._connect() as db:

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Interactive local Docker Runtime setup using native OS dialogs."""
+"""Interactive local Docker Runtime setup using Gum in a terminal."""
 from __future__ import annotations
 
 import hashlib
@@ -10,7 +10,6 @@ import shutil
 import subprocess
 import sys
 import tempfile
-import platform
 import base64
 import hmac
 import threading
@@ -36,7 +35,8 @@ COMMIT = re.compile(r"^(?:[0-9a-f]{40}|[0-9a-f]{64})$")
 HELPER_HOST = "127.0.0.1"
 HELPER_PORT = 47831
 HELPER_COMMAND_TIMEOUT_SECONDS = 600
-NATIVE_DIALOG_TIMEOUT_SECONDS = 180
+TERMINAL_OPERATION_START_TIMEOUT_SECONDS = 30
+TERMINAL_OPERATION_TIMEOUT_SECONDS = 3600
 LOCAL_DOCKER_COMMAND_TIMEOUT_SECONDS = 120
 HELPER_STATE: dict = {"status": "idle", "message": "Ready", "updated": time.time()}
 HELPER_LOCK = threading.Lock()
@@ -47,8 +47,8 @@ class ApprovalCancelled(RuntimeError):
     """The operator explicitly cancelled a grouped approval dialog."""
 
 
-class NativeDialogError(RuntimeError):
-    """A native dialog could not be executed."""
+class GumError(RuntimeError):
+    """A Gum prompt or its terminal could not be run."""
 
 
 def state_path() -> Path:
@@ -190,7 +190,7 @@ def serve_helper() -> None:
                 HELPER_USED_TOKENS.add(token_id)
                 action = ("cleanup" if self.path == "/cleanup" else
                           "remove local containers" if self.path == "/remove-project-containers" else "setup")
-                HELPER_STATE.update(status="starting", message=f"Starting Runtime {action} dialogs", updated=time.time())
+                HELPER_STATE.update(status="starting", message=f"Starting Runtime {action} in Gum", updated=time.time())
                 for key in ("project_id", "removed_count", "target_count", "already_absent", "failed_containers"):
                     HELPER_STATE.pop(key, None)
                 if project_id is not None:
@@ -198,8 +198,7 @@ def serve_helper() -> None:
             def execute() -> None:
                 with HELPER_LOCK: HELPER_STATE.update(status="running", message=f"Runtime {action} is running", updated=time.time())
                 try:
-                    result = (cleanup() if action == "cleanup" else
-                              remove_project_containers(project_id) if project_id is not None else setup(project_name))
+                    result = run_helper_operation(action, project_name=project_name, project_id=project_id)
                     outcome = result.get("status", "complete") if isinstance(result, dict) else "complete"
                     message = result.get("message", f"Runtime {action} completed") if isinstance(result, dict) else f"Runtime {action} completed"
                     with HELPER_LOCK:
@@ -217,7 +216,7 @@ def serve_helper() -> None:
             return self._json(202, {"status": "starting"})
 
         def do_GET(self) -> None:
-            if self.path == "/health": return self._json(200, {"ok": True, "api_version": 19})
+            if self.path == "/health": return self._json(200, {"ok": True, "api_version": 22})
             if self.path not in {"/status", "/setup-state"}: return self._json(404, {"detail": "Not found."})
             if self.path == "/setup-state":
                 if not self._authorized(unscoped=True):
@@ -271,250 +270,109 @@ def write_state(value: dict | None) -> None:
             os.unlink(temp_name)
 
 
-def dialog_backend() -> tuple[str, str]:
-    """Return the native dialog executable, or fail with an actionable error."""
-    if sys.platform == "darwin":
-        if shutil.which("swift"):
-            return "mac", shutil.which("swift")
-    elif os.name == "nt":
-        if shutil.which("powershell") or shutil.which("pwsh"):
-            return "windows", shutil.which("powershell") or shutil.which("pwsh")
-    elif sys.platform.startswith("linux"):
-        for name in ("zenity", "kdialog"):
-            if shutil.which(name):
-                return name, name
-    system = platform.system() or sys.platform
-    required = {"Darwin": "Swift command-line tools", "Windows": "PowerShell", "Linux": "Zenity or KDialog"}.get(system, "a supported OS dialog facility")
-    raise RuntimeError(f"Runtime setup does not support {system}, or its native dialog tool is unavailable (requires {required}).")
+def gum_executable() -> str:
+    executable = shutil.which("gum")
+    if not executable:
+        raise GumError("Runtime setup requires Gum. Install Gum, then restart the Runtime helper with 'just up'.")
+    return executable
 
 
-def macos_native_dialog_script(kind: str, title: str, text: str, *, default: str = "", choices: list[str] | None = None) -> str:
-    """Build native AppKit dialogs without interpolating user text as source code."""
-    if kind not in {"confirm", "entry", "checklist", "multiselect", "radiolist"}:
-        raise ValueError(f"Unsupported macOS Runtime dialog type: {kind}")
-    payload = base64.b64encode(json.dumps({
-        "kind": kind,
-        "title": title,
-        "text": text,
-        "default": default,
-        "choices": choices or [],
-        "radio_mode": kind == "radiolist",
-        "require_all": kind == "checklist",
-    }, ensure_ascii=False).encode("utf-8")).decode("ascii")
-    script = r'''import AppKit
-import Foundation
-import Darwin
-
-let encodedPayload = "__PAYLOAD__"
-let payloadData = Data(base64Encoded: encodedPayload)!
-let dialog = try! JSONSerialization.jsonObject(with: payloadData) as! [String: Any]
-let kind = dialog["kind"] as! String
-let title = dialog["title"] as! String
-let message = dialog["text"] as! String
-let defaultAnswer = dialog["default"] as! String
-let choices = dialog["choices"] as! [String]
-let radioMode = dialog["radio_mode"] as! Bool
-let requireAll = dialog["require_all"] as! Bool
-
-final class ChecklistTarget: NSObject {
-    let boxes: [NSButton]
-    let continueButton: NSButton
-    let radioMode: Bool
-    let requireAll: Bool
-
-    init(boxes: [NSButton], continueButton: NSButton, radioMode: Bool, requireAll: Bool) {
-        self.boxes = boxes
-        self.continueButton = continueButton
-        self.radioMode = radioMode
-        self.requireAll = requireAll
-    }
-
-    @objc func selectionChanged(_ sender: NSButton) {
-        if radioMode && sender.state == .on {
-            for box in boxes where box !== sender { box.state = .off }
-        }
-        let checked = boxes.filter { $0.state == .on }.count
-        if radioMode {
-            continueButton.isEnabled = checked == 1
-        } else if requireAll {
-            continueButton.isEnabled = !boxes.isEmpty && checked == boxes.count
-        } else {
-            continueButton.isEnabled = checked > 0
-        }
-    }
-}
-
-let alert = NSAlert()
-alert.messageText = title
-alert.informativeText = message
-alert.alertStyle = kind == "confirm" ? .warning : .informational
-alert.addButton(withTitle: "Cancel")
-alert.addButton(withTitle: "Continue")
-let continueButton = alert.buttons[1]
-continueButton.isEnabled = kind == "confirm" || kind == "entry"
-
-var entryField: NSTextField? = nil
-var boxes: [NSButton] = []
-var checklistTarget: ChecklistTarget? = nil
-if kind == "entry" {
-    let field = NSTextField(string: defaultAnswer)
-    field.setFrameSize(NSSize(width: 420, height: 24))
-    entryField = field
-    alert.accessoryView = field
-    alert.window.initialFirstResponder = field
-} else if kind == "checklist" || kind == "multiselect" || kind == "radiolist" {
-    boxes = choices.enumerated().map { index, choice in
-        let box = radioMode
-            ? NSButton(radioButtonWithTitle: choice, target: nil, action: nil)
-            : NSButton(checkboxWithTitle: choice, target: nil, action: nil)
-        box.tag = index
-        return box
-    }
-    let target = ChecklistTarget(boxes: boxes, continueButton: continueButton,
-                                 radioMode: radioMode, requireAll: requireAll)
-    checklistTarget = target
-    for box in boxes {
-        box.target = target
-        box.action = #selector(ChecklistTarget.selectionChanged(_:))
-    }
-    let contentHeight = max(28, choices.count * 30)
-    let listHeight = min(contentHeight, 360)
-    let stack = NSStackView()
-    stack.orientation = .vertical
-    stack.alignment = .leading
-    stack.distribution = .fill
-    stack.spacing = 4
-    stack.frame = NSRect(x: 0, y: 0, width: 560, height: CGFloat(contentHeight))
-    for box in boxes {
-        box.setFrameSize(NSSize(width: 548, height: 26))
-        stack.addArrangedSubview(box)
-    }
-    let scrollView = NSScrollView(frame: NSRect(x: 0, y: 0, width: 560, height: CGFloat(listHeight)))
-    scrollView.documentView = stack
-    scrollView.hasVerticalScroller = contentHeight > listHeight
-    scrollView.drawsBackground = false
-    alert.accessoryView = scrollView
-}
-
-let application = NSApplication.shared
-application.setActivationPolicy(.accessory)
-application.activate(ignoringOtherApps: true)
-let response = withExtendedLifetime(checklistTarget) { alert.runModal() }
-if response == .alertSecondButtonReturn {
-    switch kind {
-    case "confirm": print("yes")
-    case "entry": print(entryField?.stringValue ?? "")
-    default:
-        let selected = boxes.enumerated().compactMap { index, box in box.state == .on ? String(index + 1) : nil }
-        print(selected.joined(separator: ","))
-    }
-} else {
-    print("__DEVASSISTANT_DIALOG_CANCELLED__")
-}
-'''
-    return script.replace("__PAYLOAD__", payload)
+def terminal_device() -> str:
+    return "CON" if os.name == "nt" else "/dev/tty"
 
 
-def _dialog(kind: str, title: str, text: str, *, default: str = "", choices: list[str] | None = None) -> str | None:
-    backend, executable = dialog_backend()
-    script_input = None
-    if backend == "mac":
-        swift = executable if Path(executable).name == "swift" else shutil.which("swift")
-        if not swift:
-            raise NativeDialogError("macOS native dialogs require the Swift command-line tool.")
-        args = [swift, "-"]
-        script_input = macos_native_dialog_script(kind, title, text, default=default, choices=choices)
-    elif backend == "zenity":
-        if kind == "confirm":
-            args = [executable, "--question", "--title", title, "--text", text, "--icon=dialog-warning"]
-        elif kind == "entry":
-            args = [executable, "--entry", "--title", title, "--text", text, "--entry-text", default, "--icon=dialog-information"]
-        else:
-            args = [executable, "--list", "--checklist" if kind in {"checklist", "multiselect"} else "--radiolist", "--title", title, "--text", text, "--column", "Select", "--column", "Choice", "--print-column", "2", "--separator", ",", "--icon=dialog-question"]
-            for i, choice in enumerate(choices or []): args.extend(["TRUE" if i == 0 and kind == "radiolist" else "FALSE", choice])
-    elif backend == "kdialog":
-        if kind == "confirm": args = [executable, "--icon", "dialog-warning", "--yesno", text, "--title", title]
-        elif kind == "entry": args = [executable, "--icon", "dialog-information", "--title", title, "--inputbox", text, default]
-        elif kind in {"checklist", "multiselect"}: args = [executable, "--icon", "dialog-question", "--title", title, "--checklist", text, *sum(([str(i + 1), c, "off"] for i, c in enumerate(choices or [])), [])]
-        else: args = [executable, "--icon", "dialog-question", "--title", title, "--menu", text, *sum(([str(i + 1), c] for i, c in enumerate(choices or [])), [])]
-    else:
-        # Windows Forms gives standard native message, input, and checked-list dialogs.
-        payload = base64.b64encode(json.dumps({"kind":kind,"title":title,"text":text,"default":default,"choices":choices or []}).encode()).decode()
-        script = "$ErrorActionPreference='Stop'; Add-Type -AssemblyName System.Windows.Forms; $d=[Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('"+payload+"'))|ConvertFrom-Json;"
-        script += "if($d.kind -eq 'confirm'){if([Windows.Forms.MessageBox]::Show($d.text,$d.title,'YesNo','Warning') -eq 'Yes'){'yes'}}"
-        script += "elseif($d.kind -eq 'entry'){$f=New-Object Windows.Forms.Form;$f.Text=$d.title;$f.Icon=[System.Drawing.SystemIcons]::Information;$f.Width=520;$f.Height=160;$l=New-Object Windows.Forms.Label;$l.Text=$d.text;$l.AutoSize=$true;$l.Top=15;$f.Controls.Add($l);$t=New-Object Windows.Forms.TextBox;$t.Text=$d.default;$t.Top=45;$t.Width=470;$f.Controls.Add($t);$b=New-Object Windows.Forms.Button;$b.Text='Continue';$b.Top=80;$b.DialogResult='OK';$f.Controls.Add($b);$f.AcceptButton=$b;if($f.ShowDialog() -eq 'OK'){$t.Text}else{exit 2}}"
-        script += "else{$f=New-Object Windows.Forms.Form;$f.Text=$d.title;$f.Icon=[System.Drawing.SystemIcons]::Question;$f.Width=520;$f.Height=420;$l=New-Object Windows.Forms.Label;$l.Text=$d.text;$l.AutoSize=$true;$f.Controls.Add($l);if($d.kind -eq 'radiolist'){$c=New-Object Windows.Forms.ListBox;$c.SelectionMode='One'}else{$c=New-Object Windows.Forms.CheckedListBox};$c.Top=35;$c.Width=470;$c.Height=290;foreach($x in $d.choices){[void]$c.Items.Add($x)};$f.Controls.Add($c);$b=New-Object Windows.Forms.Button;$b.Text='Continue';$b.Top=335;$b.DialogResult='OK';$f.Controls.Add($b);if($d.kind -eq 'checklist' -or $d.kind -eq 'multiselect'){$b.Enabled=$false;$c.Add_ItemCheck({param($sender,$event);$count=$sender.CheckedItems.Count;if($event.NewValue -eq 'Checked'){$count++}elseif($event.NewValue -eq 'Unchecked'){$count--};if($d.kind -eq 'checklist'){$b.Enabled=($count -eq $sender.Items.Count)}else{$b.Enabled=($count -gt 0)}})};if($f.ShowDialog() -eq 'OK'){if($d.kind -eq 'radiolist'){if($null -eq $c.SelectedItem){exit 2};$c.SelectedItem}else{if(($d.kind -eq 'checklist' -and $c.CheckedItems.Count -ne $c.Items.Count) -or ($d.kind -eq 'multiselect' -and $c.CheckedItems.Count -lt 1)){exit 2};($c.CheckedItems -join ',')}}else{exit 2}}"
-        args = [executable, "-NoProfile", "-STA", "-Command", script]
+def terminal_streams() -> tuple[object, object, int | None]:
+    if sys.stdin.isatty() and sys.stderr.isatty():
+        return sys.stdin, sys.stderr, None
     try:
-        result = subprocess.run(args, input=script_input, text=True, capture_output=True,
-                                timeout=NATIVE_DIALOG_TIMEOUT_SECONDS)
+        descriptor = os.open(terminal_device(), os.O_RDWR)
+    except OSError as exc:
+        raise GumError(f"Could not open the Runtime terminal for Gum: {exc}. Run 'just up' from a terminal session.") from exc
+    if not os.isatty(descriptor):
+        os.close(descriptor)
+        raise GumError("Runtime setup needs an interactive terminal. Run 'just up' from a terminal session.")
+    return descriptor, descriptor, descriptor
+
+
+def _run_gum(args: list[str], *, timeout: int | None = None) -> subprocess.CompletedProcess:
+    """Run Gum against the host terminal, even when the helper's standard streams are redirected."""
+    command = [gum_executable(), *args]
+    terminal_input, terminal_error, owned_descriptor = terminal_streams()
+    try:
+        return subprocess.run(command, stdin=terminal_input, stdout=subprocess.PIPE, stderr=terminal_error,
+                              text=True, encoding="utf-8", errors="replace", timeout=timeout)
     except subprocess.TimeoutExpired as exc:
-        raise NativeDialogError(
-            f"{backend} native approval dialog timed out after {NATIVE_DIALOG_TIMEOUT_SECONDS} seconds."
-        ) from exc
+        raise GumError(f"Gum prompt timed out after {timeout} seconds.") from exc
+    finally:
+        if owned_descriptor is not None:
+            os.close(owned_descriptor)
+
+
+def _gum_cancelled(result: subprocess.CompletedProcess, label: str) -> None:
+    if result.returncode in {1, 130, 143}:
+        raise ApprovalCancelled(f"Runtime {label} was cancelled in Gum.")
     if result.returncode != 0:
-        if backend == "mac":
-            detail = (result.stderr or result.stdout or "").strip()
-            if "(-128)" in detail or "User canceled" in detail or "User cancelled" in detail:
-                raise ApprovalCancelled("Runtime setup approval was cancelled in the native dialog.")
-            raise NativeDialogError(f"macOS native dialog failed: {detail or 'Swift exited unsuccessfully'}")
-        if kind in {"checklist", "multiselect", "confirm", "radiolist", "entry"} and result.returncode in {1, 2}:
-            raise ApprovalCancelled("Runtime setup approval was cancelled in the native dialog.")
-        raise NativeDialogError(f"{backend} native dialog failed: {(result.stderr or result.stdout or '').strip() or 'dialog exited unsuccessfully'}")
-    output = (result.stdout or "").strip()
-    if backend == "mac" and output == "__DEVASSISTANT_DIALOG_CANCELLED__": raise ApprovalCancelled("Runtime setup approval was cancelled in the native dialog.")
-    if kind == "confirm":
-        if backend in {"zenity", "kdialog"}: return "yes"
-        return "yes" if output.lower() in {"yes", "continue"} else None
-    return output
+        detail = (result.stderr or result.stdout or "").strip()
+        raise GumError(f"Gum {label} failed (exit {result.returncode}){': ' + detail if detail else '.'}")
+
+
+def gum_choose(items: list[str], *, title: str, multi: bool = False) -> list[str]:
+    if not items:
+        return []
+    args = ["choose", "--height", "12", "--header", title, "--cursor", "› ",
+            "--cursor.foreground", "213", "--selected.foreground", "255"]
+    if multi:
+        args.extend(["--no-limit", "--ordered", "--selected-prefix", "☑ ", "--unselected-prefix", "☐ "])
+    args.extend(items)
+    result = _run_gum(args)
+    _gum_cancelled(result, "selection")
+    return [choice for choice in result.stdout.splitlines() if choice]
+
+
+def gum_input(text: str, default: str = "") -> str:
+    args = ["input", "--header", text, "--width", "80"]
+    if default:
+        args.extend(["--value", default])
+    result = _run_gum(args)
+    _gum_cancelled(result, "input")
+    return (result.stdout or "").rstrip("\r\n")
+
+
+def gum_confirm(text: str) -> bool:
+    result = _run_gum(["confirm", "--affirmative", "Continue", "--negative", "Cancel", text])
+    if result.returncode in {130, 143}:
+        raise ApprovalCancelled("Runtime confirmation was cancelled in Gum.")
+    if result.returncode == 1:
+        return False
+    _gum_cancelled(result, "confirmation")
+    return True
 
 
 def required_approval(title: str, items: list[str], summary: str = "") -> None:
-    """Require one explicit approval covering every listed operation."""
+    """Require explicit continuation; checklist boxes are optional acknowledgements."""
     if not items:
         return
-    if sys.stdin.isatty():
-        print(f"\n{title}")
-        if summary:
-            print(summary)
-        for index, item in enumerate(items, 1):
-            print(f"  [ ] {index}. {item}")
-        answer = prompt("Type the item numbers in order (for example 1,2,3) to accept every checklist item")
-        expected = ",".join(str(index) for index in range(1, len(items) + 1))
-        normalized = ",".join(part.strip() for part in answer.split(",") if part.strip())
-        if normalized != expected:
-            raise ApprovalCancelled("Runtime setup approval was cancelled; every checklist item must be accepted.")
-        return
-    text = (summary + "\n\n" if summary else "") + "\n".join(f"☐ {item}" for item in items)
-    try:
-        output = _dialog("checklist", title, text, choices=items)
-    except ApprovalCancelled:
-        raise
-    except NativeDialogError:
-        raise
-    if output is None:
-        raise ApprovalCancelled("Runtime setup approval was cancelled in the native dialog.")
-    picked = {part.strip() for part in output.replace("\n", ",").split(",") if part.strip()}
-    if len(picked) != len(items) or not all(item in picked or str(index) in picked for index, item in enumerate(items, 1)):
-        raise ApprovalCancelled("Runtime setup approval requires every checklist item to be checked.")
+    header = f"{title} · x toggles acknowledgements; Enter continues or Esc cancels"
+    if summary:
+        header = f"{header}\n{summary}"
+    gum_choose(items, title=header, multi=True)
 
 
 def prompt(text: str, default: str | None = None) -> str:
-    if sys.stdin.isatty():
-        suffix = f" [{default}]" if default is not None else ""
-        return input(f"{text}{suffix}: ").strip() or (default or "")
-    answer = _dialog("entry", "Developer Assistant Runtime Setup", text, default=default or "")
-    if answer is None: raise RuntimeError(f"Runtime setup was cancelled at the input: {text}")
+    answer = gum_input(text, default=default or "")
     return answer.strip() or (default or "")
 
 
 def confirm(text: str) -> bool:
-    if sys.stdin.isatty(): return prompt(f"{text} [y/N]").lower() in {"y", "yes"}
-    return _dialog("confirm", "Developer Assistant Runtime Setup", text) == "yes"
+    return gum_confirm(text)
 
 
 def require_terminal() -> None:
-    if not sys.stdin.isatty(): dialog_backend()
+    gum_executable()
+    terminal_input, _, owned_descriptor = terminal_streams()
+    del terminal_input
+    if owned_descriptor is not None:
+        os.close(owned_descriptor)
 
 
 def docker_socket_group_id(socket_path: Path) -> str:
@@ -878,21 +736,11 @@ def discover_projects() -> list[dict]:
 def choose_project(projects: list[dict]) -> dict:
     if not projects:
         raise RuntimeError("Docker Compose did not report any local projects with config files")
-    if not sys.stdin.isatty():
-        answer = _dialog("radiolist", "Choose Runtime Project", "Select the Compose project whose services should report.", choices=[f"{item['name']} ({item['status']}) — {', '.join(item['files'])}" for item in projects])
-        if answer is None: raise RuntimeError("Runtime setup was cancelled while choosing a Compose project")
-        try: return projects[int(answer) - 1]
-        except (ValueError, IndexError):
-            match = next((item for item in projects if answer.startswith(str(item["name"]) + " (")), None)
-            if match: return match
-            raise RuntimeError("The native dialog returned an unknown project selection")
-    for index, item in enumerate(projects, 1):
-        print(f"  {index}. {item['name']} ({item['status']}) — {', '.join(item['files'])}")
-    while True:
-        answer = prompt("Choose a project number")
-        if answer.isdigit() and 1 <= int(answer) <= len(projects):
-            return projects[int(answer) - 1]
-        print("Enter one of the listed numbers.")
+    choices = [f"{item['name']} ({item['status']}) — {', '.join(item['files'])}" for item in projects]
+    selected = gum_choose(choices, title="Choose the Compose project whose services should report")
+    if not selected:
+        raise ApprovalCancelled("Runtime project selection was cancelled in Gum.")
+    return projects[choices.index(selected[0])]
 
 
 def update_env_scope(fingerprint: str, project_id: str, environment: str,
@@ -1015,11 +863,26 @@ def start_ingress_and_agent() -> tuple[dict, str]:
 CURRENT_SETUP: dict = {}
 
 
-def setup(project_name: str | None = None) -> None:
+def setup(project_name: str | None = None) -> dict | None:
     require_terminal()
+    saved = read_state()
+    if saved:
+        phase = saved.get("phase", "incomplete")
+        project = saved.get("project") if isinstance(saved.get("project"), dict) else {}
+        if phase == "active":
+            message = (
+                f"Runtime is already active for {saved.get('project_id')} · {saved.get('environment')} "
+                f"(Compose project {project.get('name', 'unknown')}). No changes were made. "
+                "Run just runtime-cleanup before setting up a different project."
+            )
+            print(message)
+            return {"status": "complete", "message": message}
+        raise RuntimeError(
+            f"A local Runtime recovery record is in phase '{phase}' at {state_path()}. "
+            "Run just runtime-status, then just runtime-cleanup before starting a new setup; "
+            "the recovery record was preserved."
+        )
     yaml_module()
-    if read_state():
-        raise RuntimeError(f"A local setup record already exists at {state_path()}. Run runtime status or cleanup first.")
     print("Runtime setup runs in this terminal. The browser cannot access your Docker daemon or project files.")
     print("The command requests permission before reading Docker metadata and the selected project files.")
     if not confirm("Allow this command to query Docker for local Compose project metadata?"):
@@ -1037,26 +900,16 @@ def setup(project_name: str | None = None) -> None:
     services = [line.strip() for line in (result.stdout or "").splitlines() if line.strip()]
     if not services:
         raise RuntimeError("The selected Compose project has no services")
-    if not sys.stdin.isatty():
-        answer = _dialog("multiselect", "Choose Runtime Services", "Select one or more services to track, then click Continue.", choices=services)
-        if answer is None: raise RuntimeError("Runtime setup was cancelled while choosing services")
-        picked = {part.strip() for part in answer.replace("\n", ",").replace(" ", ",").split(",") if part.strip()}
-        selected = [service for i, service in enumerate(services, 1) if service in picked or str(i) in picked]
-        if not selected: raise RuntimeError("Choose at least one service")
-    else:
-        selected = []
-    for index, service in enumerate(services, 1):
-        print(f"  {index}. {service}")
-    while sys.stdin.isatty():
-        answer = prompt("Services to track (comma-separated numbers)")
-        try:
-            indexes = sorted({int(part.strip()) for part in answer.split(",")})
-            if indexes and all(1 <= value <= len(services) for value in indexes):
-                selected = [services[value - 1] for value in indexes]
-                break
-        except ValueError:
-            pass
-        print("Choose one or more listed service numbers, separated by commas.")
+    while True:
+        picked = gum_choose(
+            services,
+            title="Choose Runtime services · x toggles; select at least one, then press Enter",
+            multi=True,
+        )
+        selected_set = set(picked)
+        selected = [service for service in services if service in selected_set]
+        if selected:
+            break
     while True:
         project_id = prompt("Runtime project ID (letters, numbers, dot, dash, underscore)")
         if SLUG.fullmatch(project_id): break
@@ -1140,7 +993,7 @@ def setup(project_name: str | None = None) -> None:
         _, fingerprint = start_ingress_and_agent()
     except Exception:
         print(f"\nSetup stopped. Recovery copies and progress are recorded at {state_path()}.")
-        print("Run ./devassistant.sh runtime status for the current setup state.")
+        print("Run just runtime-status for the current setup state.")
         raise
 
     recreate = base + ["up", "-d", "--no-deps", *selected]
@@ -1151,8 +1004,8 @@ def setup(project_name: str | None = None) -> None:
     print(f"Runtime project: {project_id} · {environment} · {commit}")
     print("Open Runtime and select the project/commit. Container reporting needs no source snapshot.")
     print("Optional: add source snapshots for code matching, and spans for routes and database activity.")
-    print("Check setup: ./devassistant.sh runtime status")
-    print("Remove setup: ./devassistant.sh runtime cleanup")
+    print("Check setup: just runtime-status")
+    print("Remove setup: just runtime-cleanup")
 
 
 def status() -> None:
@@ -1293,7 +1146,7 @@ def main() -> int:
                 "ensure-host-services": ensure_host_services, "stop-host-services": stop_host_services,
                 "helper": serve_helper}
     if len(sys.argv) != 2 or sys.argv[1] not in commands:
-        print("Usage: ./devassistant.sh runtime {setup|status|cleanup|ensure-host-services|stop-host-services|helper}", file=sys.stderr)
+        print("Usage: just {runtime-setup|runtime-status|runtime-cleanup}; internal helper commands are managed by the root justfile", file=sys.stderr)
         return 2
     try:
         commands[sys.argv[1]]()

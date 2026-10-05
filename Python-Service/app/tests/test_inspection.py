@@ -214,6 +214,35 @@ class TestServiceIndex:
         assert counts["links"] == 2
         assert counts["unlinked"] == 1
 
+    def test_snapshot_index_skips_ownerless_migration_methods(self, monkeypatch):
+        from telemetry.snapshot import Snapshot
+
+        fake = FakeGraph()
+        _service(monkeypatch, fake)
+        definitions = _fixture_defs() + [
+            {
+                "kind": "method", "name": "up", "fqn": "up",
+                "file": "/p/database/migrations/2025_01_01_create_orders.php",
+                "line": 12, "end_line": 18, "owner": "", "relations": [],
+            },
+            {
+                "kind": "method", "name": "down", "fqn": "down",
+                "file": "/p/database/migrations/2025_01_01_create_orders.php",
+                "line": 20, "end_line": 24, "owner": "", "relations": [],
+            },
+        ]
+        snapshot = Snapshot("pizza", "a" * 40, "b" * 64)
+
+        counts = InspectionService(graph=fake).index(
+            "/p", "pizza", exported={"definitions": definitions, "references": []},
+            snapshot=snapshot,
+        )
+
+        assert counts["indexed"] is True
+        assert counts["nodes"] == 8
+        assert len(fake.nodes) == 8
+        assert all("symbol_identity_error" not in node for node in fake.nodes.values())
+
     def test_def_keys_disjoint_from_chunk_ids(self):
         key = node_key("method", "App\\Services\\PaymentService::charge", "charge")
         assert len(key) == 40  # sha1 hex

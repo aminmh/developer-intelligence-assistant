@@ -55,11 +55,14 @@ qualification needs an explicit future contract.
 `arrow_function` metadata only. Other declarations return `null`. `toMetadata`
 adds `symbol_id` on success, or `symbol_identity_error` for an invalid supported
 symbol without breaking legacy chunk export. Existing `chunk_id` and
-`fq_symbol_name` remain retrieval metadata.
+`fq_symbol_name` remain retrieval metadata. Anonymous class methods have no
+canonical runtime identity, so they remain indexed as AST-only chunks without
+either a `symbol_id` or an identity error.
 
 Trait methods retain the declaring trait identity (`App\Traits\Logs::log`). An
 effective consuming-class identity is distinct (`App\Service::log`); the normalizer
 supports explicit consumer facts but the AST exporter does not resolve trait
 aliases/adaptations or invent consumer methods. Runtime trait correlation remains
 an explicit mapping task, never a silent identity merge. Anonymous class methods
-are rejected because their current synthetic class name is not a stable FQCN.
+have no runtime symbol ID because their synthetic class name is not a stable
+FQCN; source snapshots retain them under a path-and-line AST storage identity.

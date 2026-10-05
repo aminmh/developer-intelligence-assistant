@@ -101,8 +101,9 @@ class RuntimeSetupFlowTests(unittest.TestCase):
             self.path_patches(stack)
             stack.enter_context(patch.object(runtime_setup, "discover_projects", return_value=[self.project]))
             stack.enter_context(patch.object(runtime_setup, "confirm", return_value=True))
-            stack.enter_context(patch.object(runtime_setup.sys.stdin, "isatty", return_value=True))
-            stack.enter_context(patch.object(runtime_setup, "prompt", side_effect=["1,2", "dash-fixture", "development"]))
+            stack.enter_context(patch.object(runtime_setup.sys.stdin, "isatty", return_value=False))
+            stack.enter_context(patch.object(runtime_setup, "gum_choose", return_value=["php", "database"]))
+            stack.enter_context(patch.object(runtime_setup, "prompt", side_effect=["dash-fixture", "development"]))
             stack.enter_context(patch.object(runtime_setup, "run", side_effect=run))
             stack.enter_context(patch.object(runtime_setup, "required_approval", side_effect=approve))
             stack.enter_context(patch.object(runtime_setup, "start_ingress_and_agent", return_value=(runtime_setup.CURRENT_SETUP, "fingerprint")))
@@ -119,9 +120,28 @@ class RuntimeSetupFlowTests(unittest.TestCase):
         self.assertEqual(saved["compose_originals"][str(self.compose_file)], self.compose_original)
         self.assertTrue(any("--no-deps" in command for command in run_calls))
 
-    def test_setup_accepts_one_service_from_native_multiselect(self):
+    def test_setup_reports_active_record_as_success_without_overwriting_it(self):
+        state = self.initial_cleanup_state()
+
+        with ExitStack() as stack:
+            self.path_patches(stack)
+            runtime_setup.write_state(state)
+            saved_before = self.state_file.read_text()
+            stack.enter_context(patch.object(runtime_setup, "yaml_module"))
+            discover = stack.enter_context(patch.object(runtime_setup, "discover_projects"))
+            run_command = stack.enter_context(patch.object(runtime_setup, "run"))
+
+            result = runtime_setup.setup("fixture-project")
+
+        self.assertEqual(result["status"], "complete")
+        self.assertIn("already active", result["message"])
+        self.assertEqual(self.state_file.read_text(), saved_before)
+        discover.assert_not_called()
+        run_command.assert_not_called()
+
+    def test_setup_accepts_one_service_from_gum_multiselect(self):
         run_calls = []
-        dialog_calls = []
+        selection_calls = []
         approvals = []
 
         def run(args, **kwargs):
@@ -134,25 +154,27 @@ class RuntimeSetupFlowTests(unittest.TestCase):
                 stdout = ""
             return runtime_setup.subprocess.CompletedProcess(args, 0, stdout=stdout, stderr="")
 
-        def choose_services(kind, title, text, *, choices=None):
-            dialog_calls.append((kind, choices))
-            return "1"
+        def choose_services(choices, *, title, multi=False):
+            selection_calls.append((choices, title, multi))
+            return [] if len(selection_calls) == 1 else ["php"]
 
         with ExitStack() as stack:
             self.path_patches(stack)
             stack.enter_context(patch.object(runtime_setup, "discover_projects", return_value=[self.project]))
             stack.enter_context(patch.object(runtime_setup, "confirm", return_value=True))
-            stack.enter_context(patch.object(runtime_setup.sys.stdin, "isatty", return_value=False))
+            stack.enter_context(patch.object(runtime_setup.sys.stdin, "isatty", return_value=True))
+            stack.enter_context(patch.object(runtime_setup, "gum_choose", side_effect=choose_services))
             stack.enter_context(patch.object(runtime_setup, "prompt", side_effect=["dash-fixture", "development"]))
             stack.enter_context(patch.object(runtime_setup, "run", side_effect=run))
-            stack.enter_context(patch.object(runtime_setup, "_dialog", side_effect=choose_services))
             stack.enter_context(patch.object(runtime_setup, "required_approval", side_effect=lambda title, items, summary="": approvals.append(items)))
             stack.enter_context(patch.object(runtime_setup, "start_ingress_and_agent", return_value=(runtime_setup.CURRENT_SETUP, "fingerprint")))
 
             runtime_setup.setup("fixture-project")
             saved = runtime_setup.read_state()
 
-        self.assertEqual(dialog_calls, [("multiselect", ["php", "database"])])
+        self.assertEqual(selection_calls[0][0], ["php", "database"])
+        self.assertEqual(len(selection_calls), 2, "an empty selection must return to Gum selection")
+        self.assertTrue(all(call[2] for call in selection_calls))
         self.assertEqual(saved["services"], ["php"])
         self.assertEqual(len(approvals), 1)
         self.assertTrue(any("--no-deps" in command for command in run_calls))
