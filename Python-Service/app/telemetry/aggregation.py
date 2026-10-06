@@ -177,7 +177,13 @@ def _store_exception_vectors(
                 item["last_seen"] = str(row.get("Timestamp", ""))
 
         qdrant = QdrantClient(url=settings.qdrant_url)
-        collection = "runtime_exceptions"
+        # Keep Cohere signatures in their own vector space; the legacy
+        # collection may contain vectors from a different dimension/model.
+        collection = (
+            "runtime_exceptions_cohere_v5"
+            if settings.embedding_provider == "cohere"
+            else "runtime_exceptions"
+        )
         grouped_items = list(groups.values())
         existing: set[str] = set()
         if qdrant.collection_exists(collection):

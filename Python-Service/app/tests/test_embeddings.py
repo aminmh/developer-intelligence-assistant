@@ -129,6 +129,56 @@ def test_empty_input_short_circuits(monkeypatch):
     assert embeddings.embed_texts([]) == []
 
 
+def test_cohere_dispatch_uses_role_model_and_reports_batch_progress(monkeypatch):
+    monkeypatch.setattr(embeddings, "provider_name", lambda: "cohere")
+    monkeypatch.setattr(embeddings.settings, "cohere_api_key", "test-key")
+    captured = []
+
+    def fake(req, timeout=None):
+        body = json.loads(req.data.decode("utf-8"))
+        captured.append((req.full_url, req.get_header("Authorization"), body))
+        return _FakeResponse({"embeddings": {"float": [[0.1, 0.2] for _ in body["texts"]]}})
+
+    _patch_urlopen(monkeypatch, fake)
+    progress = []
+    vectors = embeddings.embed_texts(
+        [f"text-{n}" for n in range(97)],
+        input_type="search_document",
+        progress=progress.append,
+    )
+
+    assert len(vectors) == 97
+    assert [row[2]["model"] for row in captured] == ["embed-v5.0-pro", "embed-v5.0-pro"]
+    assert [len(row[2]["texts"]) for row in captured] == [96, 1]
+    assert all(row[0] == "https://api.cohere.com/v2/embed" for row in captured)
+    assert all(row[1] == "Bearer test-key" for row in captured)
+    assert all(row[2]["input_type"] == "search_document" for row in captured)
+    assert progress == [96, 1]
+
+
+def test_cohere_query_uses_fast_model_and_rejects_missing_key(monkeypatch):
+    monkeypatch.setattr(embeddings, "provider_name", lambda: "cohere")
+    monkeypatch.setattr(embeddings.settings, "cohere_api_key", "test-key")
+    captured = {}
+
+    def fake(req, timeout=None):
+        captured["body"] = json.loads(req.data.decode("utf-8"))
+        return _FakeResponse({"embeddings": {"float": [[0.1, 0.2]]}})
+
+    _patch_urlopen(monkeypatch, fake)
+    embeddings.embed_texts(["query"], input_type="search_query")
+    assert captured["body"]["model"] == "embed-v5.0-fast"
+    assert captured["body"]["input_type"] == "search_query"
+
+    monkeypatch.setattr(embeddings.settings, "cohere_api_key", "")
+    try:
+        embeddings.embed_texts(["query"], input_type="search_query")
+        raised = False
+    except RuntimeError as exc:
+        raised = "API key" in str(exc)
+    assert raised
+
+
 def test_llamaindex_embed_model_dispatch(monkeypatch):
     _isolate_embedding_settings(monkeypatch)
     # Ollama path returns a llama_index OllamaEmbedding.
@@ -137,6 +187,7 @@ def test_llamaindex_embed_model_dispatch(monkeypatch):
     assert model.model_name == "BGE-M3"
 
     monkeypatch.setattr(embeddings.settings, "embedding_base_url", "http://localhost:1234")
+    monkeypatch.setattr(embeddings, "provider_name", lambda: "openAICompatible")
     model = embeddings.get_llamaindex_embed_model()
     # OpenAI-compatible path returns the BaseEmbedding wrapper.
     from llama_index.core.embeddings import BaseEmbedding
@@ -151,6 +202,7 @@ def test_langchain_embeddings_dispatch(monkeypatch):
     assert "Ollama" in type(emb).__name__
 
     monkeypatch.setattr(embeddings.settings, "embedding_base_url", "http://localhost:1234")
+    monkeypatch.setattr(embeddings, "provider_name", lambda: "openAICompatible")
     emb = embeddings.get_langchain_embeddings()
     assert type(emb).__name__ == "OpenAIEmbeddings"
     assert emb.model == "BGE-M3"

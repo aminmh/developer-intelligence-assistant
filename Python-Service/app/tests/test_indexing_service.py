@@ -30,6 +30,6 @@ def test_parse_and_index_cleans_workspace_and_delegates(monkeypatch, tmp_path):
 
     assert calls == [(
         ("job-2", "project.zip", [{"name": "x"}], "project"),
-        {"snapshot": None},
+        {"snapshot": None, "vector_collection_name": None},
     )]
     assert not (tmp_path / "parse_job-2").exists()

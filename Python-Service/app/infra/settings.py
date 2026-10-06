@@ -26,6 +26,9 @@ class Settings(BaseModel):
 
     ollama_base_url: str = os.getenv("OLLAMA_BASE_URL", "http://host.docker.internal:11434")
     ollama_embedding_model: str = os.getenv("OLLAMA_EMBED_MODEL", "BGE-M3")
+    # Cohere credentials are UI-managed through settings.db; this empty field
+    # lets the dynamic overlay provide its normal write-only value.
+    cohere_api_key: str = ""
     ollama_llm_model: str = os.getenv("OLLAMA_LLM_MODEL", "gemma3-4b")
     # How long the local Ollama chat model may remain resident after its last
     # request. Supports Ollama duration strings such as ``30s`` or ``5m``;
@@ -124,6 +127,7 @@ class RuntimeSettings:
     """
 
     _DYNAMIC = {
+        "cohere_api_key": "cohereApiKey",
         "ollama_base_url": "ollamaBaseUrl",
         "ollama_embedding_model": "ollamaEmbedModel",
         "embedding_base_url": "embeddingBaseUrl",
@@ -163,6 +167,13 @@ class RuntimeSettings:
             value = settings_store.get(store_key)
             if value not in (None, ""):
                 return value
+        if name == "embedding_provider":
+            configured = settings_store.get("embeddingProvider")
+            if configured:
+                return configured
+            # Preserve pre-provider UI config which selected OpenAI-compatible
+            # embeddings by setting a base URL.
+            return "openAICompatible" if self.embedding_base_url else "ollama"
         if name == "ollama_eval_model":
             return self.ollama_llm_model
         value = getattr(self._env, name)

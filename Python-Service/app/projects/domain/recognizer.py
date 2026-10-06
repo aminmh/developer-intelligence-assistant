@@ -60,7 +60,7 @@ from qdrant_client.models import FieldCondition, Filter, MatchValue
 
 from index.embeddings import embed_texts
 from infra.settings import settings
-from projects.domain.indexer import CONCEPT_COLLECTION
+from projects.domain.indexer import CONCEPT_COLLECTION, collection_for_project
 from projects.domain.normalizer import ConceptNormalizer
 from projects.domain.store import concept_store
 
@@ -412,7 +412,7 @@ def _semantic_candidates(
     ``limit`` and returns ``[{"score": float, "payload": dict}, ...]``.
     """
     try:
-        vectors = embed_texts([cleaned])
+        vectors = embed_texts([cleaned], input_type="search_query")
         if not vectors or not isinstance(vectors[0], list) or not vectors[0]:
             logger.warning("semantic recognition stage: empty embedding returned")
             return [], True
@@ -420,7 +420,7 @@ def _semantic_candidates(
             project_id=project_id,
             vector=list(vectors[0]),
             limit=MAX_SEMANTIC_CANDIDATES,
-            collection=CONCEPT_COLLECTION,
+            collection=collection_for_project(project_id),
         )
     except Exception as exc:  # noqa: BLE001 — semantic search degrades
         logger.warning("semantic recognition stage degraded: %s", _trim(str(exc)))

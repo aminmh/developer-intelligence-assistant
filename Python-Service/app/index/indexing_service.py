@@ -25,6 +25,7 @@ class IndexingService:
         indexed: int,
         collection_name: str = "",
         symbol_index: dict[str, Any] | None = None,
+        error: str | None = None,
     ) -> None:
         try:
             status_path = Path(settings.download_dir) / f"{download_id}.status.json"
@@ -34,6 +35,7 @@ class IndexingService:
                 "indexed": indexed,
                 "collection_name": collection_name,
                 "symbol_index": symbol_index,
+                "error": error,
             }))
         except Exception:  # noqa: BLE001 — progress is best-effort
             pass
@@ -48,11 +50,17 @@ class IndexingService:
         symbol_references: list[dict[str, Any]] | None = None,
         workspace_path: str | None = None,
         snapshot: Any = None,
+        vector_collection_name: str | None = None,
     ) -> None:
         logger.info("Background indexing started: collection=%s count=%s", collection_name, len(chunks))
         self.write_status(download_id, "embedding", len(chunks), 0, collection_name)
         try:
             from index.llamaindex_layer import CodePropertyGraph
+
+            def report_progress(stage: str, completed: int, total: int) -> None:
+                self.write_status(
+                    download_id, stage, total, completed, collection_name
+                )
 
             def ingest_snapshot() -> dict[str, Any]:
                 ingest_kwargs: dict[str, Any] = {}
@@ -61,7 +69,12 @@ class IndexingService:
                         "symbol_definitions": symbol_definitions,
                         "symbol_references": symbol_references,
                     }
-                result = CodePropertyGraph().ingest(chunks, collection_name, snapshot=snapshot, **ingest_kwargs)
+                result = CodePropertyGraph().ingest(
+                    chunks, collection_name, snapshot=snapshot,
+                    progress_callback=report_progress,
+                    vector_collection_name=vector_collection_name,
+                    **ingest_kwargs,
+                )
                 result["symbol_index"] = self._index_symbol_graph(
                     workspace_path,
                     filename,
@@ -71,11 +84,21 @@ class IndexingService:
                 )
                 return result
 
-            if snapshot is not None:
+            if snapshot is not None and not vector_collection_name:
                 from telemetry.source import index_uploaded_snapshot
                 result = index_uploaded_snapshot(snapshot, ingest_snapshot)
             else:
                 result = ingest_snapshot()
+            if snapshot is not None and vector_collection_name:
+                from telemetry.registry import default_registry
+                registry = default_registry()
+                current = registry.get(snapshot.project_id, snapshot.commit_sha)
+                if current.get("state") != "ready":
+                    registry.register(snapshot)
+                    registry.transition(snapshot, "indexing")
+                    registry.finish_job(snapshot.project_id, snapshot.commit_sha, success=True)
+                from index.embedding_rebuild import activate_generation
+                activate_generation(collection_name, vector_collection_name)
             symbol_index = result.get("symbol_index")
             ingested = int(result.get("ingested", 0) or 0)
             logger.info(
@@ -92,11 +115,12 @@ class IndexingService:
             )
         except Exception as exc:  # noqa: BLE001 — job failure is reported in status
             logger.error("Background indexing failed for '%s': %s", collection_name, exc, exc_info=True)
-            self.write_status(download_id, "error", len(chunks), 0, collection_name)
+            self.write_status(download_id, "error", len(chunks), 0, collection_name, error="Embedding failed. Check API logs and retry.")
 
     def parse_and_index(
         self, download_id: str, filename: str, zip_data: bytes, collection_name: str,
         identity: dict[str, str] | None = None,
+        vector_collection_name: str | None = None,
     ) -> None:
         workdir = Path(settings.download_dir) / f"parse_{download_id}"
         try:
@@ -138,9 +162,13 @@ class IndexingService:
                     symbol_references=references,
                     workspace_path=str(workdir),
                     snapshot=snapshot,
+                    vector_collection_name=vector_collection_name,
                 )
             else:
-                self.index_chunks_background(download_id, filename, chunks, collection_name, snapshot=snapshot)
+                self.index_chunks_background(
+                    download_id, filename, chunks, collection_name,
+                    snapshot=snapshot, vector_collection_name=vector_collection_name,
+                )
         except Exception as exc:  # noqa: BLE001 — job failure is reported in status
             logger.error("Parse failed for '%s': %s", collection_name, exc, exc_info=True)
             self.write_status(download_id, "error", 0, 0, collection_name)

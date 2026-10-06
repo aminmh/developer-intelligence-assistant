@@ -748,6 +748,8 @@ class CodePropertyGraph:
         symbol_definitions: Optional[List[Dict[str, Any]]] = None,
         symbol_references: Optional[List[Dict[str, Any]]] = None,
         snapshot: Snapshot | None = None,
+        progress_callback=None,
+        vector_collection_name: str | None = None,
     ) -> Dict[str, Any]:
         """Ingest code chunks into the Neo4j graph and Qdrant vectors.
 
@@ -794,12 +796,18 @@ class CodePropertyGraph:
             if not deduped:
                 raise ValueError("Snapshot has no indexable source")
             graph_nodes, graph_relations = self._ingest_graph(deduped, collection_name, strict=True)
-            ingested, embed_fails = self._ingest_vectors(deduped, collection_name, replace=False)
+            ingested, embed_fails = self._ingest_vectors(
+                deduped, vector_collection_name or collection_name,
+                replace=False, progress_callback=progress_callback,
+            )
             if graph_nodes != len(deduped) or ingested != len(deduped) or embed_fails:
                 raise RuntimeError("Snapshot persistence is incomplete")
         else:
             graph_nodes, graph_relations = self._ingest_graph(deduped, collection_name)
-            ingested, embed_fails = self._ingest_vectors(deduped, collection_name)
+            ingested, embed_fails = self._ingest_vectors(
+                deduped, vector_collection_name or collection_name,
+                progress_callback=progress_callback,
+            )
 
         # Refresh the typo-correction domain dictionary so newly indexed
         # class/method names become correctable (best-effort).
@@ -960,10 +968,10 @@ class CodePropertyGraph:
         return len(node_rows), len(rel_rows) + len(structure_rows)
 
     def _ingest_vectors(
-        self, chunks: List[Dict[str, Any]], collection_name: str, *, replace: bool = True
+        self, chunks: List[Dict[str, Any]], collection_name: str, *, replace: bool = True,
+        progress_callback=None,
     ) -> tuple[int, int]:
         qdrant = self._get_qdrant()
-        embed_model = self._get_embed_model()
         self._last_embedding_error: str | None = None
 
         if replace:
@@ -976,47 +984,51 @@ class CodePropertyGraph:
         embed_fails = 0
         vector_size: Optional[int] = None
 
-        for c in chunks:
-            text = build_embeddable_text(c)
-            if not text.strip():
-                continue
+        embeddable = [(chunk, build_embeddable_text(chunk)) for chunk in chunks]
+        embeddable = [(chunk, text) for chunk, text in embeddable if text.strip()]
+        completed = 0
+        batch_size = 96
+        for offset in range(0, len(embeddable), batch_size):
+            batch = embeddable[offset:offset + batch_size]
+
+            def report_embedding_progress(amount: int) -> None:
+                nonlocal completed
+                completed += amount
+                if progress_callback:
+                    progress_callback("embedding", completed, len(embeddable))
 
             try:
-                embedding = embed_model.get_text_embedding(text)
-            except Exception as exc:
-                # LlamaIndex's Ollama adapter has changed endpoint behavior
-                # across releases. Retry through the project's canonical
-                # stdlib embedding dispatcher before declaring the chunk lost.
-                try:
-                    if type(embed_model).__module__.startswith("llama_index"):
-                        embedding = embed_texts([text])[0]
-                    else:
-                        raise exc
-                except Exception as fallback_exc:
-                    embed_fails += 1
-                    if self._last_embedding_error is None:
-                        self._last_embedding_error = str(fallback_exc)[:500]
-                    continue
-
-            if vector_size is None:
-                vector_size = len(embedding)
-                try:
-                    qdrant.create_collection(
-                        collection_name=collection_name,
-                        vectors_config=VectorParams(
-                            size=vector_size, distance=Distance.COSINE
-                        ),
-                    )
-                except Exception:
-                    pass
-
-            points.append(
-                PointStruct(
-                    id=_point_id_for(_chunk_node_id(c)),
-                    vector=embedding,
-                    payload=_payload(c, collection_name),
+                vectors = embed_texts(
+                    [text for _, text in batch],
+                    input_type="search_document",
+                    progress=report_embedding_progress,
                 )
-            )
+                if len(vectors) != len(batch):
+                    raise RuntimeError("Embedding provider returned an incomplete batch")
+            except Exception as exc:
+                embed_fails += len(batch)
+                if self._last_embedding_error is None:
+                    self._last_embedding_error = str(exc)[:500]
+                continue
+
+            for (chunk, _), embedding in zip(batch, vectors):
+                if vector_size is None:
+                    vector_size = len(embedding)
+                    try:
+                        qdrant.create_collection(
+                            collection_name=collection_name,
+                            vectors_config=VectorParams(size=vector_size, distance=Distance.COSINE),
+                        )
+                    except Exception:
+                        pass
+                points.append(PointStruct(
+                    id=_point_id_for(_chunk_node_id(chunk)),
+                    vector=embedding,
+                    payload=_payload(chunk, collection_name),
+                ))
+
+        if progress_callback:
+            progress_callback("upserting", completed, len(embeddable))
 
         if points:
             ingested = 0
@@ -1144,11 +1156,23 @@ class CodePropertyGraph:
 
         collection_names = {c.name for c in collections}
         target_collections: List[str] = []
+        graph_collection_name = collection_name
         if collection_name:
             if collection_name.startswith("snapshot_"):
                 from telemetry.registry import default_registry
                 if not default_registry().is_ready_collection(collection_name):
                     raise ValueError("Snapshot is not ready for retrieval")
+                if settings.embedding_provider == "cohere":
+                    generation_state = default_registry().get_runtime_setting(
+                        "cohere_embedding_generations"
+                    ) or {}
+                    active = (generation_state.get("value") or {}).get("active", {})
+                    generation = active.get(collection_name) if isinstance(active, dict) else None
+                    if not generation:
+                        raise ValueError(
+                            "This revision needs a Cohere embedding rebuild before retrieval"
+                        )
+                    collection_name = generation
             if collection_name in collection_names:
                 target_collections.append(collection_name)
             # Persisted analysis knowledge rides in a SIBLING collection
@@ -1181,7 +1205,7 @@ class CodePropertyGraph:
             return {"results": [], "searched_collections": []}
 
         try:
-            query_vec = self._get_embed_model().get_text_embedding(query)
+            query_vec = self._get_embed_model().get_query_embedding(query)
         except Exception:
             trace["mode"] = "vector_unavailable"
             record_retrieval_trace(trace_id or "", trace)
@@ -1201,7 +1225,7 @@ class CodePropertyGraph:
         if legs_active:
             # Additive provenance: present only when graph expansion ran.
             trace["legs"] = list(legs)
-        stem = _collection_stem(collection_name)
+        stem = _collection_stem(graph_collection_name)
         sym_collection = _sym_collection_for(stem) if stem else ""
         sym_active = (
             legs_active
@@ -1266,7 +1290,7 @@ class CodePropertyGraph:
             # CALLS leg (default): direct callee/caller neighbours scoped to the
             # searched collection (legacy collection-less edges still match).
             if _GRAPH_LEG_CALLS in legs:
-                neighbours = self._traverse_neighbours(store, vector_ids, col_name)
+                neighbours = self._traverse_neighbours(store, vector_ids, graph_collection_name)
                 if neighbours:
                     trace["graph_neighbor_count"] += len(neighbours)
                     self._append_graph_neighbours(

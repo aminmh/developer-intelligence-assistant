@@ -1,10 +1,11 @@
-"""Embedding client dispatch — Ollama native or OpenAI-compatible endpoint.
+"""Embedding client dispatch — Ollama, OpenAI-compatible, or Cohere.
 
 The embedding server is configurable via the dynamic ``embedding_base_url``
 (``embeddingBaseUrl``) setting:
 
-* unset  -> Ollama ``/api/embeddings`` (default, backward compatible),
-* set    -> OpenAI-compatible ``{base}/v1/embeddings`` (LM Studio, Bionic, ...).
+* ``ollama`` -> Ollama ``/api/embeddings`` (default),
+* ``openAICompatible`` -> ``{base}/v1/embeddings`` (LM Studio, Bionic, ...),
+* ``cohere`` -> Cohere v2 ``/embed`` with role-specific models.
 
 The model name comes from ``ollama_embedding_model`` (``ollamaEmbedModel``) for
 both backends. The low-level ``embed_texts`` path is stdlib-only (``urllib``),
@@ -34,22 +35,83 @@ def _openai_v1_base() -> str:
     return f"{base}/v1"
 
 
-def embed_texts(texts: list[str]) -> list[list[float]]:
+def provider_name() -> str:
+    """Return the selected embedding provider, preserving legacy URL config."""
+    return settings.embedding_provider
+
+
+def embedding_profile(role: str = "search_document") -> dict[str, Any]:
+    """Describe the vector space used for a document or query embedding."""
+    provider = provider_name()
+    if provider == "cohere":
+        model = "embed-v5.0-fast" if role == "search_query" else "embed-v5.0-pro"
+        return {"provider": provider, "model": model, "dimensions": 2048}
+    if provider == "openAICompatible":
+        return {"provider": provider, "model": settings.ollama_embedding_model, "base_url": _openai_v1_base()}
+    return {"provider": "ollama", "model": settings.ollama_embedding_model, "base_url": settings.ollama_base_url.rstrip("/")}
+
+
+def embed_texts(
+    texts: list[str],
+    *,
+    input_type: str = "search_document",
+    progress: Any = None,
+) -> list[list[float]]:
     """Embed ``texts`` and return one vector per input.
 
-    Routes to the OpenAI-compatible ``/v1/embeddings`` endpoint when
-    ``embedding_base_url`` is configured, otherwise to Ollama's native
-    ``/api/embeddings``. Raises on transport/parse failure — callers degrade
-    gracefully.
+    Raises on transport/parse failure. ``progress`` is an optional callback
+    called with the number of inputs completed after each successful request.
     """
     if not texts:
         return []
-    if embedding_base_url():
-        return _embed_openai(texts)
-    return _embed_ollama(texts)
+    if input_type not in {"search_document", "search_query", "classification"}:
+        raise ValueError("Unsupported embedding input_type")
+    provider = provider_name()
+    if provider == "cohere":
+        return _embed_cohere(texts, input_type, progress)
+    if provider == "openAICompatible":
+        return _embed_openai(texts, progress)
+    if provider == "ollama":
+        return _embed_ollama(texts, progress)
+    raise ValueError(f"Unsupported embedding provider: {provider}")
 
 
-def _embed_openai(texts: list[str]) -> list[list[float]]:
+def _report_progress(progress: Any, count: int) -> None:
+    if progress is not None:
+        progress(count)
+
+
+def _embed_cohere(texts: list[str], input_type: str, progress: Any = None) -> list[list[float]]:
+    if not settings.cohere_api_key:
+        raise RuntimeError("Cohere API key is not configured")
+    vectors: list[list[float]] = []
+    profile = embedding_profile(input_type)
+    for offset in range(0, len(texts), 96):
+        batch = texts[offset : offset + 96]
+        body = json.dumps({
+            "model": profile["model"],
+            "texts": batch,
+            "input_type": input_type,
+            "embedding_types": ["float"],
+            "truncate": "END",
+        }).encode("utf-8")
+        req = urllib.request.Request(
+            "https://api.cohere.com/v2/embed",
+            data=body,
+            headers={"Content-Type": "application/json", "Authorization": f"Bearer {settings.cohere_api_key}"},
+            method="POST",
+        )
+        with urllib.request.urlopen(req, timeout=120) as response:
+            data = json.loads(response.read().decode("utf-8"))
+        rows = (data.get("embeddings") or {}).get("float") if isinstance(data, dict) else None
+        if not isinstance(rows, list) or len(rows) != len(batch) or not all(isinstance(row, list) and row for row in rows):
+            raise TypeError("Invalid embedding response from Cohere")
+        vectors.extend(rows)
+        _report_progress(progress, len(batch))
+    return vectors
+
+
+def _embed_openai(texts: list[str], progress: Any = None) -> list[list[float]]:
     body = json.dumps(
         {
             "model": settings.ollama_embedding_model,
@@ -74,10 +136,11 @@ def _embed_openai(texts: list[str]) -> list[list[float]]:
         isinstance(v, list) and v for v in vectors
     ):
         raise TypeError("Invalid embedding response from OpenAI-compatible server")
+    _report_progress(progress, len(texts))
     return vectors
 
 
-def _embed_ollama(texts: list[str]) -> list[list[float]]:
+def _embed_ollama(texts: list[str], progress: Any = None) -> list[list[float]]:
     embeddings: list[list[float]] = []
     base = settings.ollama_base_url.rstrip("/")
     for doc in texts:
@@ -96,12 +159,13 @@ def _embed_ollama(texts: list[str]) -> list[list[float]]:
         if not embedding or not isinstance(embedding, list):
             raise RuntimeError("Invalid embedding returned from Ollama")
         embeddings.append(embedding)
+        _report_progress(progress, 1)
     return embeddings
 
 
 def get_llamaindex_embed_model() -> Any:
     """Return the llama_index embedding model for ingestion/retrieval."""
-    if embedding_base_url():
+    if provider_name() != "ollama":
         # llama_index's OpenAIEmbedding validates its model enum, rejecting
         # arbitrary local model ids — so wrap the raw /v1/embeddings call
         # instead. Keeps the dispatch in one place.
@@ -113,13 +177,13 @@ def get_llamaindex_embed_model() -> Any:
                 super().__init__(model_name=settings.ollama_embedding_model)
 
             def _get_query_embedding(self, query: str) -> list[float]:
-                return embed_texts([query])[0]
+                return embed_texts([query], input_type="search_query")[0]
 
             def _get_text_embedding(self, text: str) -> list[float]:
-                return embed_texts([text])[0]
+                return embed_texts([text], input_type="search_document")[0]
 
             def _get_text_embeddings(self, texts: list[str]) -> list[list[float]]:
-                return embed_texts(texts)
+                return embed_texts(texts, input_type="search_document")
 
             def _aget_query_embedding(self, query: str):
                 return self._get_query_embedding(query)
@@ -132,7 +196,8 @@ def get_llamaindex_embed_model() -> Any:
 
             def _embed(self, nodes: list[BaseNode]) -> list[BaseNode]:
                 embeddings = embed_texts(
-                    [n.get_content(metadata_mode="llm") for n in nodes]
+                    [n.get_content(metadata_mode="llm") for n in nodes],
+                    input_type="search_document",
                 )
                 for node, vec in zip(nodes, embeddings):
                     node.embedding = vec
@@ -149,7 +214,7 @@ def get_llamaindex_embed_model() -> Any:
 
 def get_langchain_embeddings() -> Any:
     """Return the langchain embeddings wrapper for RAGAS evaluation."""
-    if embedding_base_url():
+    if provider_name() == "openAICompatible":
         from langchain_openai import OpenAIEmbeddings
 
         return OpenAIEmbeddings(
@@ -157,6 +222,17 @@ def get_langchain_embeddings() -> Any:
             base_url=_openai_v1_base(),
             api_key="ollama",
         )
+    if provider_name() != "ollama":
+        from langchain_core.embeddings import Embeddings
+
+        class _ConfiguredEmbeddings(Embeddings):
+            def embed_documents(self, texts: list[str]) -> list[list[float]]:
+                return embed_texts(texts, input_type="search_document")
+
+            def embed_query(self, text: str) -> list[float]:
+                return embed_texts([text], input_type="search_query")[0]
+
+        return _ConfiguredEmbeddings()
     from langchain_community.embeddings import OllamaEmbeddings
 
     return OllamaEmbeddings(

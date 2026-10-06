@@ -41,6 +41,7 @@ from projects.domain.store import ConceptStore, concept_store
 # Single semantic collection holds every project's mirrored concepts; the
 # ``project_id`` payload key keeps the namespace separable (filters + purge).
 CONCEPT_COLLECTION = "domain_concepts"
+COHERE_CONCEPT_COLLECTION = "domain_concepts_cohere_v5"
 
 # The only row fields ``embed_input`` records — provenance for what the
 # semantic vector may change on. Aliases/descriptions live on the row; roles
@@ -188,8 +189,21 @@ def _project_filter(project_id: str) -> Filter:
     )
 
 
+def collection_for_project(project_id: str) -> str:
+    """Resolve a collection in the selected provider's vector space."""
+    if settings.embedding_provider != "cohere":
+        return CONCEPT_COLLECTION
+    from telemetry.registry import default_registry
+
+    saved = default_registry().get_runtime_setting("cohere_embedding_generations") or {}
+    domains = (saved.get("value") or {}).get("domains", {})
+    if isinstance(domains, dict) and domains.get(project_id):
+        return str(domains[project_id])
+    return COHERE_CONCEPT_COLLECTION
+
+
 def ensure_collection(
-    collection: str = CONCEPT_COLLECTION,
+    collection: str | None = None,
 ) -> dict[str, Any]:
     """Create the semantic collection + project payload index if missing.
 
@@ -198,6 +212,12 @@ def ensure_collection(
     differs is reported honestly (``ok: False``) — Qdrant cannot resize it.
     """
     try:
+        if collection is None:
+            collection = (
+                COHERE_CONCEPT_COLLECTION
+                if settings.embedding_provider == "cohere"
+                else CONCEPT_COLLECTION
+            )
         client = _qdrant()
         dimension = _probe_dimension()
         existing = [c.name for c in client.get_collections().collections]
@@ -343,7 +363,9 @@ def _point_payload(
 def index_project_concepts(
     project_id: str,
     concepts: list[dict[str, Any]],
-    collection: str = CONCEPT_COLLECTION,
+    collection: str | None = None,
+    progress_callback=None,
+    force_reembed: bool = False,
 ) -> dict[str, Any]:
     """Mirror canonical concept rows into the semantic collection.
 
@@ -354,6 +376,7 @@ def index_project_concepts(
     error and never raise. When the collection cannot be guaranteed every row
     is recorded pending and the result reports ``ok: False``.
     """
+    collection = collection or collection_for_project(project_id)
     rows = _valid_concepts(concepts)
     if not rows:
         return _empty_index_result(collection)
@@ -411,15 +434,24 @@ def index_project_concepts(
     indexed = 0
     skipped_unmodified = 0
     failed = 0
+    processed = 0
 
     for row in rows:
         identity_key = str(row["identity_key"])
+        state_identity_key = (
+            f"{identity_key}::cohere-v5"
+            if settings.embedding_provider == "cohere" else identity_key
+        )
         try:
             text = embed_input(row)
             hash_value = content_hash(text)
-            prior = previous.get(identity_key) or {}
-            if prior.get("status") == _DONE and prior.get("content_hash") == hash_value:
+            prior = previous.get(state_identity_key) or {}
+            if (not force_reembed and prior.get("status") == _DONE
+                    and prior.get("content_hash") == hash_value):
                 skipped_unmodified += 1
+                processed += 1
+                if progress_callback:
+                    progress_callback(processed, len(rows))
                 continue
 
             try:
@@ -428,10 +460,11 @@ def index_project_concepts(
                 logger.warning(
                     "embedding domain concept %s failed: %s", identity_key, exc
                 )
-                _record_pending(
-                    _store, project_id, identity_key, hash_value, f"embed failed: {exc}"
-                )
+                _record_pending(_store, project_id, state_identity_key, hash_value, f"embed failed: {exc}")
                 failed += 1
+                processed += 1
+                if progress_callback:
+                    progress_callback(processed, len(rows))
                 continue
 
             point_id = str(uuid.uuid5(uuid.NAMESPACE_URL, str(row["id"])))
@@ -459,23 +492,32 @@ def index_project_concepts(
                     f"upsert failed: {exc}",
                 )
                 failed += 1
+                processed += 1
+                if progress_callback:
+                    progress_callback(processed, len(rows))
                 continue
 
             try:
                 _store.mark_index_state(
-                    project_id, identity_key, hash_value, status=_DONE
+                    project_id, state_identity_key, hash_value, status=_DONE
                 )
             except Exception as exc:  # noqa: BLE001 — state write is best effort
                 logger.warning(
                     "marking index_state done for %s failed: %s", identity_key, exc
                 )
             indexed += 1
+            processed += 1
+            if progress_callback:
+                progress_callback(processed, len(rows))
         except Exception as exc:  # noqa: BLE001 — total: a bad row must not abort
             logger.warning("indexing domain concept %s failed: %s", identity_key, exc)
             _record_pending(
                 _store, project_id, identity_key, "unknown", f"index failed: {exc}"
             )
             failed += 1
+            processed += 1
+            if progress_callback:
+                progress_callback(processed, len(rows))
 
     return {
         "ok": True,
@@ -530,7 +572,7 @@ def _delete_points(
 def reconcile_vectors(
     project_id: str,
     active_identity_keys: set[str],
-    collection: str = CONCEPT_COLLECTION,
+    collection: str | None = None,
 ) -> dict[str, Any]:
     """Delete Qdrant points whose identity_key left the canonical set.
 
@@ -538,6 +580,7 @@ def reconcile_vectors(
     the source of truth and any semantic point for a concept no longer in it is
     stale. Never raises.
     """
+    collection = collection or collection_for_project(project_id)
     try:
         client = _qdrant()
     except Exception as exc:  # noqa: BLE001 — reconcile degrades
@@ -564,9 +607,10 @@ def reconcile_vectors(
 
 def purge_project_vectors(
     project_id: str,
-    collection: str = CONCEPT_COLLECTION,
+    collection: str | None = None,
 ) -> dict[str, Any]:
     """Delete every semantic point for a project (rebuild-from-zero)."""
+    collection = collection or collection_for_project(project_id)
     try:
         client = _qdrant()
     except Exception as exc:  # noqa: BLE001 — purge degrades

@@ -193,7 +193,7 @@ def _semantic_hit(
     }
 
 
-def _fake_embed(texts: list[str]) -> list[list[float]]:
+def _fake_embed(texts: list[str], **_kwargs: Any) -> list[list[float]]:
     return [[0.1, 0.2, 0.3, 0.4] for _ in texts]
 
 

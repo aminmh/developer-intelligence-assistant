@@ -18,6 +18,8 @@ from typing import Any, Dict, Optional
 # (RAGConfig). The Python service is the single source of truth; the web server
 # reads these and proxies edits back here.
 RAG_CONFIG_DEFAULTS: Dict[str, Any] = {
+    "embeddingProvider": "ollama",
+    "cohereApiKey": "",
     "ollamaBaseUrl": "http://host.docker.internal:11434",
     "ollamaEmbedModel": "BGE-M3",
     "embeddingBaseUrl": "",
@@ -48,7 +50,7 @@ RAG_CONFIG_DEFAULTS: Dict[str, Any] = {
 
 # Fields returned masked by GET /settings. They are write-only: a PUT only
 # overwrites them when a non-empty value is supplied.
-SECRET_KEYS = {"qdrantApiKey", "llmRemoteApiKey", "runpodApiKey"}
+SECRET_KEYS = {"qdrantApiKey", "llmRemoteApiKey", "runpodApiKey", "cohereApiKey"}
 
 MASKED_VALUE = ""
 
@@ -159,6 +161,8 @@ def build_config(store: SettingsStore) -> Dict[str, Any]:
         stored = store.get(key)
         if stored is not None:
             config[key] = stored
+    if store.get("embeddingProvider") is None and config.get("embeddingBaseUrl"):
+        config["embeddingProvider"] = "openAICompatible"
     if store.get("ollamaEvalModel") is None:
         config["ollamaEvalModel"] = config["ollamaLlmModel"]
     return config

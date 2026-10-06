@@ -234,11 +234,13 @@ from inspection.http import router as inspection_router  # noqa: E402 — after 
 from routers.developer_logs import router as developer_logs_router  # noqa: E402 — after app exists
 from routers.system import router as system_router  # noqa: E402 — after app exists
 from routers.evaluator import router as evaluator_router  # noqa: E402 — after app exists
+from routers.embedding_jobs import router as embedding_jobs_router  # noqa: E402 — after app exists
 
 app.include_router(inspection_router)
 app.include_router(developer_logs_router)
 app.include_router(system_router)
 app.include_router(evaluator_router)
+app.include_router(embedding_jobs_router)
 
 app.add_middleware(
     CORSMiddleware,
@@ -840,6 +842,7 @@ def rag_parse_code(body: dict):
     if data is None:
         raise HTTPException(status_code=500, detail="Failed to read file from index.storage.")
 
+    vector_collection_name = None
     if identity:
         from telemetry.snapshot import Snapshot
         collection_name = Snapshot(
@@ -850,7 +853,15 @@ def rag_parse_code(body: dict):
     already = collection_exists(collection_name)
     if identity:
         from telemetry.registry import default_registry
-        already = already and default_registry().is_ready_collection(collection_name)
+        ready = default_registry().is_ready_collection(collection_name)
+        if settings.embedding_provider == "cohere":
+            from index.embedding_rebuild import active_generation
+            active = active_generation(collection_name)
+            already = bool(ready and active and collection_exists(active))
+            if not already:
+                vector_collection_name = f"{collection_name}_cohere_{uuid.uuid4().hex}"
+        else:
+            already = already and ready
     download_id = str(uuid.uuid4())
     token = _mint_download_token(download_id, filename)
 
@@ -869,7 +880,7 @@ def rag_parse_code(body: dict):
 
     thread = threading.Thread(
         target=indexing_service.parse_and_index,
-        args=(download_id, filename, data, collection_name, identity),
+        args=(download_id, filename, data, collection_name, identity, vector_collection_name),
         daemon=True,
     )
     thread.start()
@@ -1940,6 +1951,10 @@ def evaluate_prompt(body: dict):
 
 def _coerce_setting(key: str, value):
     default = RAG_CONFIG_DEFAULTS.get(key)
+    if key == "embeddingProvider":
+        if value not in {"ollama", "openAICompatible", "cohere"}:
+            raise HTTPException(status_code=400, detail="embeddingProvider must be ollama, openAICompatible, or cohere")
+        return value
     if key == "logDeletionMode":
         return value if value in {"soft", "hard"} else default
     if isinstance(default, int) and not isinstance(value, bool):
@@ -2005,6 +2020,8 @@ def update_settings(body: dict):
             status_code=400,
             detail="contextPreviewMode must be one of off, inline, gate",
         )
+    if "embeddingProvider" in incoming and incoming["embeddingProvider"] not in {"ollama", "openAICompatible", "cohere"}:
+        raise HTTPException(status_code=400, detail="embeddingProvider must be ollama, openAICompatible, or cohere")
     updates = {}
     for key in RAG_CONFIG_DEFAULTS:
         if key not in incoming:

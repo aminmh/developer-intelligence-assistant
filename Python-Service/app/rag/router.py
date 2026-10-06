@@ -62,7 +62,7 @@ class OllamaEncoder(BaseEncoder):
     def __call__(self, docs: List[str]) -> List[List[float]]:
         from index.embeddings import embed_texts
 
-        return embed_texts([normalize_query(doc) for doc in docs])
+        return embed_texts([normalize_query(doc) for doc in docs], input_type="search_query")
 
 
 encoder = OllamaEncoder()
@@ -95,24 +95,35 @@ def _get_qdrant() -> QdrantClient:
     return QdrantClient(**kwargs)
 
 
-def _ensure_feedback_collection(qdrant: QdrantClient, dim: int) -> None:
+def _active_feedback_collection() -> str | None:
+    if settings.embedding_provider != "cohere":
+        return FEEDBACK_COLLECTION
+    from telemetry.registry import default_registry
+
+    saved = default_registry().get_runtime_setting("cohere_feedback_generation") or {}
+    return (saved.get("value") or {}).get("active")
+
+
+def _ensure_feedback_collection(
+    qdrant: QdrantClient, dim: int, collection: str = FEEDBACK_COLLECTION
+) -> bool:
     try:
         existing = [c.name for c in qdrant.get_collections().collections]
-        if FEEDBACK_COLLECTION in existing:
-            # Recreate when the embedding model changed the vector dimension
-            # (Qdrant cannot alter an existing collection's vector size).
-            info = qdrant.get_collection(FEEDBACK_COLLECTION)
+        if collection in existing:
+            info = qdrant.get_collection(collection)
             current = getattr(info.config.params.vectors, "size", None)
             if current != dim:
-                qdrant.delete_collection(FEEDBACK_COLLECTION)
+                return False
             else:
-                return
+                return True
         qdrant.create_collection(
-            collection_name=FEEDBACK_COLLECTION,
+            collection_name=collection,
             vectors_config=VectorParams(size=dim, distance=Distance.COSINE),
         )
-    except Exception:
-        pass
+        return True
+    except Exception as exc:
+        logger.warning("route feedback collection unavailable: %s", exc)
+        return False
 
 
 def submit_feedback(query: str, correct_route: str) -> dict:
@@ -128,11 +139,16 @@ def submit_feedback(query: str, correct_route: str) -> dict:
     try:
         embedding = encoder([query])[0]
         qdrant = _get_qdrant()
-        _ensure_feedback_collection(qdrant, len(embedding))
+        collection = _active_feedback_collection()
+        if collection is None and settings.embedding_provider == "cohere":
+            collection = "route_feedback_cohere_v5"
+        if not _ensure_feedback_collection(qdrant, len(embedding), collection or FEEDBACK_COLLECTION):
+            return {"success": False, "error": "Feedback embeddings need rebuilding for the selected provider"}
+        collection = collection or FEEDBACK_COLLECTION
 
         point_id = str(uuid.uuid5(uuid.NAMESPACE_URL, query))
         qdrant.upsert(
-            collection_name=FEEDBACK_COLLECTION,
+            collection_name=collection,
             wait=True,
             points=[
                 PointStruct(
@@ -147,6 +163,11 @@ def submit_feedback(query: str, correct_route: str) -> dict:
                 )
             ],
         )
+        if settings.embedding_provider == "cohere" and _active_feedback_collection() is None:
+            from telemetry.registry import default_registry
+            default_registry().set_runtime_setting(
+                "cohere_feedback_generation", {"active": collection, "retained": []}
+            )
         return {"success": True, "route": correct_route, "query": query}
     except Exception as exc:
         return {"success": False, "error": str(exc)[:200]}
@@ -157,11 +178,12 @@ def _feedback_override(query_vec: List[float]) -> Optional[str]:
     try:
         qdrant = _get_qdrant()
         collections = [c.name for c in qdrant.get_collections().collections]
-        if FEEDBACK_COLLECTION not in collections:
+        collection = _active_feedback_collection()
+        if not collection or collection not in collections:
             return None
 
         hits = qdrant.search(
-            collection_name=FEEDBACK_COLLECTION,
+            collection_name=collection,
             query_vector=query_vec,
             limit=1,
         )
@@ -175,6 +197,81 @@ def _feedback_override(query_vec: List[float]) -> Optional[str]:
     except Exception:
         pass
     return None
+
+
+def rebuild_feedback_collection(progress=None) -> dict:
+    """Build and activate a fresh Cohere route-feedback generation."""
+    if settings.embedding_provider != "cohere":
+        raise RuntimeError("Select Cohere before rebuilding route feedback")
+    qdrant = _get_qdrant()
+    collections = {item.name for item in qdrant.get_collections().collections}
+    current = _active_feedback_collection()
+    sources = [source for source in (current, FEEDBACK_COLLECTION)
+               if source and source in collections]
+    if not sources:
+        raise RuntimeError("There are no saved route-feedback vectors to rebuild")
+
+    rows_by_id: dict[str, dict] = {}
+    for source in dict.fromkeys(sources):
+        offset = None
+        while True:
+            points, offset = qdrant.scroll(
+                collection_name=source,
+                limit=256,
+                offset=offset,
+                with_payload=True,
+                with_vectors=False,
+            )
+            for point in points:
+                payload = dict(point.payload or {})
+                if isinstance(payload.get("original_query"), str) and payload.get("route") in ROUTE_NAMES:
+                    rows_by_id[str(point.id)] = payload
+            if offset is None:
+                break
+    rows = list(rows_by_id.items())
+    if not rows:
+        raise RuntimeError("There are no saved route-feedback queries to rebuild")
+
+    from index.embeddings import embed_texts
+    texts = [payload["original_query"] for _, payload in rows]
+    completed = 0
+
+    def embedding_progress(amount: int) -> None:
+        nonlocal completed
+        completed += amount
+        if progress:
+            progress("embedding", completed, len(texts))
+
+    vectors = embed_texts(texts, input_type="search_query", progress=embedding_progress)
+    generation = "route_feedback_cohere_" + uuid.uuid4().hex
+    qdrant.create_collection(
+        collection_name=generation,
+        vectors_config=VectorParams(size=len(vectors[0]), distance=Distance.COSINE),
+    )
+    from qdrant_client.models import PointStruct
+
+    points = [PointStruct(id=point_id, vector=vector, payload=payload)
+              for (point_id, payload), vector in zip(rows, vectors)]
+    for start in range(0, len(points), 128):
+        batch = points[start:start + 128]
+        qdrant.upsert(collection_name=generation, points=batch, wait=True)
+        if progress:
+            progress("upserting", min(start + len(batch), len(points)), len(points))
+
+    from telemetry.registry import default_registry
+    registry = default_registry()
+    saved = registry.get_runtime_setting("cohere_feedback_generation") or {}
+    state = saved.get("value") or {"active": None, "retained": []}
+    retained = list(state.get("retained") or [])
+    previous = state.get("active")
+    if previous and previous != generation:
+        retained.insert(0, previous)
+    if progress:
+        progress("activating", len(points), len(points))
+    registry.set_runtime_setting(
+        "cohere_feedback_generation", {"active": generation, "retained": retained}
+    )
+    return {"collection_name": generation, "total": len(points), "indexed": len(points)}
 
 
 def _top_route_scores(query_vec: List[float], top_k: int = 8) -> List[Tuple[str, float]]:
