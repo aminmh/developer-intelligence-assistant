@@ -22,7 +22,7 @@ export interface ProjectFileState {
   uploading: Ref<boolean>;
   uploadProgress: Ref<Record<string, number>>;
   parsingFileId: Ref<string | null>;
-  indexingProgress: Ref<{ total: number; indexed: number; status: string }>;
+  indexingProgress: Ref<{ total: number; indexed: number; status: string; stage?: string; error?: string }>;
   indexedFileIds: Ref<Set<string>>;
   activeFileName: Ref<string | null>;
   activeFileId: Ref<string | null>;
@@ -32,6 +32,7 @@ export interface ProjectFileState {
   deleteFile: (id: string, name: string) => Promise<void>;
   parseFile: (id: string, name: string) => Promise<void>;
   indexFile: (id: string, name: string) => Promise<void>;
+  rebuildCohereEmbeddings: (id: string, name: string) => Promise<void>;
   attachZip: (file: File) => Promise<void>;
   clearAttach: () => void;
   selectAttachment: (fileName: string) => void;
@@ -50,7 +51,7 @@ export function useProjectFiles({ triggerToast, getUploadIdentity }: UseProjectF
   // Per-file upload progress (0-1) for files going through the TUS path.
   const uploadProgress = ref<Record<string, number>>({});
   const parsingFileId = ref<string | null>(null);
-  const indexingProgress = ref({ total: 0, indexed: 0, status: '' });
+  const indexingProgress = ref<{ total: number; indexed: number; status: string; stage?: string; error?: string }>({ total: 0, indexed: 0, status: '' });
   const indexedFileIds = ref<Set<string>>(new Set());
   const activeFileName = ref<string | null>(null);
   const activeFileId = ref<string | null>(null);
@@ -230,6 +231,10 @@ export function useProjectFiles({ triggerToast, getUploadIdentity }: UseProjectF
             await fetchFiles();
             parsingFileId.value = null;
             indexingProgress.value = { total: 0, indexed: 0, status: '' };
+          } else if (status.status === 'error') {
+            clearInterval(poll);
+            triggerToast(status.error || 'Embedding failed. Check the API service and retry.', false);
+            parsingFileId.value = null;
           }
         } catch {
           // Python unreachable — keep polling until timeout.
@@ -254,6 +259,56 @@ export function useProjectFiles({ triggerToast, getUploadIdentity }: UseProjectF
   const indexFile = async (id: string, name: string) => {
     // All uploaded files are project ZIP archives now — full parse-code pipeline.
     await parseFile(id, name);
+  };
+
+  const rebuildCohereEmbeddings = async (id: string, name: string) => {
+    const file = files.value.find((item) => item.id === id);
+    if (!file?.projectId || !file.commitSha || !file.uploadSessionId) {
+      triggerToast('This upload has no indexed project revision to rebuild.', false);
+      return;
+    }
+    parsingFileId.value = id;
+    activeFileName.value = name;
+    indexingProgress.value = { total: 0, indexed: 0, status: 'queued', stage: 'queued' };
+    try {
+      const response = await makeRequest('/api/embeddings/rebuild', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          filename: name,
+          upload_session_id: file.uploadSessionId,
+          project_id: file.projectId,
+          commit_sha: file.commitSha,
+        }),
+      });
+      const created = await response.json();
+      if (!response.ok || !created.job_id) {
+        throw new Error(created.detail || created.error || 'Could not start the Cohere rebuild.');
+      }
+
+      for (let attempt = 0; attempt < 300; attempt++) {
+        await new Promise((resolve) => setTimeout(resolve, 1000));
+        const statusResponse = await makeRequest(`/api/embeddings/rebuild/${encodeURIComponent(created.job_id)}`);
+        const status = await statusResponse.json();
+        if (!statusResponse.ok) throw new Error(status.detail || 'Could not read rebuild progress.');
+        indexingProgress.value = status;
+        if (status.status === 'done') {
+          triggerToast(`Cohere embeddings rebuilt for ${name}.`, true);
+          indexedFileIds.value = new Set(indexedFileIds.value).add(id);
+          await fetchFiles();
+          parsingFileId.value = null;
+          return;
+        }
+        if (status.status === 'error') {
+          throw new Error(status.error || 'Cohere embedding rebuild failed. Retry the rebuild.');
+        }
+      }
+      throw new Error('Cohere rebuild timed out. Check the API service before retrying.');
+    } catch (err: any) {
+      indexingProgress.value = { ...indexingProgress.value, status: 'error', stage: 'error', error: err.message };
+      triggerToast(err.message, false);
+      parsingFileId.value = null;
+    }
   };
 
   const attachZip = async (file: File) => {
@@ -312,6 +367,7 @@ export function useProjectFiles({ triggerToast, getUploadIdentity }: UseProjectF
     deleteFile,
     parseFile,
     indexFile,
+    rebuildCohereEmbeddings,
     attachZip,
     clearAttach,
     selectAttachment,

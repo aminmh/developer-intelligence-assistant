@@ -9,7 +9,7 @@ const STORE_DIR = path.join(process.cwd(), 'data');
 const FILES_PATH = path.join(STORE_DIR, 'files.json');
 
 // Secret fields are write-only: masked on read, only overwritten on non-empty write.
-const SECRET_CONFIG_KEYS = ['qdrantApiKey', 'llmRemoteApiKey', 'runpodApiKey'] as const;
+const SECRET_CONFIG_KEYS = ['qdrantApiKey', 'llmRemoteApiKey', 'runpodApiKey', 'cohereApiKey'] as const;
 
 // Ensure directory exists
 if (!fs.existsSync(STORE_DIR)) {
@@ -18,6 +18,8 @@ if (!fs.existsSync(STORE_DIR)) {
 
 // Global configurations with default values (overridden from the Python service).
 let ragConfig: RAGConfig = {
+  embeddingProvider: 'ollama',
+  cohereApiKey: '',
   ollamaBaseUrl: process.env.OLLAMA_URL || 'http://host.docker.internal:11434',
   ollamaEmbedModel: process.env.OLLAMA_MODEL || 'BGE-M3',
   embeddingBaseUrl: '',

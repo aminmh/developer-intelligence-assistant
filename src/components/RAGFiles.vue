@@ -18,14 +18,16 @@ const props = defineProps<{
   uploading: boolean;
   uploadProgress: Record<string, number>;
   parsingFileId: string | null;
-  indexingProgress: { total: number; indexed: number; status: string };
+  indexingProgress: { total: number; indexed: number; status: string; stage?: string; error?: string };
   indexedFileIds: Set<string>;
+  embeddingProvider: 'ollama' | 'openAICompatible' | 'cohere';
 }>();
 
 const emit = defineEmits<{
   (e: 'uploadFiles', files: FileList): void;
   (e: 'deleteFile', id: string, name: string): void;
   (e: 'indexFile', id: string, name: string): void;
+  (e: 'rebuildCohereEmbeddings', id: string, name: string): void;
 }>();
 
 const dragOver = ref(false);
@@ -34,6 +36,13 @@ const selectedFile = ref<UploadedFile | null>(null);
 const activeFileId = ref<string | null>(null);
 const runtimeProjects = ref<RuntimeProjectRecord[]>([]);
 const runtimeLoadError = ref('');
+const progressStageMessage: Record<string, string> = {
+  queued: 'Queueing Cohere rebuild...',
+  extracting: 'Preparing source revision...',
+  embedding: 'Embedding project chunks...',
+  upserting: 'Saving embeddings...',
+  activating: 'Activating new embeddings...',
+};
 const deploymentByScope = computed(() => new Map(runtimeProjects.value
   .filter((row) => row.commit_sha)
   .map((row) => [`${row.project_id}:${row.commit_sha}`, row])));
@@ -257,19 +266,35 @@ const handleIndexFile = () => {
                 <Cpu class="w-3.5 h-3.5" />
                 {{ file.chunkCount > 0 ? 'Re-index' : 'Index' }}
               </button>
+              <button
+                v-if="embeddingProvider === 'cohere' && file.projectId && file.commitSha && file.uploadSessionId && parsingFileId !== file.id"
+                type="button"
+                @click="emit('rebuildCohereEmbeddings', file.id, file.name)"
+                class="flex items-center gap-1.5 px-3 py-1.5 text-[11px] font-semibold text-cyan-100 bg-cyan-700 hover:bg-cyan-600 rounded-lg transition-colors"
+              >
+                <Cpu class="w-3.5 h-3.5" />
+                Rebuild Cohere embeddings
+              </button>
               <div
                 v-if="parsingFileId === file.id && indexingProgress.total > 0"
                 class="space-y-2"
               >
                 <div class="flex items-center justify-between text-[10px]">
-                  <span class="text-indigo-400 font-mono">
-                    {{ indexingProgress.status === 'upserting' ? 'Saving to Qdrant...' : `Embedding chunks: ${indexingProgress.indexed}/${indexingProgress.total}` }}
+                  <span class="text-indigo-400 font-mono" aria-live="polite">
+                    {{ (indexingProgress.stage || indexingProgress.status) === 'upserting' ? 'Saving embeddings...' : (indexingProgress.stage === 'activating' ? 'Activating Cohere embeddings...' : (indexingProgress.stage === 'domain_embedding' ? `Embedding domain concepts: ${indexingProgress.indexed}/${indexingProgress.total}` : `Embedding chunks: ${indexingProgress.indexed}/${indexingProgress.total}`)) }}
                   </span>
-                  <span class="text-indigo-400 tabular-nums">
+                  <span class="text-indigo-400 tabular-nums" aria-hidden="true">
                     {{ ((indexingProgress.indexed / indexingProgress.total) * 100).toFixed(0) }}%
                   </span>
                 </div>
-                <div class="h-1.5 bg-slate-800 rounded-full overflow-hidden">
+                <div
+                  class="h-1.5 bg-slate-800 rounded-full overflow-hidden"
+                  role="progressbar"
+                  :aria-valuenow="Math.min(100, Math.round((indexingProgress.indexed / indexingProgress.total) * 100))"
+                  aria-valuemin="0"
+                  aria-valuemax="100"
+                  :aria-label="(indexingProgress.stage || indexingProgress.status) === 'upserting' ? 'Saving embeddings to the vector database' : (indexingProgress.stage === 'activating' ? 'Activating Cohere embeddings' : (indexingProgress.stage === 'domain_embedding' ? 'Embedding domain concepts' : 'Embedding project chunks'))"
+                >
                   <div
                     class="h-full bg-indigo-500 rounded-full transition-all duration-300"
                     :style="{ width: `${(indexingProgress.indexed / indexingProgress.total) * 100}%` }"
@@ -281,8 +306,11 @@ const handleIndexFile = () => {
                 class="flex items-center gap-2 text-[11px] text-indigo-400"
               >
                 <div class="w-3.5 h-3.5 border-2 border-indigo-400 border-t-transparent rounded-full animate-spin"></div>
-                Extracting PHP code...
+                {{ progressStageMessage[indexingProgress.stage || indexingProgress.status] || 'Extracting PHP code...' }}
               </div>
+              <p v-if="indexingProgress.status === 'error' && activeFileId === file.id" role="alert" class="text-[10px] text-rose-300">
+                {{ indexingProgress.error || 'Embedding failed. Check the API service and retry.' }}
+              </p>
             </div>
           </div>
         </div>

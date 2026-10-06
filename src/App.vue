@@ -111,6 +111,8 @@ const toggleSidebar = () => {
 };
 
 const config = ref<RAGConfig>({
+  embeddingProvider: 'ollama',
+  cohereApiKey: '',
   ollamaBaseUrl: 'http://host.docker.internal:11434',
   ollamaEmbedModel: 'BGE-M3',
   embeddingBaseUrl: '',
@@ -211,6 +213,7 @@ const {
   processFiles,
   deleteFile,
   indexFile,
+  rebuildCohereEmbeddings,
   attachZip,
   clearAttach,
   selectAttachment,
@@ -262,6 +265,7 @@ const saveConfig = async () => {
     });
     const data = await res.json();
     if (data.success) {
+      if (data.config) config.value = data.config;
       triggerToast('Configurations applied and saved successfully!');
     } else {
       triggerToast(data.error || 'Failed to save configuration', false);
@@ -1144,9 +1148,11 @@ onUnmounted(() => window.removeEventListener('popstate', syncTabFromHistory));
         :parsingFileId="parsingFileId"
         :indexingProgress="indexingProgress"
         :indexedFileIds="indexedFileIds"
+        :embeddingProvider="config.embeddingProvider"
         @uploadFiles="processFiles"
         @deleteFile="deleteFile"
         @indexFile="indexFile"
+        @rebuildCohereEmbeddings="rebuildCohereEmbeddings"
       />
 
       <RAGConfigComponent

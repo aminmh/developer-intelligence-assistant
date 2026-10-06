@@ -1,4 +1,6 @@
 export interface RAGConfig {
+  embeddingProvider: 'ollama' | 'openAICompatible' | 'cohere';
+  cohereApiKey: string;
   ollamaBaseUrl: string;
   ollamaEmbedModel: string;
   embeddingBaseUrl: string;

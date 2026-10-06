@@ -9,6 +9,41 @@ const { config, updateField } = defineProps<{
   updateField: <K extends keyof RAGConfig>(key: K, value: RAGConfig[K]) => void;
 }>();
 
+const embeddingProviders = [
+  { id: 'ollama', label: 'Ollama' },
+  { id: 'openAICompatible', label: 'OpenAI-compatible' },
+  { id: 'cohere', label: 'Cohere' },
+] as const;
+const feedbackRebuild = ref<{ job_id?: string; status: string; stage?: string; total: number; indexed: number; error?: string } | null>(null);
+const rebuildingFeedback = ref(false);
+
+const rebuildRouteFeedback = async () => {
+  rebuildingFeedback.value = true;
+  feedbackRebuild.value = { status: 'queued', stage: 'queued', total: 0, indexed: 0 };
+  try {
+    const response = await makeRequest('/api/embeddings/rebuild-route-feedback', { method: 'POST' });
+    const created = await response.json();
+    if (!response.ok || !created.job_id) throw new Error(created.detail || 'Could not start route-feedback rebuild.');
+    for (let attempt = 0; attempt < 300; attempt++) {
+      await new Promise((resolve) => setTimeout(resolve, 1000));
+      const statusResponse = await makeRequest(`/api/embeddings/rebuild/${encodeURIComponent(created.job_id)}`);
+      const status = await statusResponse.json();
+      if (!statusResponse.ok) throw new Error(status.detail || 'Could not read rebuild progress.');
+      feedbackRebuild.value = status;
+      if (status.status === 'done') return;
+      if (status.status === 'error') throw new Error(status.error || 'Route-feedback rebuild failed.');
+    }
+    throw new Error('Route-feedback rebuild timed out. Check the API service before retrying.');
+  } catch (error: any) {
+    feedbackRebuild.value = {
+      ...(feedbackRebuild.value || { total: 0, indexed: 0 }),
+      status: 'error', stage: 'error', error: error?.message || 'Route-feedback rebuild failed.',
+    };
+  } finally {
+    rebuildingFeedback.value = false;
+  }
+};
+
 // Preset base URLs deliberately omit "/v1" — the backend appends it.
 const remotePresets = [
   { id: 'openai', label: 'OpenAI', baseUrl: 'https://api.openai.com' },
@@ -194,6 +229,65 @@ onMounted(() => {
     <div class="flex items-center gap-2">
       <span class="w-1 h-3.5 bg-sky-500 rounded-full"></span>
       <h4 class="text-[11px] font-bold text-slate-400 uppercase tracking-widest">External OpenAI-Compatible Models</h4>
+    </div>
+
+    <div class="bg-slate-900/30 border border-slate-800 rounded-2xl p-6 space-y-4 max-w-2xl">
+      <h4 class="text-xs font-bold text-slate-200 uppercase tracking-wider flex items-center gap-2 border-b border-slate-800 pb-3">
+        <Zap class="w-4 h-4 text-sky-400" />
+        Embedding Provider
+      </h4>
+      <div class="space-y-1.5">
+        <label for="embedding-provider" class="text-xs text-slate-400 font-mono">Provider</label>
+        <select
+          id="embedding-provider"
+          :value="config.embeddingProvider"
+          @change="updateField('embeddingProvider', ($event.target as HTMLSelectElement).value as RAGConfig['embeddingProvider'])"
+          class="w-full bg-[#11162d] border border-slate-800 rounded-xl px-3 py-2.5 text-xs font-mono focus:outline-none focus:border-sky-500 text-slate-200"
+        >
+          <option v-for="provider in embeddingProviders" :key="provider.id" :value="provider.id">{{ provider.label }}</option>
+        </select>
+      </div>
+      <div v-if="config.embeddingProvider === 'cohere'" class="space-y-1.5">
+        <label for="cohere-api-key" class="text-xs text-slate-400 font-mono">Cohere API key</label>
+        <input
+          id="cohere-api-key"
+          :value="config.cohereApiKey"
+          @input="updateField('cohereApiKey', ($event.target as HTMLInputElement).value)"
+          type="password"
+          autocomplete="new-password"
+          class="w-full bg-[#11162d] border border-slate-800 rounded-xl px-4 py-2.5 text-xs font-mono focus:outline-none focus:border-sky-500 text-slate-200"
+          placeholder="Leave blank to keep the saved key"
+        />
+        <p class="text-[9px] text-slate-500">Stored by the API service and never returned to the browser. Cohere uses Embed v5 Pro for indexing and Fast for queries.</p>
+        <div class="pt-3 border-t border-slate-800 space-y-2">
+          <div class="flex items-center justify-between gap-3">
+            <div>
+              <p class="text-[10px] text-slate-300">Route feedback vectors</p>
+              <p class="text-[9px] text-slate-500">Rebuild saved routing corrections in Cohere’s query space.</p>
+            </div>
+            <button
+              type="button"
+              @click="rebuildRouteFeedback"
+              :disabled="rebuildingFeedback"
+              class="shrink-0 px-3 py-2 text-[10px] font-mono text-cyan-100 bg-cyan-700 hover:bg-cyan-600 rounded-lg disabled:opacity-50"
+            >
+              {{ rebuildingFeedback ? 'Rebuilding…' : 'Rebuild feedback' }}
+            </button>
+          </div>
+          <div v-if="feedbackRebuild && feedbackRebuild.status !== 'error'" role="status" aria-live="polite" class="space-y-1.5">
+            <div class="flex justify-between text-[9px] text-slate-400">
+              <span>{{ feedbackRebuild.stage === 'upserting' ? 'Saving feedback vectors…' : (feedbackRebuild.stage === 'activating' ? 'Activating feedback vectors…' : `Embedding feedback: ${feedbackRebuild.indexed}/${feedbackRebuild.total}`) }}</span>
+              <span v-if="feedbackRebuild.total">{{ Math.round((feedbackRebuild.indexed / feedbackRebuild.total) * 100) }}%</span>
+            </div>
+            <div v-if="feedbackRebuild.total" class="h-1.5 bg-slate-800 rounded-full overflow-hidden" role="progressbar" :aria-valuenow="Math.min(100, Math.round((feedbackRebuild.indexed / feedbackRebuild.total) * 100))" aria-valuemin="0" aria-valuemax="100" aria-label="Rebuilding route-feedback embeddings">
+              <div class="h-full bg-cyan-500 transition-all duration-300" :style="{ width: `${(feedbackRebuild.indexed / feedbackRebuild.total) * 100}%` }"></div>
+            </div>
+          </div>
+          <p v-if="feedbackRebuild?.status === 'error'" role="alert" class="text-[10px] text-rose-300">{{ feedbackRebuild.error }}</p>
+        </div>
+      </div>
+      <p v-else-if="config.embeddingProvider === 'openAICompatible'" class="text-[9px] text-slate-500">Uses the configured embedding base URL and model.</p>
+      <p v-else class="text-[9px] text-slate-500">Ollama remains the default embedding provider.</p>
     </div>
 
     <div class="bg-slate-900/30 border border-slate-800 rounded-2xl p-6 space-y-4 max-w-2xl">

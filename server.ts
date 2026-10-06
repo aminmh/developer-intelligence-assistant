@@ -19,7 +19,7 @@ const SYS_MON_URL = process.env.SYS_MON_URL || 'http://host.docker.internal:8765
 const SYS_MON_LOCAL_URL = 'http://localhost:8765';
 
 // Secret fields masked before returning config to the browser (write-only).
-const MASKED_SECRET_KEYS = ['qdrantApiKey', 'llmRemoteApiKey'];
+const MASKED_SECRET_KEYS = ['qdrantApiKey', 'llmRemoteApiKey', 'cohereApiKey'];
 function maskConfig(config: Record<string, any>) {
   const masked = { ...config };
   for (const key of MASKED_SECRET_KEYS) {
@@ -42,6 +42,7 @@ const jobToQueryId = new Map<string, string>();
 const jobToOwner = new Map<string, string>();
 const queryToOwner = new Map<string, string>();
 const downloadToOwner = new Map<string, string>();
+const embeddingJobToOwner = new Map<string, string>();
 
 // ============================================================================
 // ROUTE MAP (proxies + passthroughs to the python backend). New endpoints
@@ -1353,6 +1354,59 @@ async function startServer() {
       res.status(response.status).json(await response.json());
     } catch (error: any) {
       res.status(502).json({ error: error?.message || 'Python service is unavailable.' });
+    }
+  });
+
+  app.post('/api/embeddings/rebuild', async (req, res) => {
+    try {
+      const user = (res.locals as any).authUser;
+      const projectId = req.body?.project_id;
+      const role = projectId ? authRoleFor(user, projectId) : null;
+      if (!role || role === 'viewer') {
+        return res.status(403).json({ detail: 'Project access denied.' });
+      }
+      const response = await fetch(`${PYTHON_API_URL}/api/embeddings/rebuild`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(req.body),
+      });
+      const data = await response.json().catch(() => ({})) as any;
+      if (response.ok && data.job_id) {
+        embeddingJobToOwner.set(data.job_id, user.sub);
+      }
+      res.status(response.status).json(data);
+    } catch (error: any) {
+      res.status(502).json({ detail: error?.message || 'Python service is unavailable.' });
+    }
+  });
+
+  app.get('/api/embeddings/rebuild/:jobId', async (req, res) => {
+    if (embeddingJobToOwner.get(req.params.jobId) !== (res.locals as any).authUser.sub) {
+      return res.status(403).json({ detail: 'Embedding job access denied.' });
+    }
+    try {
+      const response = await fetch(`${PYTHON_API_URL}/api/embeddings/rebuild/${encodeURIComponent(req.params.jobId)}`);
+      res.status(response.status).json(await response.json());
+    } catch (error: any) {
+      res.status(502).json({ detail: error?.message || 'Python service is unavailable.' });
+    }
+  });
+
+  app.post('/api/embeddings/rebuild-route-feedback', async (req, res) => {
+    const user = (res.locals as any).authUser;
+    if (!authIsBootstrapAdmin(user)) {
+      return res.status(403).json({ detail: 'Administrator access is required.' });
+    }
+    try {
+      const response = await fetch(`${PYTHON_API_URL}/api/embeddings/rebuild-route-feedback`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+      });
+      const data = await response.json().catch(() => ({})) as any;
+      if (response.ok && data.job_id) embeddingJobToOwner.set(data.job_id, user.sub);
+      res.status(response.status).json(data);
+    } catch (error: any) {
+      res.status(502).json({ detail: error?.message || 'Python service is unavailable.' });
     }
   });
 
