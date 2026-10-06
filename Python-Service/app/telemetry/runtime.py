@@ -201,13 +201,13 @@ class ClickHouseRuntime:
             scoped = f"SELECT TraceId, SpanId, ParentSpanId, Timestamp, Duration, StatusCode, SpanAttributes, SpanAttributes['indexer.symbol_id'] AS symbol_id FROM {table} WHERE {scope}"
             totals = self.rows(
                 f"SELECT count() AS spans, countIf(symbol_id != '') AS symbol_spans, "
-                f"countIf(StatusCode = 2) AS errors, max(Timestamp) AS last_seen "
+                f"countIf(StatusCode = 'Error') AS errors, max(Timestamp) AS last_seen "
                 f"FROM ({scoped})", project_id, revision_id,
             )
             symbols = self.rows(
                 f"SELECT symbol_id, count() AS runs, max(Timestamp) AS last_seen, "
                 f"quantile(0.95)(toFloat64(Duration)) / 1000000 AS p95_ms, "
-                f"countIf(StatusCode = 2) AS failures FROM ({scoped}) "
+                f"countIf(StatusCode = 'Error') AS failures FROM ({scoped}) "
                 "WHERE symbol_id != '' GROUP BY symbol_id ORDER BY runs DESC LIMIT 5000",
                 project_id, revision_id,
             )
@@ -217,7 +217,7 @@ class ClickHouseRuntime:
                 "if(SpanAttributes['indexer.route_id'] != '', SpanAttributes['indexer.route_id'], "
                 "concat('route:', upper(SpanAttributes['http.request.method']), ' ', SpanAttributes['http.route'])) AS route_id, "
                 f"quantile(0.95)(toFloat64(Duration)) / 1000000 AS p95_ms, "
-                f"countIf(StatusCode = 2) AS failures, max(Timestamp) AS last_seen FROM {table} WHERE {scope} "
+                f"countIf(StatusCode = 'Error') AS failures, max(Timestamp) AS last_seen FROM {table} WHERE {scope} "
                 "AND route != '' GROUP BY method, route, route_id ORDER BY requests DESC LIMIT 1000",
                 project_id, revision_id,
             )

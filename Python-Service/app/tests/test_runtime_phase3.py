@@ -5,7 +5,7 @@ import asyncio
 from telemetry.aggregation import _graph_facts
 from telemetry.events import publish_runtime_update, runtime_events
 from telemetry.registry import SnapshotRegistry
-from telemetry.runtime import runtime_sampling_policy, update_runtime_sampling_policy
+from telemetry.runtime import ClickHouseRuntime, runtime_sampling_policy, update_runtime_sampling_policy
 from telemetry.snapshot import storage_id
 
 
@@ -68,3 +68,33 @@ def test_runtime_events_publish_invalidation_without_project_data():
     assert "event: runtime.updated" in event
     assert '"type":"runtime.updated"' in event
     assert "project_id" not in event
+
+
+def test_runtime_summary_compares_clickhouse_span_status_as_text(monkeypatch):
+    queries = []
+
+    def rows(_self, sql, _project_id, _revision_id):
+        queries.append(sql)
+        if "AS spans" in sql:
+            return [{"spans": 0, "symbol_spans": 0, "errors": 0, "last_seen": None}]
+        return []
+
+    monkeypatch.setattr(ClickHouseRuntime, "configured", property(lambda _self: True))
+    monkeypatch.setattr(ClickHouseRuntime, "rows", rows)
+    monkeypatch.setattr(
+        "telemetry.runtime.runtime_sampling_policy",
+        lambda _registry=None: {
+            "p95_window_hours": 24,
+            "refresh_minutes": 5,
+            "aggregation_retention_hours": 168,
+        },
+    )
+
+    summary = ClickHouseRuntime().summary("pizza", "rev_test", set())
+
+    assert summary["available"] is True
+    assert summary["total_spans"] == 0
+    assert summary["reason"] == "No runtime spans have arrived for this project commit."
+    status_queries = [query for query in queries if "countIf(StatusCode" in query]
+    assert len(status_queries) == 3
+    assert all("StatusCode = 'Error'" in query for query in status_queries)
