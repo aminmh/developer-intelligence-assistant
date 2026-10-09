@@ -128,6 +128,7 @@ export interface RuntimeContainer {
 export interface RuntimeProjectRecord {
   project_id: string;
   can_remove?: boolean;
+  can_delete_telemetry?: boolean;
   commit_sha: string | null;
   revision_id: string | null;
   state: string;
@@ -179,6 +180,41 @@ export interface RuntimeTelemetryData {
   unmatched_percent: number;
   aggregation_window_hours: number;
   pipeline_health: string;
+}
+
+export interface RuntimeRequest {
+  trace_id: string;
+  span_id: string;
+  timestamp: string | null;
+  method: string;
+  route: string;
+  status_code: number | null;
+  duration_ms: number | null;
+  span_status: string;
+  php_cpu_time_us: number | null;
+  php_peak_memory_bytes: number | null;
+}
+
+export interface RuntimeDatabaseCall {
+  span_id: string;
+  parent_span_id: string;
+  timestamp: string | null;
+  duration_ms: number | null;
+  db_system: string | null;
+  db_namespace: string | null;
+  operation: string | null;
+  table_ids: string[];
+  symbol_id: string | null;
+  caller_symbol_id: string | null;
+  span_status: string;
+}
+
+export interface RuntimeRequestDetail {
+  available: boolean;
+  reason?: string | null;
+  sampled?: boolean;
+  request: RuntimeRequest | null;
+  database_calls: RuntimeDatabaseCall[];
 }
 
 export interface RuntimeSnapshotData {

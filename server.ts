@@ -721,6 +721,7 @@ async function startServer() {
         .map((project: any) => ({
           ...project,
           can_remove: authIsBootstrapAdmin(user) || authRoleFor(user, project.project_id) === 'admin',
+          can_delete_telemetry: authIsBootstrapAdmin(user) || authRoleFor(user, project.project_id) === 'admin',
         }));
       return res.json({ projects });
     } catch {
@@ -755,6 +756,61 @@ async function startServer() {
       return res.status(pyRes.status).json(data);
     } catch {
       return res.status(502).json({ detail: 'Runtime revision is unavailable.' });
+    }
+  });
+
+  app.get('/api/runtime/projects/:projectId/revisions/:revisionId/requests', async (req, res) => {
+    try {
+      const user = (res.locals as any).authUser;
+      if (!authIsBootstrapAdmin(user) && !authRoleFor(user, req.params.projectId)) {
+        return res.status(403).json({ detail: 'Project access denied.' });
+      }
+      const path = `/telemetry/runtime/projects/${encodeURIComponent(req.params.projectId)}/revisions/${encodeURIComponent(req.params.revisionId)}/requests`;
+      const pyRes = await fetch(`${PYTHON_API_URL}${path}`, { headers: { 'X-Internal-Secret': INTERNAL_SECRET } });
+      const data = await pyRes.json().catch(() => ({ detail: 'Runtime requests are unavailable.' }));
+      return res.status(pyRes.status).json(data);
+    } catch {
+      return res.status(502).json({ detail: 'Runtime requests are unavailable.' });
+    }
+  });
+
+  app.delete('/api/runtime/projects/:projectId/revisions/:revisionId/requests', async (req, res) => {
+    try {
+      const user = (res.locals as any).authUser;
+      if (!authIsBootstrapAdmin(user) && authRoleFor(user, req.params.projectId) !== 'admin') {
+        return res.status(403).json({ detail: 'Project administrator access is required to delete Runtime telemetry.' });
+      }
+      const traceIds = req.body?.trace_ids;
+      if (!Array.isArray(traceIds) || traceIds.length < 1 || traceIds.length > 50
+        || traceIds.some((traceId: unknown) => typeof traceId !== 'string' || !/^[0-9a-f]{32}$/i.test(traceId))
+        || new Set(traceIds.map((traceId: string) => traceId.toLowerCase())).size !== traceIds.length) {
+        return res.status(400).json({ detail: 'Select between 1 and 50 unique request traces.' });
+      }
+      const path = `/telemetry/runtime/projects/${encodeURIComponent(req.params.projectId)}/revisions/${encodeURIComponent(req.params.revisionId)}/requests`;
+      const pyRes = await fetch(`${PYTHON_API_URL}${path}`, {
+        method: 'DELETE',
+        headers: { 'Content-Type': 'application/json', 'X-Internal-Secret': INTERNAL_SECRET },
+        body: JSON.stringify({ trace_ids: traceIds.map((traceId: string) => traceId.toLowerCase()) }),
+      });
+      const data = await pyRes.json().catch(() => ({ detail: 'Request telemetry could not be deleted.' }));
+      return res.status(pyRes.status).json(data);
+    } catch {
+      return res.status(502).json({ detail: 'Request telemetry could not be deleted.' });
+    }
+  });
+
+  app.get('/api/runtime/projects/:projectId/revisions/:revisionId/requests/:traceId', async (req, res) => {
+    try {
+      const user = (res.locals as any).authUser;
+      if (!authIsBootstrapAdmin(user) && !authRoleFor(user, req.params.projectId)) {
+        return res.status(403).json({ detail: 'Project access denied.' });
+      }
+      const path = `/telemetry/runtime/projects/${encodeURIComponent(req.params.projectId)}/revisions/${encodeURIComponent(req.params.revisionId)}/requests/${encodeURIComponent(req.params.traceId)}`;
+      const pyRes = await fetch(`${PYTHON_API_URL}${path}`, { headers: { 'X-Internal-Secret': INTERNAL_SECRET } });
+      const data = await pyRes.json().catch(() => ({ detail: 'Request details are unavailable.' }));
+      return res.status(pyRes.status).json(data);
+    } catch {
+      return res.status(502).json({ detail: 'Request details are unavailable.' });
     }
   });
 

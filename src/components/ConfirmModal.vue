@@ -7,6 +7,8 @@ defineProps<{
   message: string;
   confirmLabel?: string;
   cancelLabel?: string;
+  busy?: boolean;
+  error?: string;
 }>();
 
 const emit = defineEmits<{
@@ -32,7 +34,7 @@ const emit = defineEmits<{
         <!-- Backdrop -->
         <div
           class="absolute inset-0 bg-slate-950/70 backdrop-blur-sm"
-          @click="emit('cancel')"
+          @click="!busy && emit('cancel')"
         />
 
         <!-- Modal -->
@@ -46,10 +48,12 @@ const emit = defineEmits<{
             <div class="flex-1 min-w-0">
               <h3 class="text-sm font-semibold text-white">{{ title }}</h3>
               <p class="text-xs text-slate-400 mt-1 leading-relaxed">{{ message }}</p>
+              <p v-if="error" role="alert" class="text-xs text-rose-300 mt-3">{{ error }}</p>
             </div>
             <button
-              @click="emit('cancel')"
-              class="text-slate-500 hover:text-slate-300 transition-colors shrink-0"
+              @click="!busy && emit('cancel')"
+              :disabled="busy"
+              class="text-slate-500 hover:text-slate-300 transition-colors shrink-0 disabled:opacity-50"
             >
               <X class="w-4 h-4" />
             </button>
@@ -58,15 +62,17 @@ const emit = defineEmits<{
           <div class="flex gap-2.5 justify-end">
             <button
               @click="emit('cancel')"
-              class="px-4 py-2 text-xs font-medium text-slate-400 hover:text-white hover:bg-slate-800/60 rounded-xl transition-colors"
+              :disabled="busy"
+              class="px-4 py-2 text-xs font-medium text-slate-400 hover:text-white hover:bg-slate-800/60 rounded-xl transition-colors disabled:opacity-50"
             >
               {{ cancelLabel ?? 'Cancel' }}
             </button>
             <button
               @click="emit('confirm')"
-              class="px-4 py-2 text-xs font-semibold text-white bg-rose-600 hover:bg-rose-500 rounded-xl transition-colors shadow-sm shadow-rose-600/20"
+              :disabled="busy"
+              class="px-4 py-2 text-xs font-semibold text-white bg-rose-600 hover:bg-rose-500 rounded-xl transition-colors shadow-sm shadow-rose-600/20 disabled:opacity-50"
             >
-              {{ confirmLabel ?? 'Delete' }}
+              {{ busy ? 'Working…' : confirmLabel ?? 'Delete' }}
             </button>
           </div>
         </div>

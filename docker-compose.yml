@@ -1,5 +1,6 @@
 services:
   keycloak:
+    profiles: [local-auth]
     image: quay.io/keycloak/keycloak:26.7.4
     container_name: developer-assistant-keycloak
     env_file:
@@ -43,7 +44,7 @@ services:
     environment:
       OLLAMA_URL: http://host.docker.internal:11434
       PYTHON_API_URL: http://python-api:9002
-      OIDC_INTERNAL_ISSUER: http://keycloak:8080/realms/developer-assistant
+      OIDC_INTERNAL_ISSUER: ${OIDC_LITE_INTERNAL_ISSUER:-${OIDC_ISSUER:-http://keycloak:8080/realms/developer-assistant}}
       OLLAMA_IMPORT_ROOT: /ollama-imports
       OLLAMA_IMPORT_HOST_ROOT: ${OLLAMA_IMPORT_HOST_ROOT:-./ollama-imports}
     ports:
@@ -55,8 +56,6 @@ services:
     networks:
       - default
       - devassistant_net
-    depends_on:
-      - keycloak
 
   web-dev:
     build:
@@ -83,7 +82,7 @@ services:
       NODE_OPTIONS: --max-old-space-size=2304
       OLLAMA_URL: http://host.docker.internal:11434
       PYTHON_API_URL: http://python-api:9002
-      OIDC_INTERNAL_ISSUER: http://keycloak:8080/realms/developer-assistant
+      OIDC_INTERNAL_ISSUER: ${OIDC_LITE_INTERNAL_ISSUER:-${OIDC_ISSUER:-http://keycloak:8080/realms/developer-assistant}}
       OLLAMA_IMPORT_ROOT: /ollama-imports
       OLLAMA_IMPORT_HOST_ROOT: ${OLLAMA_IMPORT_HOST_ROOT:-./ollama-imports}
     ports:
@@ -101,8 +100,6 @@ services:
     networks:
       - default
       - devassistant_net
-    depends_on:
-      - keycloak
 
 networks:
   default: {}

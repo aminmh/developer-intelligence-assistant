@@ -5,7 +5,7 @@ SERVICE ?= web
 DEV_SERVICE ?= web-dev
 NETWORK ?= devassistant_net
 
-.PHONY: help network build up down stop restart logs ps \
+.PHONY: help network build up up-lite down stop restart logs ps \
         dev dev-build dev-down dev-logs dev-shell \
         shell exec lint rebuild clean prune
 
@@ -14,6 +14,7 @@ help:
 	@echo "  make network         - Create the shared devassistant_net Docker network (idempotent)"
 	@echo "  make build           - Build the production web image"
 	@echo "  make up              - Start the production web service in detached mode"
+	@echo "  make up-lite         - Start production Web using external OIDC (no local Keycloak)"
 	@echo "  make down            - Stop and remove the production web service"
 	@echo "  make stop            - Stop the production web service"
 	@echo "  make restart         - Restart the production web service"
@@ -38,13 +39,16 @@ build:
 	$(COMPOSE) build $(SERVICE)
 
 up: network
+	OIDC_LITE_INTERNAL_ISSUER=http://keycloak:8080/realms/developer-assistant $(COMPOSE) --profile local-auth up -d keycloak $(SERVICE)
+
+up-lite: network
 	$(COMPOSE) up -d $(SERVICE)
 
 down:
-	$(COMPOSE) down
+	$(COMPOSE) --profile '*' down
 
 stop:
-	$(COMPOSE) stop $(SERVICE)
+	$(COMPOSE) --profile '*' stop
 
 restart:
 	$(COMPOSE) restart $(SERVICE)
@@ -66,7 +70,7 @@ dev-build:
 	$(COMPOSE) --profile dev build $(DEV_SERVICE)
 
 dev: network
-	$(COMPOSE) --profile dev up -d $(DEV_SERVICE)
+	OIDC_LITE_INTERNAL_ISSUER=http://keycloak:8080/realms/developer-assistant $(COMPOSE) --profile dev --profile local-auth up -d keycloak $(DEV_SERVICE)
 
 dev-down:
 	$(COMPOSE) --profile dev down
@@ -86,7 +90,7 @@ rebuild: network
 	$(COMPOSE) up -d $(SERVICE)
 
 clean:
-	$(COMPOSE) --profile dev down --remove-orphans
+	$(COMPOSE) --profile '*' down --remove-orphans
 
 prune:
 	docker system prune -af --volumes

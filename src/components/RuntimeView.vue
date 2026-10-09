@@ -1,9 +1,10 @@
 <script setup lang="ts">
 import { Activity, AlertTriangle, ArrowUpRight, BookOpen, CheckCircle2, RefreshCw, Server, Trash2, XCircle } from 'lucide-vue-next';
 import { computed, onMounted, onUnmounted, ref, watch } from 'vue';
+import ConfirmModal from './ConfirmModal.vue';
 import { makeRequest } from '../ui/makeRequest';
 import { subscribeRuntimeUpdates } from '../ui/runtimeEvents';
-import type { RuntimeProjectRecord, RuntimeSnapshotData } from '../types';
+import type { RuntimeDatabaseCall, RuntimeProjectRecord, RuntimeRequest, RuntimeRequestDetail, RuntimeSnapshotData } from '../types';
 
 const emit = defineEmits<{
   (event: 'openDefinition', projectId: string, revisionId: string, symbolId: string): void;
@@ -11,7 +12,20 @@ const emit = defineEmits<{
 
 const projects = ref<RuntimeProjectRecord[]>([]);
 const selectedKey = ref('');
+const loadedDetailKey = ref('');
 const detail = ref<RuntimeSnapshotData | null>(null);
+const requestList = ref<{ available: boolean; reason?: string | null; sampled?: boolean; window_hours?: number; requests: RuntimeRequest[] } | null>(null);
+const requestListLoading = ref(false);
+const requestListError = ref('');
+const hiddenTraceIds = ref(new Set<string>());
+const deleteTarget = ref<{ key: string; projectId: string; revisionId: string; traceIds: string[] } | null>(null);
+const deletingRequests = ref(false);
+const requestDeleteError = ref('');
+const requestDeleteNotice = ref('');
+const expandedTraceId = ref('');
+const requestDetails = ref<Record<string, RuntimeRequestDetail>>({});
+const requestDetailLoading = ref<Record<string, boolean>>({});
+const requestDetailErrors = ref<Record<string, string>>({});
 const loadingProjects = ref(false);
 const loadingDetail = ref(false);
 const error = ref('');
@@ -76,6 +90,11 @@ const options = computed(() => {
   return [...byKey.values()];
 });
 const selected = computed(() => options.value.find((item) => item.key === selectedKey.value) || null);
+const visibleRequests = computed(() => (requestList.value?.requests || []).filter((request) => !hiddenTraceIds.value.has(request.trace_id)));
+const deleteTargetMessage = computed(() => {
+  const count = deleteTarget.value?.traceIds.length || 0;
+  return `Delete telemetry for ${count} loaded request trace${count === 1 ? '' : 's'}? This removes all stored spans for these traces in the selected project and revision, including database-call spans. Runtime aggregate metrics for those spans will decrease. This cannot be undone.`;
+});
 const metricsBySymbol = computed(() => new Map((detail.value?.telemetry.symbols || []).map((item) => [item.symbol_id, item])));
 const symbols = computed(() => {
   const metrics = metricsBySymbol.value;
@@ -106,9 +125,39 @@ const loadProjects = async () => {
 };
 
 const loadDetail = async () => {
-  if (!selected.value?.commit_sha) { detail.value = null; return; }
+  if (!selected.value?.commit_sha) {
+    loadedDetailKey.value = '';
+    detail.value = null;
+    requestList.value = null;
+    requestListError.value = '';
+    hiddenTraceIds.value = new Set();
+    requestDeleteError.value = '';
+    requestDeleteNotice.value = '';
+    expandedTraceId.value = '';
+    requestDetails.value = {};
+    requestDetailLoading.value = {};
+    requestDetailErrors.value = {};
+    requestListLoading.value = false;
+    loadingDetail.value = false;
+    return;
+  }
+  const selectedKeyAtStart = selected.value.key;
+  const isSelectionChange = loadedDetailKey.value !== selectedKeyAtStart;
   loadingDetail.value = true;
   error.value = '';
+  requestListError.value = '';
+  if (isSelectionChange) {
+    detail.value = null;
+    requestList.value = null;
+    hiddenTraceIds.value = new Set();
+    deleteTarget.value = null;
+    requestDeleteError.value = '';
+    requestDeleteNotice.value = '';
+    expandedTraceId.value = '';
+    requestDetails.value = {};
+    requestDetailLoading.value = {};
+    requestDetailErrors.value = {};
+  }
   try {
     const { project_id, commit_sha, revision_id } = selected.value;
     const identityPath = revision_id
@@ -118,16 +167,150 @@ const loadDetail = async () => {
     const response = await makeRequest(path);
     const data = await response.json();
     if (!response.ok) throw new Error(data.detail || 'Could not load runtime snapshot.');
+    if (selected.value?.key !== selectedKeyAtStart) return;
     detail.value = data as RuntimeSnapshotData;
+    loadedDetailKey.value = selectedKeyAtStart;
+    if (revision_id) await loadRequestList(project_id, revision_id, selectedKeyAtStart);
+    else requestList.value = null;
   } catch (cause: any) {
-    detail.value = null;
-    error.value = cause?.message || 'Could not load runtime snapshot.';
+    if (selected.value?.key === selectedKeyAtStart) {
+      if (!detail.value || loadedDetailKey.value !== selectedKeyAtStart) {
+        detail.value = null;
+        error.value = cause?.message || 'Could not load runtime snapshot.';
+      }
+    }
   } finally {
-    loadingDetail.value = false;
+    if (selected.value?.key === selectedKeyAtStart) loadingDetail.value = false;
   }
 };
 
+const loadRequestList = async (projectId = selected.value?.project_id, revisionId = selected.value?.revision_id, expectedKey = selected.value?.key) => {
+  if (!projectId || !revisionId) { requestList.value = null; return; }
+  requestListLoading.value = true;
+  requestListError.value = '';
+  try {
+    const path = `/api/runtime/projects/${encodeURIComponent(projectId)}/revisions/${encodeURIComponent(revisionId)}/requests`;
+    const response = await makeRequest(path);
+    const data = await response.json();
+    if (!response.ok) throw new Error(data.detail || 'Could not load recent requests.');
+    if (selected.value?.key === expectedKey) {
+      requestList.value = data;
+      const currentTraceIds = new Set((data.requests || []).map((request: RuntimeRequest) => request.trace_id));
+      hiddenTraceIds.value = new Set([...hiddenTraceIds.value].filter((traceId) => currentTraceIds.has(traceId)));
+    }
+  } catch (cause: any) {
+    if (selected.value?.key === expectedKey) requestListError.value = cause?.message || 'Could not load recent requests.';
+  } finally {
+    if (selected.value?.key === expectedKey) requestListLoading.value = false;
+  }
+};
+
+const toggleRequest = async (request: RuntimeRequest, retry = false) => {
+  const existing = requestDetails.value[request.trace_id];
+  if (expandedTraceId.value === request.trace_id && !retry) { expandedTraceId.value = ''; return; }
+  expandedTraceId.value = request.trace_id;
+  if (requestDetailLoading.value[request.trace_id] || (existing && !retry)) return;
+  if (existing && retry) {
+    const remaining = { ...requestDetails.value };
+    delete remaining[request.trace_id];
+    requestDetails.value = remaining;
+  }
+  const current = selected.value;
+  if (!current?.revision_id) return;
+  const expectedKey = current.key;
+  requestDetailLoading.value = { ...requestDetailLoading.value, [request.trace_id]: true };
+  requestDetailErrors.value = { ...requestDetailErrors.value, [request.trace_id]: '' };
+  try {
+    const path = `/api/runtime/projects/${encodeURIComponent(current.project_id)}/revisions/${encodeURIComponent(current.revision_id)}/requests/${encodeURIComponent(request.trace_id)}`;
+    const response = await makeRequest(path);
+    const data = await response.json();
+    if (!response.ok) throw new Error(data.detail || 'Could not load request details.');
+    if (selected.value?.key === expectedKey) requestDetails.value = { ...requestDetails.value, [request.trace_id]: data };
+  } catch (cause: any) {
+    if (selected.value?.key === expectedKey) requestDetailErrors.value = { ...requestDetailErrors.value, [request.trace_id]: cause?.message || 'Could not load request details.' };
+  } finally {
+    if (selected.value?.key === expectedKey) requestDetailLoading.value = { ...requestDetailLoading.value, [request.trace_id]: false };
+  }
+};
+
+const formatMilliseconds = (value: number | null) => value == null ? 'Unavailable' : `${Number(value).toFixed(2)} ms`;
+const formatPhpCpu = (value: number | null) => value == null ? 'Unavailable' : `${(value / 1000).toFixed(2)} ms`;
+const formatPhpMemory = (value: number | null) => value == null ? 'Unavailable' : value >= 1024 * 1024 ? `${(value / 1024 / 1024).toFixed(2)} MiB` : `${(value / 1024).toFixed(1)} KiB`;
+const displayTable = (tableId: string) => tableId.replace(/^table:/, '').split('.').slice(1).join('.') || tableId;
+const displaySymbol = (symbolId: string | null) => {
+  if (!symbolId) return 'Unavailable';
+  const definition = detail.value?.definitions.find((item) => item.symbol_id === symbolId);
+  return definition?.fqn || definition?.name || symbolId;
+};
+const requestMethod = (call: RuntimeDatabaseCall) => displaySymbol(call.caller_symbol_id || call.symbol_id);
+
 const refresh = async () => { await loadProjects(); await loadDetail(); };
+const clearRequestRows = () => {
+  const traceIds = visibleRequests.value.map((request) => request.trace_id);
+  if (!traceIds.length) return;
+  hiddenTraceIds.value = new Set([...hiddenTraceIds.value, ...traceIds]);
+  expandedTraceId.value = '';
+  requestDeleteNotice.value = '';
+};
+const restoreHiddenRequestRows = () => { hiddenTraceIds.value = new Set(); };
+const cancelDeleteRequestRows = () => {
+  if (deletingRequests.value) return;
+  deleteTarget.value = null;
+  requestDeleteError.value = '';
+};
+const confirmDeleteRequestRows = () => {
+  const current = selected.value;
+  const traceIds = [...new Set((requestList.value?.requests || []).map((request) => request.trace_id))];
+  if (!current?.revision_id || !current.can_delete_telemetry || !traceIds.length) return;
+  requestDeleteError.value = '';
+  requestDeleteNotice.value = '';
+  deleteTarget.value = {
+    key: current.key,
+    projectId: current.project_id,
+    revisionId: current.revision_id,
+    traceIds,
+  };
+};
+const deleteStoredRequestRows = async () => {
+  const target = deleteTarget.value;
+  if (!target || deletingRequests.value || selected.value?.key !== target.key) return;
+  deletingRequests.value = true;
+  requestDeleteError.value = '';
+  try {
+    const path = `/api/runtime/projects/${encodeURIComponent(target.projectId)}/revisions/${encodeURIComponent(target.revisionId)}/requests`;
+    const response = await makeRequest(path, {
+      method: 'DELETE',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ trace_ids: target.traceIds }),
+    });
+    const data = await response.json().catch(() => ({}));
+    if (!response.ok) throw new Error(data.detail || 'Could not delete request telemetry.');
+    const deleted = new Set(target.traceIds);
+    requestList.value = requestList.value
+      ? { ...requestList.value, requests: requestList.value.requests.filter((request) => !deleted.has(request.trace_id)) }
+      : null;
+    hiddenTraceIds.value = new Set([...hiddenTraceIds.value].filter((traceId) => !deleted.has(traceId)));
+    const remainingDetails = { ...requestDetails.value };
+    const remainingErrors = { ...requestDetailErrors.value };
+    const remainingLoading = { ...requestDetailLoading.value };
+    for (const traceId of deleted) {
+      delete remainingDetails[traceId];
+      delete remainingErrors[traceId];
+      delete remainingLoading[traceId];
+    }
+    requestDetails.value = remainingDetails;
+    requestDetailErrors.value = remainingErrors;
+    requestDetailLoading.value = remainingLoading;
+    expandedTraceId.value = '';
+    requestDeleteNotice.value = `Deleted telemetry for ${target.traceIds.length} request trace${target.traceIds.length === 1 ? '' : 's'}. Runtime aggregates are refreshing.`;
+    deleteTarget.value = null;
+    await refresh();
+  } catch (cause: any) {
+    requestDeleteError.value = cause?.message || 'Could not delete request telemetry.';
+  } finally {
+    deletingRequests.value = false;
+  }
+};
 const getRuntimeHelperAuth = async () => {
   const response = await makeRequest('/api/runtime/setup-authorization', { method: 'POST' });
   const data = await response.json();
@@ -457,6 +640,52 @@ onUnmounted(() => stopRuntimeUpdates?.());
       <div v-if="detail.snapshot.state !== 'awaiting_source' && detail.telemetry.reason" class="rounded-xl border border-amber-500/20 bg-amber-500/5 p-4 text-xs text-amber-200">{{ detail.telemetry.reason }} Start the local runtime telemetry profile and instrument the PHP application with the Phase 1 identity attributes. The synthetic Phase 0 collector does not accept application spans.</div>
       <div v-if="detail.snapshot.state !== 'awaiting_source' && detail.symbol_index_available === false" class="rounded-xl border border-amber-500/20 bg-amber-500/5 p-4 text-xs text-amber-200">{{ detail.symbol_index_reason || 'The symbol index is unavailable.' }} Runtime spans may still be present, but code-match and dead-code views require the indexed snapshot.</div>
 
+      <section v-if="detail.revision_id" class="rounded-2xl border border-slate-800 bg-slate-900/30 p-4 space-y-3">
+        <div class="flex flex-wrap items-center justify-between gap-2">
+          <div><h4 class="text-xs font-semibold uppercase tracking-wide text-slate-300">Recent sampled requests</h4><p class="mt-1 text-[10px] text-slate-500">At most 50 requests from the last {{ requestList?.window_hours || detail.telemetry.aggregation_window_hours }} hours. PHP CPU and memory are worker-level estimates.</p></div>
+          <div class="flex flex-wrap items-center gap-2">
+            <button type="button" @click="clearRequestRows" :disabled="!visibleRequests.length" class="rounded-lg border border-slate-700 px-2 py-1.5 text-[10px] text-slate-300 hover:bg-slate-800 disabled:opacity-50">Clear</button>
+            <button v-if="selected?.can_delete_telemetry && requestList?.requests.length" type="button" @click="confirmDeleteRequestRows" class="rounded-lg border border-rose-500/40 px-2 py-1.5 text-[10px] text-rose-300 hover:bg-rose-500/10"><Trash2 class="mr-1 inline h-3 w-3" />Delete stored traces ({{ requestList.requests.length }})</button>
+            <button type="button" @click="loadRequestList()" :disabled="requestListLoading" class="rounded-lg border border-slate-700 px-2 py-1.5 text-[10px] text-slate-300 hover:bg-slate-800 disabled:opacity-50"><RefreshCw class="mr-1 inline h-3 w-3" :class="requestListLoading ? 'animate-spin' : ''" />Refresh requests</button>
+          </div>
+        </div>
+        <p v-if="requestDeleteNotice" role="status" class="text-xs text-emerald-300">{{ requestDeleteNotice }}</p>
+        <p v-if="requestListLoading && !requestList" class="text-xs text-slate-500">Loading recent sampled requests…</p>
+        <div v-if="requestListError" class="flex flex-wrap items-center gap-2 text-xs text-rose-300"><span>{{ requestListError }}</span><button type="button" @click="loadRequestList()" class="underline">Retry</button></div>
+        <p v-if="requestList?.available === false" class="text-xs text-amber-300">{{ requestList.reason || 'Request data is unavailable.' }}</p>
+        <p v-else-if="requestList && !requestList.requests.length" class="text-xs text-slate-500">No sampled request spans were observed in this window.</p>
+        <div v-else-if="requestList && !visibleRequests.length" class="flex flex-wrap items-center gap-2 text-xs text-slate-500"><span>All loaded request rows are hidden in this view.</span><button type="button" @click="restoreHiddenRequestRows" class="underline">Show hidden requests ({{ requestList.requests.length }})</button></div>
+        <div v-else-if="visibleRequests.length" class="space-y-2">
+          <article v-for="request in visibleRequests" :key="request.trace_id" class="overflow-hidden rounded-xl border border-slate-800 bg-slate-950/30">
+            <button type="button" :aria-expanded="expandedTraceId === request.trace_id" @click="toggleRequest(request)" class="flex w-full flex-wrap items-center gap-x-3 gap-y-1 p-3 text-left hover:bg-slate-800/30">
+              <span class="rounded bg-indigo-500/10 px-1.5 py-0.5 text-[10px] text-indigo-300">{{ request.method || 'HTTP' }}</span>
+              <span class="min-w-0 flex-1 truncate font-mono text-[11px] text-slate-200">{{ request.route || 'Route unavailable' }}</span>
+              <span class="text-[10px] text-slate-400">{{ request.status_code ?? 'Status unavailable' }}</span>
+              <span class="text-[10px] text-cyan-300">{{ formatMilliseconds(request.duration_ms) }}</span>
+              <span class="text-[10px] text-slate-500">{{ formatTime(request.timestamp) }}</span>
+              <span class="w-full text-[10px] text-slate-500">PHP CPU estimate {{ formatPhpCpu(request.php_cpu_time_us) }} · PHP-managed peak above request start {{ formatPhpMemory(request.php_peak_memory_bytes) }}</span>
+            </button>
+            <div v-if="expandedTraceId === request.trace_id" class="space-y-2 border-t border-slate-800 p-3">
+              <p class="text-[10px] text-slate-500">Estimates cover this PHP worker’s request interval. Memory is PHP-managed allocator peak above request start; neither value represents whole-container CPU or RSS.</p>
+              <p v-if="requestDetailLoading[request.trace_id]" class="text-xs text-slate-500">Loading database calls…</p>
+              <div v-else-if="requestDetailErrors[request.trace_id]" class="flex flex-wrap items-center gap-2 text-xs text-rose-300"><span>{{ requestDetailErrors[request.trace_id] }}</span><button type="button" @click="toggleRequest(request, true)" class="underline">Retry</button></div>
+              <template v-else-if="requestDetails[request.trace_id]?.available">
+                <p v-if="!requestDetails[request.trace_id].database_calls.length" class="text-xs text-slate-500">No database calls were captured for this request.</p>
+                <div v-else class="space-y-1">
+                  <div class="grid grid-cols-[1fr_auto_auto] gap-2 px-2 text-[9px] uppercase text-slate-500"><span>Database call · table · attributed method</span><span>Operation</span><span>Duration</span></div>
+                  <div v-for="call in requestDetails[request.trace_id].database_calls" :key="call.span_id" class="grid grid-cols-[1fr_auto_auto] items-start gap-2 rounded-lg bg-slate-900/70 px-2 py-2 text-[10px]">
+                    <div class="min-w-0"><p class="truncate text-slate-300">{{ call.db_system || 'Database unavailable' }}<span v-if="call.db_namespace"> · {{ call.db_namespace }}</span></p><p class="truncate font-mono text-cyan-300">{{ call.table_ids.length ? call.table_ids.map(displayTable).join(', ') : 'Table unavailable' }}</p><p class="truncate text-slate-500">{{ requestMethod(call) }}</p></div>
+                    <span class="text-indigo-300">{{ call.operation || 'Unavailable' }}</span><span class="text-slate-400">{{ formatMilliseconds(call.duration_ms) }}</span>
+                  </div>
+                </div>
+              </template>
+              <div v-else class="flex flex-wrap items-center gap-2 text-xs text-amber-300"><span>{{ requestDetails[request.trace_id]?.reason || 'Request details are unavailable.' }}</span><button type="button" @click="toggleRequest(request, true)" class="underline">Retry</button></div>
+            </div>
+          </article>
+        </div>
+        <p class="text-[10px] text-slate-600">Sampled telemetry can omit requests. SQL text, bindings, request bodies, and headers are not shown.</p>
+      </section>
+
       <section class="rounded-2xl border border-slate-800 bg-slate-900/30 p-4 space-y-3">
         <div class="flex flex-wrap items-center justify-between gap-2"><h4 class="text-xs font-semibold uppercase tracking-wide text-slate-300">Containers</h4><span class="text-[10px] text-slate-500">Deployment reports refresh every 60 seconds at the host agent</span></div>
         <div v-if="!detail.deployments.length" class="text-xs text-slate-500">No running containers have reported for this project.</div>
@@ -487,4 +716,14 @@ onUnmounted(() => stopRuntimeUpdates?.());
       </div>
     </template>
   </section>
+  <ConfirmModal
+    :show="!!deleteTarget"
+    title="Delete stored request telemetry?"
+    :message="deleteTargetMessage"
+    confirm-label="Delete traces"
+    :busy="deletingRequests"
+    :error="requestDeleteError"
+    @confirm="deleteStoredRequestRows"
+    @cancel="cancelDeleteRequestRows"
+  />
 </template>

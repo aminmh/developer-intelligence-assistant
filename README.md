@@ -28,11 +28,29 @@ client, and the initial administrator account. The app's browser issuer is
 `http://keycloak:8080/realms/developer-assistant` for server-to-server OIDC
 requests. Keep the client secret and passwords in the ignored `web/.env` file.
 
-Start the production web container with `docker compose up -d`, or the local
-development container with `docker compose --profile dev up -d keycloak web-dev`.
-For host-run `npm run dev`, use `docker compose up -d keycloak`; `.env` already
-points server requests to localhost, and Compose overrides that address for
-containerized web servers. Sign in as `developer-admin`; the generated
+Start production Web with `make up`; it starts Keycloak using the `local-auth`
+profile. To start both containers directly, run:
+
+```sh
+OIDC_LITE_INTERNAL_ISSUER=http://keycloak:8080/realms/developer-assistant \
+  docker compose --profile local-auth up -d keycloak web
+```
+
+To start the development container directly, run:
+
+```sh
+OIDC_LITE_INTERNAL_ISSUER=http://keycloak:8080/realms/developer-assistant \
+  docker compose --profile dev --profile local-auth up -d keycloak web-dev
+```
+
+For host-run `npm run dev`, use `docker compose --profile local-auth up -d keycloak`;
+`.env` already points server requests to localhost. Sign in as
+`developer-admin`; the generated
 password is stored as `KEYCLOAK_BOOTSTRAP_PASSWORD` in `web/.env`. The separate
 Keycloak console account is `admin`, with its password in
 `KEYCLOAK_ADMIN_PASSWORD`.
+
+For a lower-memory production launch with an external OIDC provider, configure
+`OIDC_ISSUER` and `OIDC_LITE_INTERNAL_ISSUER` if the Web container needs a
+different provider URL, then run `make up-lite` (or `just up-lite` from the
+workspace root). This mode does not start Keycloak.
