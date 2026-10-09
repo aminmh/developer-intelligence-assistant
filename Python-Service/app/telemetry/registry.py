@@ -253,10 +253,22 @@ class SnapshotRegistry:
         with self._connect() as db:
             return db.execute("SELECT 1 FROM deployment_events WHERE host_id=? AND event_id=?", (host_id, event_id)).fetchone() is not None
 
-    def queue_if_deployable(self, project_id: str, commit_sha: str) -> bool:
+    def queue_if_deployable(
+        self, project_id: str, commit_sha: str, *, retry_failed: bool = False
+    ) -> bool:
         with self._connect() as db:
-            row = db.execute("SELECT state,archive_key FROM snapshots WHERE project_id=? AND commit_sha=?", (project_id, commit_sha)).fetchone()
+            row = db.execute(
+                "SELECT s.state,s.archive_key,j.state AS job_state "
+                "FROM snapshots s LEFT JOIN index_jobs j "
+                "ON j.project_id=s.project_id AND j.commit_sha=s.commit_sha "
+                "WHERE s.project_id=? AND s.commit_sha=?",
+                (project_id, commit_sha),
+            ).fetchone()
             if not row or not row["archive_key"] or row["state"] == "ready":
+                return False
+            if row["job_state"] == "running":
+                return False
+            if (row["state"] == "failed" or row["job_state"] == "failed") and not retry_failed:
                 return False
             if not db.execute("SELECT 1 FROM deployments WHERE project_id=? AND commit_sha=? AND state='running' "
                               "AND datetime(updated_at) >= datetime('now', ?) LIMIT 1",

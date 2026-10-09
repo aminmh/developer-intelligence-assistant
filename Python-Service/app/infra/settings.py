@@ -97,6 +97,9 @@ class Settings(BaseModel):
 
     lsp_timeout: float = float(os.getenv("LSP_TIMEOUT", "10"))
     lsp_max_retries: int = int(os.getenv("LSP_MAX_RETRIES", "2"))
+    lsp_warmup_enabled: bool = os.getenv(
+        "LSP_WARMUP_ENABLED", "false"
+    ).strip().lower() in ("1", "true", "yes", "on")
     lsp_validation_enabled: bool = os.getenv(
         "LSP_VALIDATION_ENABLED", "true"
     ).strip().lower() in ("1", "true", "yes", "on")

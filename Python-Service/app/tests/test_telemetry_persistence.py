@@ -47,8 +47,10 @@ def index_with_local_vectors(monkeypatch):
     vectors = QdrantClient(":memory:")
     monkeypatch.setattr(graph, "_get_graph_store", lambda: store)
     monkeypatch.setattr(graph, "_get_qdrant", lambda: vectors)
-    monkeypatch.setattr(graph, "_get_embed_model", lambda: type("Embedding", (), {
-        "get_text_embedding": lambda self, text: [0.2, 0.4, 0.6]})())
+    monkeypatch.setattr(
+        "index.llamaindex_layer.embed_texts",
+        lambda texts, **kwargs: [[0.2, 0.4, 0.6] for _ in texts],
+    )
     return graph, store, vectors
 
 
@@ -84,7 +86,10 @@ def test_snapshot_requires_graph_and_embeddings(monkeypatch):
         graph.ingest(chunks(), snapshot.collection, snapshot=snapshot)
     monkeypatch.setattr(graph, "_get_graph_store", lambda: store)
     monkeypatch.setattr(graph, "_ingest_vectors", lambda *args, **kwargs: (1, 1))
-    with pytest.raises(RuntimeError, match="incomplete"):
+    with pytest.raises(
+        RuntimeError,
+        match=r"incomplete \(chunks=2, graph_nodes=2, vectors=1, embedding_failures=1, embedding_error=unknown\)",
+    ):
         graph.ingest(chunks(), snapshot.collection, snapshot=snapshot)
 
 

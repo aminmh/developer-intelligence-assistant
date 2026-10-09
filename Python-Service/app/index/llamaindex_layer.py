@@ -801,7 +801,12 @@ class CodePropertyGraph:
                 replace=False, progress_callback=progress_callback,
             )
             if graph_nodes != len(deduped) or ingested != len(deduped) or embed_fails:
-                raise RuntimeError("Snapshot persistence is incomplete")
+                raise RuntimeError(
+                    "Snapshot persistence is incomplete "
+                    f"(chunks={len(deduped)}, graph_nodes={graph_nodes}, "
+                    f"vectors={ingested}, embedding_failures={embed_fails}, "
+                    f"embedding_error={getattr(self, '_last_embedding_error', None) or 'unknown'})"
+                )
         else:
             graph_nodes, graph_relations = self._ingest_graph(deduped, collection_name)
             ingested, embed_fails = self._ingest_vectors(
@@ -1008,7 +1013,12 @@ class CodePropertyGraph:
             except Exception as exc:
                 embed_fails += len(batch)
                 if self._last_embedding_error is None:
-                    self._last_embedding_error = str(exc)[:500]
+                    status = getattr(exc, "code", None)
+                    self._last_embedding_error = (
+                        f"{type(exc).__name__}:{status}"
+                        if isinstance(status, int)
+                        else type(exc).__name__
+                    )
                 continue
 
             for (chunk, _), embedding in zip(batch, vectors):

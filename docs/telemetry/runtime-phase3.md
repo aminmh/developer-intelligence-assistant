@@ -31,6 +31,24 @@ aggregates are counts of spans received, not guaranteed counts of every
 request. Error and slow-trace retention only applies to traces that reach the
 Collector.
 
+Runtime also lists up to 50 sampled server requests from the selected project's
+immutable revision and aggregation window. Expanding a request loads its trace
+through a revision-scoped query and returns only the request span and database
+spans with safe operation, system, namespace, table, and symbol attributes.
+SQL text and bindings are not returned. Requests without matching DB spans
+show an empty database-call list; unavailable fields remain unavailable for
+older spans or unsupported PHP runtimes.
+
+Request spans may include the PHP worker's user-plus-system CPU time delta
+(microseconds) and PHP allocator peak above request-start memory (bytes). These
+are worker-level estimates, not container CPU or resident memory. Request
+sampling may omit traffic, and callers need project access to read the details.
+The Runtime view can hide the currently loaded request rows without changing
+storage. Project administrators can permanently delete the stored spans for up
+to 50 currently listed request traces; this is revision-scoped, includes child
+database spans, and reduces the aggregates computed from those spans. The UI
+requires confirmation before deletion.
+
 ## Sampling controls and retention
 
 - The rolling p95 window defaults to 24 hours, bounded by
@@ -45,8 +63,7 @@ Collector.
 
 ## Implementation status
 
-The API, web, PHP library, and custom runtime Collector changes are implemented
-on their Phase 3 feature branches. Automated tests, lint, Collector build,
-production build, and repository diff checks are intentionally pending the
-user's confirmation to begin verification. The production PHP SDK sampler
-remains at its existing 10% default; changing it to 100% was not included.
+The API, web, PHP library, and custom Runtime Collector expose bounded,
+revision-scoped request details with database calls and PHP worker estimates.
+The production PHP SDK sampler remains at its existing 10% default; changing
+it to 100% was not included.

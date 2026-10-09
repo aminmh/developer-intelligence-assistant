@@ -159,7 +159,7 @@ async def lifespan(app: FastAPI):
 
     # Warm the language servers so the first answer isn't slow (they index /
     # build caches on first use). Best-effort + non-blocking.
-    if getattr(settings, "lsp_validation_enabled", True):
+    if settings.lsp_validation_enabled and settings.lsp_warmup_enabled:
         try:
             from lsp import warmup
 

@@ -74,6 +74,29 @@ internal source/deployment provenance. The runtime summary joins
 project/revision. Caller, route, and table relationships are inferred only
 within a shared trace ID; they remain observations, not static graph edges.
 
+### Request and database details
+
+The Laravel adapter may add the route template (`http.route`), HTTP method
+(`http.request.method`), and numeric response status
+(`http.response.status_code`) to a server request span. Database spans may add
+the driver (`db.system.name`), a validated database namespace (`db.namespace`),
+and the SQL operation from the fixed verb set
+`SELECT|INSERT|UPDATE|DELETE|REPLACE|CREATE|ALTER|DROP|TRUNCATE`
+(`db.operation.name`). Existing `indexer.table_ids` and safe application
+symbol identifiers attribute table activity to request traces. Request and DB
+details are returned only for the selected project and immutable revision.
+
+The PHP adapter reports `indexer.php.cpu_time_us`, the request interval's
+worker user-plus-system CPU time in microseconds, from `getrusage()`. It reports
+`indexer.php.peak_memory_bytes`, the PHP allocator peak above the request-start
+baseline in bytes, only when the runtime supports resetting its peak counter.
+These are estimates for one PHP worker request; they do not measure whole
+container CPU or resident set size. Unsupported measurements are omitted.
+
+The Runtime Collector allow-list admits these fields explicitly. It continues
+to drop `db.query.text`, raw SQL, bindings, request/response payloads, headers,
+cookies, credentials, and all other unapproved span attributes.
+
 The local pipeline is a development receiver and has no remote authentication.
 Do not expose port 24318 outside the local host. Host deployment reports still
 require the separately configured verified-client-certificate ingress described

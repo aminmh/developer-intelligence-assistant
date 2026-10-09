@@ -221,12 +221,17 @@ class TestServiceIndex:
         _service(monkeypatch, fake)
         definitions = _fixture_defs() + [
             {
-                "kind": "method", "name": "up", "fqn": "up",
+                "kind": "class", "name": "", "fqn": "",
+                "file": "/p/database/migrations/2025_01_01_create_orders.php",
+                "line": 8, "end_line": 30,
+            },
+            {
+                "kind": "method", "name": "up", "fqn": "::up",
                 "file": "/p/database/migrations/2025_01_01_create_orders.php",
                 "line": 12, "end_line": 18, "owner": "", "relations": [],
             },
             {
-                "kind": "method", "name": "down", "fqn": "down",
+                "kind": "method", "name": "down", "fqn": "::down",
                 "file": "/p/database/migrations/2025_01_01_create_orders.php",
                 "line": 20, "end_line": 24, "owner": "", "relations": [],
             },

@@ -6,7 +6,7 @@ import json
 import os
 import re
 
-from fastapi import APIRouter, HTTPException, Request
+from fastapi import APIRouter, Body, HTTPException, Request
 from fastapi.responses import StreamingResponse
 from starlette.concurrency import run_in_threadpool
 
@@ -79,6 +79,65 @@ def runtime_revision(project_id: str, revision_id: str, request: Request) -> dic
         raise HTTPException(422, "Invalid indexed revision identity") from exc
     except KeyError as exc:
         raise HTTPException(404, "Indexed revision was not found") from exc
+
+
+@runtime_router.get("/projects/{project_id}/revisions/{revision_id}/requests")
+def runtime_requests(project_id: str, revision_id: str, request: Request) -> dict:
+    authorize_internal(request)
+    try:
+        validate_project_id(project_id)
+        validate_revision_id(revision_id)
+        if get_registry().get_by_revision_id(project_id, revision_id) is None:
+            raise HTTPException(404, "Indexed revision was not found")
+        from telemetry.runtime import ClickHouseRuntime
+        return ClickHouseRuntime().requests(project_id, revision_id)
+    except ValueError as exc:
+        raise HTTPException(422, "Invalid indexed revision identity") from exc
+
+
+@runtime_router.get("/projects/{project_id}/revisions/{revision_id}/requests/{trace_id}")
+def runtime_request_detail(project_id: str, revision_id: str, trace_id: str, request: Request) -> dict:
+    authorize_internal(request)
+    try:
+        validate_project_id(project_id)
+        validate_revision_id(revision_id)
+        if not re.fullmatch(r"[0-9a-fA-F]{32}", trace_id):
+            raise ValueError("Invalid trace ID")
+        if get_registry().get_by_revision_id(project_id, revision_id) is None:
+            raise HTTPException(404, "Indexed revision was not found")
+        from telemetry.runtime import ClickHouseRuntime
+        return ClickHouseRuntime().request_detail(project_id, revision_id, trace_id)
+    except ValueError as exc:
+        raise HTTPException(422, "Invalid request trace identity") from exc
+
+
+@runtime_router.delete("/projects/{project_id}/revisions/{revision_id}/requests")
+def runtime_delete_requests(
+    project_id: str,
+    revision_id: str,
+    request: Request,
+    payload: dict = Body(...),
+) -> dict:
+    authorize_internal(request)
+    try:
+        validate_project_id(project_id)
+        validate_revision_id(revision_id)
+        if get_registry().get_by_revision_id(project_id, revision_id) is None:
+            raise HTTPException(404, "Indexed revision was not found")
+        trace_ids = payload.get("trace_ids") if isinstance(payload, dict) else None
+        if not isinstance(trace_ids, list) or not 1 <= len(trace_ids) <= 50:
+            raise ValueError("Select between 1 and 50 request traces")
+        from telemetry.runtime import ClickHouseRuntime
+        result = ClickHouseRuntime().delete_requests(project_id, revision_id, trace_ids)
+        from telemetry.events import publish_runtime_update
+        publish_runtime_update()
+        return result
+    except ValueError as exc:
+        raise HTTPException(422, "Invalid request trace selection") from exc
+    except KeyError as exc:
+        raise HTTPException(404, "Indexed revision was not found") from exc
+    except RuntimeError as exc:
+        raise HTTPException(503, "Request telemetry could not be deleted") from exc
 
 
 @runtime_router.get("/settings")

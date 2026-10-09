@@ -132,8 +132,8 @@ class ClickHouseRuntime:
     def configured(self) -> bool:
         return bool(self.url)
 
-    def rows(self, sql: str, project_id: str, revision_id: str) -> list[dict]:
-        parameters = urlencode({"param_project_id": project_id, "param_revision_id": revision_id})
+    def rows(self, sql: str, project_id: str, revision_id: str, extra_parameters: dict[str, str] | None = None) -> list[dict]:
+        parameters = urlencode({"param_project_id": project_id, "param_revision_id": revision_id, **(extra_parameters or {})})
         url = f"{self.url}/?{parameters}"
         token = base64.b64encode(f"{self.user}:{self.password}".encode()).decode("ascii")
         request = Request(
@@ -144,6 +144,122 @@ class ClickHouseRuntime:
         )
         with urlopen(request, timeout=5) as response:
             return [json.loads(line) for line in response.read().decode("utf-8").splitlines() if line]
+
+    def requests(self, project_id: str, revision_id: str) -> dict:
+        """Return bounded, privacy-shaped server request spans for one revision."""
+        if not self.configured:
+            return {"available": False, "reason": "ClickHouse is not configured.", "requests": []}
+        table = f"`{self.database}`.`{self.table}`"
+        try:
+            rows = self.rows(
+                "SELECT TraceId AS trace_id, "
+                "argMin(SpanId, tuple(Timestamp, SpanId)) AS span_id, "
+                "argMin(Timestamp, tuple(Timestamp, SpanId)) AS timestamp, "
+                "argMin(SpanAttributes['http.request.method'], tuple(Timestamp, SpanId)) AS method, "
+                "argMin(SpanAttributes['http.route'], tuple(Timestamp, SpanId)) AS route, "
+                "argMin(toInt32OrNull(SpanAttributes['http.response.status_code']), tuple(Timestamp, SpanId)) AS status_code, "
+                "argMin(toFloat64(Duration) / 1000000, tuple(Timestamp, SpanId)) AS duration_ms, "
+                "argMin(toInt64OrNull(SpanAttributes['indexer.php.cpu_time_us']), tuple(Timestamp, SpanId)) AS php_cpu_time_us, "
+                "argMin(toInt64OrNull(SpanAttributes['indexer.php.peak_memory_bytes']), tuple(Timestamp, SpanId)) AS php_peak_memory_bytes, "
+                "argMin(StatusCode, tuple(Timestamp, SpanId)) AS span_status FROM " + table + " WHERE " + _SCOPE +
+                " AND Timestamp >= now() - INTERVAL " + str(self.window_hours) +
+                " HOUR AND SpanKind = 'Server' AND SpanAttributes['http.route'] != '' "
+                "GROUP BY TraceId ORDER BY timestamp DESC LIMIT 50",
+                project_id, revision_id,
+            )
+        except (HTTPError, URLError, TimeoutError, OSError, ValueError, KeyError):
+            return {"available": False, "reason": "ClickHouse request spans could not be queried.", "requests": []}
+        clean = []
+        for row in rows:
+            trace_id = str(row.get("trace_id", "")).lower()
+            if not re.fullmatch(r"[0-9a-f]{32}", trace_id):
+                continue
+            clean.append({
+                "trace_id": trace_id,
+                "span_id": str(row.get("span_id", "")),
+                "timestamp": row.get("timestamp"),
+                "method": str(row.get("method", "")),
+                "route": str(row.get("route", "")),
+                "status_code": row.get("status_code"),
+                "duration_ms": row.get("duration_ms"),
+                "span_status": str(row.get("span_status", "")),
+                "php_cpu_time_us": row.get("php_cpu_time_us"),
+                "php_peak_memory_bytes": row.get("php_peak_memory_bytes"),
+            })
+        return {"available": True, "reason": None, "window_hours": self.window_hours, "sampled": True, "requests": clean}
+
+    def request_detail(self, project_id: str, revision_id: str, trace_id: str) -> dict:
+        """Return only the request root and database spans from a scoped trace."""
+        if not re.fullmatch(r"[0-9a-fA-F]{32}", trace_id):
+            raise ValueError("Invalid trace ID")
+        if not self.configured:
+            return {"available": False, "reason": "ClickHouse is not configured.", "request": None, "database_calls": []}
+        table = f"`{self.database}`.`{self.table}`"
+        try:
+            rows = self.rows(
+                "SELECT TraceId AS trace_id, SpanId AS span_id, ParentSpanId AS parent_span_id, "
+                "Timestamp AS timestamp, SpanKind AS span_kind, StatusCode AS span_status, "
+                "SpanAttributes['http.request.method'] AS method, SpanAttributes['http.route'] AS route, "
+                "toInt32OrNull(SpanAttributes['http.response.status_code']) AS status_code, "
+                "toFloat64(Duration) / 1000000 AS duration_ms, "
+                "SpanAttributes['db.system.name'] AS db_system, SpanAttributes['db.namespace'] AS db_namespace, "
+                "SpanAttributes['db.operation.name'] AS db_operation, "
+                "SpanAttributes['indexer.table_ids'] AS table_ids, "
+                "SpanAttributes['indexer.symbol_id'] AS symbol_id, "
+                "SpanAttributes['indexer.caller.symbol_id'] AS caller_symbol_id, "
+                "toInt64OrNull(SpanAttributes['indexer.php.cpu_time_us']) AS php_cpu_time_us, "
+                "toInt64OrNull(SpanAttributes['indexer.php.peak_memory_bytes']) AS php_peak_memory_bytes "
+                "FROM " + table + " WHERE " + _SCOPE + " AND TraceId = {trace_id:String} "
+                "AND Timestamp >= now() - INTERVAL " + str(self.window_hours) + " HOUR ORDER BY Timestamp ASC LIMIT 500",
+                project_id, revision_id, {"param_trace_id": trace_id.lower()},
+            )
+        except (HTTPError, URLError, TimeoutError, OSError, ValueError, KeyError):
+            return {"available": False, "reason": "ClickHouse trace details could not be queried.", "request": None, "database_calls": []}
+
+        def table_ids(value) -> list[str]:
+            try:
+                decoded = json.loads(value) if isinstance(value, str) else value
+            except (ValueError, TypeError):
+                return []
+            if not isinstance(decoded, list):
+                return []
+            return [item for item in decoded if isinstance(item, str) and len(item) <= 256][:32]
+
+        root = next((row for row in rows if row.get("span_kind") == "Server"), None)
+        if root is None:
+            return {"available": False, "reason": "The sampled request was not found in this revision.", "request": None, "database_calls": []}
+        request = {
+            "trace_id": str(root.get("trace_id", "")).lower(),
+            "span_id": str(root.get("span_id", "")),
+            "timestamp": root.get("timestamp"),
+            "method": str(root.get("method", "")),
+            "route": str(root.get("route", "")),
+            "status_code": root.get("status_code"),
+            "duration_ms": root.get("duration_ms"),
+            "span_status": str(root.get("span_status", "")),
+            "php_cpu_time_us": root.get("php_cpu_time_us"),
+            "php_peak_memory_bytes": root.get("php_peak_memory_bytes"),
+        }
+        calls = []
+        for row in rows:
+            operation = str(row.get("db_operation", ""))
+            tables = table_ids(row.get("table_ids"))
+            if not operation and not tables:
+                continue
+            calls.append({
+                "span_id": str(row.get("span_id", "")),
+                "parent_span_id": str(row.get("parent_span_id", "")),
+                "timestamp": row.get("timestamp"),
+                "duration_ms": row.get("duration_ms"),
+                "db_system": str(row.get("db_system", "")) or None,
+                "db_namespace": str(row.get("db_namespace", "")) or None,
+                "operation": operation or None,
+                "table_ids": tables,
+                "symbol_id": str(row.get("symbol_id", "")) or None,
+                "caller_symbol_id": str(row.get("caller_symbol_id", "")) or None,
+                "span_status": str(row.get("span_status", "")),
+            })
+        return {"available": True, "reason": None, "request": request, "database_calls": calls, "sampled": True}
 
     def unscoped_rows(self, sql: str) -> list[dict]:
         if not self.configured:
@@ -158,19 +274,67 @@ class ClickHouseRuntime:
         with urlopen(request, timeout=10) as response:
             return [json.loads(line) for line in response.read().decode("utf-8").splitlines() if line]
 
-    def execute(self, sql: str, body: bytes | None = None) -> None:
+    def execute(
+        self,
+        sql: str,
+        body: bytes | None = None,
+        extra_parameters: dict[str, str] | None = None,
+        timeout: int = 15,
+    ) -> None:
         if not self.configured:
             raise RuntimeError("ClickHouse is not configured")
         token = base64.b64encode(f"{self.user}:{self.password}".encode()).decode("ascii")
-        query = urlencode({"database": self.database, **({"query": sql} if body is not None else {})})
+        query = urlencode({"database": self.database, **(extra_parameters or {}), **({"query": sql} if body is not None else {})})
         request = Request(
             f"{self.url}/?{query}",
             data=body if body is not None else sql.encode("utf-8"),
             headers={"Authorization": f"Basic {token}", "Content-Type": "text/plain"},
             method="POST",
         )
-        with urlopen(request, timeout=15) as response:
+        with urlopen(request, timeout=timeout) as response:
             response.read()
+
+    def delete_requests(self, project_id: str, revision_id: str, trace_ids: list[str]) -> dict:
+        """Permanently remove the selected request traces within one indexed revision."""
+        if not self.configured:
+            raise RuntimeError("ClickHouse is not configured")
+        if not isinstance(trace_ids, list) or not 1 <= len(trace_ids) <= 50:
+            raise ValueError("Select between 1 and 50 request traces")
+
+        normalized_ids = list(dict.fromkeys(
+            trace_id.lower() for trace_id in trace_ids
+            if isinstance(trace_id, str) and re.fullmatch(r"[0-9a-fA-F]{32}", trace_id)
+        ))
+        if len(normalized_ids) != len(trace_ids):
+            raise ValueError("Request trace IDs are invalid")
+        current_requests = self.requests(project_id, revision_id)
+        if not current_requests.get("available"):
+            raise RuntimeError("Runtime request telemetry is unavailable")
+        allowed_ids = {request["trace_id"] for request in current_requests.get("requests", [])}
+        if not set(normalized_ids).issubset(allowed_ids):
+            raise ValueError("Only currently listed request traces can be deleted")
+
+        parameters = {
+            "mutations_sync": "1",
+            "param_project_id": project_id,
+            "param_revision_id": revision_id,
+        }
+        placeholders = []
+        for index, trace_id in enumerate(normalized_ids):
+            parameter_name = f"param_trace_id_{index}"
+            placeholders.append(f"{{{parameter_name}:String}}")
+            parameters[parameter_name] = trace_id
+
+        table = f"`{self.database}`.`{self.table}`"
+        sql = (
+            f"ALTER TABLE {table} DELETE WHERE {_SCOPE} "
+            f"AND TraceId IN ({', '.join(placeholders)})"
+        )
+        try:
+            self.execute(sql, extra_parameters=parameters, timeout=120)
+        except (HTTPError, URLError, TimeoutError, OSError, ValueError) as exc:
+            raise RuntimeError("Request telemetry could not be deleted") from exc
+        return {"deleted_trace_count": len(normalized_ids)}
 
     def store_unresolved_symbols(self, rows: list[dict]) -> None:
         if not rows or not self.configured:

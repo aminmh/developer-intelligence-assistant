@@ -114,7 +114,11 @@ def test_ollama_fallback_dispatch(monkeypatch):
     vectors = embeddings.embed_texts(["hello"])
 
     assert captured["url"] == "http://ollama:11434/api/embeddings"
-    assert captured["body"] == {"model": "BGE-M3", "prompt": "hello"}
+    assert captured["body"] == {
+        "model": "BGE-M3",
+        "prompt": "hello",
+        "keep_alive": "5m",
+    }
     assert vectors == [[0.7, 0.8]]
 
 
@@ -179,12 +183,65 @@ def test_cohere_query_uses_fast_model_and_rejects_missing_key(monkeypatch):
     assert raised
 
 
+def test_cohere_retries_rate_limit_after_cooldown(monkeypatch):
+    monkeypatch.setattr(embeddings, "provider_name", lambda: "cohere")
+    monkeypatch.setattr(embeddings.settings, "cohere_api_key", "test-key")
+    attempts = []
+    sleeps = []
+
+    def fake(req, timeout=None):
+        attempts.append(req.full_url)
+        if len(attempts) == 1:
+            raise error.HTTPError(req.full_url, 429, "rate limited", {}, None)
+        return _FakeResponse({"embeddings": {"float": [[0.1, 0.2]]}})
+
+    _patch_urlopen(monkeypatch, fake)
+    monkeypatch.setattr(embeddings.time, "sleep", sleeps.append)
+
+    assert embeddings.embed_texts(["query"], input_type="search_document") == [[0.1, 0.2]]
+    assert len(attempts) == 2
+    assert sleeps == [60.0]
+
+
+def test_ollama_embedding_request_uses_configured_keep_alive(monkeypatch):
+    monkeypatch.setattr(embeddings, "provider_name", lambda: "ollama")
+    monkeypatch.setattr(embeddings.settings, "ollama_base_url", "http://ollama:11434")
+    monkeypatch.setattr(embeddings.settings, "ollama_embedding_model", "BGE-M3")
+    monkeypatch.setattr(embeddings.settings, "ollama_keep_alive", "30s")
+    captured = {}
+
+    def fake(req, timeout=None):
+        captured["url"] = req.full_url
+        captured["body"] = json.loads(req.data.decode("utf-8"))
+        return _FakeResponse({"embedding": [0.1, 0.2]})
+
+    _patch_urlopen(monkeypatch, fake)
+
+    assert embeddings.embed_texts(["document"]) == [[0.1, 0.2]]
+    assert captured["url"] == "http://ollama:11434/api/embeddings"
+    assert captured["body"] == {
+        "model": "BGE-M3",
+        "prompt": "document",
+        "keep_alive": "30s",
+    }
+
+
 def test_llamaindex_embed_model_dispatch(monkeypatch):
     _isolate_embedding_settings(monkeypatch)
-    # Ollama path returns a llama_index OllamaEmbedding.
+    # Ollama path keeps the LlamaIndex adapter and forwards the configured TTL.
     model = embeddings.get_llamaindex_embed_model()
     assert type(model).__module__.startswith("llama_index")
     assert model.model_name == "BGE-M3"
+    monkeypatch.setattr(embeddings.settings, "ollama_keep_alive", "30s")
+    captured = {}
+
+    def fake_embeddings(**kwargs):
+        captured.update(kwargs)
+        return {"embedding": [0.1, 0.2]}
+
+    monkeypatch.setattr(model._client, "embeddings", fake_embeddings)
+    assert model.get_general_text_embedding("document") == [0.1, 0.2]
+    assert captured["keep_alive"] == "30s"
 
     monkeypatch.setattr(embeddings.settings, "embedding_base_url", "http://localhost:1234")
     monkeypatch.setattr(embeddings, "provider_name", lambda: "openAICompatible")
@@ -199,7 +256,16 @@ def test_llamaindex_embed_model_dispatch(monkeypatch):
 def test_langchain_embeddings_dispatch(monkeypatch):
     _isolate_embedding_settings(monkeypatch)
     emb = embeddings.get_langchain_embeddings()
-    assert "Ollama" in type(emb).__name__
+    assert type(emb).__name__ == "_KeepAliveOllamaEmbeddings"
+    forwarded = []
+    monkeypatch.setattr(
+        embeddings,
+        "_embed_ollama",
+        lambda texts, progress=None: forwarded.append(texts) or [[0.1, 0.2]],
+    )
+    assert emb.embed_documents(["document"]) == [[0.1, 0.2]]
+    assert emb.embed_query("question") == [0.1, 0.2]
+    assert forwarded == [["passage: document"], ["query: question"]]
 
     monkeypatch.setattr(embeddings.settings, "embedding_base_url", "http://localhost:1234")
     monkeypatch.setattr(embeddings, "provider_name", lambda: "openAICompatible")

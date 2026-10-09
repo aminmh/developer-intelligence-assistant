@@ -109,6 +109,19 @@ def test_failed_indexing_never_publishes_ready_and_retries(tmp_path, result):
     assert state["state"] == "failed"
     assert "collection_name" not in state
     assert "SECRET_CANARY_SOURCE" not in json.dumps(state)
+    # A heartbeat racing with worker completion can leave snapshot and job state
+    # briefly inconsistent. The persisted failed job must still stay terminal.
+    with registry._connect() as db:
+        db.execute(
+            "UPDATE snapshots SET state='queued' WHERE project_id=? AND commit_sha=?",
+            ("one", SHA),
+        )
+    assert not registry.queue_if_deployable("one", SHA)
+    with registry._connect() as db:
+        assert db.execute(
+            "SELECT state FROM index_jobs WHERE project_id=? AND commit_sha=?",
+            ("one", SHA),
+        ).fetchone()[0] == "failed"
     service.indexer = successful_index
     service.upload("one", SHA, data)
     assert registry.get("one", SHA)["state"] == "queued"

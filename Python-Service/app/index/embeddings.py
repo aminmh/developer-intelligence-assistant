@@ -16,6 +16,8 @@ for the ingestion and evaluation pipelines.
 from __future__ import annotations
 
 import json
+import time
+from urllib.error import HTTPError
 import urllib.request as request
 import urllib.request
 from typing import Any
@@ -101,7 +103,7 @@ def _embed_cohere(texts: list[str], input_type: str, progress: Any = None) -> li
             headers={"Content-Type": "application/json", "Authorization": f"Bearer {settings.cohere_api_key}"},
             method="POST",
         )
-        with urllib.request.urlopen(req, timeout=120) as response:
+        with _cohere_urlopen(req) as response:
             data = json.loads(response.read().decode("utf-8"))
         rows = (data.get("embeddings") or {}).get("float") if isinstance(data, dict) else None
         if not isinstance(rows, list) or len(rows) != len(batch) or not all(isinstance(row, list) and row for row in rows):
@@ -109,6 +111,26 @@ def _embed_cohere(texts: list[str], input_type: str, progress: Any = None) -> li
         vectors.extend(rows)
         _report_progress(progress, len(batch))
     return vectors
+
+
+def _cohere_urlopen(req: urllib.request.Request):
+    """Retry Cohere rate limits using its Retry-After header when available."""
+    max_retries = 2
+    for attempt in range(max_retries + 1):
+        try:
+            return urllib.request.urlopen(req, timeout=120)
+        except HTTPError as exc:
+            if exc.code != 429 or attempt == max_retries:
+                raise
+            retry_after = None
+            if exc.headers is not None:
+                retry_after = exc.headers.get("Retry-After")
+            exc.close()
+            try:
+                delay = max(0.0, float(retry_after)) if retry_after is not None else 60.0
+            except (TypeError, ValueError):
+                delay = 60.0
+            time.sleep(delay)
 
 
 def _embed_openai(texts: list[str], progress: Any = None) -> list[list[float]]:
@@ -145,7 +167,11 @@ def _embed_ollama(texts: list[str], progress: Any = None) -> list[list[float]]:
     base = settings.ollama_base_url.rstrip("/")
     for doc in texts:
         body = json.dumps(
-            {"model": settings.ollama_embedding_model, "prompt": doc}
+            {
+                "model": settings.ollama_embedding_model,
+                "prompt": doc,
+                "keep_alive": settings.ollama_keep_alive,
+            }
         ).encode("utf-8")
         req = urllib.request.Request(
             f"{base}/api/embeddings",
@@ -206,7 +232,28 @@ def get_llamaindex_embed_model() -> Any:
         return _OpenAICompatibleEmbedding()
     from llama_index.embeddings.ollama import OllamaEmbedding
 
-    return OllamaEmbedding(
+    class _KeepAliveOllamaEmbedding(OllamaEmbedding):
+        """Keep LlamaIndex's Ollama adapter behavior with a configurable TTL."""
+
+        def get_general_text_embedding(self, texts: str) -> list[float]:
+            result = self._client.embeddings(
+                model=self.model_name,
+                prompt=texts,
+                options=self.ollama_additional_kwargs,
+                keep_alive=settings.ollama_keep_alive,
+            )
+            return result["embedding"]
+
+        async def aget_general_text_embedding(self, prompt: str) -> list[float]:
+            result = await self._async_client.embeddings(
+                model=self.model_name,
+                prompt=prompt,
+                options=self.ollama_additional_kwargs,
+                keep_alive=settings.ollama_keep_alive,
+            )
+            return result["embedding"]
+
+    return _KeepAliveOllamaEmbedding(
         model_name=settings.ollama_embedding_model,
         base_url=settings.ollama_base_url,
     )
@@ -233,9 +280,15 @@ def get_langchain_embeddings() -> Any:
                 return embed_texts([text], input_type="search_query")[0]
 
         return _ConfiguredEmbeddings()
-    from langchain_community.embeddings import OllamaEmbeddings
+    from langchain_core.embeddings import Embeddings
 
-    return OllamaEmbeddings(
-        model=settings.ollama_embedding_model,
-        base_url=settings.ollama_base_url,
-    )
+    class _KeepAliveOllamaEmbeddings(Embeddings):
+        """Use the shared Ollama request path and preserve LangChain prefixes."""
+
+        def embed_documents(self, texts: list[str]) -> list[list[float]]:
+            return _embed_ollama([f"passage: {text}" for text in texts])
+
+        def embed_query(self, text: str) -> list[float]:
+            return _embed_ollama([f"query: {text}"])[0]
+
+    return _KeepAliveOllamaEmbeddings()

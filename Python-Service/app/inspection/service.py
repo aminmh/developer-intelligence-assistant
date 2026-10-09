@@ -235,6 +235,10 @@ class InspectionService:
             "class_const", "function", "const",
         ):
             return None
+        if kind in ("class", "interface", "trait", "enum") and not str(record.get("fqn") or "").strip():
+            # Anonymous migration classes have no stable symbol identity and
+            # commonly appear once per migration file.
+            return None
         if kind == "method" and canonical_definition(record) is None:
             return None
         fqn = record.get("fqn", "")

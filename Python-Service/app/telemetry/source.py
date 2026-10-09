@@ -84,7 +84,7 @@ class SourceService:
                 self.registry.transition(snapshot, "storing")
                 key = self.storage.put_snapshot_archive(snapshot.key, snapshot.source_archive_sha256, data)
                 self.registry.transition(snapshot, "awaiting_deployment", archive_key=key)
-            self.registry.queue_if_deployable(project_id, commit_sha)
+            self.registry.queue_if_deployable(project_id, commit_sha, retry_failed=True)
             return self.registry.get(project_id, commit_sha)
 
     def process_one(self) -> bool:

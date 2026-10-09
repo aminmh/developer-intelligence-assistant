@@ -98,3 +98,171 @@ def test_runtime_summary_compares_clickhouse_span_status_as_text(monkeypatch):
     status_queries = [query for query in queries if "countIf(StatusCode" in query]
     assert len(status_queries) == 3
     assert all("StatusCode = 'Error'" in query for query in status_queries)
+
+
+def test_runtime_request_reads_are_revision_scoped_and_privacy_shaped(monkeypatch):
+    captured = []
+
+    def rows(self, sql, project_id, revision_id, extra_parameters=None):
+        captured.append((sql, project_id, revision_id, extra_parameters))
+        if "ParentSpanId AS parent_span_id" in sql:
+            return [
+                {"trace_id": "a" * 32, "span_id": "1" * 16, "parent_span_id": "", "span_kind": "Server",
+                 "method": "GET", "route": "/api/pizzas", "status_code": 200, "duration_ms": 12.5,
+                 "php_cpu_time_us": 900, "php_peak_memory_bytes": 65536, "timestamp": "2026-10-08 10:00:00", "span_status": "Unset"},
+                {"trace_id": "a" * 32, "span_id": "2" * 16, "parent_span_id": "1" * 16, "span_kind": "Client",
+                 "db_system": "mysql", "db_namespace": "pizza", "db_operation": "SELECT",
+                 "table_ids": '["table:mysql.pizzas"]', "symbol_id": "method:PizzaRepository::all", "duration_ms": 2.0,
+                 "timestamp": "2026-10-08 10:00:00", "span_status": "Unset", "db.query.text": "SELECT secret"},
+            ]
+        return [{"trace_id": "a" * 32, "span_id": "1" * 16, "timestamp": "2026-10-08 10:00:00",
+                 "method": "GET", "route": "/api/pizzas", "status_code": 200, "duration_ms": 12.5,
+                 "php_cpu_time_us": 900, "php_peak_memory_bytes": 65536, "span_status": "Unset"}]
+
+    monkeypatch.setattr(ClickHouseRuntime, "configured", property(lambda _self: True))
+    monkeypatch.setattr(ClickHouseRuntime, "rows", rows)
+    monkeypatch.setattr(
+        "telemetry.runtime.runtime_sampling_policy",
+        lambda _registry=None: {"p95_window_hours": 24, "refresh_minutes": 5, "aggregation_retention_hours": 168},
+    )
+    clickhouse = ClickHouseRuntime()
+
+    listing = clickhouse.requests("pizza", "rev_test")
+    detail = clickhouse.request_detail("pizza", "rev_test", "A" * 32)
+
+    assert "GROUP BY TraceId" in captured[0][0]
+    assert "argMin(SpanId, tuple(Timestamp, SpanId)) AS span_id" in captured[0][0]
+    assert "LIMIT 50" in captured[0][0]
+    assert listing["requests"][0]["route"] == "/api/pizzas"
+    assert listing["requests"][0]["php_cpu_time_us"] == 900
+    assert "db.query.text" not in listing["requests"][0]
+    assert detail["database_calls"][0]["table_ids"] == ["table:mysql.pizzas"]
+    assert detail["database_calls"][0]["db_namespace"] == "pizza"
+    assert "db.query.text" not in detail["database_calls"][0]
+    for sql, project_id, revision_id, params in captured:
+        assert "indexer.project_id" in sql and "indexer.revision_id" in sql
+        assert project_id == "pizza" and revision_id == "rev_test"
+    assert captured[1][3] == {"param_trace_id": "a" * 32}
+
+
+def test_runtime_request_detail_rejects_malformed_trace_id(monkeypatch):
+    import pytest
+    monkeypatch.setattr(
+        "telemetry.runtime.runtime_sampling_policy",
+        lambda _registry=None: {"p95_window_hours": 24, "refresh_minutes": 5, "aggregation_retention_hours": 168},
+    )
+
+    with pytest.raises(ValueError, match="Invalid trace ID"):
+        ClickHouseRuntime().request_detail("pizza", "rev_test", "not-a-trace")
+
+
+def test_runtime_request_delete_is_bounded_parameterized_and_revision_scoped(monkeypatch):
+    captured = []
+    trace_ids = ["a" * 32, "B" * 32]
+    monkeypatch.setattr(
+        "telemetry.runtime.runtime_sampling_policy",
+        lambda _registry=None: {"p95_window_hours": 24, "refresh_minutes": 5, "aggregation_retention_hours": 168},
+    )
+    monkeypatch.setattr(ClickHouseRuntime, "configured", property(lambda _self: True))
+    monkeypatch.setattr(
+        ClickHouseRuntime,
+        "execute",
+        lambda self, sql, body=None, extra_parameters=None, timeout=15: captured.append((sql, extra_parameters, timeout)),
+    )
+    monkeypatch.setattr(
+        ClickHouseRuntime,
+        "requests",
+        lambda self, project_id, revision_id: {
+            "available": True,
+            "requests": [{"trace_id": "a" * 32}, {"trace_id": "b" * 32}],
+        },
+    )
+
+    result = ClickHouseRuntime().delete_requests("pizza", "rev_test", trace_ids)
+
+    sql, parameters, timeout = captured[0]
+    assert result == {"deleted_trace_count": 2}
+    assert "ALTER TABLE `telemetry`.`otel_spans_full` DELETE WHERE" in sql
+    assert "indexer.project_id" in sql and "indexer.revision_id" in sql
+    assert "TraceId IN ({param_trace_id_0:String}, {param_trace_id_1:String})" in sql
+    assert all(trace_id.lower() not in sql for trace_id in trace_ids)
+    assert parameters == {
+        "mutations_sync": "1",
+        "param_project_id": "pizza",
+        "param_revision_id": "rev_test",
+        "param_trace_id_0": "a" * 32,
+        "param_trace_id_1": "b" * 32,
+    }
+    assert timeout == 120
+
+
+def test_runtime_request_delete_rejects_unbounded_or_invalid_trace_ids(monkeypatch):
+    import pytest
+
+    monkeypatch.setattr(
+        "telemetry.runtime.runtime_sampling_policy",
+        lambda _registry=None: {"p95_window_hours": 24, "refresh_minutes": 5, "aggregation_retention_hours": 168},
+    )
+    monkeypatch.setattr(ClickHouseRuntime, "configured", property(lambda _self: True))
+    monkeypatch.setattr(ClickHouseRuntime, "execute", lambda *_args, **_kwargs: pytest.fail("delete must not run"))
+    monkeypatch.setattr(
+        ClickHouseRuntime,
+        "requests",
+        lambda *_args, **_kwargs: {"available": True, "requests": [{"trace_id": "a" * 32}]},
+    )
+
+    with pytest.raises(ValueError, match="between 1 and 50"):
+        ClickHouseRuntime().delete_requests("pizza", "rev_test", [])
+    with pytest.raises(ValueError, match="invalid"):
+        ClickHouseRuntime().delete_requests("pizza", "rev_test", ["not-a-trace"])
+
+
+def test_runtime_request_delete_rejects_traces_outside_the_current_list(monkeypatch):
+    import pytest
+
+    monkeypatch.setattr(
+        "telemetry.runtime.runtime_sampling_policy",
+        lambda _registry=None: {"p95_window_hours": 24, "refresh_minutes": 5, "aggregation_retention_hours": 168},
+    )
+    monkeypatch.setattr(ClickHouseRuntime, "configured", property(lambda _self: True))
+    monkeypatch.setattr(ClickHouseRuntime, "execute", lambda *_args, **_kwargs: pytest.fail("delete must not run"))
+    monkeypatch.setattr(
+        ClickHouseRuntime,
+        "requests",
+        lambda *_args, **_kwargs: {"available": True, "requests": [{"trace_id": "a" * 32}]},
+    )
+
+    with pytest.raises(ValueError, match="currently listed"):
+        ClickHouseRuntime().delete_requests("pizza", "rev_test", ["b" * 32])
+
+
+def test_runtime_delete_endpoint_publishes_refresh_after_success(monkeypatch, tmp_path):
+    monkeypatch.setenv("SETTINGS_DB_PATH", str(tmp_path / "settings.db"))
+    from telemetry import events, http
+
+    class Registry:
+        def get_by_revision_id(self, project_id, revision_id):
+            return {"project_id": project_id, "revision_id": revision_id}
+
+    deleted = []
+    published = []
+    monkeypatch.setattr(http, "authorize_internal", lambda _request: None)
+    monkeypatch.setattr(http, "get_registry", Registry)
+    monkeypatch.setattr(
+        "telemetry.runtime.runtime_sampling_policy",
+        lambda _registry=None: {"p95_window_hours": 24, "refresh_minutes": 5, "aggregation_retention_hours": 168},
+    )
+    monkeypatch.setattr(
+        ClickHouseRuntime,
+        "delete_requests",
+        lambda self, project_id, revision_id, trace_ids: deleted.append((project_id, revision_id, trace_ids))
+        or {"deleted_trace_count": len(trace_ids)},
+    )
+    monkeypatch.setattr(events, "publish_runtime_update", lambda: published.append(True))
+
+    revision_id = "rev_" + "c" * 32
+    result = http.runtime_delete_requests("pizza", revision_id, None, {"trace_ids": ["a" * 32]})
+
+    assert deleted == [("pizza", revision_id, ["a" * 32])]
+    assert published == [True]
+    assert result == {"deleted_trace_count": 1}

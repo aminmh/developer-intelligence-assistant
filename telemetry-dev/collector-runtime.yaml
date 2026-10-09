@@ -34,7 +34,7 @@ processors:
           - 'set(version, "1")'
       - context: span
         statements:
-          - 'keep_keys(attributes, ["indexer.symbol_id", "indexer.caller.symbol_id", "indexer.route_id", "indexer.table_ids", "indexer.db.table", "indexer.command.name", "indexer.exception.type", "indexer.exception.normalized_message", "indexer.exception.top_frames", "http.route", "http.request.method", "db.system.name", "db.operation.name", "db.collection.name", "server.address", "url.scheme", "rpc.system", "messaging.system"])'
+          - 'keep_keys(attributes, ["indexer.symbol_id", "indexer.caller.symbol_id", "indexer.route_id", "indexer.table_ids", "indexer.db.table", "indexer.command.name", "indexer.exception.type", "indexer.exception.normalized_message", "indexer.exception.top_frames", "indexer.php.cpu_time_us", "indexer.php.peak_memory_bytes", "http.route", "http.request.method", "http.response.status_code", "db.system.name", "db.namespace", "db.operation.name", "db.collection.name", "server.address", "url.scheme", "rpc.system", "messaging.system"])'
           - 'set(name, "runtime.span")'
           - 'set(status.message, "")'
           - 'set(trace_state, "")'
