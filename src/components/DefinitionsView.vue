@@ -21,6 +21,17 @@ const runtimeData = ref<RuntimeSnapshotData | null>(null);
 const runtimeFilter = ref<'all' | 'unobserved' | 'hot'>('all');
 const runtimeScopeKey = ref('');
 const runtimeMetrics = computed(() => new Map((runtimeData.value?.telemetry.symbols || []).map((item) => [item.symbol_id, item])));
+const methodCallers = (symbolId: string) => (runtimeData.value?.telemetry.method_calls || []).filter((item) => item.symbol_id === symbolId);
+const methodCallees = (symbolId: string) => (runtimeData.value?.telemetry.method_calls || []).filter((item) => item.caller_symbol_id === symbolId);
+const visibleMethodEdges = (edges: ReturnType<typeof methodCallers>) => edges.slice(0, 10);
+const methodEdgeCount = (row: ReturnType<typeof methodCallers>[number]) => {
+  const parts: string[] = [];
+  if (row.hook_calls) parts.push(`${formatRuns(row.hook_calls)} hook calls`);
+  if (row.span_edges) parts.push(`${formatRuns(row.span_edges)} span edges`);
+  if (row.sample_weight) parts.push(`${formatRuns(row.sample_weight)} profile samples`);
+  return parts.join(' · ') || `${formatRuns(row.calls)} observed calls`;
+};
+const hotPathShare = (symbolId: string) => runtimeData.value?.telemetry.hot_path.find((item) => item.symbol_id === symbolId)?.sample_share;
 const selectedProject = computed(() => projects.value.find((project) => project.collection === selectedStem.value) || null);
 const runtimePath = (project: IndexedSymbolProject) => {
   if (!project.project_id) return null;
@@ -253,6 +264,8 @@ onUnmounted(() => stopRuntimeUpdates?.());
     </div>
 
     <p v-if="runtimeData" class="text-[10px] text-slate-500">Runtime counts cover {{ runtimeData.telemetry.retention_hours / 24 }} retained days. No observed calls do not prove dead code.</p>
+    <p v-if="runtimeData?.telemetry.profile_count" class="text-[10px] text-slate-500">Method hot-path estimates use {{ formatRuns(runtimeData.telemetry.profiled_samples) }} samples from the latest {{ formatRuns(runtimeData.telemetry.profile_count) }} profiles (up to 1,000). Sampling percentages are statistical estimates.</p>
+    <p v-if="runtimeData?.telemetry.method_edge_coverage?.percent !== null && runtimeData?.telemetry.method_edge_coverage?.percent !== undefined" class="text-[10px] text-slate-500">Observed {{ runtimeData.telemetry.method_edge_coverage.observed_edges }} of {{ runtimeData.telemetry.method_edge_coverage.static_edges }} static method-call edges in this aggregation window ({{ runtimeData.telemetry.method_edge_coverage.percent }}%).</p>
     <p v-if="runtimeData?.symbol_index_available === false" class="text-[10px] text-amber-300">{{ runtimeData.symbol_index_reason || 'The symbol index is unavailable; runtime code joins may be incomplete.' }}</p>
 
     <p v-if="selectedStem" class="text-xs text-slate-500">{{ total }} definition(s) in <span class="text-slate-300 font-mono">{{ selectedStem }}</span></p>
@@ -264,7 +277,46 @@ onUnmounted(() => stopRuntimeUpdates?.());
         <div class="px-4 py-3 border-b border-slate-800 flex items-center justify-between"><div><p class="text-sm font-semibold text-white">{{ group.owner }}</p><p class="text-[11px] text-slate-500 font-mono mt-1">{{ group.file }}</p></div><span class="text-[10px] text-slate-500">{{ group.items.length }} item(s)</span></div>
         <div v-for="definition in group.items" :key="`${definition.kind}|${definition.fqn}|${definition.line}`" class="border-b last:border-b-0 border-slate-800/70">
           <button @click="toggle(definition)" class="w-full px-4 py-3 text-left flex items-center gap-3 hover:bg-slate-800/30"><component :is="isExpanded(definition) ? ChevronDown : ChevronRight" class="w-4 h-4 text-slate-500 shrink-0" /><span class="px-2 py-1 rounded-md bg-indigo-500/10 text-indigo-300 text-[10px] font-semibold uppercase">{{ kindLabel(definition.kind) }}</span><span class="text-sm text-slate-200 truncate">{{ definition.name }}</span><span v-if="runtimeData && ['class','method','function'].includes(definition.kind)" class="hidden md:inline text-[10px] text-cyan-300">{{ formatRuns(definitionMetric(definition)?.runs) }} runs</span><span class="text-[10px] text-slate-500 font-mono">{{ runtimeData && ['class','method','function'].includes(definition.kind) ? `${Number(definitionMetric(definition)?.p95_ms || 0).toFixed(1)} ms · ${formatRuns(definitionMetric(definition)?.failures)} fails` : '' }}</span><span class="ml-auto text-[10px] text-slate-500 font-mono">L{{ definition.line || '?' }}{{ definition.end_line ? `–${definition.end_line}` : '' }}</span></button>
-          <div v-if="isExpanded(definition)" class="px-11 pb-4 space-y-2 text-xs"><div class="text-slate-400 break-all"><span class="text-slate-500">FQN:</span> <span class="font-mono text-slate-300">{{ definition.fqn }}</span></div><div class="grid grid-cols-2 md:grid-cols-4 gap-2 text-slate-400"><span v-if="definition.visibility">Visibility: <b class="text-slate-200">{{ definition.visibility }}</b></span><span v-if="definition.static !== null && definition.static !== undefined">Static: <b class="text-slate-200">{{ definition.static ? 'yes' : 'no' }}</b></span><span v-if="definition.abstract !== null && definition.abstract !== undefined">Abstract: <b class="text-slate-200">{{ definition.abstract ? 'yes' : 'no' }}</b></span><span v-if="definition.owner">Owner: <b class="text-slate-200">{{ definition.owner }}</b></span></div><div v-if="runtimeData && definitionMetric(definition)" class="text-slate-400">{{ formatRuns(definitionMetric(definition)?.runs) }} observed calls · last ran {{ formatLastSeen(definitionMetric(definition)?.last_seen) }} · p95 {{ Number(definitionMetric(definition)?.p95_ms || 0).toFixed(1) }} ms · {{ formatRuns(definitionMetric(definition)?.failures) }} failures</div><div v-if="definition.symbol_id && runtimeData" class="grid gap-2 md:grid-cols-3"><div><b class="text-slate-500">Called by</b><p v-for="row in runtimeData.telemetry.callers.filter((item) => item.symbol_id === definition.symbol_id)" :key="row.caller_symbol_id" class="mt-1 font-mono text-slate-300">{{ row.caller_symbol_id }} · {{ formatRuns(row.calls) }}</p></div><div><b class="text-slate-500">Routes</b><p v-for="row in runtimeData.telemetry.symbol_routes.filter((item) => item.symbol_id === definition.symbol_id)" :key="row.route" class="mt-1 font-mono text-slate-300">{{ row.route }} · {{ formatRuns(row.calls) }}</p></div><div><b class="text-slate-500">Database tables</b><p v-for="row in runtimeData.telemetry.symbol_tables.filter((item) => item.symbol_id === definition.symbol_id)" :key="row.table_name" class="mt-1 font-mono text-slate-300">{{ row.table_name }} · {{ formatRuns(row.calls) }}</p></div></div><div class="text-slate-500 font-mono break-all">{{ definition.file }}:{{ definition.line || '?' }}</div></div>
+          <div v-if="isExpanded(definition)" class="px-11 pb-4 space-y-2 text-xs">
+            <div class="text-slate-400 break-all"><span class="text-slate-500">FQN:</span> <span class="font-mono text-slate-300">{{ definition.fqn }}</span></div>
+            <div class="grid grid-cols-2 md:grid-cols-4 gap-2 text-slate-400">
+              <span v-if="definition.visibility">Visibility: <b class="text-slate-200">{{ definition.visibility }}</b></span>
+              <span v-if="definition.static !== null && definition.static !== undefined">Static: <b class="text-slate-200">{{ definition.static ? 'yes' : 'no' }}</b></span>
+              <span v-if="definition.abstract !== null && definition.abstract !== undefined">Abstract: <b class="text-slate-200">{{ definition.abstract ? 'yes' : 'no' }}</b></span>
+              <span v-if="definition.owner">Owner: <b class="text-slate-200">{{ definition.owner }}</b></span>
+            </div>
+            <div v-if="runtimeData && definitionMetric(definition)" class="text-slate-400">{{ formatRuns(definitionMetric(definition)?.runs) }} observed calls · last ran {{ formatLastSeen(definitionMetric(definition)?.last_seen) }} · p95 {{ Number(definitionMetric(definition)?.p95_ms || 0).toFixed(1) }} ms · {{ formatRuns(definitionMetric(definition)?.failures) }} failures</div>
+            <div v-if="definition.symbol_id && runtimeData" class="grid gap-3 md:grid-cols-2 xl:grid-cols-4">
+              <div>
+                <b class="text-slate-500">Called by</b>
+                <p v-for="row in visibleMethodEdges(methodCallers(definition.symbol_id))" :key="row.caller_symbol_id" class="mt-1 font-mono text-slate-300 break-all">
+                  {{ row.caller_symbol_id }} · {{ methodEdgeCount(row) }}
+                </p>
+                <p v-if="!methodCallers(definition.symbol_id).length" class="mt-1 text-slate-600">No observed caller edges.</p>
+                <p v-else-if="methodCallers(definition.symbol_id).length > 10" class="mt-1 text-slate-500">Top 10 of {{ methodCallers(definition.symbol_id).length }} caller edges.</p>
+              </div>
+              <div>
+                <b class="text-slate-500">Calls</b>
+                <p v-for="row in visibleMethodEdges(methodCallees(definition.symbol_id))" :key="row.symbol_id" class="mt-1 font-mono text-slate-300 break-all">
+                  {{ row.symbol_id }} · {{ methodEdgeCount(row) }}
+                </p>
+                <p v-if="!methodCallees(definition.symbol_id).length" class="mt-1 text-slate-600">No observed callee edges.</p>
+                <p v-else-if="methodCallees(definition.symbol_id).length > 10" class="mt-1 text-slate-500">Top 10 of {{ methodCallees(definition.symbol_id).length }} callee edges.</p>
+              </div>
+              <div>
+                <b class="text-slate-500">Hot path share</b>
+                <p v-if="hotPathShare(definition.symbol_id) !== undefined" class="mt-1 text-cyan-300">{{ hotPathShare(definition.symbol_id)?.toFixed(1) }}% of retained profile samples</p>
+                <p v-else class="mt-1 text-slate-600">No retained profile samples.</p>
+              </div>
+              <div>
+                <b class="text-slate-500">Routes</b>
+                <p v-for="row in runtimeData.telemetry.symbol_routes.filter((item) => item.symbol_id === definition.symbol_id)" :key="row.route" class="mt-1 font-mono text-slate-300 break-all">{{ row.route }} · {{ formatRuns(row.calls) }}</p>
+                <b class="mt-2 block text-slate-500">Database tables</b>
+                <p v-for="row in runtimeData.telemetry.symbol_tables.filter((item) => item.symbol_id === definition.symbol_id)" :key="row.table_name" class="mt-1 font-mono text-slate-300">{{ row.table_name }} · {{ formatRuns(row.calls) }}</p>
+              </div>
+            </div>
+            <div class="text-slate-500 font-mono break-all">{{ definition.file }}:{{ definition.line || '?' }}</div>
+          </div>
         </div>
       </div>
     </div>

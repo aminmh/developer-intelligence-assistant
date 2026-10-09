@@ -54,3 +54,8 @@ For a lower-memory production launch with an external OIDC provider, configure
 `OIDC_ISSUER` and `OIDC_LITE_INTERNAL_ISSUER` if the Web container needs a
 different provider URL, then run `make up-lite` (or `just up-lite` from the
 workspace root). This mode does not start Keycloak.
+
+The Definitions view's expanded rows can show method callers, callees, and hot-path share when
+Phase 4 runtime telemetry is available. Counts come from selected PHP method hooks; hot-path share
+is a statistical estimate based on retained Excimer samples. Missing profiles or hooks leave those
+details empty. See the workspace's `api/docs/telemetry/runtime-phase4.md` for PHP and API setup.

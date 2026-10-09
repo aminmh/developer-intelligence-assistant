@@ -172,6 +172,25 @@ export interface RuntimeTelemetryData {
   routes: Array<{ method: string; route: string; route_id: string; requests: number; p95_ms: number; failures: number; error_rate: number; last_seen: string | null }>;
   tables: Array<{ table_id: string; table_name: string; operation: string; operations: number; last_seen: string | null }>;
   callers: Array<{ symbol_id: string; caller_symbol_id: string; calls: number }>;
+  method_calls: Array<{
+    caller_symbol_id: string;
+    symbol_id: string;
+    calls: number;
+    hook_calls: number;
+    span_edges: number;
+    sample_weight: number;
+    hot_path_share: number;
+    sources: Array<'span' | 'hook' | 'excimer'>;
+  }>;
+  hot_path: Array<{ symbol_id: string; sample_share: number }>;
+  profile_count: number;
+  profiled_samples: number;
+  method_edge_coverage?: {
+    observed_edges: number;
+    static_edges: number;
+    percent: number | null;
+    basis: string;
+  };
   symbol_routes: Array<{ symbol_id: string; route_id: string; method?: string; route: string; calls: number }>;
   symbol_tables: Array<{ symbol_id: string; table_id: string; table_name: string; calls: number }>;
   retention_hours: number;
