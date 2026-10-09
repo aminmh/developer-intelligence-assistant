@@ -44,12 +44,17 @@ def _graph_facts(project_id: str, revision_id: str, commit_sha: str, collection:
             "last_seen": row.get("last_seen"),
             "window_hours": window,
         })
-    for row in telemetry.get("callers", []):
+    for row in telemetry.get("method_calls") or telemetry.get("callers", []):
         if row.get("symbol_id") in known and row.get("caller_symbol_id") in known:
             facts["calls"].append({
                 "symbol_id": row["symbol_id"],
                 "caller_symbol_id": row["caller_symbol_id"],
                 "calls": int(row.get("calls", 0) or 0),
+                "hook_calls": int(row.get("hook_calls", 0) or 0),
+                "span_edges": int(row.get("span_edges", 0) or 0),
+                "sample_weight": int(row.get("sample_weight", 0) or 0),
+                "hot_path_share": float(row.get("hot_path_share", 0) or 0),
+                "sources": list(row.get("sources", [])) if isinstance(row.get("sources"), list) else [],
                 "last_seen": telemetry.get("last_seen"),
                 "window_hours": window,
             })

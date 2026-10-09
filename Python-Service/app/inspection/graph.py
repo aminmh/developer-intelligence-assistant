@@ -55,6 +55,13 @@ MATCH (s:PhpSymbol {id: id})
 RETURN collect(s.id) AS ids
 """
 
+_STATIC_CALL_EDGES_CYPHER = """
+MATCH (caller:PhpSymbol {collection: $collection})-[r:REFERENCES {kind: 'method_call'}]->(callee:PhpSymbol {collection: $collection})
+WHERE caller.symbol_id IS NOT NULL AND callee.symbol_id IS NOT NULL
+RETURN caller.symbol_id AS caller_symbol_id, callee.symbol_id AS symbol_id
+LIMIT 50000
+"""
+
 _RUNTIME_SYMBOLS_CYPHER = """
 UNWIND $data AS row
 MATCH (s:PhpSymbol {collection: $collection, symbol_id: row.symbol_id})
@@ -75,7 +82,9 @@ MATCH (caller:PhpSymbol {collection: $collection, symbol_id: row.caller_symbol_i
 MATCH (callee:PhpSymbol {collection: $collection, symbol_id: row.symbol_id})
 MERGE (caller)-[r:RUNTIME_CALLS]->(callee)
 SET r.calls = row.calls, r.last_seen = row.last_seen,
-    r.window_hours = row.window_hours
+    r.hook_calls = row.hook_calls, r.span_edges = row.span_edges,
+    r.sample_weight = row.sample_weight, r.hot_path_share = row.hot_path_share,
+    r.sources = row.sources, r.window_hours = row.window_hours
 RETURN count(*) AS count
 """
 
@@ -243,6 +252,23 @@ class InspectionGraph:
             except Exception as exc:  # noqa: BLE001 — runtime graph projection is retryable
                 get_exception_logger().error("Runtime graph %s upsert failed: %s", name, exc)
         return counts
+
+    def static_call_edges(self, collection: str) -> list[dict[str, str]]:
+        """Read bounded method-call edges from the immutable source graph."""
+        store = self._get_store()
+        if store is None:
+            return []
+        try:
+            rows = store.structured_query(_STATIC_CALL_EDGES_CYPHER, param_map={"collection": collection})
+            return [
+                {"caller_symbol_id": row["caller_symbol_id"], "symbol_id": row["symbol_id"]}
+                for row in rows or []
+                if isinstance(row, dict) and isinstance(row.get("caller_symbol_id"), str)
+                and isinstance(row.get("symbol_id"), str)
+            ][:50000]
+        except Exception as exc:  # noqa: BLE001 — missing static graph leaves coverage unavailable
+            get_exception_logger().error("Static method-call read failed: %s", exc)
+            return []
 
 
 def _first_count(result: Any) -> int:

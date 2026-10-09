@@ -124,8 +124,10 @@ class ClickHouseRuntime:
         self.database = os.getenv("TELEMETRY_CLICKHOUSE_DATABASE", "telemetry")
         self.table = os.getenv("TELEMETRY_CLICKHOUSE_FULL_TABLE", "otel_spans_full")
         self.trace_table = os.getenv("TELEMETRY_CLICKHOUSE_TABLE", "otel_traces")
+        self.profile_table = os.getenv("TELEMETRY_PROFILE_TABLE", "otel_profiles")
         self.window_hours = runtime_sampling_policy()["p95_window_hours"]
-        if not _IDENTIFIER.fullmatch(self.database) or not _IDENTIFIER.fullmatch(self.table):
+        if (not _IDENTIFIER.fullmatch(self.database) or not _IDENTIFIER.fullmatch(self.table)
+                or not _IDENTIFIER.fullmatch(self.profile_table)):
             raise ValueError("Invalid ClickHouse telemetry table configuration")
 
     @property
@@ -331,6 +333,8 @@ class ClickHouseRuntime:
             f"AND TraceId IN ({', '.join(placeholders)})"
         )
         try:
+            from telemetry.profiles import delete_profiles
+            delete_profiles(self, project_id, revision_id, normalized_ids)
             self.execute(sql, extra_parameters=parameters, timeout=120)
         except (HTTPError, URLError, TimeoutError, OSError, ValueError) as exc:
             raise RuntimeError("Request telemetry could not be deleted") from exc
@@ -403,6 +407,10 @@ class ClickHouseRuntime:
                 "GROUP BY symbol_id, caller_symbol_id ORDER BY calls DESC LIMIT 5000",
                 project_id, revision_id,
             )
+            from telemetry.profiles import merge_method_edges, method_hook_edges, profile_edges
+            profile_data = profile_edges(self, project_id, revision_id, known_symbol_ids)
+            hook_edges = method_hook_edges(self, project_id, revision_id, known_symbol_ids)
+            method_calls = merge_method_edges(parents, hook_edges, profile_data)
             symbol_routes = self.rows(
                 "WITH traces AS (SELECT TraceId, groupUniqArrayIf(if(SpanAttributes['indexer.route_id'] != '', "
                 "SpanAttributes['indexer.route_id'], concat('route:', upper(SpanAttributes['http.request.method']), ' ', SpanAttributes['http.route'])), "
@@ -478,6 +486,13 @@ class ClickHouseRuntime:
             "routes": routes,
             "tables": tables,
             "callers": parents,
+            "method_calls": method_calls,
+            "hot_path": [
+                {"symbol_id": symbol_id, "sample_share": share}
+                for symbol_id, share in sorted(profile_data.get("hot_path_share", {}).items(), key=lambda item: item[1], reverse=True)[:5000]
+            ],
+            "profile_count": int(profile_data.get("profiles", 0) or 0),
+            "profiled_samples": int(profile_data.get("samples", 0) or 0),
             "symbol_routes": symbol_routes,
             "symbol_tables": symbol_tables,
             "retention_hours": runtime_sampling_policy()["aggregation_retention_hours"],
@@ -492,7 +507,8 @@ class ClickHouseRuntime:
             "available": False, "reason": reason, "total_spans": 0,
             "symbol_spans": 0, "matched_spans": 0, "match_percent": 0.0,
             "error_spans": 0, "last_seen": None, "symbols": [], "routes": [],
-            "tables": [], "callers": [], "symbol_routes": [], "symbol_tables": [],
+            "tables": [], "callers": [], "method_calls": [], "hot_path": [], "profile_count": 0,
+            "profiled_samples": 0, "symbol_routes": [], "symbol_tables": [],
             "retention_hours": runtime_sampling_policy()["aggregation_retention_hours"],
             "sampled_trace_retention_hours": telemetry_settings()["retention_hours"],
             "unmatched_spans": 0, "unmatched_percent": 0.0,
@@ -538,6 +554,29 @@ def _project_runtime(project_id: str, snapshot: dict, registry) -> dict:
     telemetry = clickhouse.summary(project_id, revision_id, known_ids) if revision_id else clickhouse._empty(
         "This snapshot has no indexed revision ID yet."
     )
+    if index_available and commit_sha and revision_id:
+        try:
+            from inspection.graph import InspectionGraph
+            from telemetry.snapshot import storage_id
+            collection = "sym_snapshot_" + storage_id(project_id, commit_sha, "")
+            static_edges = InspectionGraph().static_call_edges(collection)
+            observed_edges = {
+                (row.get("caller_symbol_id"), row.get("symbol_id"))
+                for row in telemetry.get("method_calls", [])
+            }
+            expected_edges = {
+                (row["caller_symbol_id"], row["symbol_id"])
+                for row in static_edges
+                if row["caller_symbol_id"] in known_ids and row["symbol_id"] in known_ids
+            }
+            telemetry["method_edge_coverage"] = {
+                "observed_edges": len(expected_edges & observed_edges),
+                "static_edges": len(expected_edges),
+                "percent": round(100 * len(expected_edges & observed_edges) / len(expected_edges), 1) if expected_edges else None,
+                "basis": "runtime samples within the selected aggregation window",
+            }
+        except Exception:
+            telemetry["method_edge_coverage"] = {"observed_edges": 0, "static_edges": 0, "percent": None, "basis": "static graph unavailable"}
     return {
         "project_id": project_id,
         "commit_sha": commit_sha,

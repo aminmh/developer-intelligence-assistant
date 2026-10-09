@@ -18,6 +18,7 @@ router = APIRouter(prefix="/telemetry/projects", tags=["Telemetry snapshots"])
 host_router = APIRouter(prefix="/telemetry/host", tags=["Telemetry deployments"])
 runtime_router = APIRouter(prefix="/telemetry/runtime", tags=["Runtime telemetry"])
 MAX_HOST_REPORT_BYTES = 2 * 1024 * 1024
+MAX_PROFILE_BATCH_BYTES = 2 * 1024 * 1024
 
 
 def authorize(request: Request, project_id: str) -> None:
@@ -54,6 +55,44 @@ def authorize_internal(request: Request) -> None:
 def runtime_projects(request: Request) -> list[dict]:
     authorize_internal(request)
     return get_registry().runtime_projects()
+
+
+@runtime_router.post("/profiles")
+async def ingest_runtime_profiles(request: Request) -> dict:
+    authorize_internal(request)
+    raw = await request.body()
+    if len(raw) > MAX_PROFILE_BATCH_BYTES:
+        raise HTTPException(413, "Profile batch exceeds the configured size limit")
+    try:
+        payload = json.loads(raw)
+        profiles = payload.get("profiles")
+        if not isinstance(profiles, list) or not profiles or not isinstance(profiles[0], dict):
+            raise ValueError("Profile batch is missing entries")
+        project_id = profiles[0].get("project_id")
+        revision_id = profiles[0].get("revision_id")
+        from telemetry.snapshot import validate_project_id, validate_revision_id
+        validate_project_id(project_id)
+        validate_revision_id(revision_id)
+        snapshot = get_registry().get_by_revision_id(project_id, revision_id)
+        if snapshot is None:
+            raise HTTPException(404, "Indexed revision was not found")
+        commit_sha = snapshot.get("commit_sha")
+        if not isinstance(commit_sha, str):
+            raise HTTPException(404, "Indexed revision source was not found")
+        from telemetry.profiles import store_profiles
+        from telemetry.runtime import ClickHouseRuntime
+        accepted = await run_in_threadpool(
+            store_profiles, ClickHouseRuntime(), project_id, revision_id, commit_sha, profiles,
+        )
+    except HTTPException:
+        raise
+    except (ValueError, TypeError, AttributeError, json.JSONDecodeError) as exc:
+        raise HTTPException(422, "Profile payload is invalid") from exc
+    except Exception as exc:
+        raise HTTPException(503, "Profile storage is unavailable") from exc
+    from telemetry.events import publish_runtime_update
+    publish_runtime_update()
+    return {"accepted": accepted}
 
 
 @runtime_router.get("/projects/{project_id}/snapshots/{commit_sha}")
