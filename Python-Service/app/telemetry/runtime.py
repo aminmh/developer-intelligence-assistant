@@ -27,6 +27,21 @@ def _table_display_name(table_id: str) -> str:
     return value.rsplit(".", 1)[-1]
 
 
+def _timestamp_epoch_ms(value) -> float | None:
+    if isinstance(value, datetime):
+        timestamp = value if value.tzinfo else value.replace(tzinfo=timezone.utc)
+        return timestamp.timestamp() * 1000
+    if not isinstance(value, str):
+        return None
+    try:
+        timestamp = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if timestamp.tzinfo is None:
+        timestamp = timestamp.replace(tzinfo=timezone.utc)
+    return timestamp.timestamp() * 1000
+
+
 RUNTIME_POLICY_KEY = "sampling_policy"
 
 
@@ -201,6 +216,7 @@ class ClickHouseRuntime:
             rows = self.rows(
                 "SELECT TraceId AS trace_id, SpanId AS span_id, ParentSpanId AS parent_span_id, "
                 "Timestamp AS timestamp, SpanKind AS span_kind, StatusCode AS span_status, "
+                "SpanAttributes['db.system.name'] AS db_system, SpanAttributes['db.operation.name'] AS db_operation, "
                 "SpanAttributes['http.request.method'] AS method, SpanAttributes['http.route'] AS route, "
                 "toInt32OrNull(SpanAttributes['http.response.status_code']) AS status_code, "
                 "toFloat64(Duration) / 1000000 AS duration_ms, "
@@ -242,6 +258,7 @@ class ClickHouseRuntime:
             "php_cpu_time_us": root.get("php_cpu_time_us"),
             "php_peak_memory_bytes": root.get("php_peak_memory_bytes"),
         }
+        ai_summary = self._trace_ai_summary(project_id, revision_id, trace_id, request, rows)
         calls = []
         for row in rows:
             operation = str(row.get("db_operation", ""))
@@ -261,7 +278,111 @@ class ClickHouseRuntime:
                 "caller_symbol_id": str(row.get("caller_symbol_id", "")) or None,
                 "span_status": str(row.get("span_status", "")),
             })
-        return {"available": True, "reason": None, "request": request, "database_calls": calls, "sampled": True}
+        return {"available": True, "reason": None, "request": request, "database_calls": calls, "ai_summary": ai_summary, "sampled": True}
+
+    def _trace_ai_summary(self, project_id: str, revision_id: str, trace_id: str, request: dict, rows: list[dict]) -> dict:
+        """Build a privacy-shaped, trace-scoped summary from spans and one retained profile."""
+        total_ms = max(0.0, float(request.get("duration_ms") or 0.0))
+        root = next((row for row in rows if row.get("span_kind") == "Server"), None)
+        buckets: dict[str, list[tuple[float, float]]] = {}
+        root_start = _timestamp_epoch_ms((root or {}).get("timestamp"))
+        for row in rows:
+            if row is root:
+                continue
+            db_system = str(row.get("db_system") or "").lower()
+            if "mysql" in db_system:
+                bucket = "mysql_queries_ms"
+            elif "redis" in db_system:
+                operation = re.sub(r"[^a-z0-9]+", "_", str(row.get("db_operation") or "other").lower()).strip("_")
+                bucket = f"redis_{operation or 'other'}_ms"
+            else:
+                continue
+            duration_ms = max(0.0, float(row.get("duration_ms") or 0.0))
+            if duration_ms <= 0 or total_ms <= 0:
+                continue
+            start = _timestamp_epoch_ms(row.get("timestamp"))
+            if root_start is None or start is None:
+                buckets.setdefault(bucket, []).append((0.0, min(total_ms, duration_ms)))
+                continue
+            offset = start - root_start
+            begin = max(0.0, offset)
+            end = min(total_ms, offset + duration_ms)
+            if end > begin:
+                buckets.setdefault(bucket, []).append((begin, end))
+
+        external_ms = {name: 0.0 for name in buckets}
+        if root_start is None:
+            for name, intervals in buckets.items():
+                external_ms[name] = min(total_ms, sum(end - start for start, end in intervals))
+        else:
+            boundaries = sorted({point for intervals in buckets.values() for interval in intervals for point in interval})
+            for start, end in zip(boundaries, boundaries[1:]):
+                if end <= start:
+                    continue
+                covering = next((name for name in sorted(buckets) if any(left <= start and right >= end for left, right in buckets[name])), None)
+                if covering is not None:
+                    external_ms[covering] += end - start
+        breakdown = {name: round(value, 3) for name, value in sorted(external_ms.items())}
+        breakdown["php_app_time_ms"] = round(max(0.0, total_ms - sum(external_ms.values())), 3)
+        hotspots, profile_event_type = self._trace_profile_hotspots(project_id, revision_id, trace_id)
+        endpoint = f"{request.get('method') or 'UNKNOWN'} {request.get('route') or 'unknown route'}"
+        if hotspots:
+            hottest = hotspots[0]
+            insight = (
+                f"{endpoint} took {total_ms:.1f} ms; the largest retained profile hotspot was "
+                f"{hottest['frame']} ({hottest['sample_percentage']:.1f}% of samples)."
+            )
+        else:
+            insight = f"{endpoint} took {total_ms:.1f} ms; no retained Excimer profile was available for this trace."
+        return {
+            "trace_id": trace_id.lower(),
+            "endpoint": endpoint,
+            "total_latency_ms": round(total_ms, 3),
+            "otel_breakdown": breakdown,
+            "excimer_hotspots": hotspots,
+            "profile_event_type": profile_event_type,
+            "actionable_insight": insight,
+        }
+
+    def _trace_profile_hotspots(self, project_id: str, revision_id: str, trace_id: str) -> tuple[list[dict], str | None]:
+        if not self.configured:
+            return [], None
+        table = f"`{self.database}`.`{self.profile_table}`"
+        try:
+            rows = self.rows(
+                f"SELECT samples_collapsed, event_type FROM {table} FINAL WHERE project_id = {{project_id:String}} "
+                "AND revision_id = {revision_id:String} AND trace_id = {trace_id:String} "
+                "ORDER BY received_at DESC LIMIT 1",
+                project_id, revision_id, {"param_trace_id": trace_id.lower()},
+            )
+        except (HTTPError, URLError, TimeoutError, OSError, ValueError, KeyError):
+            return [], None
+        if not rows or not isinstance(rows[0].get("samples_collapsed"), str):
+            return [], None
+        frame_samples: dict[str, int] = {}
+        total_samples = 0
+        method_id = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*(?:\\[A-Za-z_][A-Za-z0-9_]*)*::[A-Za-z_][A-Za-z0-9_]*$")
+        for line in rows[0]["samples_collapsed"].splitlines()[:2000]:
+            try:
+                stack_text, count_text = line.rsplit(" ", 1)
+                count = int(count_text)
+            except (ValueError, TypeError):
+                continue
+            if not 1 <= count <= 1_000_000:
+                continue
+            frames = set(stack_text.split(";"))
+            frames = {frame for frame in frames if method_id.fullmatch(frame)}
+            if not frames:
+                continue
+            total_samples += count
+            for frame in frames:
+                frame_samples[frame] = frame_samples.get(frame, 0) + count
+        if total_samples <= 0:
+            return [], None
+        return [
+            {"frame": frame, "sample_percentage": round(100 * count / total_samples, 1)}
+            for frame, count in sorted(frame_samples.items(), key=lambda item: (-item[1], item[0]))[:10]
+        ], str(rows[0].get("event_type") or "") or None
 
     def unscoped_rows(self, sql: str) -> list[dict]:
         if not self.configured:
