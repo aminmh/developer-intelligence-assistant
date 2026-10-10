@@ -234,6 +234,15 @@ export interface RuntimeRequestDetail {
   sampled?: boolean;
   request: RuntimeRequest | null;
   database_calls: RuntimeDatabaseCall[];
+  ai_summary?: {
+    trace_id: string;
+    endpoint: string;
+    total_latency_ms: number;
+    otel_breakdown: Record<string, number>;
+    excimer_hotspots: Array<{ frame: string; sample_percentage: number }>;
+    profile_event_type: string | null;
+    actionable_insight: string;
+  };
 }
 
 export interface RuntimeSnapshotData {

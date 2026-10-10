@@ -670,6 +670,23 @@ onUnmounted(() => stopRuntimeUpdates?.());
               <p v-if="requestDetailLoading[request.trace_id]" class="text-xs text-slate-500">Loading database calls…</p>
               <div v-else-if="requestDetailErrors[request.trace_id]" class="flex flex-wrap items-center gap-2 text-xs text-rose-300"><span>{{ requestDetailErrors[request.trace_id] }}</span><button type="button" @click="toggleRequest(request, true)" class="underline">Retry</button></div>
               <template v-else-if="requestDetails[request.trace_id]?.available">
+                <section v-if="requestDetails[request.trace_id].ai_summary" class="rounded-lg border border-cyan-500/20 bg-cyan-500/5 p-3">
+                  <p class="text-[10px] font-semibold uppercase tracking-wide text-cyan-200">Trace summary</p>
+                  <p class="mt-1 text-[11px] text-slate-300">{{ requestDetails[request.trace_id].ai_summary?.actionable_insight }}</p>
+                  <div class="mt-2 flex flex-wrap gap-2">
+                    <span v-for="(duration, category) in requestDetails[request.trace_id].ai_summary?.otel_breakdown" :key="category" class="rounded bg-slate-900/70 px-2 py-1 text-[10px] text-slate-400">
+                      {{ category.replaceAll('_', ' ') }} · {{ formatMilliseconds(duration) }}
+                    </span>
+                  </div>
+                  <div v-if="requestDetails[request.trace_id].ai_summary?.excimer_hotspots.length" class="mt-2">
+                    <p class="text-[9px] uppercase text-slate-500">Excimer hotspots · {{ requestDetails[request.trace_id].ai_summary?.profile_event_type === 'EXCIMER_CPU' ? 'CPU samples' : 'wall-clock samples' }}</p>
+                    <p v-for="hotspot in requestDetails[request.trace_id].ai_summary?.excimer_hotspots" :key="hotspot.frame" class="mt-1 truncate font-mono text-[10px] text-orange-200">
+                      {{ hotspot.sample_percentage.toFixed(1) }}% · {{ hotspot.frame }}
+                    </p>
+                  </div>
+                  <p v-else class="mt-2 text-[10px] text-slate-500">No retained Excimer profile for this trace.</p>
+                  <p class="mt-2 text-[9px] text-slate-600">Instrumented MySQL/Redis spans are de-overlapped estimates; remaining time can include uninstrumented work. Excimer percentages describe retained samples, not exact request time.</p>
+                </section>
                 <p v-if="!requestDetails[request.trace_id].database_calls.length" class="text-xs text-slate-500">No database calls were captured for this request.</p>
                 <div v-else class="space-y-1">
                   <div class="grid grid-cols-[1fr_auto_auto] gap-2 px-2 text-[9px] uppercase text-slate-500"><span>Database call · table · attributed method</span><span>Operation</span><span>Duration</span></div>
