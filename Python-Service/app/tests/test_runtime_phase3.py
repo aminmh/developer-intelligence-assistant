@@ -140,8 +140,12 @@ def test_runtime_request_reads_are_revision_scoped_and_privacy_shaped(monkeypatc
     assert detail["database_calls"][0]["db_namespace"] == "pizza"
     assert "db.query.text" not in detail["database_calls"][0]
     for sql, project_id, revision_id, params in captured:
-        assert "indexer.project_id" in sql and "indexer.revision_id" in sql
         assert project_id == "pizza" and revision_id == "rev_test"
+        if "`telemetry`.`otel_spans_full`" in sql:
+            assert "indexer.project_id" in sql and "indexer.revision_id" in sql
+        elif "`telemetry`.`otel_profiles`" in sql:
+            assert "project_id = {project_id:String}" in sql
+            assert "revision_id = {revision_id:String}" in sql
     assert captured[1][3] == {"param_trace_id": "a" * 32}
 
 
@@ -164,6 +168,7 @@ def test_runtime_request_delete_is_bounded_parameterized_and_revision_scoped(mon
         lambda _registry=None: {"p95_window_hours": 24, "refresh_minutes": 5, "aggregation_retention_hours": 168},
     )
     monkeypatch.setattr(ClickHouseRuntime, "configured", property(lambda _self: True))
+    monkeypatch.setattr(ClickHouseRuntime, "rows", lambda *_args, **_kwargs: [{"tables": 1}])
     monkeypatch.setattr(
         ClickHouseRuntime,
         "execute",
@@ -180,11 +185,19 @@ def test_runtime_request_delete_is_bounded_parameterized_and_revision_scoped(mon
 
     result = ClickHouseRuntime().delete_requests("pizza", "rev_test", trace_ids)
 
-    sql, parameters, timeout = captured[0]
+    profile_sql, profile_parameters, _profile_timeout = next(
+        item for item in captured if "`telemetry`.`otel_profiles`" in item[0]
+    )
+    sql, parameters, timeout = next(
+        item for item in captured if "`telemetry`.`otel_spans_full`" in item[0]
+    )
     assert result == {"deleted_trace_count": 2}
+    assert "trace_id IN ({trace_id_0:String}, {trace_id_1:String})" in profile_sql
+    assert profile_parameters["param_trace_id_0"] == "a" * 32
+    assert profile_parameters["param_trace_id_1"] == "b" * 32
     assert "ALTER TABLE `telemetry`.`otel_spans_full` DELETE WHERE" in sql
     assert "indexer.project_id" in sql and "indexer.revision_id" in sql
-    assert "TraceId IN ({param_trace_id_0:String}, {param_trace_id_1:String})" in sql
+    assert "TraceId IN ({trace_id_0:String}, {trace_id_1:String})" in sql
     assert all(trace_id.lower() not in sql for trace_id in trace_ids)
     assert parameters == {
         "mutations_sync": "1",
@@ -266,3 +279,78 @@ def test_runtime_delete_endpoint_publishes_refresh_after_success(monkeypatch, tm
     assert deleted == [("pizza", revision_id, ["a" * 32])]
     assert published == [True]
     assert result == {"deleted_trace_count": 1}
+
+
+def test_runtime_request_detail_exposes_bounded_method_hook_counts(monkeypatch):
+    captured = []
+    hook_counts = (
+        '[{"caller_symbol_id":"App\\\\Http\\\\Controllers\\\\PizzaController::index",'
+        '"symbol_id":"App\\\\Services\\\\PizzaService::list", "calls":3}]'
+    )
+
+    def rows(self, sql, project_id, revision_id, extra_parameters=None):
+        captured.append((sql, project_id, revision_id, extra_parameters))
+        return [{
+            "trace_id": "a" * 32,
+            "span_id": "1" * 16,
+            "parent_span_id": "",
+            "span_kind": "Server",
+            "timestamp": "2026-10-08 10:00:00",
+            "method": "GET",
+            "route": "/api/pizzas",
+            "status_code": 200,
+            "duration_ms": 12.5,
+            "span_status": "Unset",
+            "method_hook_counts": hook_counts,
+        }]
+
+    monkeypatch.setattr(ClickHouseRuntime, "configured", property(lambda _self: True))
+    monkeypatch.setattr(ClickHouseRuntime, "rows", rows)
+    monkeypatch.setattr(
+        ClickHouseRuntime,
+        "_trace_ai_summary",
+        lambda *_args: {"excimer_hotspots": []},
+    )
+    monkeypatch.setattr(
+        "telemetry.runtime.runtime_sampling_policy",
+        lambda _registry=None: {
+            "p95_window_hours": 24,
+            "refresh_minutes": 5,
+            "aggregation_retention_hours": 168,
+        },
+    )
+
+    detail = ClickHouseRuntime().request_detail("pizza", "rev_test", "a" * 32)
+
+    assert "indexer.method_hook_counts" in captured[0][0]
+    assert captured[0][1:3] == ("pizza", "rev_test")
+    assert detail["method_activity"] == {
+        "available": True,
+        "reason": None,
+        "edges": [{
+            "caller_symbol_id": "App\\Http\\Controllers\\PizzaController::index",
+            "symbol_id": "App\\Services\\PizzaService::list",
+            "calls": 3,
+            "source": "hook",
+        }],
+    }
+
+
+def test_runtime_method_activity_omits_invalid_edges_and_reports_missing_data():
+    from telemetry.runtime import _method_activity
+
+    activity = _method_activity([
+        {"caller_symbol_id": "App\\Caller::run", "symbol_id": "App\\Callee::work", "calls": 2},
+        {"caller_symbol_id": "../../secret", "symbol_id": "App\\Callee::work", "calls": 9},
+        {"caller_symbol_id": "App\\Caller::run", "symbol_id": "App\\Callee::work", "calls": True},
+    ])
+    missing = _method_activity(None)
+
+    assert activity["available"] is True
+    assert activity["edges"][0]["calls"] == 2
+    assert len(activity["edges"]) == 1
+    assert missing == {
+        "available": False,
+        "reason": "No method-call data was captured for this request.",
+        "edges": [],
+    }

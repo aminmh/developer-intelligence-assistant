@@ -292,9 +292,9 @@ def delete_profiles(client: ClickHouseRuntime, project_id: str, revision_id: str
         placeholders = []
         parameters = {"mutations_sync": "1", "param_project_id": project_id, "param_revision_id": revision_id}
         for index, trace_id in enumerate(trace_ids):
-            name = f"param_trace_id_{index}"
+            name = f"trace_id_{index}"
             placeholders.append(f"{{{name}:String}}")
-            parameters[name] = trace_id
+            parameters[f"param_{name}"] = trace_id
         client.execute(
             f"ALTER TABLE {table} DELETE WHERE project_id = {{project_id:String}} "
             "AND revision_id = {revision_id:String} "

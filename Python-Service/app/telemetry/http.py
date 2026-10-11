@@ -150,6 +150,84 @@ def runtime_request_detail(project_id: str, revision_id: str, trace_id: str, req
         raise HTTPException(422, "Invalid request trace identity") from exc
 
 
+@runtime_router.post("/projects/{project_id}/revisions/{revision_id}/requests/{trace_id}/analysis")
+async def runtime_request_analysis(
+    project_id: str, revision_id: str, trace_id: str, request: Request, payload: dict = Body(...),
+) -> dict:
+    authorize_internal(request)
+    try:
+        validate_project_id(project_id)
+        validate_revision_id(revision_id)
+        if not re.fullmatch(r"[0-9a-fA-F]{32}", trace_id):
+            raise ValueError("Invalid trace ID")
+        registry = get_registry()
+        snapshot = registry.get_by_revision_id(project_id, revision_id)
+        if snapshot is None:
+            raise HTTPException(404, "Indexed revision was not found")
+        provider = payload.get("provider") if isinstance(payload, dict) else None
+        if provider not in {"local", "remote"}:
+            raise HTTPException(422, "Choose a valid configured chat provider")
+        from telemetry.runtime import ClickHouseRuntime, snapshot_definitions
+        from telemetry.analysis import AnalysisError, analyze_request
+        detail = await run_in_threadpool(ClickHouseRuntime().request_detail, project_id, revision_id, trace_id)
+        revision = {**snapshot, "project_id": project_id, "archive_key": registry.archive_key(project_id, snapshot["commit_sha"])}
+        if not revision.get("archive_key"):
+            # Partial telemetry analysis remains available without source.
+            revision.pop("archive_key", None)
+        result = await run_in_threadpool(
+            analyze_request, project_id, revision, detail, provider,
+            definitions_loader=snapshot_definitions,
+            archive_loader=get_storage().get_snapshot_archive,
+        )
+        return result
+    except HTTPException:
+        raise
+    except ValueError as exc:
+        from telemetry.analysis import AnalysisError
+        if isinstance(exc, AnalysisError):
+            raise HTTPException(502, str(exc)) from exc
+        raise HTTPException(422, "Invalid request analysis identity") from exc
+    except Exception as exc:
+        raise HTTPException(503, "Request analysis is temporarily unavailable. Retry the request.") from exc
+
+
+@runtime_router.post("/projects/{project_id}/revisions/{revision_id}/requests/{trace_id}/analysis/diff")
+async def runtime_request_diff_preview(
+    project_id: str, revision_id: str, trace_id: str, request: Request, payload: dict = Body(...),
+) -> dict:
+    authorize_internal(request)
+    try:
+        validate_project_id(project_id)
+        validate_revision_id(revision_id)
+        if not re.fullmatch(r"[0-9a-fA-F]{32}", trace_id):
+            raise ValueError("Invalid trace ID")
+        if len(json.dumps(payload, ensure_ascii=False)) > 100_000:
+            raise HTTPException(413, "Selected finding exceeds the request limit")
+        registry = get_registry()
+        snapshot = registry.get_by_revision_id(project_id, revision_id)
+        if snapshot is None:
+            raise HTTPException(404, "Indexed revision was not found")
+        from telemetry.analysis import preview_diff
+        from telemetry.runtime import ClickHouseRuntime
+        detail = await run_in_threadpool(ClickHouseRuntime().request_detail, project_id, revision_id, trace_id)
+        revision = {**snapshot, "project_id": project_id,
+                    "archive_key": registry.archive_key(project_id, snapshot["commit_sha"])}
+        result = await run_in_threadpool(
+            preview_diff, revision, payload.get("finding"), payload.get("analysis") or {}, detail,
+            archive_loader=get_storage().get_snapshot_archive,
+        )
+        return result
+    except HTTPException:
+        raise
+    except ValueError as exc:
+        from telemetry.analysis import AnalysisError
+        if isinstance(exc, AnalysisError):
+            raise HTTPException(422, str(exc)) from exc
+        raise HTTPException(422, "Invalid request analysis identity") from exc
+    except Exception as exc:
+        raise HTTPException(503, "Diff preview is temporarily unavailable. Retry the request.") from exc
+
+
 @runtime_router.delete("/projects/{project_id}/revisions/{revision_id}/requests")
 def runtime_delete_requests(
     project_id: str,

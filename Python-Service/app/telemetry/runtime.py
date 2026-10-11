@@ -12,6 +12,9 @@ from urllib.request import Request, urlopen
 
 
 _IDENTIFIER = re.compile(r"^[A-Za-z_][A-Za-z0-9_]{0,62}$")
+_METHOD_HOOK_ID = re.compile(
+    r"^(?:[A-Za-z_][A-Za-z0-9_]*\\)*[A-Za-z_][A-Za-z0-9_]*::[A-Za-z_][A-Za-z0-9_]*$"
+)
 _SCOPE = """ResourceAttributes['indexer.project_id'] = {project_id:String}
     AND ResourceAttributes['indexer.revision_id'] = {revision_id:String}
     AND ResourceAttributes['indexer.code_dirty'] = 'false'
@@ -40,6 +43,61 @@ def _timestamp_epoch_ms(value) -> float | None:
     if timestamp.tzinfo is None:
         timestamp = timestamp.replace(tzinfo=timezone.utc)
     return timestamp.timestamp() * 1000
+
+
+def _method_activity(raw) -> dict:
+    """Normalize the bounded method-hook edge list from one request root span."""
+    if raw in (None, ""):
+        return {
+            "available": False,
+            "reason": "No method-call data was captured for this request.",
+            "edges": [],
+        }
+    try:
+        entries = json.loads(raw) if isinstance(raw, str) else raw
+    except (ValueError, TypeError):
+        entries = None
+    if not isinstance(entries, list):
+        return {
+            "available": False,
+            "reason": "Method-call data could not be decoded.",
+            "edges": [],
+        }
+
+    counts: dict[tuple[str, str], int] = {}
+    for item in entries[:256]:
+        if not isinstance(item, dict):
+            continue
+        caller = item.get("caller_symbol_id")
+        callee = item.get("symbol_id")
+        calls = item.get("calls")
+        if (
+            isinstance(caller, str)
+            and isinstance(callee, str)
+            and _METHOD_HOOK_ID.fullmatch(caller)
+            and _METHOD_HOOK_ID.fullmatch(callee)
+            and type(calls) is int
+            and 0 < calls <= 1_000_000
+        ):
+            key = (caller, callee)
+            counts[key] = min(1_000_000, counts.get(key, 0) + calls)
+
+    edges = [
+        {
+            "caller_symbol_id": caller,
+            "symbol_id": callee,
+            "calls": calls,
+            "source": "hook",
+        }
+        for (caller, callee), calls in sorted(
+            counts.items(), key=lambda item: (-item[1], item[0])
+        )
+    ]
+    return {
+        "available": bool(edges),
+        "reason": None if edges else "No valid method-call data was available for this request.",
+        "edges": edges,
+    }
 
 
 RUNTIME_POLICY_KEY = "sampling_policy"
@@ -210,7 +268,13 @@ class ClickHouseRuntime:
         if not re.fullmatch(r"[0-9a-fA-F]{32}", trace_id):
             raise ValueError("Invalid trace ID")
         if not self.configured:
-            return {"available": False, "reason": "ClickHouse is not configured.", "request": None, "database_calls": []}
+            return {
+                "available": False,
+                "reason": "ClickHouse is not configured.",
+                "request": None,
+                "database_calls": [],
+                "method_activity": _method_activity(None),
+            }
         table = f"`{self.database}`.`{self.table}`"
         try:
             rows = self.rows(
@@ -226,13 +290,20 @@ class ClickHouseRuntime:
                 "SpanAttributes['indexer.symbol_id'] AS symbol_id, "
                 "SpanAttributes['indexer.caller.symbol_id'] AS caller_symbol_id, "
                 "toInt64OrNull(SpanAttributes['indexer.php.cpu_time_us']) AS php_cpu_time_us, "
-                "toInt64OrNull(SpanAttributes['indexer.php.peak_memory_bytes']) AS php_peak_memory_bytes "
+                "toInt64OrNull(SpanAttributes['indexer.php.peak_memory_bytes']) AS php_peak_memory_bytes, "
+                "SpanAttributes['indexer.method_hook_counts'] AS method_hook_counts "
                 "FROM " + table + " WHERE " + _SCOPE + " AND TraceId = {trace_id:String} "
                 "AND Timestamp >= now() - INTERVAL " + str(self.window_hours) + " HOUR ORDER BY Timestamp ASC LIMIT 500",
                 project_id, revision_id, {"param_trace_id": trace_id.lower()},
             )
         except (HTTPError, URLError, TimeoutError, OSError, ValueError, KeyError):
-            return {"available": False, "reason": "ClickHouse trace details could not be queried.", "request": None, "database_calls": []}
+            return {
+                "available": False,
+                "reason": "ClickHouse trace details could not be queried.",
+                "request": None,
+                "database_calls": [],
+                "method_activity": _method_activity(None),
+            }
 
         def table_ids(value) -> list[str]:
             try:
@@ -245,7 +316,13 @@ class ClickHouseRuntime:
 
         root = next((row for row in rows if row.get("span_kind") == "Server"), None)
         if root is None:
-            return {"available": False, "reason": "The sampled request was not found in this revision.", "request": None, "database_calls": []}
+            return {
+                "available": False,
+                "reason": "The sampled request was not found in this revision.",
+                "request": None,
+                "database_calls": [],
+                "method_activity": _method_activity(None),
+            }
         request = {
             "trace_id": str(root.get("trace_id", "")).lower(),
             "span_id": str(root.get("span_id", "")),
@@ -278,7 +355,15 @@ class ClickHouseRuntime:
                 "caller_symbol_id": str(row.get("caller_symbol_id", "")) or None,
                 "span_status": str(row.get("span_status", "")),
             })
-        return {"available": True, "reason": None, "request": request, "database_calls": calls, "ai_summary": ai_summary, "sampled": True}
+        return {
+            "available": True,
+            "reason": None,
+            "request": request,
+            "database_calls": calls,
+            "method_activity": _method_activity(root.get("method_hook_counts")),
+            "ai_summary": ai_summary,
+            "sampled": True,
+        }
 
     def _trace_ai_summary(self, project_id: str, revision_id: str, trace_id: str, request: dict, rows: list[dict]) -> dict:
         """Build a privacy-shaped, trace-scoped summary from spans and one retained profile."""
@@ -444,9 +529,9 @@ class ClickHouseRuntime:
         }
         placeholders = []
         for index, trace_id in enumerate(normalized_ids):
-            parameter_name = f"param_trace_id_{index}"
+            parameter_name = f"trace_id_{index}"
             placeholders.append(f"{{{parameter_name}:String}}")
-            parameters[parameter_name] = trace_id
+            parameters[f"param_{parameter_name}"] = trace_id
 
         table = f"`{self.database}`.`{self.table}`"
         sql = (

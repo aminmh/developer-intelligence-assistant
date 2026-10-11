@@ -44,6 +44,23 @@ def validate_archive(data: bytes) -> None:
         raise ValueError("Invalid source ZIP archive") from exc
 
 
+def _normalize_exported_paths(exported: dict[str, list[dict[str, Any]]], workspace: str) -> None:
+    root = Path(workspace).resolve()
+    for records in (exported.get("definitions", []), exported.get("references", [])):
+        for record in records:
+            for field in ("file", "file_path"):
+                value = record.get(field)
+                if not isinstance(value, str) or not value:
+                    continue
+                path = Path(value)
+                if path.is_absolute():
+                    try:
+                        value = path.resolve().relative_to(root).as_posix()
+                    except ValueError as exc:
+                        raise ValueError("Source index emitted a path outside the snapshot root") from exc
+                record[field] = relative_path(value)
+
+
 def index_source(workspace: str, snapshot: Snapshot) -> dict:
     from infra.php_cli import PhpCli
     from index.llamaindex_layer import CodePropertyGraph
@@ -59,6 +76,7 @@ def index_source(workspace: str, snapshot: Snapshot) -> dict:
     if not isinstance(chunks, list) or not chunks:
         raise ValueError("Source archive contains no indexable PHP")
     exported = cli.inspect_index(workspace)
+    _normalize_exported_paths(exported, workspace)
     result = CodePropertyGraph().ingest(
         chunks, snapshot.collection, snapshot=snapshot,
         symbol_definitions=exported["definitions"], symbol_references=exported["references"],
