@@ -1,10 +1,13 @@
 <script setup lang="ts">
-import { Activity, AlertTriangle, ArrowUpRight, BookOpen, CheckCircle2, RefreshCw, Server, Trash2, XCircle } from 'lucide-vue-next';
+import { Activity, AlertTriangle, BookOpen, CheckCircle2, RefreshCw, Server, Trash2, XCircle } from 'lucide-vue-next';
 import { computed, onMounted, onUnmounted, ref, watch } from 'vue';
 import ConfirmModal from './ConfirmModal.vue';
+import ToggleCard from './ToggleCard.vue';
 import { makeRequest } from '../ui/makeRequest';
 import { subscribeRuntimeUpdates } from '../ui/runtimeEvents';
-import type { RuntimeDatabaseCall, RuntimeProjectRecord, RuntimeRequest, RuntimeRequestDetail, RuntimeSnapshotData } from '../types';
+import type { RuntimeAnalysisFinding, RuntimeDatabaseCall, RuntimeDiffPreview, RuntimeProjectRecord, RuntimeRequest, RuntimeRequestAnalysis, RuntimeRequestDetail, RuntimeSnapshotData } from '../types';
+
+const props = defineProps<{ useRemote: boolean }>();
 
 const emit = defineEmits<{
   (event: 'openDefinition', projectId: string, revisionId: string, symbolId: string): void;
@@ -17,6 +20,8 @@ const detail = ref<RuntimeSnapshotData | null>(null);
 const requestList = ref<{ available: boolean; reason?: string | null; sampled?: boolean; window_hours?: number; requests: RuntimeRequest[] } | null>(null);
 const requestListLoading = ref(false);
 const requestListError = ref('');
+const requestPage = ref(1);
+const REQUESTS_PER_PAGE = 10;
 const hiddenTraceIds = ref(new Set<string>());
 const deleteTarget = ref<{ key: string; projectId: string; revisionId: string; traceIds: string[] } | null>(null);
 const deletingRequests = ref(false);
@@ -26,6 +31,13 @@ const expandedTraceId = ref('');
 const requestDetails = ref<Record<string, RuntimeRequestDetail>>({});
 const requestDetailLoading = ref<Record<string, boolean>>({});
 const requestDetailErrors = ref<Record<string, string>>({});
+const requestAnalyses = ref<Record<string, RuntimeRequestAnalysis>>({});
+const analysisLoading = ref<Record<string, boolean>>({});
+const analysisErrors = ref<Record<string, string>>({});
+const selectedFindings = ref<Record<string, string>>({});
+const diffPreviews = ref<Record<string, RuntimeDiffPreview | undefined>>({});
+const diffLoading = ref<Record<string, boolean>>({});
+const diffErrors = ref<Record<string, string>>({});
 const loadingProjects = ref(false);
 const loadingDetail = ref(false);
 const error = ref('');
@@ -33,8 +45,8 @@ const setupState = ref<'idle' | 'starting' | 'running' | 'complete' | 'cancelled
 const setupMessage = ref('');
 const activeOperation = ref<'setup' | 'cleanup' | 'remove' | ''>('');
 const savedSetup = ref<any>(null);
-const deadOnly = ref(false);
 const showGuide = ref(false);
+const autoRefresh = ref(false);
 const ciTokenSnippet = 'TELEMETRY_CI_PROJECT_TOKENS={"billing":"replace-with-a-32-plus-character-random-token"}';
 const snapshotUploadSnippet = [
   'CI_COMMIT_SHA="$(git rev-parse HEAD)"',
@@ -90,23 +102,16 @@ const options = computed(() => {
   return [...byKey.values()];
 });
 const selected = computed(() => options.value.find((item) => item.key === selectedKey.value) || null);
+const requestAnalysisKey = (traceId: string) => `${selected.value?.project_id || ''}:${selected.value?.revision_id || ''}:${traceId}`;
 const visibleRequests = computed(() => (requestList.value?.requests || []).filter((request) => !hiddenTraceIds.value.has(request.trace_id)));
+const requestPageCount = computed(() => Math.max(1, Math.ceil(visibleRequests.value.length / REQUESTS_PER_PAGE)));
+const pagedRequests = computed(() => visibleRequests.value.slice((requestPage.value - 1) * REQUESTS_PER_PAGE, requestPage.value * REQUESTS_PER_PAGE));
+const firstVisibleRequest = computed(() => visibleRequests.value.length ? (requestPage.value - 1) * REQUESTS_PER_PAGE + 1 : 0);
+const lastVisibleRequest = computed(() => Math.min(requestPage.value * REQUESTS_PER_PAGE, visibleRequests.value.length));
 const deleteTargetMessage = computed(() => {
   const count = deleteTarget.value?.traceIds.length || 0;
   return `Delete telemetry for ${count} loaded request trace${count === 1 ? '' : 's'}? This removes all stored spans for these traces in the selected project and revision, including database-call spans. Runtime aggregate metrics for those spans will decrease. This cannot be undone.`;
 });
-const metricsBySymbol = computed(() => new Map((detail.value?.telemetry.symbols || []).map((item) => [item.symbol_id, item])));
-const symbols = computed(() => {
-  const metrics = metricsBySymbol.value;
-  const eligible = (detail.value?.definitions || []).filter((item) => ['method', 'function'].includes(item.kind) && item.symbol_id);
-  const rows = eligible.map((item) => ({ ...item, metric: metrics.get(item.symbol_id!) || null }));
-  return deadOnly.value ? rows.filter((item) => !item.metric) : rows;
-});
-const deadCount = computed(() => (detail.value?.definitions || []).filter((item) =>
-  ['method', 'function'].includes(item.kind) && item.symbol_id && !metricsBySymbol.value.has(item.symbol_id),
-).length);
-const hotCount = computed(() => (detail.value?.telemetry.symbols || []).filter((item) => Number(item.runs) >= 100).length);
-
 const loadProjects = async () => {
   loadingProjects.value = true;
   try {
@@ -137,6 +142,13 @@ const loadDetail = async () => {
     requestDetails.value = {};
     requestDetailLoading.value = {};
     requestDetailErrors.value = {};
+    requestAnalyses.value = {};
+    analysisLoading.value = {};
+    analysisErrors.value = {};
+    selectedFindings.value = {};
+    diffPreviews.value = {};
+    diffLoading.value = {};
+    diffErrors.value = {};
     requestListLoading.value = false;
     loadingDetail.value = false;
     return;
@@ -157,6 +169,13 @@ const loadDetail = async () => {
     requestDetails.value = {};
     requestDetailLoading.value = {};
     requestDetailErrors.value = {};
+    requestAnalyses.value = {};
+    analysisLoading.value = {};
+    analysisErrors.value = {};
+    selectedFindings.value = {};
+    diffPreviews.value = {};
+    diffLoading.value = {};
+    diffErrors.value = {};
   }
   try {
     const { project_id, commit_sha, revision_id } = selected.value;
@@ -233,6 +252,68 @@ const toggleRequest = async (request: RuntimeRequest, retry = false) => {
   }
 };
 
+const analyzeRequest = async (traceId: string, retry = false) => {
+  const current = selected.value;
+  if (!current?.revision_id) return;
+  const key = requestAnalysisKey(traceId);
+  if (analysisLoading.value[key]) return;
+  if (requestAnalyses.value[key] && !retry) return;
+  analysisLoading.value = { ...analysisLoading.value, [key]: true };
+  analysisErrors.value = { ...analysisErrors.value, [key]: '' };
+  try {
+    const path = `/api/runtime/projects/${encodeURIComponent(current.project_id)}/revisions/${encodeURIComponent(current.revision_id)}/requests/${encodeURIComponent(traceId)}/analysis`;
+    const response = await makeRequest(path, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ provider: props.useRemote ? 'remote' : 'local' }),
+    });
+    const data = await response.json();
+    if (!response.ok) throw new Error(data.detail || 'Request analysis failed. Retry the request.');
+    if (selected.value?.key === current.key) {
+      requestAnalyses.value = { ...requestAnalyses.value, [key]: data };
+      selectedFindings.value = { ...selectedFindings.value, [key]: '' };
+      diffPreviews.value = { ...diffPreviews.value, [key]: undefined };
+      diffErrors.value = { ...diffErrors.value, [key]: '' };
+    }
+  } catch (cause: any) {
+    if (selected.value?.key === current.key) analysisErrors.value = { ...analysisErrors.value, [key]: cause?.message || 'Request analysis failed. Retry the request.' };
+  } finally {
+    if (selected.value?.key === current.key) analysisLoading.value = { ...analysisLoading.value, [key]: false };
+  }
+};
+
+const selectFinding = (traceId: string, finding: RuntimeAnalysisFinding) => {
+  const key = requestAnalysisKey(traceId);
+  selectedFindings.value = { ...selectedFindings.value, [key]: finding.id };
+  diffPreviews.value = { ...diffPreviews.value, [key]: undefined };
+  diffErrors.value = { ...diffErrors.value, [key]: '' };
+};
+
+const previewFindingDiff = async (traceId: string) => {
+  const current = selected.value;
+  if (!current?.revision_id) return;
+  const key = requestAnalysisKey(traceId);
+  const analysis = requestAnalyses.value[key];
+  const finding = analysis?.findings.find((item) => item.id === selectedFindings.value[key]);
+  if (!analysis || !finding || diffLoading.value[key]) return;
+  diffLoading.value = { ...diffLoading.value, [key]: true };
+  diffErrors.value = { ...diffErrors.value, [key]: '' };
+  diffPreviews.value = { ...diffPreviews.value, [key]: undefined };
+  try {
+    const path = `/api/runtime/projects/${encodeURIComponent(current.project_id)}/revisions/${encodeURIComponent(current.revision_id)}/requests/${encodeURIComponent(traceId)}/analysis/diff`;
+    const response = await makeRequest(path, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ analysis, finding }),
+    });
+    const data = await response.json();
+    if (!response.ok) throw new Error(data.detail || 'Diff preview failed. Retry the request.');
+    if (selected.value?.key === current.key) diffPreviews.value = { ...diffPreviews.value, [key]: data };
+  } catch (cause: any) {
+    if (selected.value?.key === current.key) diffErrors.value = { ...diffErrors.value, [key]: cause?.message || 'Diff preview failed. Retry the request.' };
+  } finally {
+    if (selected.value?.key === current.key) diffLoading.value = { ...diffLoading.value, [key]: false };
+  }
+};
+
 const formatMilliseconds = (value: number | null) => value == null ? 'Unavailable' : `${Number(value).toFixed(2)} ms`;
 const formatPhpCpu = (value: number | null) => value == null ? 'Unavailable' : `${(value / 1000).toFixed(2)} ms`;
 const formatPhpMemory = (value: number | null) => value == null ? 'Unavailable' : value >= 1024 * 1024 ? `${(value / 1024 / 1024).toFixed(2)} MiB` : `${(value / 1024).toFixed(1)} KiB`;
@@ -242,9 +323,20 @@ const displaySymbol = (symbolId: string | null) => {
   const definition = detail.value?.definitions.find((item) => item.symbol_id === symbolId);
   return definition?.fqn || definition?.name || symbolId;
 };
+const goToRequestPage = (page: number) => {
+  requestPage.value = Math.max(1, Math.min(page, requestPageCount.value));
+};
 const requestMethod = (call: RuntimeDatabaseCall) => displaySymbol(call.caller_symbol_id || call.symbol_id);
 
 const refresh = async () => { await loadProjects(); await loadDetail(); };
+const updateRuntimeSubscription = (enabled: boolean) => {
+  if (!enabled) {
+    stopRuntimeUpdates?.();
+    stopRuntimeUpdates = undefined;
+    return;
+  }
+  if (!stopRuntimeUpdates) stopRuntimeUpdates = subscribeRuntimeUpdates(() => { void refresh(); });
+};
 const clearRequestRows = () => {
   const traceIds = visibleRequests.value.map((request) => request.trace_id);
   if (!traceIds.length) return;
@@ -490,18 +582,21 @@ const removeLocalContainers = async () => {
 };
 const formatCount = (value: number | string) => Number(value || 0).toLocaleString();
 const formatTime = (value?: string | null) => value ? new Date(value).toLocaleString() : 'No observed calls';
-const symbolMetric = (symbolId: string) => metricsBySymbol.value.get(symbolId);
-const callersFor = (symbolId: string) => (detail.value?.telemetry.callers || []).filter((row) => row.symbol_id === symbolId);
-const routesFor = (symbolId: string) => (detail.value?.telemetry.symbol_routes || []).filter((row) => row.symbol_id === symbolId);
-const tablesFor = (symbolId: string) => (detail.value?.telemetry.symbol_tables || []).filter((row) => row.symbol_id === symbolId);
 const openDefinition = (symbolId?: string | null) => {
   if (selected.value?.revision_id && symbolId) emit('openDefinition', selected.value.project_id, selected.value.revision_id, symbolId);
 };
 
-watch(selectedKey, loadDetail);
+watch(selectedKey, () => {
+  requestPage.value = 1;
+  void loadDetail();
+});
+watch(requestPageCount, (pageCount) => {
+  if (requestPage.value > pageCount) requestPage.value = pageCount;
+});
+watch(autoRefresh, updateRuntimeSubscription);
 onMounted(async () => {
   await Promise.all([refresh(), loadSavedSetup()]);
-  stopRuntimeUpdates = subscribeRuntimeUpdates(() => { void refresh(); });
+  updateRuntimeSubscription(autoRefresh.value);
 });
 onUnmounted(() => stopRuntimeUpdates?.());
 </script>
@@ -511,18 +606,19 @@ onUnmounted(() => stopRuntimeUpdates?.());
     <header class="flex flex-wrap items-center justify-between gap-3">
       <div>
         <h3 class="flex items-center gap-2 text-lg font-bold text-white"><Activity class="h-5 w-5 text-cyan-400" />Runtime</h3>
-        <p class="mt-1 text-xs text-slate-500">Opt-in local Docker deployments, span flow, code matching, routes, and database tables.</p>
+        <p class="mt-1 text-xs text-slate-500">Opt-in local Docker deployments, sampled requests, and request-level runtime details.</p>
       </div>
       <div class="flex flex-wrap items-center gap-2">
-        <button type="button" @click="startRuntimeSetup" :disabled="!!savedSetup || setupState === 'starting' || setupState === 'running'" class="rounded-xl border border-emerald-500/30 px-3 py-2 text-xs text-emerald-200 hover:bg-emerald-500/10 disabled:opacity-50"><Activity class="mr-1 inline h-3.5 w-3.5" :class="(setupState === 'starting' || setupState === 'running') && activeOperation === 'setup' ? 'animate-pulse' : ''" />{{ (setupState === 'starting' || setupState === 'running') && activeOperation === 'setup' ? 'Setting up…' : 'Set up Runtime' }}</button>
-        <button type="button" @click="cleanupRuntime" :disabled="setupState === 'starting' || setupState === 'running'" title="Checkbox acknowledgements are optional; Continue approves all applicable cleanup actions. Cancel preserves recovery state." class="rounded-xl border border-rose-500/30 px-3 py-2 text-xs text-rose-200 hover:bg-rose-500/10 disabled:opacity-50"><Activity class="mr-1 inline h-3.5 w-3.5" :class="(setupState === 'starting' || setupState === 'running') && activeOperation === 'cleanup' ? 'animate-pulse' : ''" />{{ (setupState === 'starting' || setupState === 'running') && activeOperation === 'cleanup' ? 'Cleaning up…' : 'Clean up Runtime' }}</button>
-        <button type="button" @click="showGuide = !showGuide" class="rounded-xl border border-cyan-500/30 px-3 py-2 text-xs text-cyan-200 hover:bg-cyan-500/10"><BookOpen class="mr-1 inline h-3.5 w-3.5" />{{ showGuide ? 'Hide guide' : 'Get Started' }}</button>
-        <select v-model="selectedKey" :disabled="setupState === 'starting' || setupState === 'running'" class="max-w-[24rem] rounded-xl border border-slate-800 bg-[#11162d] px-3 py-2 text-xs text-slate-200 disabled:opacity-50">
+        <button type="button" @click="startRuntimeSetup" :disabled="!!savedSetup || setupState === 'starting' || setupState === 'running'" class="inline-flex h-10 items-center justify-center rounded-xl border border-emerald-500/30 px-3 text-xs text-emerald-200 hover:bg-emerald-500/10 disabled:opacity-50"><Activity class="mr-1 inline h-3.5 w-3.5" :class="(setupState === 'starting' || setupState === 'running') && activeOperation === 'setup' ? 'animate-pulse' : ''" />{{ (setupState === 'starting' || setupState === 'running') && activeOperation === 'setup' ? 'Setting up…' : 'Set up Runtime' }}</button>
+        <button type="button" @click="cleanupRuntime" :disabled="setupState === 'starting' || setupState === 'running'" title="Checkbox acknowledgements are optional; Continue approves all applicable cleanup actions. Cancel preserves recovery state." class="inline-flex h-10 items-center justify-center rounded-xl border border-rose-500/30 px-3 text-xs text-rose-200 hover:bg-rose-500/10 disabled:opacity-50"><Activity class="mr-1 inline h-3.5 w-3.5" :class="(setupState === 'starting' || setupState === 'running') && activeOperation === 'cleanup' ? 'animate-pulse' : ''" />{{ (setupState === 'starting' || setupState === 'running') && activeOperation === 'cleanup' ? 'Cleaning up…' : 'Clean up Runtime' }}</button>
+        <button type="button" @click="showGuide = !showGuide" class="inline-flex h-10 items-center justify-center rounded-xl border border-cyan-500/30 px-3 text-xs text-cyan-200 hover:bg-cyan-500/10"><BookOpen class="mr-1 inline h-3.5 w-3.5" />{{ showGuide ? 'Hide guide' : 'Get Started' }}</button>
+        <select v-model="selectedKey" :disabled="setupState === 'starting' || setupState === 'running'" class="h-10 max-w-[24rem] rounded-xl border border-slate-800 bg-[#11162d] px-3 text-xs text-slate-200 disabled:opacity-50">
           <option value="">Select project / indexed revision</option>
           <option v-for="item in options" :key="item.key" :value="item.key">{{ item.project_id }} · {{ item.revision_id ? `Revision ${item.revision_id.slice(4, 12)}` : 'Docker only · no indexed revision' }}</option>
         </select>
-        <button v-if="selected?.can_remove" type="button" @click="removeLocalContainers" :disabled="setupState === 'starting' || setupState === 'running'" title="Stops and removes only matching local containers. Runtime history and remote containers remain." class="rounded-xl border border-rose-500/30 px-3 py-2 text-xs text-rose-200 hover:bg-rose-500/10 disabled:opacity-50"><Trash2 class="mr-1 inline h-3.5 w-3.5" :class="(setupState === 'starting' || setupState === 'running') && activeOperation === 'remove' ? 'animate-pulse' : ''" />{{ (setupState === 'starting' || setupState === 'running') && activeOperation === 'remove' ? 'Removing containers…' : 'Remove local containers' }}</button>
-        <button type="button" @click="refresh" :disabled="loadingProjects || loadingDetail || setupState === 'starting' || setupState === 'running'" class="rounded-xl border border-slate-700 px-3 py-2 text-xs text-slate-300 hover:bg-slate-800 disabled:opacity-50"><RefreshCw class="mr-1 inline h-3.5 w-3.5" :class="loadingProjects || loadingDetail ? 'animate-spin' : ''" />Refresh</button>
+        <button v-if="selected?.can_remove" type="button" @click="removeLocalContainers" :disabled="setupState === 'starting' || setupState === 'running'" title="Stops and removes only matching local containers. Runtime history and remote containers remain." class="inline-flex h-10 items-center justify-center rounded-xl border border-rose-500/30 px-3 text-xs text-rose-200 hover:bg-rose-500/10 disabled:opacity-50"><Trash2 class="mr-1 inline h-3.5 w-3.5" :class="(setupState === 'starting' || setupState === 'running') && activeOperation === 'remove' ? 'animate-pulse' : ''" />{{ (setupState === 'starting' || setupState === 'running') && activeOperation === 'remove' ? 'Removing containers…' : 'Remove local containers' }}</button>
+        <button type="button" @click="refresh" :disabled="loadingProjects || loadingDetail || setupState === 'starting' || setupState === 'running'" class="inline-flex h-10 items-center justify-center rounded-xl border border-slate-700 px-3 text-xs text-slate-300 hover:bg-slate-800 disabled:opacity-50"><RefreshCw class="mr-1 inline h-3.5 w-3.5" :class="loadingProjects || loadingDetail ? 'animate-spin' : ''" />Refresh</button>
+        <ToggleCard v-model="autoRefresh" label="Auto-refresh" description="Live Runtime updates" density="compact" />
       </div>
     </header>
 
@@ -616,39 +712,30 @@ onUnmounted(() => stopRuntimeUpdates?.());
     </section>
 
     <template v-if="options.length && detail && !error">
-      <div class="flex flex-wrap items-center gap-2 rounded-xl border border-slate-800 bg-slate-900/30 p-3 text-[11px]">
-        <span class="font-mono text-slate-200">{{ detail.project_id }} · {{ detail.revision_id || 'Docker only · no indexed revision' }}</span>
-        <span class="ml-auto rounded-full border px-2 py-1" :class="detail.snapshot.state === 'ready' ? 'border-emerald-500/20 bg-emerald-500/5 text-emerald-300' : 'border-amber-500/20 bg-amber-500/5 text-amber-300'">{{ detail.snapshot.state === 'awaiting_source' ? 'Docker only · no source snapshot' : detail.snapshot.state }}</span>
-        <span v-if="detail.deployment_mismatch" class="inline-flex items-center gap-1 rounded-full border border-amber-500/20 bg-amber-500/5 px-2 py-1 text-amber-300"><AlertTriangle class="h-3 w-3" />Running containers use another revision or unindexed code</span>
-      </div>
-
-      <div v-if="detail.snapshot.state !== 'awaiting_source'" class="grid grid-cols-2 gap-3 xl:grid-cols-7">
-        <article class="rounded-2xl border border-slate-800 bg-slate-900/30 p-4"><p class="text-[10px] uppercase text-slate-500">Running containers</p><p class="mt-2 text-2xl font-semibold text-white">{{ detail.deployments.length }}</p><p class="mt-1 text-[10px] text-slate-500">{{ detail.matching_deployments.length }} match this revision</p></article>
-        <article class="rounded-2xl border border-slate-800 bg-slate-900/30 p-4"><p class="text-[10px] uppercase text-slate-500">Observed spans</p><p class="mt-2 text-2xl font-semibold text-white">{{ formatCount(detail.telemetry.total_spans) }}</p><p class="mt-1 text-[10px] text-slate-500">Last received {{ formatTime(detail.telemetry.last_seen) }}</p></article>
-        <article class="rounded-2xl border border-slate-800 bg-slate-900/30 p-4"><p class="text-[10px] uppercase text-slate-500">Matched to code</p><p class="mt-2 text-2xl font-semibold text-white">{{ detail.telemetry.match_percent }}%</p><p class="mt-1 text-[10px] text-slate-500">{{ formatCount(detail.telemetry.matched_spans) }} / {{ formatCount(detail.telemetry.symbol_spans) }} symbol spans</p></article>
-        <article class="rounded-2xl border border-slate-800 bg-slate-900/30 p-4"><p class="text-[10px] uppercase text-slate-500">Unmatched symbols</p><p class="mt-2 text-2xl font-semibold text-amber-300">{{ detail.telemetry.unmatched_percent }}%</p><p class="mt-1 text-[10px] text-slate-500">{{ formatCount(detail.telemetry.unmatched_spans) }} spans need mapping</p></article>
-        <article class="rounded-2xl border border-slate-800 bg-slate-900/30 p-4"><p class="text-[10px] uppercase text-slate-500">Span input</p><p class="mt-2 text-lg font-semibold text-white">{{ detail.telemetry.pipeline_health.replace('_', ' ') }}</p><p class="mt-1 text-[10px] text-slate-500">Rolling p95 window: {{ detail.telemetry.aggregation_window_hours }}h</p></article>
-        <article class="rounded-2xl border border-slate-800 bg-slate-900/30 p-4"><p class="text-[10px] uppercase text-slate-500">Possible dead code</p><p class="mt-2 text-2xl font-semibold text-amber-300">{{ formatCount(deadCount) }}</p><p class="mt-1 text-[10px] text-slate-500">No calls observed in this window</p></article>
-        <article class="rounded-2xl border border-slate-800 bg-slate-900/30 p-4"><p class="text-[10px] uppercase text-slate-500">Hot symbols</p><p class="mt-2 text-2xl font-semibold text-orange-300">{{ formatCount(hotCount) }}</p><p class="mt-1 text-[10px] text-slate-500">100+ observed calls in window</p></article>
-      </div>
-
-      <div v-else class="rounded-xl border border-cyan-500/20 bg-cyan-500/5 p-4 text-xs text-cyan-100">
-        <p class="font-semibold">Docker-only view is active</p>
-        <p class="mt-1 text-slate-400">The host agent is reporting {{ detail.deployments.length }} running container(s) for this project. Source upload and application spans are optional; add a source snapshot only when you want code matching and code-level views.</p>
-      </div>
-
       <div v-if="detail.snapshot.state !== 'awaiting_source' && detail.telemetry.reason" class="rounded-xl border border-amber-500/20 bg-amber-500/5 p-4 text-xs text-amber-200">{{ detail.telemetry.reason }} Start the local runtime telemetry profile and instrument the PHP application with the Phase 1 identity attributes. The synthetic Phase 0 collector does not accept application spans.</div>
-      <div v-if="detail.snapshot.state !== 'awaiting_source' && detail.symbol_index_available === false" class="rounded-xl border border-amber-500/20 bg-amber-500/5 p-4 text-xs text-amber-200">{{ detail.symbol_index_reason || 'The symbol index is unavailable.' }} Runtime spans may still be present, but code-match and dead-code views require the indexed snapshot.</div>
+      <div v-if="detail.snapshot.state !== 'awaiting_source' && detail.symbol_index_available === false" class="rounded-xl border border-amber-500/20 bg-amber-500/5 p-4 text-xs text-amber-200">{{ detail.symbol_index_reason || 'The symbol index is unavailable.' }} Runtime spans may still be present, but source-linked request details and code analysis require the indexed snapshot.</div>
 
-      <section v-if="detail.revision_id" class="rounded-2xl border border-slate-800 bg-slate-900/30 p-4 space-y-3">
-        <div class="flex flex-wrap items-center justify-between gap-2">
-          <div><h4 class="text-xs font-semibold uppercase tracking-wide text-slate-300">Recent sampled requests</h4><p class="mt-1 text-[10px] text-slate-500">At most 50 requests from the last {{ requestList?.window_hours || detail.telemetry.aggregation_window_hours }} hours. PHP CPU and memory are worker-level estimates.</p></div>
+      <section class="rounded-2xl border border-slate-800 bg-slate-900/30 p-4 space-y-3">
+        <div class="rounded-xl border border-slate-800 bg-slate-950/30 p-3 space-y-2">
+          <div class="flex flex-wrap items-center justify-between gap-2"><h5 class="text-[10px] font-semibold uppercase tracking-wide text-slate-300">Containers</h5><span class="text-[10px] text-slate-500">Deployment reports refresh every 60 seconds at the host agent</span></div>
+          <p v-if="detail.deployment_mismatch" class="flex items-center gap-1 text-[10px] text-amber-300"><AlertTriangle class="h-3 w-3 shrink-0" />Running containers use another revision or unindexed code.</p>
+          <div v-if="!detail.deployments.length" class="text-xs text-slate-500">No running containers have reported for this project.</div>
+          <div v-for="container in detail.deployments" :key="container.container_id" class="flex flex-wrap items-center gap-2 rounded-lg border border-slate-800 p-2 text-[10px]">
+            <CheckCircle2 class="h-3.5 w-3.5 text-emerald-400" /><span class="font-semibold text-slate-200">{{ container.service }}</span><span class="text-slate-500">{{ container.environment }}</span><span class="font-mono text-slate-500">{{ container.container_id.slice(0, 12) }}</span><span class="ml-auto max-w-full font-mono text-slate-500">{{ container.revision_id ? `Revision ${container.revision_id.slice(4, 12)}` : 'Unindexed code' }}</span><XCircle v-if="container.commit_sha !== detail.commit_sha" class="h-3.5 w-3.5 text-amber-400" />
+          </div>
+        </div>
+      </section>
+
+      <section class="rounded-2xl border border-slate-800 bg-slate-900/30 p-4 space-y-3">
+        <div v-if="detail.revision_id" class="flex flex-wrap items-center justify-between gap-2">
+          <div><h4 class="text-xs font-semibold uppercase tracking-wide text-slate-300">Recent sampled requests</h4><p class="mt-1 text-[10px] text-slate-500">10 requests per page, up to 50 from the last {{ requestList?.window_hours || detail.telemetry.aggregation_window_hours }} hours. PHP CPU and memory are worker-level estimates.</p></div>
           <div class="flex flex-wrap items-center gap-2">
             <button type="button" @click="clearRequestRows" :disabled="!visibleRequests.length" class="rounded-lg border border-slate-700 px-2 py-1.5 text-[10px] text-slate-300 hover:bg-slate-800 disabled:opacity-50">Clear</button>
             <button v-if="selected?.can_delete_telemetry && requestList?.requests.length" type="button" @click="confirmDeleteRequestRows" class="rounded-lg border border-rose-500/40 px-2 py-1.5 text-[10px] text-rose-300 hover:bg-rose-500/10"><Trash2 class="mr-1 inline h-3 w-3" />Delete stored traces ({{ requestList.requests.length }})</button>
             <button type="button" @click="loadRequestList()" :disabled="requestListLoading" class="rounded-lg border border-slate-700 px-2 py-1.5 text-[10px] text-slate-300 hover:bg-slate-800 disabled:opacity-50"><RefreshCw class="mr-1 inline h-3 w-3" :class="requestListLoading ? 'animate-spin' : ''" />Refresh requests</button>
           </div>
         </div>
+        <template v-if="detail.revision_id">
         <p v-if="requestDeleteNotice" role="status" class="text-xs text-emerald-300">{{ requestDeleteNotice }}</p>
         <p v-if="requestListLoading && !requestList" class="text-xs text-slate-500">Loading recent sampled requests…</p>
         <div v-if="requestListError" class="flex flex-wrap items-center gap-2 text-xs text-rose-300"><span>{{ requestListError }}</span><button type="button" @click="loadRequestList()" class="underline">Retry</button></div>
@@ -656,7 +743,7 @@ onUnmounted(() => stopRuntimeUpdates?.());
         <p v-else-if="requestList && !requestList.requests.length" class="text-xs text-slate-500">No sampled request spans were observed in this window.</p>
         <div v-else-if="requestList && !visibleRequests.length" class="flex flex-wrap items-center gap-2 text-xs text-slate-500"><span>All loaded request rows are hidden in this view.</span><button type="button" @click="restoreHiddenRequestRows" class="underline">Show hidden requests ({{ requestList.requests.length }})</button></div>
         <div v-else-if="visibleRequests.length" class="space-y-2">
-          <article v-for="request in visibleRequests" :key="request.trace_id" class="overflow-hidden rounded-xl border border-slate-800 bg-slate-950/30">
+          <article v-for="request in pagedRequests" :key="request.trace_id" class="overflow-hidden rounded-xl border border-slate-800 bg-slate-950/30">
             <button type="button" :aria-expanded="expandedTraceId === request.trace_id" @click="toggleRequest(request)" class="flex w-full flex-wrap items-center gap-x-3 gap-y-1 p-3 text-left hover:bg-slate-800/30">
               <span class="rounded bg-indigo-500/10 px-1.5 py-0.5 text-[10px] text-indigo-300">{{ request.method || 'HTTP' }}</span>
               <span class="min-w-0 flex-1 truncate font-mono text-[11px] text-slate-200">{{ request.route || 'Route unavailable' }}</span>
@@ -687,6 +774,21 @@ onUnmounted(() => stopRuntimeUpdates?.());
                   <p v-else class="mt-2 text-[10px] text-slate-500">No retained Excimer profile for this trace.</p>
                   <p class="mt-2 text-[9px] text-slate-600">Instrumented MySQL/Redis spans are de-overlapped estimates; remaining time can include uninstrumented work. Excimer percentages describe retained samples, not exact request time.</p>
                 </section>
+                <section class="rounded-lg border border-violet-500/20 bg-violet-500/5 p-3">
+                  <div class="flex flex-wrap items-center justify-between gap-2">
+                    <div><h5 class="text-[10px] font-semibold uppercase tracking-wide text-violet-200">Observed method activity</h5><p class="mt-1 text-[10px] text-slate-400">Bounded hook counts show configured caller-to-callee counts. They do not show call order or complete execution.</p></div>
+                    <span class="text-[9px] text-violet-300">{{ requestDetails[request.trace_id].method_activity?.available ? 'Instrumentation observation' : 'Coverage gap' }}</span>
+                  </div>
+                  <div v-if="requestDetails[request.trace_id].method_activity?.edges.length" class="mt-2 space-y-1">
+                    <div v-for="edge in requestDetails[request.trace_id].method_activity?.edges" :key="`${edge.caller_symbol_id}:${edge.symbol_id}`" class="flex flex-wrap items-center gap-2 rounded bg-slate-950/50 px-2 py-1.5 text-[10px]">
+                      <button type="button" class="truncate font-mono text-left text-slate-300 underline decoration-slate-600 underline-offset-2" @click="openDefinition(edge.caller_symbol_id)">{{ displaySymbol(edge.caller_symbol_id) }}</button>
+                      <span aria-hidden="true" class="text-slate-600">→</span>
+                      <button type="button" class="truncate font-mono text-left text-cyan-300 underline decoration-cyan-900 underline-offset-2" @click="openDefinition(edge.symbol_id)">{{ displaySymbol(edge.symbol_id) }}</button>
+                      <span class="ml-auto text-violet-200">{{ formatCount(edge.calls) }} calls</span>
+                    </div>
+                  </div>
+                  <p v-else class="mt-2 text-[10px] text-amber-300">{{ requestDetails[request.trace_id].method_activity?.reason || 'No method-hook data was captured. This does not mean no code ran.' }}</p>
+                </section>
                 <p v-if="!requestDetails[request.trace_id].database_calls.length" class="text-xs text-slate-500">No database calls were captured for this request.</p>
                 <div v-else class="space-y-1">
                   <div class="grid grid-cols-[1fr_auto_auto] gap-2 px-2 text-[9px] uppercase text-slate-500"><span>Database call · table · attributed method</span><span>Operation</span><span>Duration</span></div>
@@ -695,42 +797,50 @@ onUnmounted(() => stopRuntimeUpdates?.());
                     <span class="text-indigo-300">{{ call.operation || 'Unavailable' }}</span><span class="text-slate-400">{{ formatMilliseconds(call.duration_ms) }}</span>
                   </div>
                 </div>
+                <section class="rounded-lg border border-slate-700 bg-slate-900/50 p-3" :aria-label="`AI analysis for ${request.method} ${request.route}`">
+                  <h5 class="text-[10px] font-semibold uppercase tracking-wide text-slate-200">Evidence-backed request analysis</h5>
+                  <p class="mt-1 text-[10px] text-slate-400">Before sending, review what the selected {{ props.useRemote ? 'remote' : 'local' }} chat provider receives: request method, route, status, timing estimates, database system/table/operation and durations, method IDs/counts, profile samples, and matching indexed source excerpts. Request/response bodies, headers, credentials, SQL text/bindings, cache keys, and exception messages are excluded. Results are temporary and disappear after reload.</p>
+                  <button type="button" class="mt-2 rounded-lg border border-violet-400/40 px-3 py-2 text-[10px] font-medium text-violet-100 hover:bg-violet-500/10 disabled:cursor-wait disabled:opacity-60" :disabled="analysisLoading[requestAnalysisKey(request.trace_id)]" @click="analyzeRequest(request.trace_id, Boolean(requestAnalyses[requestAnalysisKey(request.trace_id)]))">
+                    {{ analysisLoading[requestAnalysisKey(request.trace_id)] ? 'Analyzing request…' : requestAnalyses[requestAnalysisKey(request.trace_id)] ? 'Analyze again' : 'Analyze request' }}
+                  </button>
+                  <p v-if="analysisErrors[requestAnalysisKey(request.trace_id)]" role="alert" class="mt-2 text-[10px] text-rose-300">{{ analysisErrors[requestAnalysisKey(request.trace_id)] }} <button type="button" class="underline" @click="analyzeRequest(request.trace_id, true)">Retry</button></p>
+                  <div v-if="requestAnalyses[requestAnalysisKey(request.trace_id)]" class="mt-3 space-y-2" aria-live="polite">
+                    <p class="text-[10px] text-slate-400">Model used: {{ requestAnalyses[requestAnalysisKey(request.trace_id)].provider }} · {{ requestAnalyses[requestAnalysisKey(request.trace_id)].model }}<span v-if="requestAnalyses[requestAnalysisKey(request.trace_id)].requested_provider !== requestAnalyses[requestAnalysisKey(request.trace_id)].provider"> (configured provider fell back to {{ requestAnalyses[requestAnalysisKey(request.trace_id)].provider }})</span></p>
+                    <p v-if="!requestAnalyses[requestAnalysisKey(request.trace_id)].findings.length" class="text-[10px] text-slate-400">No findings were returned for the available evidence.</p>
+                    <article v-for="finding in requestAnalyses[requestAnalysisKey(request.trace_id)].findings" :key="finding.id" class="rounded-lg border border-slate-700 p-2.5">
+                      <label class="flex cursor-pointer items-start gap-2"><input type="radio" :name="`finding-${request.trace_id}`" :checked="selectedFindings[requestAnalysisKey(request.trace_id)] === finding.id" @change="selectFinding(request.trace_id, finding)" class="mt-0.5 accent-violet-400" /><span><span class="text-[11px] font-medium text-slate-200">{{ finding.title }}</span><span class="ml-2 text-[9px] uppercase text-slate-500">{{ finding.severity }} · AI inference</span><span class="mt-1 block text-[10px] text-slate-300">{{ finding.summary }}</span></span></label>
+                      <ul v-if="finding.recommendations.length" class="ml-6 mt-1 list-disc space-y-0.5 text-[10px] text-slate-400"><li v-for="recommendation in finding.recommendations" :key="recommendation">{{ recommendation }}</li></ul>
+                      <p v-if="finding.evidence_refs.length" class="ml-6 mt-1 text-[9px] text-cyan-300">Evidence: {{ finding.evidence_refs.map(displaySymbol).join(', ') }}</p>
+                    </article>
+                    <ul v-if="requestAnalyses[requestAnalysisKey(request.trace_id)].coverage_gaps.length" class="list-disc space-y-1 pl-4 text-[10px] text-amber-300"><li v-for="gap in requestAnalyses[requestAnalysisKey(request.trace_id)].coverage_gaps" :key="gap">Coverage gap: {{ gap }}</li></ul>
+                    <div v-if="selectedFindings[requestAnalysisKey(request.trace_id)]" class="pt-1">
+                      <button type="button" class="rounded-lg border border-cyan-500/40 px-3 py-2 text-[10px] text-cyan-200 hover:bg-cyan-500/10 disabled:opacity-60" :disabled="diffLoading[requestAnalysisKey(request.trace_id)] || !requestAnalyses[requestAnalysisKey(request.trace_id)].source_available" @click="previewFindingDiff(request.trace_id)">{{ diffLoading[requestAnalysisKey(request.trace_id)] ? 'Preparing preview…' : 'Preview code diff' }}</button>
+                      <p v-if="!requestAnalyses[requestAnalysisKey(request.trace_id)].source_available" class="mt-1 text-[10px] text-amber-300">No exact-revision source mapping is available; diff preview is disabled.</p>
+                      <p v-if="diffErrors[requestAnalysisKey(request.trace_id)]" role="alert" class="mt-2 text-[10px] text-rose-300">{{ diffErrors[requestAnalysisKey(request.trace_id)] }}</p>
+                      <div v-if="diffPreviews[requestAnalysisKey(request.trace_id)]" class="mt-2 rounded-lg border border-cyan-500/20 bg-slate-950 p-2">
+                        <p class="text-[10px] text-cyan-200">Read-only preview · {{ diffPreviews[requestAnalysisKey(request.trace_id)].file_path }} · revision {{ diffPreviews[requestAnalysisKey(request.trace_id)].revision_id }} · {{ diffPreviews[requestAnalysisKey(request.trace_id)].provider }} / {{ diffPreviews[requestAnalysisKey(request.trace_id)].model }}</p>
+                        <pre tabindex="0" class="mt-2 max-h-80 overflow-auto whitespace-pre-wrap break-words font-mono text-[10px] text-slate-300">{{ diffPreviews[requestAnalysisKey(request.trace_id)].diff }}</pre>
+                      </div>
+                    </div>
+                  </div>
+                </section>
               </template>
               <div v-else class="flex flex-wrap items-center gap-2 text-xs text-amber-300"><span>{{ requestDetails[request.trace_id]?.reason || 'Request details are unavailable.' }}</span><button type="button" @click="toggleRequest(request, true)" class="underline">Retry</button></div>
             </div>
           </article>
         </div>
-        <p class="text-[10px] text-slate-600">Sampled telemetry can omit requests. SQL text, bindings, request bodies, and headers are not shown.</p>
-      </section>
-
-      <section class="rounded-2xl border border-slate-800 bg-slate-900/30 p-4 space-y-3">
-        <div class="flex flex-wrap items-center justify-between gap-2"><h4 class="text-xs font-semibold uppercase tracking-wide text-slate-300">Containers</h4><span class="text-[10px] text-slate-500">Deployment reports refresh every 60 seconds at the host agent</span></div>
-        <div v-if="!detail.deployments.length" class="text-xs text-slate-500">No running containers have reported for this project.</div>
-        <div v-for="container in detail.deployments" :key="container.container_id" class="flex flex-wrap items-center gap-2 rounded-xl border border-slate-800 p-3 text-[10px]">
-          <CheckCircle2 class="h-3.5 w-3.5 text-emerald-400" /><span class="font-semibold text-slate-200">{{ container.service }}</span><span class="text-slate-500">{{ container.environment }}</span><span class="font-mono text-slate-500">{{ container.container_id.slice(0, 12) }}</span><span class="ml-auto max-w-full font-mono text-slate-500">{{ container.revision_id ? `Revision ${container.revision_id.slice(4, 12)}` : 'Unindexed code' }}</span><XCircle v-if="container.commit_sha !== detail.commit_sha" class="h-3.5 w-3.5 text-amber-400" />
-        </div>
-      </section>
-
-      <div v-if="detail.snapshot.state !== 'awaiting_source'" class="grid gap-4 xl:grid-cols-2">
-        <section class="rounded-2xl border border-slate-800 bg-slate-900/30 p-4 space-y-3">
-          <div class="flex items-center justify-between gap-2"><h4 class="text-xs font-semibold uppercase tracking-wide text-slate-300">Dead-code candidates</h4><label class="flex items-center gap-2 text-[10px] text-slate-400"><input v-model="deadOnly" type="checkbox" class="accent-amber-500" />Show only unobserved</label></div>
-          <p class="text-[10px] text-slate-500">Absence here means no matching spans in the current aggregation window; it does not prove code is unused.</p>
-          <div class="max-h-80 space-y-1 overflow-auto">
-            <button v-for="symbol in symbols.slice(0, 300)" :key="symbol.symbol_id" type="button" @click="openDefinition(symbol.symbol_id)" class="flex w-full items-center gap-2 rounded-lg px-2 py-2 text-left hover:bg-slate-800/50">
-              <span class="min-w-0 flex-1 truncate font-mono text-[10px] text-slate-300">{{ symbol.fqn || symbol.name }}</span>
-              <span v-if="symbol.metric" class="text-[10px] text-cyan-300">{{ formatCount(symbol.metric.runs) }} calls</span><span v-else class="text-[10px] text-amber-300">No observed calls</span><ArrowUpRight class="h-3 w-3 shrink-0 text-slate-600" />
-            </button>
-            <p v-if="!symbols.length" class="py-4 text-center text-xs text-slate-500">{{ deadOnly ? 'No symbols without observations.' : 'No indexed methods or functions in this snapshot.' }}</p>
+        <nav v-if="visibleRequests.length > REQUESTS_PER_PAGE" aria-label="Recent sampled request pages" class="flex flex-wrap items-center justify-between gap-2 border-t border-slate-800 pt-3">
+          <p class="text-[10px] text-slate-500">Showing {{ firstVisibleRequest }}–{{ lastVisibleRequest }} of {{ visibleRequests.length }}</p>
+          <div class="flex items-center gap-2">
+            <button type="button" @click="goToRequestPage(requestPage - 1)" :disabled="requestPage <= 1" class="rounded-lg border border-slate-700 px-2.5 py-1.5 text-[10px] text-slate-300 hover:bg-slate-800 disabled:cursor-not-allowed disabled:opacity-50">Previous</button>
+            <span class="text-[10px] text-slate-400">Page {{ requestPage }} of {{ requestPageCount }}</span>
+            <button type="button" @click="goToRequestPage(requestPage + 1)" :disabled="requestPage >= requestPageCount" class="rounded-lg border border-slate-700 px-2.5 py-1.5 text-[10px] text-slate-300 hover:bg-slate-800 disabled:cursor-not-allowed disabled:opacity-50">Next</button>
           </div>
-        </section>
-
-        <section class="rounded-2xl border border-slate-800 bg-slate-900/30 p-4 space-y-3">
-          <h4 class="text-xs font-semibold uppercase tracking-wide text-slate-300">Routes and database tables</h4>
-          <div v-if="!detail.telemetry.routes.length && !detail.telemetry.tables.length" class="text-xs text-slate-500">No route or database-operation spans were observed.</div>
-          <div v-if="detail.telemetry.routes.length" class="space-y-1"><p class="text-[10px] uppercase text-slate-500">Routes</p><div v-for="route in detail.telemetry.routes.slice(0, 30)" :key="`${route.method}|${route.route}`" class="flex gap-2 rounded-lg bg-slate-950/40 px-2 py-2 text-[10px]"><span class="text-indigo-300">{{ route.method }}</span><span class="min-w-0 flex-1 truncate font-mono text-slate-300">{{ route.route }}</span><span class="text-slate-500">{{ formatCount(route.requests) }}</span></div></div>
-          <div v-if="detail.telemetry.tables.length" class="space-y-1"><p class="text-[10px] uppercase text-slate-500">Tables</p><div v-for="table in detail.telemetry.tables.slice(0, 30)" :key="`${table.table_name}|${table.operation}`" class="flex gap-2 rounded-lg bg-slate-950/40 px-2 py-2 text-[10px]"><span class="min-w-0 flex-1 truncate font-mono text-slate-300">{{ table.table_name }}</span><span class="text-cyan-300">{{ table.operation || 'operation' }}</span><span class="text-slate-500">{{ formatCount(table.operations) }}</span></div></div>
-        </section>
-      </div>
+        </nav>
+        <p class="text-[10px] text-slate-600">Sampled telemetry can omit requests. SQL text, bindings, request bodies, and headers are not shown.</p>
+        </template>
+        <p v-else class="text-xs text-slate-500">Upload or select an indexed source revision to view sampled request details.</p>
+      </section>
     </template>
   </section>
   <ConfirmModal

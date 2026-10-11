@@ -1171,7 +1171,7 @@ onUnmounted(() => window.removeEventListener('popstate', syncTabFromHistory));
 
       <DomainKnowledgeView v-else-if="activeTab === 'domain'" @ask-about-concept="askAboutDomainConcept" />
 
-      <RuntimeView v-else-if="activeTab === 'runtime'" @open-definition="openDefinitionDeepLink" />
+      <RuntimeView v-else-if="activeTab === 'runtime'" :use-remote="useRemote" @open-definition="openDefinitionDeepLink" />
 
     </main>
 

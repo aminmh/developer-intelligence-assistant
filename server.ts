@@ -814,6 +814,44 @@ async function startServer() {
     }
   });
 
+  app.post('/api/runtime/projects/:projectId/revisions/:revisionId/requests/:traceId/analysis', async (req, res) => {
+    try {
+      const user = (res.locals as any).authUser;
+      if (!authIsBootstrapAdmin(user) && !authRoleFor(user, req.params.projectId)) {
+        return res.status(403).json({ detail: 'Project access denied.' });
+      }
+      const path = `/telemetry/runtime/projects/${encodeURIComponent(req.params.projectId)}/revisions/${encodeURIComponent(req.params.revisionId)}/requests/${encodeURIComponent(req.params.traceId)}/analysis`;
+      const pyRes = await fetch(`${PYTHON_API_URL}${path}`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'X-Internal-Secret': INTERNAL_SECRET },
+        body: JSON.stringify({ provider: req.body?.provider }),
+      });
+      const data = await pyRes.json().catch(() => ({ detail: 'Request analysis is unavailable.' }));
+      return res.status(pyRes.status).json(data);
+    } catch {
+      return res.status(502).json({ detail: 'Request analysis is unavailable. Retry the request.' });
+    }
+  });
+
+  app.post('/api/runtime/projects/:projectId/revisions/:revisionId/requests/:traceId/analysis/diff', async (req, res) => {
+    try {
+      const user = (res.locals as any).authUser;
+      if (!authIsBootstrapAdmin(user) && !authRoleFor(user, req.params.projectId)) {
+        return res.status(403).json({ detail: 'Project access denied.' });
+      }
+      const path = `/telemetry/runtime/projects/${encodeURIComponent(req.params.projectId)}/revisions/${encodeURIComponent(req.params.revisionId)}/requests/${encodeURIComponent(req.params.traceId)}/analysis/diff`;
+      const pyRes = await fetch(`${PYTHON_API_URL}${path}`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'X-Internal-Secret': INTERNAL_SECRET },
+        body: JSON.stringify({ finding: req.body?.finding, analysis: req.body?.analysis }),
+      });
+      const data = await pyRes.json().catch(() => ({ detail: 'Diff preview is unavailable.' }));
+      return res.status(pyRes.status).json(data);
+    } catch {
+      return res.status(502).json({ detail: 'Diff preview is unavailable. Retry the request.' });
+    }
+  });
+
   app.get('/api/runtime/settings', async (_req, res) => {
     try {
       const pyRes = await fetch(`${PYTHON_API_URL}/telemetry/runtime/settings`, {

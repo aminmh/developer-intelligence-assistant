@@ -9,6 +9,7 @@ import type {
   NeonBorderTheme,
   UiFontFamily,
 } from '../../types';
+import ToggleCard from '../ToggleCard.vue';
 
 defineProps<{
   appearance: AppearancePreferences;
@@ -192,39 +193,13 @@ const selectPalette = (option: (typeof paletteOptions)[number]) => {
     </div>
 
     <div class="border-t border-slate-800 pt-4 grid grid-cols-1 sm:grid-cols-2 gap-3">
-      <button
-        type="button"
-        class="flex items-center justify-between gap-3 rounded-xl border px-3 py-3 text-left transition-colors"
-        :class="appearance.showWelcomeBanner ? 'border-emerald-400/40 bg-emerald-500/5' : 'border-slate-700 bg-slate-900/30'"
-        :aria-pressed="appearance.showWelcomeBanner"
-        @click="update('showWelcomeBanner', !appearance.showWelcomeBanner)"
-      >
-        <span class="flex items-center gap-2 min-w-0">
-          <Sparkles class="w-4 h-4 text-cyan-300 shrink-0" />
-          <span>
-            <span class="block text-xs font-semibold text-slate-200">Welcome banner</span>
-            <span class="block text-[10px] text-slate-500 mt-0.5">Animated terminal introduction</span>
-          </span>
-        </span>
-        <span class="text-[10px] font-mono" :class="appearance.showWelcomeBanner ? 'text-emerald-300' : 'text-slate-500'">{{ appearance.showWelcomeBanner ? 'On' : 'Off' }}</span>
-      </button>
+      <ToggleCard :model-value="appearance.showWelcomeBanner" label="Welcome banner" description="Animated terminal introduction" @update:model-value="update('showWelcomeBanner', $event)">
+        <template #icon><Sparkles class="h-4 w-4 shrink-0 text-cyan-300" /></template>
+      </ToggleCard>
 
-      <button
-        type="button"
-        class="flex items-center justify-between gap-3 rounded-xl border px-3 py-3 text-left transition-colors"
-        :class="appearance.showSystemMonitor ? 'border-emerald-400/40 bg-emerald-500/5' : 'border-slate-700 bg-slate-900/30'"
-        :aria-pressed="appearance.showSystemMonitor"
-        @click="update('showSystemMonitor', !appearance.showSystemMonitor)"
-      >
-        <span class="flex items-center gap-2 min-w-0">
-          <Activity class="w-4 h-4 text-emerald-300 shrink-0" />
-          <span>
-            <span class="block text-xs font-semibold text-slate-200">System monitor</span>
-            <span class="block text-[10px] text-slate-500 mt-0.5">CPU, RAM, temperature, and GPU</span>
-          </span>
-        </span>
-        <span class="text-[10px] font-mono" :class="appearance.showSystemMonitor ? 'text-emerald-300' : 'text-slate-500'">{{ appearance.showSystemMonitor ? 'On' : 'Off' }}</span>
-      </button>
+      <ToggleCard :model-value="appearance.showSystemMonitor" label="System monitor" description="CPU, RAM, temperature, and GPU" @update:model-value="update('showSystemMonitor', $event)">
+        <template #icon><Activity class="h-4 w-4 shrink-0 text-emerald-300" /></template>
+      </ToggleCard>
     </div>
   </section>
 </template>

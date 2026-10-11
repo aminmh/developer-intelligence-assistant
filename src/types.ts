@@ -234,6 +234,11 @@ export interface RuntimeRequestDetail {
   sampled?: boolean;
   request: RuntimeRequest | null;
   database_calls: RuntimeDatabaseCall[];
+  method_activity?: {
+    available: boolean;
+    reason?: string | null;
+    edges: Array<{ caller_symbol_id: string; symbol_id: string; calls: number; source: 'hook' }>;
+  };
   ai_summary?: {
     trace_id: string;
     endpoint: string;
@@ -243,6 +248,35 @@ export interface RuntimeRequestDetail {
     profile_event_type: string | null;
     actionable_insight: string;
   };
+}
+
+export interface RuntimeAnalysisFinding {
+  id: string;
+  title: string;
+  summary: string;
+  recommendations: string[];
+  evidence_refs: string[];
+  source_refs: string[];
+  severity: 'low' | 'medium' | 'high' | 'informational';
+}
+
+export interface RuntimeRequestAnalysis {
+  findings: RuntimeAnalysisFinding[];
+  coverage_gaps: string[];
+  provider: string;
+  requested_provider: 'local' | 'remote';
+  model: string;
+  revision_id: string;
+  source_available: boolean;
+}
+
+export interface RuntimeDiffPreview {
+  diff: string;
+  file_path: string;
+  revision_id: string;
+  provider: string;
+  model: string;
+  applied: false;
 }
 
 export interface RuntimeSnapshotData {
