@@ -20,9 +20,9 @@ type Report = {
   coverage: { files: number; scanned_files: number; skipped_files: number; scanned_bytes: number; languages: Record<string, number>; unsupported_extensions: Record<string, number>; analyzer_failures: Array<{ name: string; reason: string }>; categories: Record<CategoryId, { supported: boolean; evidence_count: number; reason?: string | null }>; analyzers: Array<{ name: string; version: string; languages: string[]; categories: string[] }> };
   findings: Array<{ evidence_id: string; category: CategoryId; rule: string; file: string; line: number; message: string }>;
   evidence: AssessmentEvidence[];
-  rubric_version: string; model: string; provider: string;
+  rubric_version: string; scoring_parameters?: { temperature: number; top_p: number }; model: string; provider: string;
 };
-type HistoryRow = Pick<Report, 'report_id' | 'project_id' | 'revision_id' | 'commit_sha' | 'created_at' | 'overall_score' | 'categories' | 'weights' | 'rubric_version' | 'model' | 'provider'> & { coverage: number; languages: Record<string, number> };
+type HistoryRow = Pick<Report, 'report_id' | 'project_id' | 'revision_id' | 'commit_sha' | 'created_at' | 'overall_score' | 'categories' | 'weights' | 'rubric_version' | 'scoring_parameters' | 'model' | 'provider'> & { coverage: number; languages: Record<string, number> };
 
 const projects = ref<ProjectRevision[]>([]);
 const selectedRevision = ref('');
@@ -54,6 +54,7 @@ const compareIsEquivalent = computed(() => {
   return left.rubric_version === right.rubric_version
     && left.model === right.model
     && left.provider === right.provider
+    && JSON.stringify(left.scoring_parameters || null) === JSON.stringify(right.scoring_parameters || null)
     && JSON.stringify(analyzer(left)) === JSON.stringify(analyzer(right))
     && JSON.stringify(left.coverage) === JSON.stringify(right.coverage)
     && JSON.stringify(left.weights) === JSON.stringify(right.weights);
@@ -227,7 +228,7 @@ onMounted(loadProjectsAndPreferences);
 </script>
 
 <template>
-  <main class="mx-auto w-full max-w-7xl space-y-6 p-4 text-slate-100 sm:p-6">
+  <section role="region" aria-label="Code quality assessment" tabindex="0" class="mx-auto min-h-0 w-full max-w-7xl flex-1 space-y-6 overflow-y-auto overscroll-contain p-4 text-slate-100 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-indigo-400 sm:p-6">
     <header class="flex flex-col gap-3 border-b border-slate-800 pb-5 sm:flex-row sm:items-end sm:justify-between">
       <div>
         <div class="mb-2 flex items-center gap-2 text-indigo-300"><ShieldCheck :size="18" /><span class="text-xs font-semibold uppercase tracking-[0.18em]">Codebase health</span></div>
@@ -260,6 +261,17 @@ onMounted(loadProjectsAndPreferences);
               <LoaderCircle v-if="assessing" class="motion-safe:animate-spin" :size="16" /><Play v-else :size="16" />
               {{ assessing ? 'Assessing revision…' : weightsChanged ? 'Save weights and assess' : 'Assess this revision' }}
             </button>
+          </div>
+          <p class="mt-3 text-xs leading-relaxed text-slate-500">Scoring uses a fixed rubric, temperature 0, and top_p 1. Model providers can still change behavior; report comparisons flag known differences in model, rubric, analyzers, coverage, weights, and scoring settings.</p>
+          <div v-if="assessing" class="mt-5 rounded-xl border border-indigo-400/20 bg-indigo-400/5 p-4" role="status" aria-live="polite">
+            <div class="flex items-center justify-between gap-3">
+              <p class="text-sm font-medium text-indigo-100">Assessing {{ selectedProject?.project_id }}…</p>
+              <span class="text-xs text-slate-400">In progress</span>
+            </div>
+            <div role="progressbar" aria-label="Project assessment progress" aria-valuetext="Assessment is running" class="mt-3 h-2 overflow-hidden rounded-full bg-slate-800">
+              <div class="quality-assessment-progress h-full w-1/3 rounded-full bg-indigo-400"></div>
+            </div>
+            <p class="mt-2 text-xs text-slate-400">Running source checks and evidence-based scoring. The result will appear here when complete.</p>
           </div>
           <div class="mt-5 grid gap-3 sm:grid-cols-2 lg:grid-cols-5">
             <label v-for="category in categories" :key="category.id" class="rounded-xl border border-slate-800 bg-slate-950/60 p-3">
@@ -297,7 +309,7 @@ onMounted(loadProjectsAndPreferences);
             <p v-if="currentReport.coverage.skipped_files" class="mt-1">{{ currentReport.coverage.skipped_files }} files exceeded source scan limits and were not analyzed.</p>
           </div>
           <div class="mt-5 grid gap-4 border-t border-slate-800 pt-4 sm:grid-cols-2">
-            <div><div class="text-xs font-semibold uppercase tracking-wider text-slate-500">Analyzer coverage</div><p class="mt-2 text-sm text-slate-300">{{ currentReport.coverage.analyzers.map((item) => `${item.name} ${item.version}`).join(' · ') }}</p><p class="mt-1 text-xs text-slate-500">Rubric {{ currentReport.rubric_version }} · {{ currentReport.provider }} / {{ currentReport.model }}</p></div>
+            <div><div class="text-xs font-semibold uppercase tracking-wider text-slate-500">Analyzer coverage</div><p class="mt-2 text-sm text-slate-300">{{ currentReport.coverage.analyzers.map((item) => `${item.name} ${item.version}`).join(' · ') }}</p><p class="mt-1 text-xs text-slate-500">Rubric {{ currentReport.rubric_version }} · {{ currentReport.provider }} / {{ currentReport.model }}<span v-if="currentReport.scoring_parameters"> · temp {{ currentReport.scoring_parameters.temperature }} · top_p {{ currentReport.scoring_parameters.top_p }}</span></p></div>
             <div><div class="text-xs font-semibold uppercase tracking-wider text-slate-500">Evidence findings</div><p class="mt-2 text-sm text-slate-300">{{ currentReport.findings.length }} normalized findings</p></div>
           </div>
           <div v-if="currentReport.findings.length" class="mt-4 space-y-2">
@@ -356,5 +368,24 @@ onMounted(loadProjectsAndPreferences);
         <p v-else-if="!loadingHistory" class="mt-5 text-sm leading-relaxed text-slate-500">Reports from every indexed revision in the selected project will appear here.</p>
       </aside>
     </section>
-  </main>
+  </section>
 </template>
+
+<style scoped>
+.quality-assessment-progress {
+  animation: quality-assessment-progress-slide 1.2s ease-in-out infinite;
+}
+
+@keyframes quality-assessment-progress-slide {
+  from { transform: translateX(-110%); }
+  to { transform: translateX(310%); }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .quality-assessment-progress {
+    animation: none;
+    transform: translateX(0);
+    opacity: 0.6;
+  }
+}
+</style>
