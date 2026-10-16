@@ -75,6 +75,14 @@ class AssessmentError(ValueError):
     """Safe, client-actionable assessment error."""
 
 
+class AssessmentModelUnavailable(RuntimeError):
+    """The configured model could not complete the scoring request."""
+
+
+class AssessmentReportStoreUnavailable(RuntimeError):
+    """The completed report could not be persisted."""
+
+
 def _store_path() -> Path:
     root = Path(os.environ.get("TELEMETRY_SNAPSHOT_ROOT") or Path(settings.workspace_root).parent / "snapshots")
     root.mkdir(parents=True, exist_ok=True)
@@ -297,7 +305,15 @@ def _score(
         "Scores range 0-100, where higher is better. Cite only supplied evidence IDs. Mark a category unassessed if evidence is insufficient; do not infer absence of defects from missing evidence. "
         "Do not invent findings. Evidence: " + compact
     )
-    content, model, provider = complete_with_model(prompt, system="You are a cautious code quality evaluator. Follow the response schema exactly.", max_tokens=1200, provider="local")
+    try:
+        content, model, provider = complete_with_model(
+            prompt,
+            system="You are a cautious code quality evaluator. Follow the response schema exactly.",
+            max_tokens=1200,
+            provider="local",
+        )
+    except Exception as exc:
+        raise AssessmentModelUnavailable from exc
     try:
         raw = _parse_model_output(content)
     except AssessmentError:
@@ -327,7 +343,11 @@ def _score(
 
 
 def assess_revision(project_id: str, revision_id: str, snapshot: dict, archive_data: bytes, user_id: str, store: ReportStore | None = None) -> dict:
-    store = store or ReportStore()
+    try:
+        store = store or ReportStore()
+        weights = store.weights(user_id)
+    except Exception as exc:
+        raise AssessmentReportStoreUnavailable from exc
     languages, findings, files, scan_stats, analyzer_failures = inventory_archive(archive_data)
     coverage_evidence = _coverage_evidence(project_id, revision_id, languages, findings, scan_stats)
     evidence = [*findings, *coverage_evidence]
@@ -339,7 +359,6 @@ def assess_revision(project_id: str, revision_id: str, snapshot: dict, archive_d
         categories = {category: {"assessed": False, "score": None, "reason": reason, "evidence_ids": []}
                       for category in CATEGORIES}
         model, provider = "not-run", "not-run"
-    weights = store.weights(user_id)
     overall = None
     if all(categories[key]["assessed"] for key in CATEGORIES):
         overall = round(sum(categories[key]["score"] * weights[key] for key in CATEGORIES) / 100, 1)
@@ -377,4 +396,7 @@ def assess_revision(project_id: str, revision_id: str, snapshot: dict, archive_d
         "model": model,
         "provider": provider,
     }
-    return store.save_report(report)
+    try:
+        return store.save_report(report)
+    except Exception as exc:
+        raise AssessmentReportStoreUnavailable from exc

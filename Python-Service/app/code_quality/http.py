@@ -2,15 +2,23 @@
 from __future__ import annotations
 
 import hmac
+import logging
 import os
 
 from fastapi import APIRouter, HTTPException, Request
 from starlette.concurrency import run_in_threadpool
 
-from code_quality.service import AssessmentError, ReportStore, assess_revision
+from code_quality.service import (
+    AssessmentError,
+    AssessmentModelUnavailable,
+    AssessmentReportStoreUnavailable,
+    ReportStore,
+    assess_revision,
+)
 from telemetry.snapshot import validate_project_id, validate_revision_id
 
 router = APIRouter(prefix="/code-quality", tags=["Code quality assessment"])
+logger = logging.getLogger(__name__)
 
 
 def _authorize(request: Request) -> str:
@@ -82,7 +90,19 @@ async def assess(project_id: str, revision_id: str, request: Request) -> dict:
         if not archive_key:
             raise HTTPException(409, "The source archive for this revision is no longer available for assessment.")
         from index.storage import storage
-        archive = await run_in_threadpool(storage.get_snapshot_archive, archive_key)
+        try:
+            archive = await run_in_threadpool(storage.get_snapshot_archive, archive_key)
+        except Exception as exc:
+            logger.warning(
+                "code_quality_source_archive_unavailable project=%s revision=%s error_type=%s",
+                project_id,
+                revision_id,
+                type(exc).__name__,
+            )
+            raise HTTPException(
+                503,
+                "The selected revision's source archive could not be retrieved. Retry or re-index the project.",
+            ) from exc
         return await run_in_threadpool(assess_revision, project_id, revision_id, snapshot, archive, user_id)
     except HTTPException:
         raise
@@ -90,5 +110,36 @@ async def assess(project_id: str, revision_id: str, request: Request) -> dict:
         raise HTTPException(422, str(exc)) from exc
     except ValueError as exc:
         raise HTTPException(422, "Invalid indexed revision identity.") from exc
+    except AssessmentModelUnavailable as exc:
+        logger.warning(
+            "code_quality_model_unavailable project=%s revision=%s error_type=%s",
+            project_id,
+            revision_id,
+            type(exc.__cause__).__name__ if exc.__cause__ else type(exc).__name__,
+        )
+        raise HTTPException(
+            503,
+            "The configured local model could not complete scoring. Check its endpoint, model name, and availability, then retry.",
+        ) from exc
+    except AssessmentReportStoreUnavailable as exc:
+        logger.error(
+            "code_quality_report_store_unavailable project=%s revision=%s error_type=%s",
+            project_id,
+            revision_id,
+            type(exc.__cause__).__name__ if exc.__cause__ else type(exc).__name__,
+        )
+        raise HTTPException(
+            503,
+            "The assessment completed but its report could not be saved. Check API storage and retry.",
+        ) from exc
     except Exception as exc:
-        raise HTTPException(503, "The assessment could not be completed. Check the configured model and retry.") from exc
+        logger.error(
+            "code_quality_unexpected_failure project=%s revision=%s error_type=%s",
+            project_id,
+            revision_id,
+            type(exc).__name__,
+        )
+        raise HTTPException(
+            503,
+            "The assessment failed during internal processing. Check API logs and retry.",
+        ) from exc
