@@ -21,7 +21,8 @@ from infra.settings import settings
 CATEGORIES = ("security", "clean_code", "maintainability", "reliability", "performance")
 DEFAULT_WEIGHTS = {category: 20 for category in CATEGORIES}
 POLICY_VERSION = "code-quality-policy-1"
-RUBRIC_VERSION = "code-quality-rubric-1"
+RUBRIC_VERSION = "code-quality-rubric-2"
+SCORING_PARAMETERS = {"temperature": 0.0, "top_p": 1.0}
 MAX_ARCHIVE_BYTES = 64 * 1024 * 1024
 MAX_FILES = 20_000
 MAX_FILE_BYTES = 2 * 1024 * 1024
@@ -136,6 +137,7 @@ class ReportStore:
         return [{key: report.get(key) for key in (
             "report_id", "project_id", "revision_id", "commit_sha", "created_at",
             "overall_score", "categories", "weights", "rubric_version", "model", "provider",
+            "scoring_parameters",
         )} | {"coverage": report.get("coverage", {}).get("files", 0),
             "languages": report.get("coverage", {}).get("languages", {})} for report in reports]
 
@@ -301,6 +303,10 @@ def _score(
     compact = json.dumps(model_context, ensure_ascii=False, separators=(",", ":"))
     prompt = (
         f"Score these five software quality categories: {', '.join(CATEGORIES)}. Rubric {RUBRIC_VERSION}. "
+        "Use this fixed score scale: 0-20 means critical failures dominate; 21-40 means multiple serious risks; "
+        "41-60 means mixed evidence with material risks; 61-80 means generally healthy with notable improvements; "
+        "81-100 means strong positive evidence with only minor risks. Select a score within the matching band "
+        "and do not reward missing evidence or treat a clean heuristic scan as proof of quality. "
         "Return only JSON: {\"categories\":{category:{\"assessed\":boolean,\"score\":integer|null,\"reason\":string,\"evidence_ids\":[string]}}}. "
         "Scores range 0-100, where higher is better. Cite only supplied evidence IDs. Mark a category unassessed if evidence is insufficient; do not infer absence of defects from missing evidence. "
         "Do not invent findings. Evidence: " + compact
@@ -310,6 +316,8 @@ def _score(
             prompt,
             system="You are a cautious code quality evaluator. Follow the response schema exactly.",
             max_tokens=1200,
+            temperature=SCORING_PARAMETERS["temperature"],
+            top_p=SCORING_PARAMETERS["top_p"],
             provider="remote" if remote_configured() else "local",
         )
     except Exception as exc:
@@ -393,6 +401,7 @@ def assess_revision(project_id: str, revision_id: str, snapshot: dict, archive_d
         "findings": findings,
         "evidence": evidence,
         "rubric_version": RUBRIC_VERSION,
+        "scoring_parameters": dict(SCORING_PARAMETERS),
         "model": model,
         "provider": provider,
     }
