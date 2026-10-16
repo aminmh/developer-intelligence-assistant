@@ -13,11 +13,13 @@ const categories = [
 type CategoryId = typeof categories[number]['id'];
 type ProjectRevision = { project_id: string; revision_id: string; commit_sha: string; updated_at?: string };
 type CategoryScore = { assessed: boolean; score: number | null; reason: string; evidence_ids: string[] };
+type AssessmentEvidence = { evidence_id: string; kind: 'finding' | 'coverage'; category: CategoryId; rule: string; file: string | null; line: number | null; message: string };
 type Report = {
   report_id: string; project_id: string; revision_id: string; commit_sha: string; created_at: string;
   overall_score: number | null; categories: Record<CategoryId, CategoryScore>; weights: Record<CategoryId, number>;
-  coverage: { files: number; scanned_files: number; skipped_files: number; scanned_bytes: number; languages: Record<string, number>; categories: Record<CategoryId, { supported: boolean; evidence_count: number; reason?: string | null }>; analyzers: Array<{ name: string; version: string; languages: string[]; categories: string[] }> };
+  coverage: { files: number; scanned_files: number; skipped_files: number; scanned_bytes: number; languages: Record<string, number>; unsupported_extensions: Record<string, number>; analyzer_failures: Array<{ name: string; reason: string }>; categories: Record<CategoryId, { supported: boolean; evidence_count: number; reason?: string | null }>; analyzers: Array<{ name: string; version: string; languages: string[]; categories: string[] }> };
   findings: Array<{ evidence_id: string; category: CategoryId; rule: string; file: string; line: number; message: string }>;
+  evidence: AssessmentEvidence[];
   rubric_version: string; model: string; provider: string;
 };
 type HistoryRow = Pick<Report, 'report_id' | 'project_id' | 'revision_id' | 'commit_sha' | 'created_at' | 'overall_score' | 'categories' | 'weights' | 'rubric_version' | 'model' | 'provider'> & { coverage: number; languages: Record<string, number> };
@@ -39,6 +41,7 @@ const assessing = ref(false);
 const savingWeights = ref(false);
 const error = ref('');
 const preferenceMessage = ref('');
+const recoveryAction = ref<'projects' | 'history' | 'report' | 'comparison' | 'weights' | 'assessment'>('projects');
 let historyRequest = 0;
 
 const selectedProject = computed(() => projects.value.find((item) => `${item.project_id}:${item.revision_id}` === selectedRevision.value) || null);
@@ -80,15 +83,15 @@ const loadProjectsAndPreferences = async () => {
     ]);
     if (!projectResponse.ok) throw new Error(await readError(projectResponse, 'Indexed projects are unavailable.'));
     projects.value = (await projectResponse.json()).projects || [];
-    if (preferenceResponse.ok) {
-      const result = await preferenceResponse.json();
-      if (result.weights) { weights.value = result.weights; savedWeights.value = { ...result.weights }; }
-    }
+    if (!preferenceResponse.ok) throw new Error(await readError(preferenceResponse, 'Assessment preferences are unavailable.'));
+    const preference = await preferenceResponse.json();
+    if (preference.weights) { weights.value = preference.weights; savedWeights.value = { ...preference.weights }; }
     if (projects.value.length && !selectedRevision.value) {
       const first = projects.value[0];
       selectedRevision.value = `${first.project_id}:${first.revision_id}`;
     }
   } catch (cause: any) {
+    recoveryAction.value = 'projects';
     error.value = cause?.message || 'Code quality assessment is unavailable.';
   } finally {
     loadingProjects.value = false;
@@ -119,7 +122,7 @@ const loadHistory = async () => {
       if (history.value.length > 1) rightCompareId.value = history.value[1].report_id;
     }
   } catch (cause: any) {
-    if (requestId === historyRequest) error.value = cause?.message || 'Assessment history could not be loaded.';
+    if (requestId === historyRequest) { recoveryAction.value = 'history'; error.value = cause?.message || 'Assessment history could not be loaded.'; }
   } finally {
     if (requestId === historyRequest) loadingHistory.value = false;
   }
@@ -139,7 +142,7 @@ const chooseReport = async (reportId: string) => {
   loadingReport.value = true;
   error.value = '';
   try { currentReport.value = await loadFullReport(reportId); }
-  catch (cause: any) { error.value = cause?.message || 'Assessment report could not be loaded. Retry.'; }
+  catch (cause: any) { recoveryAction.value = 'report'; error.value = cause?.message || 'Assessment report could not be loaded. Retry.'; }
   finally { loadingReport.value = false; }
 };
 
@@ -150,6 +153,7 @@ const loadComparison = async () => {
     const [left, right] = await Promise.all([loadFullReport(leftCompareId.value), loadFullReport(rightCompareId.value)]);
     compareReports.value = [left, right];
   } catch (cause: any) {
+    recoveryAction.value = 'comparison';
     error.value = cause?.message || 'Selected reports could not be compared. Retry.';
   }
 };
@@ -168,7 +172,7 @@ const saveWeights = async () => {
     weights.value = result.weights;
     savedWeights.value = { ...result.weights };
     preferenceMessage.value = 'Weights saved for your next assessment.';
-  } catch (cause: any) { error.value = cause?.message || 'Weights could not be saved.'; }
+  } catch (cause: any) { recoveryAction.value = 'weights'; error.value = cause?.message || 'Weights could not be saved.'; }
   finally { savingWeights.value = false; }
 };
 
@@ -194,8 +198,18 @@ const runAssessment = async () => {
     await loadHistory();
     selectedReportId.value = report.report_id;
     currentReport.value = report;
-  } catch (cause: any) { error.value = cause?.message || 'Assessment failed. Retry the request.'; }
+  } catch (cause: any) { recoveryAction.value = 'assessment'; error.value = cause?.message || 'Assessment failed. Retry the request.'; }
   finally { assessing.value = false; }
+};
+
+const retryLastAction = () => {
+  error.value = '';
+  if (recoveryAction.value === 'projects') return loadProjectsAndPreferences();
+  if (recoveryAction.value === 'history') return loadHistory();
+  if (recoveryAction.value === 'report') return chooseReport(selectedReportId.value);
+  if (recoveryAction.value === 'comparison') return loadComparison();
+  if (recoveryAction.value === 'weights') return saveWeights();
+  return runAssessment();
 };
 
 const formatDate = (value: string) => new Date(value).toLocaleString();
@@ -234,7 +248,7 @@ onMounted(loadProjectsAndPreferences);
 
     <div v-if="error" role="alert" class="flex items-start gap-3 rounded-xl border border-rose-500/30 bg-rose-500/10 p-4 text-sm text-rose-200">
       <AlertCircle class="mt-0.5 shrink-0" :size="18" /><span class="min-w-0 flex-1">{{ error }}</span>
-      <button class="shrink-0 rounded-md px-2 py-1 font-medium hover:bg-rose-400/10" @click="error = ''; selectedProject && loadHistory()">Retry</button>
+      <button class="shrink-0 rounded-md px-2 py-1 font-medium hover:bg-rose-400/10" @click="retryLastAction">Retry</button>
     </div>
 
     <section class="grid gap-5 xl:grid-cols-[minmax(0,1fr)_20rem]">
@@ -277,16 +291,29 @@ onMounted(loadProjectsAndPreferences);
               </div>
             </article>
           </div>
+          <div v-if="currentReport.coverage.analyzer_failures.length || Object.keys(currentReport.coverage.unsupported_extensions).length || currentReport.coverage.skipped_files" class="mt-4 rounded-lg border border-amber-500/25 bg-amber-500/5 p-3 text-xs text-amber-200">
+            <p v-if="currentReport.coverage.analyzer_failures.length" class="font-medium">Some analyzer passes could not complete: {{ currentReport.coverage.analyzer_failures.map((item) => `${item.name}: ${item.reason}`).join(' · ') }}</p>
+            <p v-if="Object.keys(currentReport.coverage.unsupported_extensions).length" :class="currentReport.coverage.analyzer_failures.length ? 'mt-1' : ''">Source-like file types without a configured analyzer: {{ Object.entries(currentReport.coverage.unsupported_extensions).map(([extension, count]) => `${extension} (${count})`).join(', ') }}</p>
+            <p v-if="currentReport.coverage.skipped_files" class="mt-1">{{ currentReport.coverage.skipped_files }} files exceeded source scan limits and were not analyzed.</p>
+          </div>
           <div class="mt-5 grid gap-4 border-t border-slate-800 pt-4 sm:grid-cols-2">
             <div><div class="text-xs font-semibold uppercase tracking-wider text-slate-500">Analyzer coverage</div><p class="mt-2 text-sm text-slate-300">{{ currentReport.coverage.analyzers.map((item) => `${item.name} ${item.version}`).join(' · ') }}</p><p class="mt-1 text-xs text-slate-500">Rubric {{ currentReport.rubric_version }} · {{ currentReport.provider }} / {{ currentReport.model }}</p></div>
             <div><div class="text-xs font-semibold uppercase tracking-wider text-slate-500">Evidence findings</div><p class="mt-2 text-sm text-slate-300">{{ currentReport.findings.length }} normalized findings</p></div>
           </div>
           <div v-if="currentReport.findings.length" class="mt-4 space-y-2">
-            <article v-for="finding in currentReport.findings" :id="finding.evidence_id" :key="finding.evidence_id" class="flex scroll-mt-24 flex-col gap-1 rounded-lg border border-slate-800/80 bg-slate-950/50 px-3 py-2.5 sm:flex-row sm:items-start sm:justify-between">
+            <article v-for="finding in currentReport.findings" :key="finding.evidence_id" class="flex flex-col gap-1 rounded-lg border border-slate-800/80 bg-slate-950/50 px-3 py-2.5 sm:flex-row sm:items-start sm:justify-between">
               <div><p class="text-sm font-medium text-slate-200">{{ finding.message }}</p><p class="mt-1 font-mono text-xs text-slate-500">{{ finding.file }}:{{ finding.line }}</p></div><span class="shrink-0 rounded-full bg-slate-800 px-2 py-1 text-[11px] text-slate-300">{{ categories.find((item) => item.id === finding.category)?.label }}</span>
             </article>
           </div>
           <div v-else class="mt-4 rounded-lg border border-slate-800 bg-slate-950/40 p-3 text-sm text-slate-400">No findings were emitted by the enabled source checks. This does not establish that the code has no issues.</div>
+          <div id="assessment-evidence" class="mt-5 space-y-2">
+            <h3 class="text-xs font-semibold uppercase tracking-wider text-slate-500">Evidence references</h3>
+            <article v-for="item in currentReport.evidence" :id="item.evidence_id" :key="item.evidence_id" class="scroll-mt-24 rounded-lg border border-slate-800/80 bg-slate-950/40 px-3 py-2.5">
+              <div class="flex flex-wrap items-center justify-between gap-2"><span class="font-mono text-[10px] text-indigo-200">{{ item.evidence_id }}</span><span class="text-[10px] uppercase tracking-wider text-slate-500">{{ item.kind }} · {{ categories.find((category) => category.id === item.category)?.label }}</span></div>
+              <p class="mt-1.5 text-xs leading-relaxed text-slate-300">{{ item.message }}</p>
+              <p v-if="item.file" class="mt-1 font-mono text-[10px] text-slate-500">{{ item.file }}<span v-if="item.line">:{{ item.line }}</span></p>
+            </article>
+          </div>
         </section>
         <div v-else-if="loadingReport" class="flex items-center gap-2 rounded-xl border border-slate-800 bg-slate-900/50 p-5 text-sm text-slate-400"><LoaderCircle class="animate-spin" :size="16" />Loading report…</div>
         <div v-else-if="!loadingHistory && !history.length" class="rounded-2xl border border-dashed border-slate-700 bg-slate-900/30 p-8 text-center">
