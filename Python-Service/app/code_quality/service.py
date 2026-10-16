@@ -1,6 +1,7 @@
 """Bounded, read-only assessment of immutable source archives."""
 from __future__ import annotations
 
+import ast
 from collections import Counter
 from datetime import datetime, timezone
 from hashlib import sha256
@@ -10,6 +11,7 @@ import os
 from pathlib import Path, PurePosixPath
 import re
 import sqlite3
+import sys
 from typing import Any
 from uuid import uuid4
 import zipfile
@@ -35,7 +37,18 @@ LANGUAGE_BY_SUFFIX = {
     ".go": "go", ".rs": "rust", ".rb": "ruby", ".cs": "csharp", ".c": "c",
     ".h": "c", ".cc": "cpp", ".cpp": "cpp", ".hpp": "cpp", ".swift": "swift",
     ".scala": "scala", ".sh": "shell", ".bash": "shell", ".sql": "sql",
+    ".html": "html", ".htm": "html", ".css": "css", ".scss": "css",
+    ".vue": "vue", ".svelte": "svelte", ".dart": "dart", ".ex": "elixir",
+    ".exs": "elixir", ".lua": "lua", ".r": "r", ".pl": "perl", ".erl": "erlang",
+    ".clj": "clojure", ".cljs": "clojure", ".tf": "hcl", ".hcl": "hcl",
+    ".m": "objective-c", ".mm": "objective-c",
 }
+SUPPORTED_LANGUAGES = sorted(set(LANGUAGE_BY_SUFFIX.values()))
+NON_SOURCE_SUFFIXES = {".md", ".json", ".json5", ".yaml", ".yml", ".toml", ".xml", ".txt",
+                       ".csv", ".lock", ".png", ".jpg", ".jpeg", ".gif", ".svg", ".webp",
+                       ".woff", ".woff2", ".ttf", ".ico", ".pdf", ".map", ".zip", ".gz",
+                       ".br", ".wasm", ".bin", ".mp4", ".mp3", ".mov", ".sqlite", ".db",
+                       ".pem", ".key"}
 
 # These bounded source-pattern checks provide cross-language signals without
 # installing or invoking arbitrary project-defined executables.
@@ -141,15 +154,17 @@ def _safe_archive_path(name: str) -> str | None:
     return path.as_posix()
 
 
-def inventory_archive(archive_data: bytes) -> tuple[dict[str, int], list[dict], list[str], dict[str, int]]:
+def inventory_archive(archive_data: bytes) -> tuple[dict[str, int], list[dict], list[str], dict[str, int], list[dict]]:
     if not archive_data or len(archive_data) > MAX_ARCHIVE_BYTES:
         raise AssessmentError("The indexed source archive is empty or exceeds the assessment limit.")
     languages: Counter[str] = Counter()
+    unsupported_extensions: Counter[str] = Counter()
     findings: list[dict] = []
     inventory: list[str] = []
     scanned_bytes = 0
     scanned_files = 0
     skipped_files = 0
+    analyzer_failures: list[dict] = []
     try:
         with zipfile.ZipFile(io.BytesIO(archive_data)) as archive:
             entries = archive.infolist()
@@ -159,8 +174,11 @@ def inventory_archive(archive_data: bytes) -> tuple[dict[str, int], list[dict], 
                 relative = _safe_archive_path(entry.filename.rstrip("/"))
                 if not relative or entry.is_dir():
                     continue
-                language = LANGUAGE_BY_SUFFIX.get(Path(relative).suffix.lower())
+                suffix = Path(relative).suffix.lower()
+                language = LANGUAGE_BY_SUFFIX.get(suffix)
                 if not language:
+                    if suffix and suffix not in NON_SOURCE_SUFFIXES:
+                        unsupported_extensions[suffix] += 1
                     continue
                 inventory.append(relative)
                 languages[language] += 1
@@ -173,6 +191,14 @@ def inventory_archive(archive_data: bytes) -> tuple[dict[str, int], list[dict], 
                 scanned_bytes += entry.file_size
                 scanned_files += 1
                 lines = source.splitlines()
+                if language == "python":
+                    try:
+                        ast.parse(source, filename=relative)
+                    except SyntaxError as exc:
+                        findings.append(_finding(relative, exc.lineno or 1, "python-syntax-error", "reliability", "Python source has a syntax error."))
+                    except RecursionError:
+                        if not any(item["name"] == "python-ast" for item in analyzer_failures):
+                            analyzer_failures.append({"name": "python-ast", "reason": "A file exceeded the parser recursion limit."})
                 measures = {
                     "large-file": (len(lines) > 800, "maintainability", f"File contains {len(lines)} lines; review responsibility boundaries."),
                     "long-lines": (sum(1 for line in lines if len(line) > 160) > 10, "clean_code", "File contains more than ten lines over 160 characters."),
@@ -196,9 +222,13 @@ def inventory_archive(archive_data: bytes) -> tuple[dict[str, int], list[dict], 
         raise
     except (OSError, zipfile.BadZipFile, RuntimeError) as exc:
         raise AssessmentError("The indexed source archive could not be read safely.") from exc
-    scan_stats = {"detected_files": len(inventory), "scanned_files": scanned_files,
+    unsupported_file_count = sum(unsupported_extensions.values())
+    unsupported_extensions = dict(unsupported_extensions.most_common(100))
+    scan_stats = {"detected_files": len(inventory) + unsupported_file_count,
+                  "supported_files": len(inventory), "scanned_files": scanned_files,
                   "skipped_files": skipped_files, "scanned_bytes": scanned_bytes}
-    return dict(sorted(languages.items())), findings[:MAX_FINDINGS], inventory, scan_stats
+    scan_stats["unsupported_extensions"] = dict(sorted(unsupported_extensions.items()))
+    return dict(sorted(languages.items())), findings[:MAX_FINDINGS], inventory, scan_stats, analyzer_failures
 
 
 def _finding(file: str, line: int, rule: str, category: str, message: str, offset: int = 0) -> dict:
@@ -206,10 +236,25 @@ def _finding(file: str, line: int, rule: str, category: str, message: str, offse
     return {"evidence_id": identifier, "category": category, "rule": rule, "file": file[:300], "line": line, "message": message[:240]}
 
 
-def _category_coverage(languages: dict[str, int], findings: list[dict], scan_stats: dict[str, int]) -> dict[str, dict]:
+def _coverage_evidence(project_id: str, revision_id: str, languages: dict[str, int], findings: list[dict], scan_stats: dict[str, Any]) -> list[dict]:
+    if not scan_stats["scanned_files"]:
+        return []
+    result = []
+    for category in CATEGORIES:
+        identifier = "ev_" + sha256(f"{project_id}:{revision_id}:{POLICY_VERSION}:{category}".encode()).hexdigest()[:16]
+        count = sum(1 for item in findings if item["category"] == category)
+        result.append({"evidence_id": identifier, "kind": "coverage", "category": category,
+                       "rule": "bounded-scan-coverage", "file": None, "line": None,
+                       "message": (f"Policy {POLICY_VERSION} scanned {scan_stats['scanned_files']} files "
+                                   f"across {', '.join(sorted(languages))}; it emitted {count} "
+                                   f"{category} findings. This heuristic scan does not prove the absence of defects.")})
+    return result
+
+
+def _category_coverage(languages: dict[str, int], evidence: list[dict], scan_stats: dict[str, int]) -> dict[str, dict]:
     return {
         category: {"supported": bool(languages) and scan_stats["scanned_files"] > 0,
-                   "evidence_count": sum(1 for item in findings if item["category"] == category),
+                   "evidence_count": sum(1 for item in evidence if item["category"] == category),
                    "reason": None if scan_stats["scanned_files"] else "No supported source files were within the scanner limits."}
         for category in CATEGORIES
     }
@@ -230,10 +275,22 @@ def _parse_model_output(content: str) -> dict:
     return value
 
 
-def _score(evidence: list[dict], coverage: dict[str, dict]) -> tuple[dict, str, str]:
+def _score(
+    evidence: list[dict], coverage: dict[str, dict], languages: dict[str, int],
+    scan_stats: dict[str, Any], analyzer_failures: list[dict],
+) -> tuple[dict, str, str]:
     from runtime.llm import complete_with_model
 
-    compact = json.dumps(evidence, ensure_ascii=False, separators=(",", ":"))[:MAX_EVIDENCE_BYTES]
+    model_context = {"languages": languages, "coverage": coverage,
+                     "scan_limits": {key: value for key, value in scan_stats.items() if key != "unsupported_extensions"},
+                     "unsupported_extensions": scan_stats["unsupported_extensions"],
+                     "analyzer_failures": analyzer_failures[:20], "evidence": []}
+    for row in evidence:
+        model_context["evidence"].append(row)
+        if len(json.dumps(model_context, ensure_ascii=False, separators=(",", ":"))) > MAX_EVIDENCE_BYTES:
+            model_context["evidence"].pop()
+            break
+    compact = json.dumps(model_context, ensure_ascii=False, separators=(",", ":"))
     prompt = (
         f"Score these five software quality categories: {', '.join(CATEGORIES)}. Rubric {RUBRIC_VERSION}. "
         "Return only JSON: {\"categories\":{category:{\"assessed\":boolean,\"score\":integer|null,\"reason\":string,\"evidence_ids\":[string]}}}. "
@@ -271,15 +328,33 @@ def _score(evidence: list[dict], coverage: dict[str, dict]) -> tuple[dict, str, 
 
 def assess_revision(project_id: str, revision_id: str, snapshot: dict, archive_data: bytes, user_id: str, store: ReportStore | None = None) -> dict:
     store = store or ReportStore()
-    languages, findings, files, scan_stats = inventory_archive(archive_data)
-    coverage = _category_coverage(languages, findings, scan_stats)
-    if not languages:
-        raise AssessmentError("No supported source language was found in the indexed revision.")
-    categories, model, provider = _score(findings, coverage)
+    languages, findings, files, scan_stats, analyzer_failures = inventory_archive(archive_data)
+    coverage_evidence = _coverage_evidence(project_id, revision_id, languages, findings, scan_stats)
+    evidence = [*findings, *coverage_evidence]
+    coverage = _category_coverage(languages, evidence, scan_stats)
+    if languages:
+        categories, model, provider = _score(evidence, coverage, languages, scan_stats, analyzer_failures)
+    else:
+        reason = "No supported source language was detected; all categories remain unassessed."
+        categories = {category: {"assessed": False, "score": None, "reason": reason, "evidence_ids": []}
+                      for category in CATEGORIES}
+        model, provider = "not-run", "not-run"
     weights = store.weights(user_id)
     overall = None
     if all(categories[key]["assessed"] for key in CATEGORIES):
         overall = round(sum(categories[key]["score"] * weights[key] for key in CATEGORIES) / 100, 1)
+    analyzers = []
+    if languages:
+        analyzers.append({"name": "cross-language-source-signals", "version": POLICY_VERSION,
+                          "languages": SUPPORTED_LANGUAGES, "selected_languages": sorted(languages),
+                          "categories": list(CATEGORIES),
+                          "limits": {"archive_bytes": MAX_ARCHIVE_BYTES, "file_bytes": MAX_FILE_BYTES,
+                                     "total_source_bytes": MAX_SCAN_BYTES, "findings": MAX_FINDINGS}})
+    if "python" in languages:
+        analyzers.append({"name": "python-ast", "version": sys.version.split()[0],
+                          "languages": ["python"], "selected_languages": ["python"],
+                          "categories": ["reliability"],
+                          "limits": {"file_bytes": MAX_FILE_BYTES, "total_source_bytes": MAX_SCAN_BYTES}})
     report = {
         "report_id": "qa_" + uuid4().hex,
         "project_id": project_id,
@@ -290,11 +365,14 @@ def assess_revision(project_id: str, revision_id: str, snapshot: dict, archive_d
         "overall_score": overall,
         "categories": categories,
         "weights": weights,
-        "coverage": {"files": len(files), "scanned_files": scan_stats["scanned_files"],
+        "coverage": {"files": scan_stats["detected_files"], "supported_files": scan_stats["supported_files"],
+                     "scanned_files": scan_stats["scanned_files"],
                      "skipped_files": scan_stats["skipped_files"], "scanned_bytes": scan_stats["scanned_bytes"],
-                     "languages": languages, "categories": coverage,
-                     "analyzer_policy_version": POLICY_VERSION, "analyzers": [{"name": "cross-language-source-signals", "version": POLICY_VERSION, "languages": sorted(languages), "categories": list(CATEGORIES)}]},
+                     "languages": languages, "unsupported_extensions": scan_stats["unsupported_extensions"],
+                     "categories": coverage, "analyzer_failures": analyzer_failures[:20],
+                     "analyzer_policy_version": POLICY_VERSION, "analyzers": analyzers},
         "findings": findings,
+        "evidence": evidence,
         "rubric_version": RUBRIC_VERSION,
         "model": model,
         "provider": provider,
