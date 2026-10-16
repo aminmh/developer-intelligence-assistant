@@ -10,6 +10,7 @@ import { RAGService } from './src/server/rag';
 import { UploadedFile } from './src/types';
 import { openDocument, complete as completeDockerfile, format as formatDockerfile, closeSession as closeDockerfileSession, closeAllSessions, bridgeStatus } from './src/server/dockerfileLanguageBridge';
 import { installOidcAuth, authRoleFor, authIsBootstrapAdmin, authCanRunRuntimeSetup } from './src/server/oidcAuth';
+import { registerCodeQualityRoutes } from './src/server/codeQualityRoutes';
 
 dotenv.config();
 
@@ -704,6 +705,13 @@ async function startServer() {
     } catch (error: any) {
       return res.status(500).json({ detail: error?.message || 'Failed to load extracted definitions.' });
     }
+  });
+
+  registerCodeQualityRoutes(app, {
+    apiUrl: PYTHON_API_URL,
+    internalSecret: INTERNAL_SECRET,
+    getUser: (res) => (res.locals as any).authUser,
+    canAccessProject: (user, projectId) => Boolean(user && (authIsBootstrapAdmin(user) || authRoleFor(user, projectId))),
   });
 
   app.get('/api/runtime/projects', async (_req, res) => {

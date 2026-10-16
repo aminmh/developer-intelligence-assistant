@@ -14,7 +14,8 @@ import {
   Network,
   Activity,
   PanelLeftClose,
-  PanelLeftOpen
+  PanelLeftOpen,
+  ShieldCheck
 } from 'lucide-vue-next';
 import type { RAGConfig, SearchMatch, LLMUsage, ContextUsage } from './types';
 import { makeRequest } from './ui/makeRequest';
@@ -32,9 +33,10 @@ const DefinitionsView = defineAsyncComponent(() => import('./components/Definiti
 const DatabaseSchemaView = defineAsyncComponent(() => import('./components/DatabaseSchemaView.vue'));
 const DomainKnowledgeView = defineAsyncComponent(() => import('./components/DomainKnowledgeView.vue'));
 const RuntimeView = defineAsyncComponent(() => import('./components/RuntimeView.vue'));
+const CodeQualityView = defineAsyncComponent(() => import('./components/CodeQualityView.vue'));
 
-type AppTab = 'chat' | 'files' | 'config' | 'logs' | 'definitions' | 'schema' | 'domain' | 'runtime';
-const VALID_TABS: AppTab[] = ['chat', 'files', 'config', 'logs', 'definitions', 'schema', 'domain', 'runtime'];
+type AppTab = 'chat' | 'files' | 'config' | 'logs' | 'definitions' | 'schema' | 'domain' | 'runtime' | 'code-quality';
+const VALID_TABS: AppTab[] = ['chat', 'files', 'config', 'logs', 'definitions', 'schema', 'domain', 'runtime', 'code-quality'];
 const tabFromUrl = (): AppTab => {
   const value = new URLSearchParams(window.location.search).get('tab');
   return VALID_TABS.includes(value as AppTab) ? value as AppTab : 'chat';
@@ -1049,6 +1051,16 @@ onUnmounted(() => window.removeEventListener('popstate', syncTabFromHistory));
           <Activity class="w-4 h-4" />
           <span v-if="!sidebarCollapsed">Runtime</span>
         </button>
+        <button
+          @click="activeTab = 'code-quality'"
+          class="flex w-full items-center gap-3 rounded-xl py-2.5 text-sm font-medium transition-all"
+          :class="[sidebarCollapsed ? 'justify-center px-2' : 'px-4', activeTab === 'code-quality' ? 'bg-indigo-600 text-white shadow-md shadow-indigo-600/20' : 'text-slate-400 hover:text-white hover:bg-slate-800/50']"
+          :title="sidebarCollapsed ? 'Code quality' : undefined"
+          :aria-label="sidebarCollapsed ? 'Code quality' : undefined"
+        >
+          <ShieldCheck :size="18" />
+          <span v-if="!sidebarCollapsed">Code quality</span>
+        </button>
 
       </nav>
 
@@ -1101,6 +1113,7 @@ onUnmounted(() => window.removeEventListener('popstate', syncTabFromHistory));
             <span v-else-if="activeTab === 'schema'">Database Schema</span>
             <span v-else-if="activeTab === 'domain'">Domain Knowledge</span>
             <span v-else-if="activeTab === 'runtime'">Runtime telemetry</span>
+            <span v-else-if="activeTab === 'code-quality'">Code quality assessment</span>
           </h2>
         </div>
         
@@ -1174,6 +1187,7 @@ onUnmounted(() => window.removeEventListener('popstate', syncTabFromHistory));
       <DomainKnowledgeView v-else-if="activeTab === 'domain'" @ask-about-concept="askAboutDomainConcept" />
 
       <RuntimeView v-else-if="activeTab === 'runtime'" :use-remote="useRemote" @open-definition="openDefinitionDeepLink" />
+      <CodeQualityView v-else-if="activeTab === 'code-quality'" />
       </div>
       </Transition>
 
