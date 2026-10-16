@@ -878,6 +878,103 @@ async function startServer() {
     }
   });
 
+  app.get('/api/runtime/settings/storage', async (_req, res) => {
+    try {
+      const pyRes = await fetch(`${PYTHON_API_URL}/telemetry/runtime/settings/storage`, {
+        headers: { 'X-Internal-Secret': INTERNAL_SECRET },
+      });
+      const data = await pyRes.json().catch(() => ({ detail: 'Runtime storage settings are unavailable.' }));
+      return res.status(pyRes.status).json(data);
+    } catch {
+      return res.status(502).json({ detail: 'Runtime storage settings are unavailable.' });
+    }
+  });
+
+  app.get('/api/runtime/host-metrics', async (_req, res) => {
+    try {
+      const pyRes = await fetch(`${PYTHON_API_URL}/telemetry/runtime/host-metrics`, {
+        headers: { 'X-Internal-Secret': INTERNAL_SECRET },
+        signal: AbortSignal.timeout(40_000),
+      });
+      const data = await pyRes.json().catch(() => ({ detail: 'Remote host metrics are unavailable.' }));
+      return res.status(pyRes.status).json(data);
+    } catch {
+      return res.status(502).json({ detail: 'Remote host metrics are unavailable.' });
+    }
+  });
+
+  app.put('/api/runtime/settings/storage/mode', async (req, res) => {
+    try {
+      const pyRes = await fetch(`${PYTHON_API_URL}/telemetry/runtime/settings/storage/mode`, {
+        method: 'PUT',
+        headers: { 'X-Internal-Secret': INTERNAL_SECRET, 'Content-Type': 'application/json' },
+        body: JSON.stringify({ mode: req.body?.mode }),
+      });
+      const data = await pyRes.json().catch(() => ({ detail: 'Runtime storage mode could not be saved.' }));
+      return res.status(pyRes.status).json(data);
+    } catch {
+      return res.status(502).json({ detail: 'Runtime storage mode could not be saved.' });
+    }
+  });
+
+  app.post('/api/runtime/settings/storage/host-key', async (req, res) => {
+    try {
+      const pyRes = await fetch(`${PYTHON_API_URL}/telemetry/runtime/settings/storage/host-key`, {
+        method: 'POST',
+        headers: { 'X-Internal-Secret': INTERNAL_SECRET, 'Content-Type': 'application/json' },
+        body: JSON.stringify(req.body ?? {}),
+      });
+      const data = await pyRes.json().catch(() => ({ detail: 'SSH host fingerprint could not be retrieved.' }));
+      return res.status(pyRes.status).json(data);
+    } catch {
+      return res.status(502).json({ detail: 'SSH host fingerprint could not be retrieved.' });
+    }
+  });
+
+  app.post('/api/runtime/settings/storage/connect', async (req, res) => {
+    try {
+      const pyRes = await fetch(`${PYTHON_API_URL}/telemetry/runtime/settings/storage/connect`, {
+        method: 'POST',
+        headers: { 'X-Internal-Secret': INTERNAL_SECRET, 'Content-Type': 'application/json' },
+        body: JSON.stringify(req.body ?? {}),
+        signal: AbortSignal.timeout(30_000),
+      });
+      const data = await pyRes.json().catch(() => ({ detail: 'Remote ClickHouse could not be verified.' }));
+      return res.status(pyRes.status).json(data);
+    } catch {
+      return res.status(502).json({ detail: 'Remote ClickHouse could not be verified or the request timed out.' });
+    }
+  });
+
+  app.post('/api/runtime/settings/storage/test', async (req, res) => {
+    try {
+      const pyRes = await fetch(`${PYTHON_API_URL}/telemetry/runtime/settings/storage/test`, {
+        method: 'POST',
+        headers: { 'X-Internal-Secret': INTERNAL_SECRET, 'Content-Type': 'application/json' },
+        body: JSON.stringify(req.body ?? {}),
+      });
+      const data = await pyRes.json().catch(() => ({ detail: 'SSH and sudo checks failed.' }));
+      return res.status(pyRes.status).json(data);
+    } catch {
+      return res.status(502).json({ detail: 'SSH and sudo checks failed.' });
+    }
+  });
+
+  app.post('/api/runtime/settings/storage/install', async (req, res) => {
+    try {
+      const pyRes = await fetch(`${PYTHON_API_URL}/telemetry/runtime/settings/storage/install`, {
+        method: 'POST',
+        headers: { 'X-Internal-Secret': INTERNAL_SECRET, 'Content-Type': 'application/json' },
+        body: JSON.stringify(req.body ?? {}),
+        signal: AbortSignal.timeout(20 * 60 * 1000),
+      });
+      const data = await pyRes.json().catch(() => ({ detail: 'Remote ClickHouse setup failed.' }));
+      return res.status(pyRes.status).json(data);
+    } catch {
+      return res.status(502).json({ detail: 'Remote ClickHouse setup failed or timed out.' });
+    }
+  });
+
   app.get('/api/runtime/events', async (_req, res) => {
     const controller = new AbortController();
     res.on('close', () => controller.abort());

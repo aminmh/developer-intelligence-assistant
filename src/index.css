@@ -7,6 +7,68 @@
   --font-mono: "JetBrains Mono", ui-monospace, SFMono-Regular, monospace;
 }
 
+:root {
+  --app-motion-ease: cubic-bezier(0.2, 0.7, 0.2, 1);
+  --app-motion-control-duration: 140ms;
+  --app-motion-panel-duration: 170ms;
+  --app-motion-page-duration: 190ms;
+  --app-motion-toast-duration: 170ms;
+  --app-motion-dialog-duration: 160ms;
+}
+
+.app-page-enter-active,
+.app-page-leave-active {
+  transition: opacity var(--app-motion-page-duration) var(--app-motion-ease), transform var(--app-motion-page-duration) var(--app-motion-ease);
+}
+
+.app-page-enter-from,
+.app-page-leave-to {
+  opacity: 0;
+  transform: translateY(4px);
+}
+
+.app-panel-enter-active,
+.app-panel-leave-active {
+  transition: opacity var(--app-motion-panel-duration) var(--app-motion-ease), transform var(--app-motion-panel-duration) var(--app-motion-ease);
+}
+
+.app-panel-enter-from,
+.app-panel-leave-to {
+  opacity: 0;
+  transform: translateY(4px);
+}
+
+.app-dialog-enter-active,
+.app-dialog-leave-active {
+  transition: opacity var(--app-motion-dialog-duration) var(--app-motion-ease), transform var(--app-motion-dialog-duration) var(--app-motion-ease);
+}
+
+.app-dialog-enter-from,
+.app-dialog-leave-to {
+  opacity: 0;
+  transform: translateY(3px) scale(0.995);
+}
+
+.app-toast-enter-active,
+.app-toast-leave-active {
+  transition: opacity var(--app-motion-toast-duration) var(--app-motion-ease), transform var(--app-motion-toast-duration) var(--app-motion-ease);
+}
+
+.app-toast-enter-from,
+.app-toast-leave-to {
+  opacity: 0;
+  transform: translateY(5px);
+}
+
+:where(button, input, select, textarea, [role="button"]) {
+  transition: color var(--app-motion-control-duration) var(--app-motion-ease),
+    background-color var(--app-motion-control-duration) var(--app-motion-ease),
+    border-color var(--app-motion-control-duration) var(--app-motion-ease),
+    box-shadow var(--app-motion-control-duration) var(--app-motion-ease),
+    opacity var(--app-motion-control-duration) var(--app-motion-ease),
+    transform var(--app-motion-control-duration) var(--app-motion-ease);
+}
+
 body {
   font-family: var(--font-sans);
   background: linear-gradient(135deg, #080b16 0%, #0d1224 52%, #0b1825 100%);
@@ -587,6 +649,18 @@ select:not([multiple]) {
 }
 
 @media (prefers-reduced-motion: reduce) {
+  .app-page-enter-active,
+  .app-page-leave-active,
+  .app-panel-enter-active,
+  .app-panel-leave-active,
+  .app-dialog-enter-active,
+  .app-dialog-leave-active,
+  .app-toast-enter-active,
+  .app-toast-leave-active,
+  :where(button, input, select, textarea, [role="button"]) {
+    transition: none !important;
+  }
+
   .brand-logo,
   .brand-logo-ring-a,
   .brand-logo-ring-b,

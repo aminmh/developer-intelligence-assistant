@@ -27,6 +27,7 @@ services:
     volumes:
       - keycloak-data:/opt/keycloak/data
       - ./keycloak:/opt/keycloak/realm-template:ro
+      - ./keycloak/themes:/opt/keycloak/themes:ro
     restart: unless-stopped
     networks:
       - devassistant_net

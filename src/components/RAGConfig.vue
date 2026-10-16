@@ -85,29 +85,33 @@ const updateAppearance = <K extends keyof AppearancePreferences>(
         </button>
       </div>
 
-      <AppearanceCard
-        v-if="activeSection === 'appearance'"
-        :appearance="appearance"
-        @update="updateAppearance"
-      />
+      <Transition name="app-panel" mode="out-in">
+        <div :key="activeSection" class="space-y-8">
+          <AppearanceCard
+            v-if="activeSection === 'appearance'"
+            :appearance="appearance"
+            @update="updateAppearance"
+          />
 
-      <template v-else-if="activeSection === 'models'">
-        <LlmProvidersCard :config="config" :update-field="updateField" />
-        <GpuOffloadCard :config="config" :update-field="updateField" />
-        <ExternalModelCard :config="config" :update-field="updateField" />
-        <ModelImportCard :config="config" :update-field="updateField" />
-      </template>
+          <template v-else-if="activeSection === 'models'">
+            <LlmProvidersCard :config="config" :update-field="updateField" />
+            <GpuOffloadCard :config="config" :update-field="updateField" />
+            <ExternalModelCard :config="config" :update-field="updateField" />
+            <ModelImportCard :config="config" :update-field="updateField" />
+          </template>
 
-      <template v-else-if="activeSection === 'retrieval'">
-        <VectorStoreCard :config="config" :update-field="updateField" />
-        <DocRetrievalCard :config="config" :update-field="updateField" />
-        <DomainConceptsCard :config="config" :update-field="updateField" />
-        <RerankerCard :config="config" :update-field="updateField" />
-        <PreviewCard :config="config" :update-field="updateField" />
-      </template>
+          <template v-else-if="activeSection === 'retrieval'">
+            <VectorStoreCard :config="config" :update-field="updateField" />
+            <DocRetrievalCard :config="config" :update-field="updateField" />
+            <DomainConceptsCard :config="config" :update-field="updateField" />
+            <RerankerCard :config="config" :update-field="updateField" />
+            <PreviewCard :config="config" :update-field="updateField" />
+          </template>
 
-      <LlmToolsCard v-else-if="activeSection === 'tools'" />
-      <RuntimeTelemetryCard v-else-if="activeSection === 'runtime'" />
+          <LlmToolsCard v-else-if="activeSection === 'tools'" />
+          <RuntimeTelemetryCard v-else-if="activeSection === 'runtime'" />
+        </div>
+      </Transition>
 
       <!-- Action Footer -->
       <div class="pt-4 border-t border-slate-800 flex justify-start">

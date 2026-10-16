@@ -159,6 +159,43 @@ export interface RuntimeTelemetrySettings {
   updated_at: string | null;
 }
 
+export interface RuntimeStorageTarget {
+  mode: 'disabled' | 'local' | 'remote';
+  remote_configured: boolean;
+  host: string | null;
+  http_port: number | null;
+  native_port: number | null;
+  ssh_port: number | null;
+  ssh_user: string | null;
+  host_fingerprint: string | null;
+  database: string;
+  username: string | null;
+  health: string;
+  verified_at: string | null;
+  last_error: string | null;
+}
+
+export interface RuntimeHostMetricsValues {
+  cpu_percent: number | null;
+  memory_used_bytes: number;
+  memory_total_bytes: number;
+  load_average: [number, number, number];
+  disk_free_bytes: number;
+  disk_total_bytes: number;
+}
+
+export interface RuntimeHostMetricsResponse {
+  mode: 'disabled' | 'local' | 'remote' | 'unavailable';
+  available: boolean;
+  stale: boolean;
+  sampled_at: string | null;
+  ssh_health: 'connected' | 'unavailable' | 'not-required';
+  ssh_message: string | null;
+  clickhouse_health: 'available' | 'unavailable' | 'unknown' | 'not-required';
+  clickhouse_message: string | null;
+  metrics: RuntimeHostMetricsValues | null;
+}
+
 export interface RuntimeTelemetryData {
   available: boolean;
   reason?: string | null;

@@ -4,9 +4,11 @@ withDefaults(defineProps<{
   label: string;
   description?: string;
   density?: 'compact' | 'normal';
+  disabled?: boolean;
 }>(), {
   description: '',
   density: 'normal',
+  disabled: false,
 });
 
 const emit = defineEmits<{
@@ -21,8 +23,10 @@ const emit = defineEmits<{
     :class="[
       density === 'compact' ? 'h-10 px-3' : 'px-3 py-3',
       modelValue ? 'border-emerald-400/40 bg-emerald-500/5' : 'border-slate-700 bg-slate-900/30',
+      disabled ? 'cursor-not-allowed opacity-40' : '',
     ]"
     :aria-pressed="modelValue"
+    :disabled="disabled"
     @click="emit('update:modelValue', !modelValue)"
   >
     <span class="flex min-w-0 items-center gap-2">

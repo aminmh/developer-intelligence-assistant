@@ -1115,6 +1115,8 @@ onUnmounted(() => window.removeEventListener('popstate', syncTabFromHistory));
       </header>
 
       <!-- View components rendering -->
+      <Transition name="app-page" mode="out-in">
+      <div :key="activeTab" class="flex min-h-0 flex-1 flex-col">
       <RAGChat
         v-if="activeTab === 'chat'"
         :messages="messages"
@@ -1172,18 +1174,13 @@ onUnmounted(() => window.removeEventListener('popstate', syncTabFromHistory));
       <DomainKnowledgeView v-else-if="activeTab === 'domain'" @ask-about-concept="askAboutDomainConcept" />
 
       <RuntimeView v-else-if="activeTab === 'runtime'" :use-remote="useRemote" @open-definition="openDefinitionDeepLink" />
+      </div>
+      </Transition>
 
     </main>
 
     <!-- Success Toast Notification -->
-    <Transition
-      enter-active-class="transform ease-out duration-300 transition"
-      enter-from-class="translate-y-2 opacity-0 sm:translate-y-0 sm:translate-x-2"
-      enter-to-class="translate-y-0 opacity-100 sm:translate-x-0"
-      leave-active-class="transition ease-in duration-200"
-      leave-from-class="opacity-100"
-      leave-to-class="opacity-0"
-    >
+    <Transition name="app-toast">
       <div v-if="showSuccessToast" class="fixed bottom-6 right-6 z-50 max-w-sm w-full bg-slate-900 border border-emerald-500/30 rounded-2xl shadow-xl shadow-slate-950/40 p-4 pointer-events-auto flex items-start gap-3">
         <CheckCircle class="w-5 h-5 text-emerald-400 shrink-0" />
         <div class="flex-1 text-left">
@@ -1197,14 +1194,7 @@ onUnmounted(() => window.removeEventListener('popstate', syncTabFromHistory));
     </Transition>
 
     <!-- Error Toast Notification -->
-    <Transition
-      enter-active-class="transform ease-out duration-300 transition"
-      enter-from-class="translate-y-2 opacity-0 sm:translate-y-0 sm:translate-x-2"
-      enter-to-class="translate-y-0 opacity-100 sm:translate-x-0"
-      leave-active-class="transition ease-in duration-200"
-      leave-from-class="opacity-100"
-      leave-to-class="opacity-0"
-    >
+    <Transition name="app-toast">
       <div v-if="showErrorToast" class="fixed bottom-6 right-6 z-50 max-w-sm w-full bg-slate-900 border border-rose-500/30 rounded-2xl shadow-xl shadow-slate-950/40 p-4 pointer-events-auto flex items-start gap-3">
         <AlertTriangle class="w-5 h-5 text-rose-400 shrink-0" />
         <div class="flex-1 text-left">

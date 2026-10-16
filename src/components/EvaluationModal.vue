@@ -65,12 +65,13 @@ watch(() => props.show, (v) => {
 
 <template>
   <Teleport to="body">
-    <div
-      v-if="show"
-      class="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-4"
-      @click.self="emit('close')"
-    >
-      <div class="w-full max-w-md bg-[#0c101f] border border-slate-800 rounded-2xl shadow-xl">
+    <Transition name="app-dialog">
+      <div
+        v-if="show"
+        class="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-4"
+        @click.self="emit('close')"
+      >
+        <div class="w-full max-w-md bg-[#0c101f] border border-slate-800 rounded-2xl shadow-xl">
         <div class="flex items-center justify-between p-4 border-b border-slate-800">
           <div class="flex items-center gap-2">
             <Gauge class="w-4 h-4 text-indigo-400" />
@@ -139,7 +140,8 @@ watch(() => props.show, (v) => {
             </p>
           </div>
         </div>
+        </div>
       </div>
-    </div>
+    </Transition>
   </Teleport>
 </template>

@@ -1,6 +1,8 @@
 {
   "realm": "developer-assistant",
+  "displayName": "Developer Assistant",
   "enabled": true,
+  "loginTheme": "developer-assistant",
   "registrationAllowed": false,
   "loginWithEmailAllowed": true,
   "duplicateEmailsAllowed": false,

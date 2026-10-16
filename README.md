@@ -27,6 +27,13 @@ client, and the initial administrator account. The app's browser issuer is
 `http://localhost:8180/realms/developer-assistant`; its container uses
 `http://keycloak:8080/realms/developer-assistant` for server-to-server OIDC
 requests. Keep the client secret and passwords in the ignored `web/.env` file.
+The local realm uses the `developer-assistant` login theme in
+`keycloak/themes`; it styles Keycloak's built-in login flow with the app's
+dark navy and indigo palette. Restart Keycloak after changing theme files.
+Existing realms retain their stored settings after import, so select
+`developer-assistant` under **Realm Settings → Themes → Login theme** once when
+upgrading an existing Keycloak data volume. External OIDC deployments own
+their login page and are not changed by this theme.
 
 Start production Web with `make up`; it starts Keycloak using the `local-auth`
 profile. To start both containers directly, run:
