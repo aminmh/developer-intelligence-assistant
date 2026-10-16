@@ -287,7 +287,7 @@ def _score(
     evidence: list[dict], coverage: dict[str, dict], languages: dict[str, int],
     scan_stats: dict[str, Any], analyzer_failures: list[dict],
 ) -> tuple[dict, str, str]:
-    from runtime.llm import complete_with_model
+    from runtime.llm import complete_with_model, remote_configured
 
     model_context = {"languages": languages, "coverage": coverage,
                      "scan_limits": {key: value for key, value in scan_stats.items() if key != "unsupported_extensions"},
@@ -310,7 +310,7 @@ def _score(
             prompt,
             system="You are a cautious code quality evaluator. Follow the response schema exactly.",
             max_tokens=1200,
-            provider="local",
+            provider="remote" if remote_configured() else "local",
         )
     except Exception as exc:
         raise AssessmentModelUnavailable from exc

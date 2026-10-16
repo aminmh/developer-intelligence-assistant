@@ -119,7 +119,7 @@ async def assess(project_id: str, revision_id: str, request: Request) -> dict:
         )
         raise HTTPException(
             503,
-            "The configured local model could not complete scoring. Check its endpoint, model name, and availability, then retry.",
+            "The configured model could not complete scoring. Check its endpoint, model name, and availability, then retry.",
         ) from exc
     except AssessmentReportStoreUnavailable as exc:
         logger.error(
