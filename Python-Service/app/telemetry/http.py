@@ -19,6 +19,7 @@ host_router = APIRouter(prefix="/telemetry/host", tags=["Telemetry deployments"]
 runtime_router = APIRouter(prefix="/telemetry/runtime", tags=["Runtime telemetry"])
 MAX_HOST_REPORT_BYTES = 2 * 1024 * 1024
 MAX_PROFILE_BATCH_BYTES = 2 * 1024 * 1024
+MAX_RUNTIME_SETUP_BYTES = 100 * 1024
 
 
 def authorize(request: Request, project_id: str) -> None:
@@ -279,6 +280,108 @@ async def update_runtime_settings(request: Request) -> dict:
     except Exception:
         policy = {"pending": True}
     return {**telemetry_settings(get_registry()), "policy_refresh": policy}
+
+
+async def _runtime_setup_payload(request: Request) -> dict:
+    raw = await request.body()
+    if len(raw) > MAX_RUNTIME_SETUP_BYTES:
+        raise HTTPException(413, "Remote setup request is too large")
+    try:
+        payload = json.loads(raw)
+    except (ValueError, TypeError) as exc:
+        raise HTTPException(400, "Remote setup request is invalid") from exc
+    if not isinstance(payload, dict):
+        raise HTTPException(422, "Remote setup request must be an object")
+    return payload
+
+
+@runtime_router.get("/settings/storage")
+def runtime_storage_settings(request: Request) -> dict:
+    authorize_internal(request)
+    from telemetry.runtime_storage import storage_status
+    return storage_status(get_registry())
+
+
+@runtime_router.get("/host-metrics")
+def runtime_host_metrics(request: Request) -> dict:
+    authorize_internal(request)
+    try:
+        from telemetry.host_metrics import collect_host_metrics
+        return collect_host_metrics(get_registry())
+    except Exception as exc:
+        raise HTTPException(503, "Runtime host metrics are unavailable") from exc
+
+
+@runtime_router.put("/settings/storage/mode")
+async def update_runtime_storage_mode(request: Request) -> dict:
+    authorize_internal(request)
+    payload = await _runtime_setup_payload(request)
+    try:
+        from telemetry.runtime_storage import set_storage_mode
+        target = await run_in_threadpool(set_storage_mode, payload.get("mode"), get_registry())
+        restart_requested = target.pop("collector_restart_requested", False)
+        return {"target": target, "collector_restart_requested": restart_requested}
+    except ValueError as exc:
+        raise HTTPException(422, str(exc)) from exc
+    except Exception as exc:
+        mode = payload.get("mode")
+        if mode in {"disabled", "local", "remote"}:
+            detail = (
+                "Runtime storage mode could not be applied. Start and verify its services with "
+                f"`just runtime-storage {mode}`, then retry."
+            )
+        else:
+            detail = "Runtime storage mode could not be applied."
+        raise HTTPException(503, detail) from exc
+
+
+@runtime_router.post("/settings/storage/host-key")
+async def runtime_storage_host_key(request: Request) -> dict:
+    authorize_internal(request)
+    payload = await _runtime_setup_payload(request)
+    try:
+        from telemetry.runtime_provisioning import scan_host_key
+        return await scan_host_key(payload)
+    except ValueError as exc:
+        raise HTTPException(422, str(exc)) from exc
+    except Exception as exc:
+        raise HTTPException(502, "SSH host fingerprint could not be retrieved") from exc
+
+
+@runtime_router.post("/settings/storage/test")
+async def runtime_storage_test(request: Request) -> dict:
+    authorize_internal(request)
+    payload = await _runtime_setup_payload(request)
+    try:
+        from telemetry.runtime_provisioning import HostKeyMismatch, test_ssh_and_sudo
+        return await test_ssh_and_sudo(payload)
+    except HostKeyMismatch as exc:
+        raise HTTPException(409, "SSH host fingerprint changed. Retrieve and confirm the new fingerprint before continuing.") from exc
+    except ValueError as exc:
+        raise HTTPException(422, str(exc)) from exc
+    except PermissionError as exc:
+        raise HTTPException(403, str(exc)) from exc
+    except RuntimeError as exc:
+        raise HTTPException(502, str(exc)) from exc
+
+
+@runtime_router.post("/settings/storage/install")
+async def runtime_storage_install(request: Request) -> dict:
+    authorize_internal(request)
+    payload = await _runtime_setup_payload(request)
+    try:
+        from telemetry.runtime_provisioning import HostKeyMismatch, install_clickhouse
+        return await install_clickhouse(payload, get_registry())
+    except HostKeyMismatch as exc:
+        raise HTTPException(409, "SSH host fingerprint changed. Retrieve and confirm the new fingerprint before continuing.") from exc
+    except ValueError as exc:
+        raise HTTPException(422, str(exc)) from exc
+    except PermissionError as exc:
+        raise HTTPException(403, str(exc)) from exc
+    except RuntimeError as exc:
+        raise HTTPException(503, str(exc)) from exc
+    except Exception as exc:
+        raise HTTPException(503, "Remote ClickHouse provisioning failed; the previous Runtime target remains active") from exc
 
 
 @runtime_router.get("/events")

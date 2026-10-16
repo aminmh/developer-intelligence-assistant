@@ -7,6 +7,7 @@ import json
 import os
 import re
 import shutil
+import signal
 import subprocess
 import sys
 import tempfile
@@ -108,7 +109,57 @@ def verify_helper_token(token: str, origin: str, *, operation: str | None = None
         return False
 
 
+def resolve_ssh_config_target(payload: dict) -> dict:
+    host = payload.get("host")
+    if not isinstance(host, str) or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,252}", host):
+        raise ValueError("Enter a valid SSH host or alias from ~/.ssh/config.")
+    command = ["ssh", "-G"]
+    try:
+        port = int(payload.get("ssh_port", 22))
+    except (TypeError, ValueError) as exc:
+        raise ValueError("SSH port must be between 1 and 65535.") from exc
+    if not 1 <= port <= 65535:
+        raise ValueError("SSH port must be between 1 and 65535.")
+    if port != 22:
+        command.extend(["-p", str(port)])
+    user = payload.get("ssh_user", "")
+    if user:
+        if not isinstance(user, str) or not re.fullmatch(r"[a-z_][a-z0-9_-]{0,31}\$?", user):
+            raise ValueError("Enter a valid Linux SSH account name.")
+        command.extend(["-l", user])
+    command.append(host)
+    try:
+        result = subprocess.run(command, capture_output=True, text=True, timeout=8, check=False)
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        raise RuntimeError("OpenSSH configuration could not be read on this desktop.") from exc
+    if result.returncode:
+        raise RuntimeError("OpenSSH could not resolve this host alias. Check ~/.ssh/config.")
+    options = {}
+    for line in result.stdout.splitlines():
+        key, _, value = line.partition(" ")
+        options[key.lower()] = value.strip()
+    if options.get("proxyjump", "none") != "none" or options.get("proxycommand", "none") != "none":
+        raise ValueError("This Runtime tunnel requires a directly reachable SSH host; SSH ProxyJump and ProxyCommand aliases are not supported yet.")
+    hostname = options.get("hostname")
+    resolved_user = options.get("user")
+    try:
+        resolved_port = int(options.get("port", "22"))
+    except ValueError as exc:
+        raise RuntimeError("OpenSSH returned an invalid configured SSH port.") from exc
+    if not hostname or not resolved_user or not 1 <= resolved_port <= 65535:
+        raise RuntimeError("OpenSSH did not return a usable host, user, and port.")
+    return {"alias": host, "host": hostname, "ssh_user": resolved_user, "ssh_port": resolved_port}
+
+
 def serve_helper() -> None:
+    import runtime_ssh_credentials as ssh_credentials
+
+    try:
+        ssh_credentials.reload_credentials()
+    except Exception:
+        # Keep the helper available so the Settings UI can explain unlock/retry.
+        pass
+
     class Handler(BaseHTTPRequestHandler):
         server_version = "RuntimeSetupHelper/1"
 
@@ -140,6 +191,14 @@ def serve_helper() -> None:
             return token.startswith("Bearer ") and verify_helper_token(
                 token[7:], origin, operation=operation, project_id=project_id, unscoped=unscoped)
 
+        def _consume_authorization(self) -> bool:
+            token_id = hashlib.sha256(self.headers.get("Authorization", "").encode()).hexdigest()
+            with HELPER_LOCK:
+                if token_id in HELPER_USED_TOKENS:
+                    return False
+                HELPER_USED_TOKENS.add(token_id)
+            return True
+
         def do_OPTIONS(self) -> None:
             origin = self.headers.get("Origin", "")
             if origin != helper_origin():
@@ -147,11 +206,50 @@ def serve_helper() -> None:
             self.send_response(204)
             self.send_header("Access-Control-Allow-Origin", origin)
             self.send_header("Access-Control-Allow-Headers", "Authorization, Content-Type")
-            self.send_header("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
+            self.send_header("Access-Control-Allow-Methods", "GET, POST, DELETE, OPTIONS")
             self.send_header("Access-Control-Max-Age", "60")
             self.end_headers()
 
         def do_POST(self) -> None:
+            if self.path == "/runtime-ssh-config":
+                if not self._authorized(unscoped=True):
+                    return self._json(403, {"detail": "Runtime credential authorization is invalid or expired."})
+                if not self._consume_authorization():
+                    return self._json(403, {"detail": "This Runtime SSH configuration authorization has already been used."})
+                length = self.headers.get("Content-Length", "0")
+                if not length.isdigit() or not 1 <= int(length) <= 4096:
+                    return self._json(400, {"detail": "Provide an SSH host or alias to resolve."})
+                try:
+                    payload = json.loads(self.rfile.read(int(length)))
+                    if not isinstance(payload, dict):
+                        raise ValueError("Provide an SSH host or alias to resolve.")
+                    return self._json(200, resolve_ssh_config_target(payload))
+                except ValueError as exc:
+                    return self._json(422, {"detail": str(exc)})
+                except RuntimeError as exc:
+                    return self._json(503, {"detail": str(exc)})
+            if self.path == "/runtime-ssh-credentials":
+                if not self._authorized(unscoped=True):
+                    return self._json(403, {"detail": "Runtime credential authorization is invalid or expired."})
+                if not self._consume_authorization():
+                    return self._json(403, {"detail": "This Runtime credential authorization has already been used."})
+                length = self.headers.get("Content-Length", "0")
+                if not length.isdigit() or not 1 <= int(length) <= 70 * 1024:
+                    return self._json(400, {"detail": "Provide a valid SSH key and optional passphrase."})
+                try:
+                    body = json.loads(self.rfile.read(int(length)))
+                    if not isinstance(body, dict):
+                        raise ValueError("Provide a valid SSH key and optional passphrase.")
+                    if body.get("action") == "reload":
+                        ssh_credentials.reload_credentials()
+                        return self._json(200, ssh_credentials.credential_status())
+                    result = ssh_credentials.save_credentials(body.get("private_key"), body.get("passphrase", ""))
+                    return self._json(200, result)
+                except (ValueError, ssh_credentials.CredentialStoreError) as exc:
+                    status = 423 if isinstance(exc, ssh_credentials.CredentialStoreError) and exc.locked else 422
+                    return self._json(status, {"detail": str(exc)})
+                except Exception:
+                    return self._json(503, {"detail": "The SSH credential could not be saved. Unlock the OS keyring and retry."})
             if self.path not in {"/setup", "/cleanup", "/remove-project-containers"}:
                 return self._json(404, {"detail": "Not found."})
             if not self._authorized(): return self._json(403, {"detail": "Runtime setup authorization is invalid or expired."})
@@ -216,7 +314,11 @@ def serve_helper() -> None:
             return self._json(202, {"status": "starting"})
 
         def do_GET(self) -> None:
-            if self.path == "/health": return self._json(200, {"ok": True, "api_version": 22})
+            if self.path == "/health": return self._json(200, {"ok": True, "api_version": 25})
+            if self.path == "/runtime-ssh-credentials":
+                if not self._authorized(unscoped=True):
+                    return self._json(403, {"detail": "Runtime credential authorization is invalid or expired."})
+                return self._json(200, ssh_credentials.credential_status())
             if self.path not in {"/status", "/setup-state"}: return self._json(404, {"detail": "Not found."})
             if self.path == "/setup-state":
                 if not self._authorized(unscoped=True):
@@ -241,6 +343,19 @@ def serve_helper() -> None:
                 return self._json(403, {"detail": "Runtime operation status authorization is invalid or expired."})
             return self._json(200, state)
 
+        def do_DELETE(self) -> None:
+            if self.path != "/runtime-ssh-credentials":
+                return self._json(404, {"detail": "Not found."})
+            if not self._authorized(unscoped=True):
+                return self._json(403, {"detail": "Runtime credential authorization is invalid or expired."})
+            if not self._consume_authorization():
+                return self._json(403, {"detail": "This Runtime credential authorization has already been used."})
+            try:
+                return self._json(200, ssh_credentials.remove_credentials())
+            except ssh_credentials.CredentialStoreError as exc:
+                status = 423 if exc.locked else 503
+                return self._json(status, {"detail": str(exc)})
+
         def log_message(self, _format: str, *_args) -> None: return
 
     try:
@@ -249,7 +364,9 @@ def serve_helper() -> None:
     except OSError as exc:
         raise RuntimeError(f"Cannot bind Runtime setup helper to loopback port {HELPER_PORT}: {exc}") from exc
     print(f"Runtime setup helper listening on http://{HELPER_HOST}:{HELPER_PORT}")
+    signal.signal(signal.SIGTERM, lambda *_: threading.Thread(target=server.shutdown, daemon=True).start())
     server.serve_forever(poll_interval=0.5)
+    server.server_close()
 
 
 def write_state(value: dict | None) -> None:

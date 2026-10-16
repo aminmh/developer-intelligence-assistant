@@ -1,12 +1,130 @@
 from __future__ import annotations
 
 import asyncio
+import socket
 
+from telemetry import runtime_storage
 from telemetry.aggregation import _graph_facts
 from telemetry.events import publish_runtime_update, runtime_events
 from telemetry.registry import SnapshotRegistry
 from telemetry.runtime import ClickHouseRuntime, runtime_sampling_policy, update_runtime_sampling_policy
 from telemetry.snapshot import storage_id
+
+
+def test_stale_collector_restart_socket_is_treated_as_no_active_relay(tmp_path, monkeypatch):
+    socket_path = tmp_path / "collector-reload.sock"
+    socket_path.touch()
+    monkeypatch.setattr(runtime_storage, "_CONTROL_DIR", tmp_path)
+
+    class RefusedClient:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return False
+
+        def settimeout(self, _timeout):
+            pass
+
+        def connect(self, _path):
+            raise ConnectionRefusedError
+
+    monkeypatch.setattr(socket, "socket", lambda *_args: RefusedClient())
+
+    assert runtime_storage.request_collector_restart() is False
+
+
+def test_active_collector_restart_socket_still_requests_restart(tmp_path, monkeypatch):
+    socket_path = tmp_path / "collector-reload.sock"
+    socket_path.touch()
+    monkeypatch.setattr(runtime_storage, "_CONTROL_DIR", tmp_path)
+
+    class ActiveClient:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return False
+
+        def settimeout(self, _timeout):
+            pass
+
+        def connect(self, path):
+            assert path == str(socket_path)
+
+        def sendall(self, command):
+            assert command == b"restart\n"
+
+        def recv(self, _size):
+            return b"restarting\n"
+
+    monkeypatch.setattr(socket, "socket", lambda *_args: ActiveClient())
+
+    assert runtime_storage.request_collector_restart() is True
+
+
+def _configured_disabled_remote_target(registry):
+    registry.set_runtime_setting(runtime_storage.STORAGE_KEY, {
+        "mode": "disabled",
+        "host": "clickhouse.example.test",
+        "ssh_port": 22,
+        "ssh_user": "telemetry",
+        "host_fingerprint": "SHA256:test-fingerprint",
+        "health": "disabled",
+        "verified_at": None,
+        "last_error": None,
+    })
+
+
+def test_enabling_remote_applies_tunnel_target_before_verification(tmp_path, monkeypatch):
+    registry = SnapshotRegistry(tmp_path)
+    _configured_disabled_remote_target(registry)
+    monkeypatch.setenv("TELEMETRY_CLICKHOUSE_USER", "telemetry")
+    monkeypatch.setenv("TELEMETRY_CLICKHOUSE_PASSWORD", "x" * 40)
+    applied_modes = []
+    monkeypatch.setattr(runtime_storage, "write_router_target", lambda target: applied_modes.append(target["mode"]))
+    monkeypatch.setattr(runtime_storage, "write_ssh_target", lambda _target: None)
+    monkeypatch.setattr(runtime_storage, "write_collector_config", lambda _target: None)
+    monkeypatch.setattr(runtime_storage, "request_collector_restart", lambda: False)
+
+    def verify_remote():
+        assert applied_modes[-1] == "remote"
+        assert runtime_storage.get_storage_target(registry)["mode"] == "remote"
+
+    monkeypatch.setattr(runtime_storage, "verify_router_clickhouse_connection", verify_remote)
+
+    result = runtime_storage.set_storage_mode("remote", registry)
+
+    assert result["mode"] == "remote"
+    assert applied_modes == ["remote"]
+
+
+def test_failed_remote_verification_restores_previous_disabled_target(tmp_path, monkeypatch):
+    registry = SnapshotRegistry(tmp_path)
+    _configured_disabled_remote_target(registry)
+    monkeypatch.setenv("TELEMETRY_CLICKHOUSE_USER", "telemetry")
+    monkeypatch.setenv("TELEMETRY_CLICKHOUSE_PASSWORD", "x" * 40)
+    applied_modes = []
+    monkeypatch.setattr(runtime_storage, "write_router_target", lambda target: applied_modes.append(target["mode"]))
+    monkeypatch.setattr(runtime_storage, "write_ssh_target", lambda _target: None)
+    monkeypatch.setattr(runtime_storage, "write_collector_config", lambda _target: None)
+    monkeypatch.setattr(runtime_storage, "request_collector_restart", lambda: False)
+
+    def fail_verification():
+        assert runtime_storage.get_storage_target(registry)["mode"] == "remote"
+        raise RuntimeError("Remote endpoint is unavailable")
+
+    monkeypatch.setattr(runtime_storage, "verify_router_clickhouse_connection", fail_verification)
+
+    try:
+        runtime_storage.set_storage_mode("remote", registry)
+    except RuntimeError as exc:
+        assert str(exc) == "Remote endpoint is unavailable"
+    else:
+        raise AssertionError("Expected failed Remote verification to be propagated")
+
+    assert runtime_storage.get_storage_target(registry)["mode"] == "disabled"
+    assert applied_modes == ["remote", "disabled"]
 
 
 def test_sampling_controls_are_persisted_and_bounded(tmp_path, monkeypatch):
@@ -279,6 +397,27 @@ def test_runtime_delete_endpoint_publishes_refresh_after_success(monkeypatch, tm
     assert deleted == [("pizza", revision_id, ["a" * 32])]
     assert published == [True]
     assert result == {"deleted_trace_count": 1}
+
+
+def test_storage_mode_failure_shows_mode_start_command(monkeypatch):
+    from fastapi import FastAPI
+    from fastapi.testclient import TestClient
+    from telemetry import http, runtime_storage
+
+    monkeypatch.setattr(http, "authorize_internal", lambda _request: None)
+    monkeypatch.setattr(http, "get_registry", lambda: object())
+
+    def fail_setting(_mode, _registry):
+        raise RuntimeError("backend is stopped")
+
+    monkeypatch.setattr(runtime_storage, "set_storage_mode", fail_setting)
+    app = FastAPI()
+    app.include_router(http.runtime_router)
+
+    response = TestClient(app).put("/telemetry/runtime/settings/storage/mode", json={"mode": "local"})
+
+    assert response.status_code == 503
+    assert "just runtime-storage local" in response.json()["detail"]
 
 
 def test_runtime_request_detail_exposes_bounded_method_hook_counts(monkeypatch):

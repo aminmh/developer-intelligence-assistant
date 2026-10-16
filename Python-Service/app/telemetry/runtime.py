@@ -1,7 +1,6 @@
 """Read-side runtime aggregates from ClickHouse, separate from the symbol graph."""
 from __future__ import annotations
 
-import base64
 from datetime import datetime, timezone
 import json
 import os
@@ -149,16 +148,6 @@ def update_runtime_sampling_policy(payload: dict, registry=None) -> dict:
 
 def telemetry_settings(registry=None) -> dict:
     """Non-secret collector/storage information safe for the authenticated UI."""
-    endpoint = os.getenv("TELEMETRY_CLICKHOUSE_URL", "").strip()
-    address = None
-    if endpoint:
-        try:
-            parsed = urlsplit(endpoint)
-            if parsed.scheme in {"http", "https"} and parsed.hostname:
-                port = parsed.port or (443 if parsed.scheme == "https" else 8123)
-                address = f"{parsed.scheme}://{parsed.hostname}:{port}"
-        except ValueError:
-            pass
     try:
         retention_hours = max(1, min(24 * 365, int(os.getenv("TELEMETRY_RETENTION_HOURS", "168"))))
     except ValueError:
@@ -169,10 +158,32 @@ def telemetry_settings(registry=None) -> dict:
         recording_ratio = 0.1
     recording_ratio = min(1.0, max(0.0, recording_ratio))
     policy = runtime_sampling_policy(registry)
+    from telemetry.runtime_storage import clickhouse_connection, public_storage_target
+    connection = clickhouse_connection(registry)
+    target = public_storage_target(registry)
+    display_connection = None
+    if target["mode"] == "remote" and target.get("host"):
+        display_connection = f"https://{target['host']}:{target['http_port']}"
+    elif target["mode"] == "local":
+        endpoint = os.getenv("TELEMETRY_CLICKHOUSE_URL", "").strip()
+        if endpoint:
+            try:
+                parsed = urlsplit(endpoint)
+                if parsed.scheme in {"http", "https"} and parsed.hostname:
+                    port = parsed.port or (443 if parsed.scheme == "https" else 8123)
+                    display_connection = f"{parsed.scheme}://{parsed.hostname}:{port}"
+            except ValueError:
+                pass
+    elif connection["url"]:
+        parsed = urlsplit(connection["url"])
+        port = parsed.port or (443 if parsed.scheme == "https" else 8123)
+        display_connection = f"{parsed.scheme}://{parsed.hostname}:{port}"
     return {
-        "enabled": bool(endpoint and address),
+        "enabled": bool(connection["url"]),
         "store": "ClickHouse",
-        "connection": address,
+        "connection": display_connection,
+        "storage_mode": target["mode"],
+        "storage_target": target,
         "retention_hours": retention_hours,
         "retention_days": retention_hours / 24,
         "aggregation_retention_days": policy["aggregation_retention_hours"] / 24,
@@ -187,14 +198,17 @@ def telemetry_settings(registry=None) -> dict:
 
 class ClickHouseRuntime:
     def __init__(self) -> None:
-        self.url = os.getenv("TELEMETRY_CLICKHOUSE_URL", "").strip().rstrip("/")
+        from telemetry.runtime_storage import clickhouse_connection
+        configured = clickhouse_connection()
+        self.url = configured["url"]
         parsed = urlsplit(self.url) if self.url else None
         if parsed and (parsed.scheme not in {"http", "https"} or not parsed.hostname
                        or parsed.username or parsed.password or parsed.query or parsed.fragment):
             self.url = ""
-        self.user = os.getenv("TELEMETRY_CLICKHOUSE_USER", "telemetry")
-        self.password = os.getenv("TELEMETRY_CLICKHOUSE_PASSWORD", "")
-        self.database = os.getenv("TELEMETRY_CLICKHOUSE_DATABASE", "telemetry")
+        self.user = configured["username"]
+        self.password = configured["password"]
+        self.database = configured["database"]
+        self.ssl_context = configured["ssl_context"]
         self.table = os.getenv("TELEMETRY_CLICKHOUSE_FULL_TABLE", "otel_spans_full")
         self.trace_table = os.getenv("TELEMETRY_CLICKHOUSE_TABLE", "otel_traces")
         self.profile_table = os.getenv("TELEMETRY_PROFILE_TABLE", "otel_profiles")
@@ -210,6 +224,7 @@ class ClickHouseRuntime:
     def rows(self, sql: str, project_id: str, revision_id: str, extra_parameters: dict[str, str] | None = None) -> list[dict]:
         parameters = urlencode({"param_project_id": project_id, "param_revision_id": revision_id, **(extra_parameters or {})})
         url = f"{self.url}/?{parameters}"
+        import base64
         token = base64.b64encode(f"{self.user}:{self.password}".encode()).decode("ascii")
         request = Request(
             url,
@@ -217,7 +232,7 @@ class ClickHouseRuntime:
             headers={"Authorization": f"Basic {token}", "Content-Type": "text/plain"},
             method="POST",
         )
-        with urlopen(request, timeout=5) as response:
+        with urlopen(request, timeout=5, context=self.ssl_context) as response:
             return [json.loads(line) for line in response.read().decode("utf-8").splitlines() if line]
 
     def requests(self, project_id: str, revision_id: str) -> dict:

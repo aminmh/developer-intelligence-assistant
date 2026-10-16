@@ -29,6 +29,10 @@ services:
       TELEMETRY_AGGREGATION_RETENTION_HOURS: ${TELEMETRY_AGGREGATION_RETENTION_HOURS:-168}
       TELEMETRY_RECORDING_PERCENT: ${TELEMETRY_RECORDING_PERCENT:-10}
       TELEMETRY_SAMPLING_POLICY_PATH: /var/lib/devassistant/runtime/sampling-policy.json
+      TELEMETRY_RUNTIME_STATE_DIR: /var/lib/devassistant/runtime
+      SSH_AUTH_SOCK: /run/devassistant/runtime-host/ssh-agent.sock
+      TELEMETRY_RUNTIME_CONTROL_DIR: /var/lib/devassistant/collector-control
+      TELEMETRY_COLLECTOR_BASE_CONFIG: /etc/devassistant/collector-runtime.base.yaml
       TELEMETRY_OTLP_ENDPOINT: ${TELEMETRY_OTLP_ENDPOINT:-http://host.docker.internal:24318}
       TELEMETRY_CI_PROJECT_TOKENS: ${TELEMETRY_CI_PROJECT_TOKENS:-}
       TELEMETRY_HOST_SCOPES: ${TELEMETRY_HOST_SCOPES:-}
@@ -43,6 +47,9 @@ services:
       - "./Python-Service/logs/:/app/logs"
       - "./Python-Service/php/:/opt/php-cli"
       - telemetry-policy-data:/var/lib/devassistant/runtime
+      - telemetry-collector-control:/var/lib/devassistant/collector-control
+      - "${RUNTIME_SSH_AGENT_SOURCE:-${HOME}/.local/state/devassistant/runtime-host/ssh-agent.sock}:/run/devassistant/runtime-host/ssh-agent.sock:ro"
+      - ./telemetry-dev/collector-runtime.yaml:/etc/devassistant/collector-runtime.base.yaml:ro
     depends_on:
       minio:
         condition: service_healthy
@@ -183,7 +190,7 @@ services:
 
   telemetry-clickhouse:
     image: clickhouse/clickhouse-server:25.8.4.13
-    profiles: [runtime]
+    profiles: [runtime-local]
     environment:
       CLICKHOUSE_DB: ${TELEMETRY_CLICKHOUSE_DATABASE:-telemetry}
       CLICKHOUSE_USER: ${TELEMETRY_CLICKHOUSE_USER:-telemetry}
@@ -204,31 +211,88 @@ services:
       nofile: {soft: 262144, hard: 262144}
     networks: [telemetry_runtime]
 
+  telemetry-clickhouse-router:
+    build:
+      context: ./telemetry-dev
+      dockerfile: Dockerfile.collector-runtime
+    image: devassistant/otelcol-runtime:0.136.0-phase3
+    profiles: [runtime]
+    entrypoint: ["/usr/local/bin/clickhouse-router"]
+    volumes:
+      - telemetry-policy-data:/var/lib/devassistant/runtime:ro
+    depends_on:
+      python-api:
+        condition: service_started
+    mem_limit: 64m
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    restart: unless-stopped
+    networks: [telemetry_runtime]
+
+  runtime-ssh-tunnel:
+    build: ./Python-Service
+    profiles: [runtime]
+    command: ["python", "-m", "app.telemetry.ssh_tunnel"]
+    environment:
+      TELEMETRY_RUNTIME_STATE_DIR: /var/lib/devassistant/runtime
+      SSH_AUTH_SOCK: /run/devassistant/runtime-host/ssh-agent.sock
+    volumes:
+      - telemetry-policy-data:/var/lib/devassistant/runtime:ro
+      - "${RUNTIME_SSH_AGENT_SOURCE:-${HOME}/.local/state/devassistant/runtime-host/ssh-agent.sock}:/run/devassistant/runtime-host/ssh-agent.sock:ro"
+    mem_limit: 128m
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    restart: unless-stopped
+    networks: [telemetry_runtime, telemetry_ssh_egress]
+
   telemetry-collector-runtime:
     build:
       context: ./telemetry-dev
       dockerfile: Dockerfile.collector-runtime
     image: devassistant/otelcol-runtime:0.136.0-phase3
     profiles: [runtime]
-    command: ["--config=/etc/otelcol/collector-runtime.yaml"]
+    entrypoint: ["/bin/sh", "/usr/local/bin/start-runtime-collector.sh"]
     environment:
       TELEMETRY_CLICKHOUSE_USER: ${TELEMETRY_CLICKHOUSE_USER:-telemetry}
       TELEMETRY_CLICKHOUSE_PASSWORD: ${TELEMETRY_CLICKHOUSE_PASSWORD:-telemetry-local-dev-only}
+      TELEMETRY_CLICKHOUSE_DATABASE: ${TELEMETRY_CLICKHOUSE_DATABASE:-telemetry}
       TELEMETRY_RETENTION_HOURS: ${TELEMETRY_RETENTION_HOURS:-168}
       TELEMETRY_AGGREGATION_RETENTION_HOURS: ${TELEMETRY_AGGREGATION_RETENTION_HOURS:-168}
       TELEMETRY_RECORDING_PERCENT: ${TELEMETRY_RECORDING_PERCENT:-10}
     volumes:
-      - ./telemetry-dev/collector-runtime.yaml:/etc/otelcol/collector-runtime.yaml:ro
+      - ./telemetry-dev/start-runtime-collector.sh:/usr/local/bin/start-runtime-collector.sh:ro
       - telemetry-policy-data:/var/lib/devassistant/runtime:ro
     ports:
       - "127.0.0.1:24318:4318"
     depends_on:
-      telemetry-clickhouse:
-        condition: service_healthy
+      telemetry-clickhouse-router:
+        condition: service_started
     mem_limit: 512m
     read_only: true
     cap_drop: [ALL]
     security_opt: [no-new-privileges:true]
+    restart: unless-stopped
+    networks: [telemetry_runtime]
+
+  telemetry-collector-reloader:
+    image: python:3.12-alpine
+    profiles: [runtime]
+    command: ["python", "/usr/local/bin/runtime-collector-reloader.py"]
+    pid: service:telemetry-collector-runtime
+    user: "10001:10001"
+    volumes:
+      - ./telemetry-dev/runtime-collector-reloader.py:/usr/local/bin/runtime-collector-reloader.py:ro
+      - telemetry-policy-data:/var/lib/devassistant/runtime:ro
+      - telemetry-collector-control:/var/lib/devassistant/collector-control
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    restart: unless-stopped
+    depends_on:
+      telemetry-collector-runtime:
+        condition: service_started
     networks: [telemetry_runtime]
 
 volumes:
@@ -237,6 +301,7 @@ volumes:
   neo4j-data:
   telemetry-runtime-data:
   telemetry-policy-data:
+  telemetry-collector-control:
   telemetry-caddy-data:
   telemetry-caddy-config:
 
@@ -246,6 +311,7 @@ networks:
     external: true
   telemetry_runtime:
     internal: true
+  telemetry_ssh_egress: {}
   telemetry_ingress:
     name: devassistant_telemetry_ingress
     internal: true

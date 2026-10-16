@@ -107,6 +107,12 @@ service = CodeIntelligenceIndex()
 async def lifespan(app: FastAPI):
     import asyncio
 
+    try:
+        from telemetry.runtime_storage import initialize_runtime_storage
+        initialize_runtime_storage()
+    except Exception as exc:
+        logging.getLogger(__name__).warning("Runtime Collector target configuration was not applied: %s", exc)
+
     async def telemetry_jobs():
         import time
         from index.storage import storage

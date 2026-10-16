@@ -6,10 +6,13 @@ ENV GOPROXY=https://proxy.golang.org|https://goproxy.io
 RUN go install go.opentelemetry.io/collector/cmd/builder@v0.136.0
 COPY collector-builder.yaml ./collector-builder.yaml
 COPY p95policyprocessor ./p95policyprocessor
+COPY clickhouse-router ./clickhouse-router
 RUN /go/bin/builder --config=collector-builder.yaml
+RUN CGO_ENABLED=0 GO111MODULE=off go build -trimpath -o /build/clickhouse-router ./clickhouse-router
 
 FROM alpine:3.22
-RUN addgroup -S otel && adduser -S -G otel -u 10001 otel
+RUN addgroup -S -g 10001 otel && adduser -S -G otel -u 10001 otel
 COPY --from=builder /build/devassistant-otelcol /usr/local/bin/devassistant-otelcol
+COPY --from=builder /build/clickhouse-router /usr/local/bin/clickhouse-router
 USER 10001:10001
 ENTRYPOINT ["/usr/local/bin/devassistant-otelcol"]
