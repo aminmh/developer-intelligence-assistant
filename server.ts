@@ -710,6 +710,8 @@ async function startServer() {
   registerCodeQualityRoutes(app, {
     apiUrl: PYTHON_API_URL,
     internalSecret: INTERNAL_SECRET,
+    helperUrl: process.env.RUNTIME_HELPER_URL || 'http://127.0.0.1:47831',
+    webOrigin: process.env.WEB_ORIGIN || 'http://localhost:3000',
     getUser: (res) => (res.locals as any).authUser,
     canAccessProject: (user, projectId) => Boolean(user && (authIsBootstrapAdmin(user) || authRoleFor(user, projectId))),
   });

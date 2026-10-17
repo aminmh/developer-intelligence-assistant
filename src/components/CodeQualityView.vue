@@ -2,6 +2,7 @@
 import { computed, onMounted, ref, watch } from 'vue';
 import { AlertCircle, ArrowDownRight, ArrowUpRight, CheckCircle2, GitCompareArrows, LoaderCircle, Play, Save, ShieldCheck } from 'lucide-vue-next';
 import { makeRequest } from '../ui/makeRequest';
+import PerformanceSetup from './code-quality/PerformanceSetup.vue';
 
 const categories = [
   { id: 'security', label: 'Security' },
@@ -25,6 +26,7 @@ type Report = {
 type HistoryRow = Pick<Report, 'report_id' | 'project_id' | 'revision_id' | 'commit_sha' | 'created_at' | 'overall_score' | 'categories' | 'weights' | 'rubric_version' | 'scoring_parameters' | 'model' | 'provider'> & { coverage: number; languages: Record<string, number> };
 
 const projects = ref<ProjectRevision[]>([]);
+const activeTab = ref<'assessment' | 'performance'>('assessment');
 const selectedRevision = ref('');
 const weights = ref<Record<CategoryId, number>>({ security: 20, clean_code: 20, maintainability: 20, reliability: 20, performance: 20 });
 const savedWeights = ref<Record<CategoryId, number>>({ security: 20, clean_code: 20, maintainability: 20, reliability: 20, performance: 20 });
@@ -247,6 +249,12 @@ onMounted(loadProjectsAndPreferences);
       </div>
     </header>
 
+    <nav role="tablist" aria-label="Code Quality sections" class="flex flex-wrap gap-2 border-b border-slate-800 pb-3">
+      <button id="quality-assessment-tab" role="tab" :aria-selected="activeTab === 'assessment'" aria-controls="quality-assessment-panel" class="min-h-10 rounded-lg px-4 text-sm font-medium transition" :class="activeTab === 'assessment' ? 'bg-indigo-500/15 text-indigo-100 ring-1 ring-indigo-400/30' : 'text-slate-400 hover:bg-slate-800 hover:text-slate-100'" @click="activeTab = 'assessment'">Static assessment</button>
+      <button id="quality-performance-tab" role="tab" :aria-selected="activeTab === 'performance'" aria-controls="quality-performance-panel" class="min-h-10 rounded-lg px-4 text-sm font-medium transition" :class="activeTab === 'performance' ? 'bg-indigo-500/15 text-indigo-100 ring-1 ring-indigo-400/30' : 'text-slate-400 hover:bg-slate-800 hover:text-slate-100'" @click="activeTab = 'performance'">Setup Performance</button>
+    </nav>
+
+    <div v-if="activeTab === 'assessment'" id="quality-assessment-panel" role="tabpanel" aria-labelledby="quality-assessment-tab" class="space-y-6">
     <div v-if="error" role="alert" class="flex items-start gap-3 rounded-xl border border-rose-500/30 bg-rose-500/10 p-4 text-sm text-rose-200">
       <AlertCircle class="mt-0.5 shrink-0" :size="18" /><span class="min-w-0 flex-1">{{ error }}</span>
       <button class="shrink-0 rounded-md px-2 py-1 font-medium hover:bg-rose-400/10" @click="retryLastAction">Retry</button>
@@ -368,6 +376,10 @@ onMounted(loadProjectsAndPreferences);
         <p v-else-if="!loadingHistory" class="mt-5 text-sm leading-relaxed text-slate-500">Reports from every indexed revision in the selected project will appear here.</p>
       </aside>
     </section>
+    </div>
+    <div v-else id="quality-performance-panel" role="tabpanel" aria-labelledby="quality-performance-tab">
+      <PerformanceSetup :project-id="selectedProject?.project_id || ''" :revision-id="selectedProject?.revision_id || ''" />
+    </div>
   </section>
 </template>
 
