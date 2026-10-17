@@ -154,6 +154,22 @@ def test_complete_with_model_remote_configured_uses_remote(monkeypatch):
     assert local_client.calls == []
 
 
+def test_complete_with_model_forwards_json_response_format(monkeypatch):
+    _configure_remote(monkeypatch)
+
+    remote_client = _FakeClient(content='{"ok":true}')
+    monkeypatch.setattr(llm, "_get_remote_client", lambda: remote_client)
+    monkeypatch.setattr(llm, "_get_openai_client", lambda: _FakeClient())
+
+    llm.complete_with_model(
+        "return json",
+        provider="remote",
+        response_format={"type": "json_object"},
+    )
+
+    assert remote_client.calls[0]["response_format"] == {"type": "json_object"}
+
+
 def test_complete_with_model_remote_error_falls_back_to_local(monkeypatch):
     _configure_remote(monkeypatch)
 

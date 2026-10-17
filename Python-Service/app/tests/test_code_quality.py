@@ -26,6 +26,7 @@ def test_score_uses_configured_provider(monkeypatch, remote_available, expected_
 
     def complete_with_model(_prompt, **kwargs):
         selected["provider"] = kwargs["provider"]
+        selected.update(kwargs)
         return json.dumps(response), "test-model", kwargs["provider"]
 
     monkeypatch.setattr(llm, "remote_configured", lambda: remote_available)
@@ -40,3 +41,5 @@ def test_score_uses_configured_provider(monkeypatch, remote_available, expected_
     )
 
     assert selected["provider"] == expected_provider
+    assert selected["max_tokens"] == 4096
+    assert selected["response_format"] == {"type": "json_object"}

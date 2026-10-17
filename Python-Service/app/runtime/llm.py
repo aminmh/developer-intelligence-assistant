@@ -275,6 +275,7 @@ def _run_chat(
     temperature: Optional[float] = None,
     top_p: Optional[float] = None,
     max_tokens: int = 2048,
+    response_format: Optional[dict] = None,
 ) -> tuple[str, dict | None]:
     """Run a chat completion and return text plus normalized provider usage."""
     messages: List[dict] = []
@@ -291,6 +292,8 @@ def _run_chat(
         kwargs["temperature"] = temperature
     if top_p is not None:
         kwargs["top_p"] = top_p
+    if response_format is not None:
+        kwargs["response_format"] = response_format
 
     response = client.chat.completions.create(**kwargs)
     content = response.choices[0].message.content if response.choices else ""
@@ -304,6 +307,7 @@ def complete_with_model(
     top_p: Optional[float] = None,
     max_tokens: int = 2048,
     provider: str = "local",
+    response_format: Optional[dict] = None,
 ) -> CompletionResult:
     """Return (content, model_used, provider_used).
 
@@ -322,6 +326,7 @@ def complete_with_model(
                 temperature=temperature,
                 top_p=top_p,
                 max_tokens=max_tokens,
+                response_format=response_format,
             )
             if content:
                 return CompletionResult(content, model, "remote", usage)
@@ -340,6 +345,7 @@ def complete_with_model(
             temperature=temperature,
             top_p=top_p,
             max_tokens=max_tokens,
+            response_format=response_format,
         )
     finally:
         _schedule_local_model_unload(model, enabled=not bool(settings.local_llm_url))

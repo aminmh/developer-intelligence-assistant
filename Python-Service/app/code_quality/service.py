@@ -315,10 +315,11 @@ def _score(
         content, model, provider = complete_with_model(
             prompt,
             system="You are a cautious code quality evaluator. Follow the response schema exactly.",
-            max_tokens=1200,
+            max_tokens=4096,
             temperature=SCORING_PARAMETERS["temperature"],
             top_p=SCORING_PARAMETERS["top_p"],
             provider="remote" if remote_configured() else "local",
+            response_format={"type": "json_object"},
         )
     except Exception as exc:
         raise AssessmentModelUnavailable from exc
