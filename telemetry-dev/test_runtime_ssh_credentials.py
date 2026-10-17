@@ -50,6 +50,30 @@ TEMPORARY_SSH_AGENT_AVAILABLE = _temporary_ssh_agent_available()
 
 
 class RuntimeSshCredentialTests(unittest.TestCase):
+    def test_code_quality_bearer_tokens_use_target_scoped_keychain_item(self):
+        target_id = "12345678-1234-5678-1234-567812345678"
+        with patch.object(credentials, "_provider", return_value="keychain"), \
+                patch.object(credentials, "_keychain_request", return_value={"saved": True}) as request:
+            self.assertEqual(credentials.save_bearer_token(target_id, "test-token"), {"saved": True})
+        action, value = request.call_args.args
+        self.assertEqual(action, "store")
+        self.assertEqual(value, {"token": "test-token"})
+        self.assertEqual(request.call_args.kwargs["service"], credentials.BEARER_SERVICE)
+        self.assertNotEqual(request.call_args.kwargs["account"], credentials.ACCOUNT)
+
+    def test_code_quality_bearer_use_returns_only_the_requested_target_token(self):
+        target_id = "12345678-1234-5678-1234-567812345678"
+        with patch.object(credentials, "_provider", return_value="keychain"), \
+                patch.object(credentials, "_keychain_request", return_value={"found": True, "value": {"token": "target-token"}}) as request:
+            self.assertEqual(credentials.use_bearer_token_for_benchmark(target_id), "target-token")
+        self.assertEqual(request.call_args.kwargs["account"], credentials._bearer_account(target_id))
+
+    def test_code_quality_bearer_token_rejects_invalid_values(self):
+        with self.assertRaisesRegex(ValueError, "valid Bearer token"):
+            credentials.save_bearer_token("12345678-1234-5678-1234-567812345678", " ")
+        with self.assertRaisesRegex(ValueError, "target identity"):
+            credentials.save_bearer_token("not-a-target", "token")
+
     def _generated_key(self, directory: str, name: str, passphrase: str) -> tuple[str, str]:
         key_path = Path(directory) / name
         subprocess.run(

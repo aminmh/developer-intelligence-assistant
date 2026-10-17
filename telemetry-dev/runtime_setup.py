@@ -94,7 +94,8 @@ def helper_origin() -> str:
 
 
 def verify_helper_token(token: str, origin: str, *, operation: str | None = None,
-                        project_id: str | None = None, unscoped: bool = False) -> bool:
+                        project_id: str | None = None, target_id: str | None = None,
+                        unscoped: bool = False) -> bool:
     try:
         head, body, signature = token.split(".")
         expected = base64.urlsafe_b64encode(hmac.new(helper_secret(), f"{head}.{body}".encode(), hashlib.sha256).digest()).decode().rstrip("=")
@@ -104,6 +105,7 @@ def verify_helper_token(token: str, origin: str, *, operation: str | None = None
                 and isinstance(claims.get("exp"), (int, float)) and claims["exp"] >= time.time()
                 and (operation is None or claims.get("operation") == operation)
                 and (project_id is None or claims.get("project_id") == project_id)
+                and (target_id is None or claims.get("target_id") == target_id)
                 and (not unscoped or (claims.get("operation") is None and claims.get("project_id") is None)))
     except (ValueError, OSError, RuntimeError, json.JSONDecodeError):
         return False
@@ -178,7 +180,8 @@ def serve_helper() -> None:
             self.wfile.write(payload)
 
         def _authorized(self, *, operation: str | None = None,
-                        project_id: str | None = None, unscoped: bool = False) -> bool:
+                        project_id: str | None = None, target_id: str | None = None,
+                        unscoped: bool = False) -> bool:
             origin = self.headers.get("Origin", "")
             allowed = helper_origin()
             host = self.headers.get("Host", "")
@@ -189,7 +192,8 @@ def serve_helper() -> None:
                 return False
             token = self.headers.get("Authorization", "")
             return token.startswith("Bearer ") and verify_helper_token(
-                token[7:], origin, operation=operation, project_id=project_id, unscoped=unscoped)
+                token[7:], origin, operation=operation, project_id=project_id,
+                target_id=target_id, unscoped=unscoped)
 
         def _consume_authorization(self) -> bool:
             token_id = hashlib.sha256(self.headers.get("Authorization", "").encode()).hexdigest()
@@ -211,6 +215,48 @@ def serve_helper() -> None:
             self.end_headers()
 
         def do_POST(self) -> None:
+            if self.path in {"/code-quality-bearer", "/code-quality-bearer-use"}:
+                length = self.headers.get("Content-Length", "0")
+                if not length.isdigit() or not 1 <= int(length) <= 12 * 1024:
+                    return self._json(400, {"detail": "Invalid Code Quality credential request."})
+                try:
+                    body = json.loads(self.rfile.read(int(length)))
+                    if not isinstance(body, dict):
+                        raise ValueError
+                    target_id = body.get("target_id")
+                    if not isinstance(target_id, str) or not re.fullmatch(r"[0-9a-fA-F-]{36}", target_id):
+                        raise ValueError
+                except (ValueError, json.JSONDecodeError):
+                    return self._json(400, {"detail": "Invalid Code Quality target identity."})
+                if self.path == "/code-quality-bearer-use":
+                    if not self._authorized(operation="code-quality-benchmark-use", target_id=target_id):
+                        return self._json(403, {"detail": "Benchmark credential authorization is invalid or expired."})
+                    if not self._consume_authorization():
+                        return self._json(403, {"detail": "This benchmark credential authorization has already been used."})
+                    try:
+                        token = ssh_credentials.use_bearer_token_for_benchmark(target_id)
+                        return self._json(200, {"token": token})
+                    except ssh_credentials.CredentialStoreError as exc:
+                        return self._json(423 if exc.locked else 503, {"detail": str(exc)})
+                    except ValueError as exc:
+                        return self._json(422, {"detail": str(exc)})
+                if not self._authorized(operation="code-quality-bearer-manage", target_id=target_id):
+                    return self._json(403, {"detail": "Code Quality credential authorization is invalid or expired."})
+                if not self._consume_authorization():
+                    return self._json(403, {"detail": "This Code Quality credential authorization has already been used."})
+                try:
+                    if body.get("action") == "save":
+                        result = ssh_credentials.save_bearer_token(target_id, body.get("token"))
+                    elif body.get("action") == "status":
+                        result = ssh_credentials.bearer_token_status(target_id)
+                    else:
+                        raise ValueError("Choose save or status.")
+                    return self._json(200, result)
+                except (ValueError, ssh_credentials.CredentialStoreError) as exc:
+                    status = 423 if isinstance(exc, ssh_credentials.CredentialStoreError) and exc.locked else 422
+                    return self._json(status, {"detail": str(exc)})
+                except Exception:
+                    return self._json(503, {"detail": "The Bearer token could not be saved to the OS credential store."})
             if self.path == "/runtime-ssh-config":
                 if not self._authorized(unscoped=True):
                     return self._json(403, {"detail": "Runtime credential authorization is invalid or expired."})
@@ -344,6 +390,27 @@ def serve_helper() -> None:
             return self._json(200, state)
 
         def do_DELETE(self) -> None:
+            if self.path == "/code-quality-bearer":
+                length = self.headers.get("Content-Length", "0")
+                if not length.isdigit() or not 1 <= int(length) <= 2048:
+                    return self._json(400, {"detail": "Invalid Code Quality target identity."})
+                try:
+                    body = json.loads(self.rfile.read(int(length)))
+                    target_id = body.get("target_id") if isinstance(body, dict) else None
+                except (ValueError, json.JSONDecodeError):
+                    target_id = None
+                if not isinstance(target_id, str) or not re.fullmatch(r"[0-9a-fA-F-]{36}", target_id):
+                    return self._json(400, {"detail": "Invalid Code Quality target identity."})
+                if not self._authorized(operation="code-quality-bearer-manage", target_id=target_id):
+                    return self._json(403, {"detail": "Code Quality credential authorization is invalid or expired."})
+                if not self._consume_authorization():
+                    return self._json(403, {"detail": "This Code Quality credential authorization has already been used."})
+                try:
+                    return self._json(200, ssh_credentials.remove_bearer_token(target_id))
+                except ssh_credentials.CredentialStoreError as exc:
+                    return self._json(423 if exc.locked else 503, {"detail": str(exc)})
+                except ValueError as exc:
+                    return self._json(422, {"detail": str(exc)})
             if self.path != "/runtime-ssh-credentials":
                 return self._json(404, {"detail": "Not found."})
             if not self._authorized(unscoped=True):

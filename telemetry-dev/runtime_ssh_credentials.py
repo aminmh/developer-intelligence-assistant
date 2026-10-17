@@ -10,6 +10,7 @@ import socket
 import subprocess
 import sys
 import atexit
+import hashlib
 import tempfile
 
 
@@ -22,6 +23,13 @@ ASKPASS = Path(__file__).with_name("runtime-ssh-askpass.sh")
 KEYCHAIN_HELPER = Path(__file__).with_name("runtime_keychain.swift")
 SHARED_AGENT_SOCKET = Path(os.environ["RUNTIME_SSH_AGENT_SOCKET"]) if os.environ.get("RUNTIME_SSH_AGENT_SOCKET") else None
 PUBLIC_KEY_FILE = STATE_DIR / "runtime-ssh-key.pub"
+BEARER_SERVICE = "com.devassistant.code-quality.bearer"
+
+
+def _bearer_account(target_id: str) -> str:
+    if not re.fullmatch(r"[0-9a-fA-F-]{36}", target_id):
+        raise ValueError("Invalid performance target identity.")
+    return "target-" + hashlib.sha256(target_id.lower().encode("ascii")).hexdigest()
 
 
 class CredentialStoreError(RuntimeError):
@@ -46,8 +54,9 @@ def _run(command: list[str], *, input_data: bytes | None = None) -> subprocess.C
         raise CredentialStoreError("The OS credential store could not be reached. Unlock it and retry.", locked=True) from exc
 
 
-def _keychain_request(action: str, value: dict | None = None) -> dict:
-    request = {"action": action, "account": ACCOUNT, "service": SERVICE}
+def _keychain_request(action: str, value: dict | None = None, *, service: str = SERVICE,
+                      account: str = ACCOUNT) -> dict:
+    request = {"action": action, "account": account, "service": service}
     if value is not None:
         request["value"] = value
     result = _run(["/usr/bin/swift", str(KEYCHAIN_HELPER)],
@@ -56,7 +65,7 @@ def _keychain_request(action: str, value: dict | None = None) -> dict:
         diagnostic = result.stderr.decode("utf-8", "replace").lower()
         locked = "keychain-locked" in diagnostic
         message = ("Unlock the macOS Keychain, then retry." if locked
-                   else "The SSH credential could not be saved to the macOS Keychain.")
+                   else "The OS credential store could not complete this operation.")
         raise CredentialStoreError(message, locked=locked)
     try:
         response = json.loads(result.stdout.decode("utf-8"))
@@ -119,6 +128,84 @@ def _delete_secret() -> None:
         text = result.stderr.decode("utf-8", "replace").lower()
         if any(word in text for word in ("locked", "unlock", "interaction not allowed", "no such secret collection")):
             raise CredentialStoreError("Unlock the macOS Keychain or Linux keyring, then retry.", locked=True)
+
+
+def save_bearer_token(target_id: str, token: str) -> dict:
+    """Store a benchmark token under a target-specific OS credential item."""
+    if not isinstance(token, str) or not token.strip() or len(token) > 8192:
+        raise ValueError("Provide a valid Bearer token up to 8192 characters.")
+    account = _bearer_account(target_id)
+    value = {"token": token.strip()}
+    if _provider() == "keychain":
+        _keychain_request("store", value, service=BEARER_SERVICE, account=account)
+    else:
+        result = _run(["secret-tool", "store", "--label=Developer Assistant Code Quality Bearer token",
+                       "app", account, "purpose", "code-quality-bearer"],
+                      input_data=json.dumps(value, separators=(",", ":")).encode("utf-8"))
+        if result.returncode:
+            text = result.stderr.decode("utf-8", "replace").lower()
+            locked = any(word in text for word in ("locked", "unlock", "interaction not allowed", "no such secret collection"))
+            raise CredentialStoreError("Unlock the OS keyring and retry." if locked else "The Bearer token could not be saved to the OS credential store.", locked=locked)
+    return {"saved": True}
+
+
+def bearer_token_status(target_id: str) -> dict:
+    account = _bearer_account(target_id)
+    if _provider() == "keychain":
+        response = _keychain_request("read", service=BEARER_SERVICE, account=account)
+        value = response.get("value") if response.get("found") is True else None
+    else:
+        result = _run(["secret-tool", "lookup", "app", account, "purpose", "code-quality-bearer"])
+        if result.returncode:
+            text = result.stderr.decode("utf-8", "replace").lower()
+            if any(word in text for word in ("locked", "unlock", "interaction not allowed", "no such secret collection")):
+                raise CredentialStoreError("Unlock the OS keyring and retry.", locked=True)
+            value = None
+        else:
+            try:
+                value = json.loads(result.stdout.decode("utf-8").strip())
+            except (UnicodeError, ValueError) as exc:
+                raise CredentialStoreError("The saved Bearer token is invalid. Replace it and retry.") from exc
+    if value is not None and (not isinstance(value, dict) or not isinstance(value.get("token"), str)):
+        raise CredentialStoreError("The saved Bearer token is invalid. Replace it and retry.")
+    return {"saved": value is not None}
+
+
+def use_bearer_token_for_benchmark(target_id: str) -> str:
+    """Return a target-scoped token only to the one-shot benchmark operation."""
+    account = _bearer_account(target_id)
+    if _provider() == "keychain":
+        response = _keychain_request("read", service=BEARER_SERVICE, account=account)
+        value = response.get("value") if response.get("found") is True else None
+    else:
+        result = _run(["secret-tool", "lookup", "app", account, "purpose", "code-quality-bearer"])
+        if result.returncode:
+            text = result.stderr.decode("utf-8", "replace").lower()
+            if any(word in text for word in ("locked", "unlock", "interaction not allowed", "no such secret collection")):
+                raise CredentialStoreError("Unlock the OS keyring and retry.", locked=True)
+            value = None
+        else:
+            try:
+                value = json.loads(result.stdout.decode("utf-8").strip())
+            except (UnicodeError, ValueError) as exc:
+                raise CredentialStoreError("The saved Bearer token is invalid. Replace it and retry.") from exc
+    token = value.get("token") if isinstance(value, dict) else None
+    if not isinstance(token, str) or not token:
+        raise CredentialStoreError("No Bearer token is saved for this target. Save one and retry.")
+    return token
+
+
+def remove_bearer_token(target_id: str) -> dict:
+    account = _bearer_account(target_id)
+    if _provider() == "keychain":
+        _keychain_request("delete", service=BEARER_SERVICE, account=account)
+    else:
+        result = _run(["secret-tool", "clear", "app", account, "purpose", "code-quality-bearer"])
+        if result.returncode:
+            text = result.stderr.decode("utf-8", "replace").lower()
+            if any(word in text for word in ("locked", "unlock", "interaction not allowed", "no such secret collection")):
+                raise CredentialStoreError("Unlock the OS keyring and retry.", locked=True)
+    return {"deleted": True}
 
 
 def _agent_env() -> dict[str, str]:
