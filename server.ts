@@ -658,55 +658,6 @@ async function startServer() {
     }
   });
 
-  app.get('/api/inspect/projects', async (_req, res) => {
-    try {
-      const pyRes = await fetch(`${PYTHON_API_URL}/api/inspect/projects`, {
-        headers: { 'X-Internal-Secret': INTERNAL_SECRET },
-      });
-      const data = await pyRes.json().catch(() => ({ detail: 'Failed to load indexed projects.' }));
-      if (!pyRes.ok || !Array.isArray(data)) return res.status(pyRes.status).json(data);
-      const user = (res.locals as any).authUser;
-      const visible = data.filter((project: any) => project.project_id
-        ? Boolean(authRoleFor(user, project.project_id))
-        : authIsBootstrapAdmin(user));
-      return res.json(visible);
-    } catch (error: any) {
-      return res.status(500).json({ detail: error?.message || 'Failed to load indexed projects.' });
-    }
-  });
-
-  app.get('/api/inspect/definitions', async (req, res) => {
-    try {
-      const stem = typeof req.query.stem === 'string' ? req.query.stem : '';
-      const collection = typeof req.query.collection === 'string' ? req.query.collection : '';
-      const projectsResponse = await fetch(`${PYTHON_API_URL}/api/inspect/projects`, {
-        headers: { 'X-Internal-Secret': INTERNAL_SECRET },
-      });
-      if (!projectsResponse.ok) return res.status(projectsResponse.status).json({ detail: 'Failed to verify symbol project access.' });
-      const projects = await projectsResponse.json() as any[];
-      const project = projects.find((item) => (collection && item.collection === collection)
-        || (stem && item.stem === stem));
-      const user = (res.locals as any).authUser;
-      if (!project || (project.project_id
-        ? !authRoleFor(user, project.project_id)
-        : !authIsBootstrapAdmin(user))) {
-        return res.status(403).json({ detail: 'Symbol project access denied.' });
-      }
-      const query = new URLSearchParams();
-      for (const key of ['stem', 'collection', 'search', 'kind', 'file', 'offset', 'limit']) {
-        const value = req.query[key];
-        if (typeof value === 'string' && value) query.set(key, value);
-      }
-      const pyRes = await fetch(`${PYTHON_API_URL}/api/inspect/definitions?${query.toString()}`, {
-        headers: { 'X-Internal-Secret': INTERNAL_SECRET },
-      });
-      const data = await pyRes.json().catch(() => ({ detail: 'Failed to load extracted definitions.' }));
-      return res.status(pyRes.status).json(data);
-    } catch (error: any) {
-      return res.status(500).json({ detail: error?.message || 'Failed to load extracted definitions.' });
-    }
-  });
-
   registerCodeQualityRoutes(app, {
     apiUrl: PYTHON_API_URL,
     internalSecret: INTERNAL_SECRET,

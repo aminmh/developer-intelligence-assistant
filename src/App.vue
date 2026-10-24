@@ -9,7 +9,6 @@ import {
   CheckCircle,
   AlertTriangle,
   ScrollText,
-  Code2,
   Database,
   Network,
   Activity,
@@ -29,14 +28,13 @@ import type { PipelineStep } from './components/PipelineProgress.vue';
 const RAGFiles = defineAsyncComponent(() => import('./components/RAGFiles.vue'));
 const RAGConfigComponent = defineAsyncComponent(() => import('./components/RAGConfig.vue'));
 const LogsView = defineAsyncComponent(() => import('./components/LogsView.vue'));
-const DefinitionsView = defineAsyncComponent(() => import('./components/DefinitionsView.vue'));
 const DatabaseSchemaView = defineAsyncComponent(() => import('./components/DatabaseSchemaView.vue'));
 const DomainKnowledgeView = defineAsyncComponent(() => import('./components/DomainKnowledgeView.vue'));
 const RuntimeView = defineAsyncComponent(() => import('./components/RuntimeView.vue'));
 const CodeQualityView = defineAsyncComponent(() => import('./components/CodeQualityView.vue'));
 
-type AppTab = 'chat' | 'files' | 'config' | 'logs' | 'definitions' | 'schema' | 'domain' | 'runtime' | 'code-quality';
-const VALID_TABS: AppTab[] = ['chat', 'files', 'config', 'logs', 'definitions', 'schema', 'domain', 'runtime', 'code-quality'];
+type AppTab = 'chat' | 'files' | 'config' | 'logs' | 'schema' | 'domain' | 'runtime' | 'code-quality';
+const VALID_TABS: AppTab[] = ['chat', 'files', 'config', 'logs', 'schema', 'domain', 'runtime', 'code-quality'];
 const tabFromUrl = (): AppTab => {
   const value = new URLSearchParams(window.location.search).get('tab');
   return VALID_TABS.includes(value as AppTab) ? value as AppTab : 'chat';
@@ -66,18 +64,6 @@ watch(activeTab, (tab) => {
 const syncTabFromHistory = () => {
   handlingHistoryNavigation = true;
   activeTab.value = tabFromUrl();
-  handlingHistoryNavigation = false;
-};
-const openDefinitionDeepLink = (projectId: string, revisionId: string, symbolId: string) => {
-  const url = new URL(window.location.href);
-  url.searchParams.set('tab', 'definitions');
-  url.searchParams.set('project_id', projectId);
-  url.searchParams.set('revision_id', revisionId);
-  url.searchParams.delete('commit_sha');
-  url.searchParams.set('symbol_id', symbolId);
-  window.history.pushState(window.history.state, '', url);
-  handlingHistoryNavigation = true;
-  activeTab.value = 'definitions';
   handlingHistoryNavigation = false;
 };
 const activeSourceFields = () => {
@@ -1013,16 +999,6 @@ onUnmounted(() => window.removeEventListener('popstate', syncTabFromHistory));
         </button>
 
         <button
-          @click="activeTab = 'definitions'"
-          class="w-full flex items-center gap-3 py-3 rounded-xl text-sm font-medium transition-all"
-          :class="[sidebarCollapsed ? 'justify-center px-2' : 'px-4', activeTab === 'definitions' ? 'bg-indigo-600 text-white shadow-md shadow-indigo-600/20' : 'text-slate-400 hover:text-white hover:bg-slate-800/50']"
-          title="Extracted Definitions"
-        >
-          <Code2 class="w-4 h-4" />
-          <span v-if="!sidebarCollapsed">Extracted Definitions</span>
-        </button>
-
-        <button
           @click="activeTab = 'schema'"
           class="w-full flex items-center gap-3 py-3 rounded-xl text-sm font-medium transition-all"
           :class="[sidebarCollapsed ? 'justify-center px-2' : 'px-4', activeTab === 'schema' ? 'bg-indigo-600 text-white shadow-md shadow-indigo-600/20' : 'text-slate-400 hover:text-white hover:bg-slate-800/50']"
@@ -1109,7 +1085,6 @@ onUnmounted(() => window.removeEventListener('popstate', syncTabFromHistory));
             <span v-else-if="activeTab === 'files'">Document Chunker & Vector Indexer</span>
             <span v-else-if="activeTab === 'config'">RAG Pipeline Configurations</span>
             <span v-else-if="activeTab === 'logs'">Developer Logs</span>
-            <span v-else-if="activeTab === 'definitions'">Extracted Definitions</span>
             <span v-else-if="activeTab === 'schema'">Database Schema</span>
             <span v-else-if="activeTab === 'domain'">Domain Knowledge</span>
             <span v-else-if="activeTab === 'runtime'">Runtime telemetry</span>
@@ -1180,13 +1155,11 @@ onUnmounted(() => window.removeEventListener('popstate', syncTabFromHistory));
 
       <LogsView v-else-if="activeTab === 'logs'" />
 
-      <DefinitionsView v-else-if="activeTab === 'definitions'" />
-
       <DatabaseSchemaView v-else-if="activeTab === 'schema'" />
 
       <DomainKnowledgeView v-else-if="activeTab === 'domain'" @ask-about-concept="askAboutDomainConcept" />
 
-      <RuntimeView v-else-if="activeTab === 'runtime'" :use-remote="useRemote" @open-definition="openDefinitionDeepLink" />
+      <RuntimeView v-else-if="activeTab === 'runtime'" :use-remote="useRemote" />
       <CodeQualityView v-else-if="activeTab === 'code-quality'" />
       </div>
       </Transition>

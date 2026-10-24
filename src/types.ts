@@ -56,6 +56,7 @@ export interface AppearancePreferences {
   codeFontFamily: CodeFontFamily;
   showSystemMonitor: boolean;
   showWelcomeBanner: boolean;
+  lowPerformanceMode: boolean;
 }
 
 export interface OllamaImportFile {
@@ -321,7 +322,6 @@ export interface RuntimeSnapshotData {
   commit_sha: string;
   revision_id: string | null;
   snapshot: Record<string, any>;
-  definitions: ExtractedDefinition[];
   symbol_index_available?: boolean;
   symbol_index_reason?: string | null;
   deployments: RuntimeContainer[];
@@ -419,40 +419,6 @@ export interface DeveloperLogsResponse {
   limit: number;
   has_more: boolean;
   deletion_mode: 'soft' | 'hard';
-}
-
-export type DefinitionKind =
-  | 'class' | 'interface' | 'trait' | 'enum' | 'method'
-  | 'property' | 'class_const' | 'function' | 'const';
-
-export interface IndexedSymbolProject {
-  collection: string;
-  stem: string;
-  definitions: number;
-  project_id?: string | null;
-  commit_sha?: string | null;
-  revision_id?: string | null;
-}
-
-export interface ExtractedDefinition {
-  symbol_id?: string | null;
-  kind: DefinitionKind | string;
-  name: string;
-  fqn: string;
-  file: string;
-  line?: number | null;
-  end_line?: number | null;
-  visibility?: string | null;
-  static?: boolean | null;
-  abstract?: boolean | null;
-  owner?: string | null;
-}
-
-export interface ExtractedDefinitionsResponse {
-  items: ExtractedDefinition[];
-  total: number;
-  offset: number;
-  limit: number;
 }
 
 export interface AnalysisSession {

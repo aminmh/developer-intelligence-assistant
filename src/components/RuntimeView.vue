@@ -10,10 +10,6 @@ import type { RuntimeAnalysisFinding, RuntimeDatabaseCall, RuntimeDiffPreview, R
 
 const props = defineProps<{ useRemote: boolean }>();
 
-const emit = defineEmits<{
-  (event: 'openDefinition', projectId: string, revisionId: string, symbolId: string): void;
-}>();
-
 const projects = ref<RuntimeProjectRecord[]>([]);
 const selectedKey = ref('');
 const loadedDetailKey = ref('');
@@ -328,11 +324,7 @@ const formatMilliseconds = (value: number | null) => value == null ? 'Unavailabl
 const formatPhpCpu = (value: number | null) => value == null ? 'Unavailable' : `${(value / 1000).toFixed(2)} ms`;
 const formatPhpMemory = (value: number | null) => value == null ? 'Unavailable' : value >= 1024 * 1024 ? `${(value / 1024 / 1024).toFixed(2)} MiB` : `${(value / 1024).toFixed(1)} KiB`;
 const displayTable = (tableId: string) => tableId.replace(/^table:/, '').split('.').slice(1).join('.') || tableId;
-const displaySymbol = (symbolId: string | null) => {
-  if (!symbolId) return 'Unavailable';
-  const definition = detail.value?.definitions.find((item) => item.symbol_id === symbolId);
-  return definition?.fqn || definition?.name || symbolId;
-};
+const displaySymbol = (symbolId: string | null) => symbolId || 'Unavailable';
 const goToRequestPage = (page: number) => {
   requestPage.value = Math.max(1, Math.min(page, requestPageCount.value));
 };
@@ -605,10 +597,6 @@ const removeLocalContainers = async () => {
 };
 const formatCount = (value: number | string) => Number(value || 0).toLocaleString();
 const formatTime = (value?: string | null) => value ? new Date(value).toLocaleString() : 'No observed calls';
-const openDefinition = (symbolId?: string | null) => {
-  if (selected.value?.revision_id && symbolId) emit('openDefinition', selected.value.project_id, selected.value.revision_id, symbolId);
-};
-
 watch(selectedKey, () => {
   requestPage.value = 1;
   void loadDetail();
@@ -858,9 +846,9 @@ onUnmounted(() => stopRuntimeUpdates?.());
                     </div>
                     <div v-if="requestDetails[request.trace_id].method_activity?.edges.length" class="space-y-2">
                       <div v-for="edge in requestDetails[request.trace_id].method_activity?.edges" :key="`${edge.caller_symbol_id}:${edge.symbol_id}`" class="flex flex-wrap items-center gap-2 rounded bg-slate-900/70 px-3 py-2 text-sm">
-                        <button type="button" class="min-w-0 break-all text-left font-mono text-slate-300 underline decoration-slate-600 underline-offset-2" @click="openDefinition(edge.caller_symbol_id)">{{ displaySymbol(edge.caller_symbol_id) }}</button>
+                        <span class="min-w-0 break-all text-left font-mono text-slate-300">{{ displaySymbol(edge.caller_symbol_id) }}</span>
                         <span aria-hidden="true" class="text-slate-500">→</span>
-                        <button type="button" class="min-w-0 break-all text-left font-mono text-cyan-200 underline decoration-cyan-900 underline-offset-2" @click="openDefinition(edge.symbol_id)">{{ displaySymbol(edge.symbol_id) }}</button>
+                        <span class="min-w-0 break-all text-left font-mono text-cyan-200">{{ displaySymbol(edge.symbol_id) }}</span>
                         <span class="ml-auto text-violet-200">{{ formatCount(edge.calls) }} calls</span>
                       </div>
                     </div>
