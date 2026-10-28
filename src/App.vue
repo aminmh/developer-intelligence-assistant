@@ -25,7 +25,7 @@ import RAGChat from './components/RAGChat.vue';
 import type { DomainConcept, AnalysisSession } from './types';
 import type { PipelineStep } from './components/PipelineProgress.vue';
 
-const RAGFiles = defineAsyncComponent(() => import('./components/RAGFiles.vue'));
+const KnowledgeBaseView = defineAsyncComponent(() => import('./components/KnowledgeBaseView.vue'));
 const RAGConfigComponent = defineAsyncComponent(() => import('./components/RAGConfig.vue'));
 const LogsView = defineAsyncComponent(() => import('./components/LogsView.vue'));
 const DatabaseSchemaView = defineAsyncComponent(() => import('./components/DatabaseSchemaView.vue'));
@@ -58,6 +58,7 @@ watch(activeTab, (tab) => {
   const url = new URL(window.location.href);
   if (tab === 'chat') url.searchParams.delete('tab');
   else url.searchParams.set('tab', tab);
+  url.searchParams.delete('panel');
   window.history.pushState(window.history.state, '', url);
 }, { flush: 'sync' });
 
@@ -912,6 +913,7 @@ onUnmounted(() => window.removeEventListener('popstate', syncTabFromHistory));
     :data-neon="appearance.preferences.neonBorder"
     :data-ui-font="appearance.preferences.uiFontFamily"
     :data-code-font="appearance.preferences.codeFontFamily"
+    :data-low-performance="appearance.preferences.lowPerformanceMode"
   >
     
     <!-- Sidebar navigation & Quick Config -->
@@ -971,10 +973,10 @@ onUnmounted(() => window.removeEventListener('popstate', syncTabFromHistory));
           @click="activeTab = 'files'" 
           class="w-full flex items-center gap-3 py-3 rounded-xl text-sm font-medium transition-all"
           :class="[sidebarCollapsed ? 'justify-center px-2' : 'px-4', activeTab === 'files' ? 'bg-indigo-600 text-white shadow-md shadow-indigo-600/20' : 'text-slate-400 hover:text-white hover:bg-slate-800/50']"
-          title="Knowledge Base (Files)"
+          title="Knowledge Base"
         >
           <FileText class="w-4 h-4" />
-          <span v-if="!sidebarCollapsed">Knowledge Base (Files)</span>
+          <span v-if="!sidebarCollapsed">Knowledge Base</span>
           <span v-if="!sidebarCollapsed && files.length > 0" class="ml-auto bg-slate-900/60 text-slate-300 text-[10px] px-2 py-0.5 rounded-full font-mono">{{ files.length }}</span>
         </button>
 
@@ -1082,7 +1084,7 @@ onUnmounted(() => window.removeEventListener('popstate', syncTabFromHistory));
           <BookOpen class="w-4 h-4 text-indigo-400" />
           <h2 class="text-sm font-semibold text-white">
             <span v-if="activeTab === 'chat'">Codebase Chat</span>
-            <span v-else-if="activeTab === 'files'">Document Chunker & Vector Indexer</span>
+            <span v-else-if="activeTab === 'files'">Knowledge Base</span>
             <span v-else-if="activeTab === 'config'">RAG Pipeline Configurations</span>
             <span v-else-if="activeTab === 'logs'">Developer Logs</span>
             <span v-else-if="activeTab === 'schema'">Database Schema</span>
@@ -1095,7 +1097,7 @@ onUnmounted(() => window.removeEventListener('popstate', syncTabFromHistory));
         <!-- Status indicator -->
         <div class="flex items-center gap-4">
           <div class="flex items-center gap-2 text-xs text-slate-400 bg-slate-900 px-3 py-1.5 rounded-lg border border-slate-800">
-            <span class="w-2 h-2 rounded-full bg-emerald-500 animate-pulse"></span>
+            <span class="w-2 h-2 rounded-full bg-emerald-500" :class="appearance.preferences.lowPerformanceMode ? '' : 'animate-pulse'"></span>
             <span>RAG System:</span>
             <span class="font-mono text-slate-200 uppercase">Ready</span>
           </div>
@@ -1117,6 +1119,7 @@ onUnmounted(() => window.removeEventListener('popstate', syncTabFromHistory));
         :generatingAnswer="generatingAnswer"
         :showSystemMonitor="appearance.preferences.showSystemMonitor"
         :showWelcomeBanner="appearance.preferences.showWelcomeBanner"
+        :lowPerformanceMode="appearance.preferences.lowPerformanceMode"
         @sendMessage="sendMessage"
         @attachZip="attachZip"
         @selectAttachment="selectAttachment"
@@ -1130,7 +1133,7 @@ onUnmounted(() => window.removeEventListener('popstate', syncTabFromHistory));
         @cancelSend="cancelGateSend"
       />
 
-      <RAGFiles
+      <KnowledgeBaseView
         v-else-if="activeTab === 'files'"
         :files="files"
         :uploading="uploading"
@@ -1139,6 +1142,7 @@ onUnmounted(() => window.removeEventListener('popstate', syncTabFromHistory));
         :indexingProgress="indexingProgress"
         :indexedFileIds="indexedFileIds"
         :embeddingProvider="config.embeddingProvider"
+        :project-id="uploadProjectId.trim()"
         @uploadFiles="processFiles"
         @deleteFile="deleteFile"
         @indexFile="indexFile"

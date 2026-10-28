@@ -18,7 +18,7 @@ const props = defineProps<{
   uploading: boolean;
   uploadProgress: Record<string, number>;
   parsingFileId: string | null;
-  indexingProgress: { total: number; indexed: number; status: string; stage?: string; error?: string };
+  indexingProgress: { total: number; indexed: number; status: string; stage?: string; error?: string; graph_status?: string; graph_index_complete?: boolean; graph_nodes?: number; graph_relations?: number };
   indexedFileIds: Set<string>;
   embeddingProvider: 'ollama' | 'openAICompatible' | 'cohere';
 }>();
@@ -40,6 +40,7 @@ const progressStageMessage: Record<string, string> = {
   queued: 'Queueing Cohere rebuild...',
   extracting: 'Preparing source revision...',
   embedding: 'Embedding project chunks...',
+  graph_indexing: 'Checking Neo4j and writing the project graph...',
   upserting: 'Saving embeddings...',
   activating: 'Activating new embeddings...',
 };
@@ -310,6 +311,9 @@ const handleIndexFile = () => {
               </div>
               <p v-if="indexingProgress.status === 'error' && activeFileId === file.id" role="alert" class="text-[10px] text-rose-300">
                 {{ indexingProgress.error || 'Embedding failed. Check the API service and retry.' }}
+              </p>
+              <p v-if="parsingFileId === file.id && indexingProgress.graph_status" class="text-[10px] text-slate-400" aria-live="polite">
+                Neo4j graph: {{ indexingProgress.graph_status === 'ready' && indexingProgress.graph_index_complete ? `complete (${indexingProgress.graph_nodes ?? 0} symbols, ${indexingProgress.graph_relations ?? 0} relationships)` : indexingProgress.graph_status }}
               </p>
             </div>
           </div>

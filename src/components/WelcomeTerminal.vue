@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { onMounted, onUnmounted, ref } from 'vue';
+import { onMounted, onUnmounted, ref, watch } from 'vue';
 
 const TYPE_DELAY_MS = 28;
 const PAUSE_DELAY_MS = 1800;
@@ -23,9 +23,10 @@ status: ready`;
 const displayedText = ref('');
 const reducedMotion = ref(false);
 
-defineProps<{
+const props = withDefaults(defineProps<{
   generatingAnswer: boolean;
-}>();
+  lowPerformanceMode?: boolean;
+}>(), { lowPerformanceMode: false });
 
 let animationTimer: ReturnType<typeof setTimeout> | null = null;
 let mediaQuery: MediaQueryList | null = null;
@@ -51,13 +52,13 @@ const schedule = (callback: () => void, delay: number) => {
 };
 
 const startAnimation = () => {
-  if (reducedMotion.value) {
+  if (reducedMotion.value || props.lowPerformanceMode) {
     setStaticContent();
     return;
   }
 
   const type = (index: number) => {
-    if (reducedMotion.value) {
+    if (reducedMotion.value || props.lowPerformanceMode) {
       setStaticContent();
       return;
     }
@@ -71,7 +72,7 @@ const startAnimation = () => {
   };
 
   const erase = (index: number) => {
-    if (reducedMotion.value) {
+    if (reducedMotion.value || props.lowPerformanceMode) {
       setStaticContent();
       return;
     }
@@ -96,6 +97,11 @@ const handleMotionPreferenceChange = (event: MediaQueryListEvent) => {
     startAnimation();
   }
 };
+
+watch(() => props.lowPerformanceMode, (enabled) => {
+  if (enabled) setStaticContent();
+  else startAnimation();
+});
 
 onMounted(() => {
   mediaQuery = window.matchMedia('(prefers-reduced-motion: reduce)');
@@ -123,14 +129,14 @@ onUnmounted(() => {
       <span class="h-2.5 w-2.5 rounded-full bg-emerald-400/80"></span>
       <span class="ml-2 text-[10px] font-mono uppercase tracking-wider text-slate-500">developer-assistant</span>
       <span class="ml-auto flex items-center gap-1.5 text-[10px] font-mono text-emerald-400/80">
-        <span class="h-1.5 w-1.5 rounded-full bg-emerald-400" :class="reducedMotion ? '' : 'animate-pulse'"></span>
+        <span class="h-1.5 w-1.5 rounded-full bg-emerald-400" :class="reducedMotion || props.lowPerformanceMode ? '' : 'animate-pulse'"></span>
         ready
       </span>
     </div>
 
     <div class="relative p-3 text-left text-[11px] leading-5 text-slate-300 sm:p-4 sm:text-xs">
       <pre class="invisible m-0 whitespace-pre-wrap break-words font-mono" aria-hidden="true">{{ terminalContent }}</pre>
-      <pre class="absolute inset-3 m-0 whitespace-pre-wrap break-words font-mono sm:inset-4" aria-hidden="true">{{ displayedText }}<span class="text-emerald-400" :class="reducedMotion ? '' : 'animate-pulse'">▋</span></pre>
+      <pre class="absolute inset-3 m-0 whitespace-pre-wrap break-words font-mono sm:inset-4" aria-hidden="true">{{ displayedText }}<span class="text-emerald-400" :class="reducedMotion || props.lowPerformanceMode ? '' : 'animate-pulse'">▋</span></pre>
     </div>
   </section>
 </template>

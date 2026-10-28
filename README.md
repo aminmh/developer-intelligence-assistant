@@ -62,6 +62,42 @@ For a lower-memory production launch with an external OIDC provider, configure
 different provider URL, then run `make up-lite` (or `just up-lite` from the
 workspace root). This mode does not start Keycloak.
 
+## Optional local Outline knowledge base
+
+Outline can run locally for authoring business rules used by Code Quality. It
+uses the existing local Keycloak realm for sign-in, with PostgreSQL and Redis
+in separate Compose containers. It is excluded from `just up-dev` and the
+regular Web startup commands.
+
+Start it explicitly from the workspace root:
+
+```sh
+just outline-up
+```
+
+Then open `http://localhost:3020` and sign in as `developer-admin` with the
+password stored in `KEYCLOAK_BOOTSTRAP_PASSWORD`. If `web/.env` does not exist,
+copy `.env.example` to `.env` and configure the existing Keycloak settings
+first. The command generates missing Outline and database secrets in the
+ignored `web/.env` file, provisions the Outline OIDC client in the existing
+realm, and starts the Outline profile. The Outline port binds to loopback. Its
+PostgreSQL database and uploaded files persist in named Docker volumes.
+
+Use `just outline-status` and `just outline-logs` to inspect the service. Stop
+and remove only the Outline, PostgreSQL, and Redis containers with
+`just outline-down`; this preserves database and file volumes and leaves the
+shared Keycloak service running. Starting Outline does not require putting an
+Outline container into the normal development profile.
+
+In Code Quality, select a project and open **Business rules**. Create a dedicated
+Outline collection for that project, generate a read-only API token for an
+Outline user who can read those documents, load the collection list, and save
+the selected collection. For the local profile, use http://outline:3000 as the
+instance URL; this service name resolves on the application Docker network.
+Tokens are stored in the host macOS Keychain or Linux Secret Service. Code
+Quality synchronizes documents before each assessment and never writes to
+Outline. Existing locally stored rules can be exported from that tab as
+Markdown for manual migration.
 
 Runtime request details also include a trace summary with de-overlapped MySQL/Redis span estimates
 and retained Excimer hotspots when available. Remaining request time can include uninstrumented

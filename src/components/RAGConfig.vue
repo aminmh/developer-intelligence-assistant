@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { Activity, Database, Layers3, Palette, Sliders, Wrench } from 'lucide-vue-next';
-import { ref } from 'vue';
 import type { AppearancePreferences, RAGConfig } from '../types';
+import { useUrlTab } from '../composables/useUrlTab';
 import AppearanceCard from './config/AppearanceCard.vue';
 import LlmProvidersCard from './config/LlmProvidersCard.vue';
 import GpuOffloadCard from './config/GpuOffloadCard.vue';
@@ -20,7 +20,8 @@ const props = defineProps<{
   appearance: AppearancePreferences;
 }>();
 
-const activeSection = ref<'appearance' | 'models' | 'retrieval' | 'tools' | 'runtime'>('appearance');
+type ConfigSection = 'appearance' | 'models' | 'retrieval' | 'tools' | 'runtime';
+const activeSection = useUrlTab<ConfigSection>({ values: ['appearance', 'models', 'retrieval', 'tools', 'runtime'], fallback: 'appearance' });
 
 const emit = defineEmits<{
   (e: 'saveConfig'): void;

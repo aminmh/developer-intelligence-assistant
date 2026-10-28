@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { Activity, Monitor, Moon, Palette, Sparkles, Sun, Type } from 'lucide-vue-next';
+import { Activity, Gauge, Monitor, Moon, Palette, Sparkles, Sun, Type } from 'lucide-vue-next';
 import type {
   AppearanceAccent,
   AppearanceMode,
@@ -192,13 +192,17 @@ const selectPalette = (option: (typeof paletteOptions)[number]) => {
       </div>
     </div>
 
-    <div class="border-t border-slate-800 pt-4 grid grid-cols-1 sm:grid-cols-2 gap-3">
+    <div class="border-t border-slate-800 pt-4 grid grid-cols-1 md:grid-cols-3 gap-3">
       <ToggleCard :model-value="appearance.showWelcomeBanner" label="Welcome banner" description="Animated terminal introduction" @update:model-value="update('showWelcomeBanner', $event)">
         <template #icon><Sparkles class="h-4 w-4 shrink-0 text-cyan-300" /></template>
       </ToggleCard>
 
       <ToggleCard :model-value="appearance.showSystemMonitor" label="System monitor" description="CPU, RAM, temperature, and GPU" @update:model-value="update('showSystemMonitor', $event)">
         <template #icon><Activity class="h-4 w-4 shrink-0 text-emerald-300" /></template>
+      </ToggleCard>
+
+      <ToggleCard :model-value="appearance.lowPerformanceMode" label="Low-performance mode" description="Reduce decorative motion and refresh system metrics every 10 seconds" @update:model-value="update('lowPerformanceMode', $event)">
+        <template #icon><Gauge class="h-4 w-4 shrink-0 text-amber-300" /></template>
       </ToggleCard>
     </div>
   </section>

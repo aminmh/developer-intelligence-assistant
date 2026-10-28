@@ -7,6 +7,7 @@ NETWORK ?= devassistant_net
 
 .PHONY: help network build up up-lite down stop restart logs ps \
         dev dev-build dev-down dev-logs dev-shell \
+        outline-up outline-down outline-status outline-logs \
         shell exec lint rebuild clean prune
 
 help:
@@ -27,6 +28,10 @@ help:
 	@echo "  make dev-down        - Stop and remove the dev web service"
 	@echo "  make dev-logs        - Follow dev web logs"
 	@echo "  make dev-shell       - Open shell in the dev web container"
+	@echo "  make outline-up      - Start the optional local Outline knowledge base"
+	@echo "  make outline-down    - Stop and remove Outline containers, preserving data"
+	@echo "  make outline-status  - Show Outline stack status"
+	@echo "  make outline-logs    - Follow Outline application logs"
 	@echo "  make lint            - Run tsc --noEmit inside the dev container"
 	@echo "  make rebuild         - Rebuild and restart the production web service"
 	@echo "  make clean           - Remove compose stack and orphans"
@@ -80,6 +85,18 @@ dev-logs:
 
 dev-shell:
 	$(COMPOSE) exec $(DEV_SERVICE) /bin/sh
+
+outline-up:
+	python3 scripts/outline_stack.py up
+
+outline-down:
+	python3 scripts/outline_stack.py down
+
+outline-status:
+	python3 scripts/outline_stack.py status
+
+outline-logs:
+	python3 scripts/outline_stack.py logs
 
 lint:
 	$(COMPOSE) exec $(DEV_SERVICE) npm run lint

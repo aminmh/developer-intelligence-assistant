@@ -37,7 +37,7 @@
     {
       "id": "3ca3f484-5ef2-4c37-a8e8-d55d0cf47fb8",
       "username": "developer-admin",
-      "email": "developer-admin@localhost",
+      "email": "developer-admin@developer-assistant.test",
       "emailVerified": true,
       "enabled": true,
       "credentials": [

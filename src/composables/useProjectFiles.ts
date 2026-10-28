@@ -22,7 +22,7 @@ export interface ProjectFileState {
   uploading: Ref<boolean>;
   uploadProgress: Ref<Record<string, number>>;
   parsingFileId: Ref<string | null>;
-  indexingProgress: Ref<{ total: number; indexed: number; status: string; stage?: string; error?: string }>;
+  indexingProgress: Ref<{ total: number; indexed: number; status: string; stage?: string; error?: string; graph_status?: string; graph_index_complete?: boolean; graph_nodes?: number; graph_relations?: number }>;
   indexedFileIds: Ref<Set<string>>;
   activeFileName: Ref<string | null>;
   activeFileId: Ref<string | null>;
@@ -51,7 +51,7 @@ export function useProjectFiles({ triggerToast, getUploadIdentity }: UseProjectF
   // Per-file upload progress (0-1) for files going through the TUS path.
   const uploadProgress = ref<Record<string, number>>({});
   const parsingFileId = ref<string | null>(null);
-  const indexingProgress = ref<{ total: number; indexed: number; status: string; stage?: string; error?: string }>({ total: 0, indexed: 0, status: '' });
+  const indexingProgress = ref<{ total: number; indexed: number; status: string; stage?: string; error?: string; graph_status?: string; graph_index_complete?: boolean; graph_nodes?: number; graph_relations?: number }>({ total: 0, indexed: 0, status: '' });
   const indexedFileIds = ref<Set<string>>(new Set());
   const activeFileName = ref<string | null>(null);
   const activeFileId = ref<string | null>(null);
@@ -226,7 +226,14 @@ export function useProjectFiles({ triggerToast, getUploadIdentity }: UseProjectF
           indexingProgress.value = status;
           if (status.status === 'done') {
             clearInterval(poll);
-            triggerToast(`Code indexed — ${status.indexed}/${status.total} chunks in collection ${status.collection_name || ''}`, true);
+            if (status.graph_index_complete !== true) {
+              const error = 'The Neo4j graph could not be verified complete. Retry after checking Neo4j readiness.';
+              indexingProgress.value = { ...status, status: 'error', stage: 'error', graph_status: 'unverified', error };
+              triggerToast(`Indexing stopped: ${error}`, false);
+              parsingFileId.value = null;
+              return;
+            }
+            triggerToast(`Code indexed — ${status.indexed}/${status.total} chunks; Neo4j graph complete with ${status.graph_nodes ?? 0} symbols and ${status.graph_relations ?? 0} relationships.`, true);
             indexedFileIds.value = new Set(indexedFileIds.value).add(id);
             await fetchFiles();
             parsingFileId.value = null;

@@ -533,6 +533,29 @@ select:not([multiple]) {
 .monitor-wave-orange { color: #FF9100; }
 .monitor-wave-red { color: #FF1744; }
 
+/* Keep decorative background effects out of the hot path when requested. */
+.app-shell[data-low-performance="true"] .app-sidebar,
+.app-shell[data-low-performance="true"] .app-header,
+.app-shell[data-low-performance="true"] .brand-logo,
+.app-shell[data-low-performance="true"] .brand-logo-ring-a,
+.app-shell[data-low-performance="true"] .brand-logo-ring-b,
+.app-shell[data-low-performance="true"] .brand-logo-network,
+.app-shell[data-low-performance="true"] .brand-logo-node,
+.app-shell[data-low-performance="true"] .brand-logo-core,
+.app-shell[data-low-performance="true"] .brand-title,
+.app-shell[data-low-performance="true"] .brand-subtitle,
+.app-shell[data-low-performance="true"] .monitor-wave,
+.app-shell[data-low-performance="true"] .monitor-wave::before,
+.app-shell[data-low-performance="true"] .monitor-wave::after,
+.app-shell[data-low-performance="true"] [class*="border-slate-800"]:not([class*="border-b"]):not([class*="border-t"]):not([class*="border-l"]):not([class*="border-r"]),
+.app-shell[data-low-performance="true"] [class*="border-slate-700"]:not([class*="border-b"]):not([class*="border-t"]):not([class*="border-l"]):not([class*="border-r"]) {
+  animation: none !important;
+}
+
+.app-shell[data-low-performance="true"] .monitor-wave {
+  transition: none !important;
+}
+
 @keyframes brand-logo-breathe {
   0%, 100% {
     box-shadow: 0 0 0 1px rgb(99 102 241 / 0.28), 0 0 18px rgb(99 102 241 / 0.12);

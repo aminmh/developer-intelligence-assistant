@@ -444,7 +444,9 @@ async function startServer() {
 
   // Set large JSON limit for uploading larger documents (including base64 PDF strings,
   // and extracted plain text handed back by python-api's large-file TUS pipeline)
-  app.use(express.json({ limit: '100mb' }));
+  app.use(express.json({ limit: '100mb', verify: (req, _res, buf) => {
+    if ((req as any).path === '/api/code-quality/github/webhook') (req as any).rawBody = Buffer.from(buf);
+  } }));
   app.use(express.urlencoded({ limit: '100mb', extended: true }));
 
   // Dockerfile language intelligence is isolated from runtime management.
@@ -665,6 +667,7 @@ async function startServer() {
     webOrigin: process.env.WEB_ORIGIN || 'http://localhost:3000',
     getUser: (res) => (res.locals as any).authUser,
     canAccessProject: (user, projectId) => Boolean(user && (authIsBootstrapAdmin(user) || authRoleFor(user, projectId))),
+    isGlobalAdmin: (user) => Boolean(user && authIsBootstrapAdmin(user)),
   });
 
   app.get('/api/runtime/projects', async (_req, res) => {

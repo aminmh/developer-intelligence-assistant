@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ref, onMounted, onUnmounted } from 'vue';
+import { ref, watch, onMounted, onUnmounted } from 'vue';
 import {
   Activity,
   Cpu,
@@ -12,12 +12,16 @@ import {
 } from 'lucide-vue-next';
 import { makeRequest } from '../ui/makeRequest';
 
+const props = defineProps<{ lowPerformanceMode: boolean }>();
+
 const stats = ref<any>({ online: false });
 const expanded = ref(true);
-const polling = ref(true);
 
-const POLL_INTERVAL_MS = 2000;
+const NORMAL_POLL_INTERVAL_MS = 2000;
+const LOW_PERFORMANCE_POLL_INTERVAL_MS = 10000;
 let pollTimer: ReturnType<typeof setInterval> | null = null;
+let mounted = false;
+let requestInFlight = false;
 
 const pct = (v: unknown): number => {
   const n = Number(v);
@@ -42,21 +46,38 @@ const gb = (bytes: unknown): string => {
 };
 
 const load = async () => {
+  if (requestInFlight) return;
+  requestInFlight = true;
   try {
     const res = await makeRequest('/api/sysmon');
     const data = await res.json();
     stats.value = { online: true, ...data };
   } catch {
     stats.value = { online: false };
+  } finally {
+    requestInFlight = false;
   }
 };
 
-onMounted(() => {
+const restartPolling = () => {
+  if (!mounted) return;
+  if (pollTimer) clearInterval(pollTimer);
   load();
-  pollTimer = setInterval(load, POLL_INTERVAL_MS);
+  const interval = props.lowPerformanceMode
+    ? LOW_PERFORMANCE_POLL_INTERVAL_MS
+    : NORMAL_POLL_INTERVAL_MS;
+  pollTimer = setInterval(load, interval);
+};
+
+watch(() => props.lowPerformanceMode, restartPolling);
+
+onMounted(() => {
+  mounted = true;
+  restartPolling();
 });
 
 onUnmounted(() => {
+  mounted = false;
   if (pollTimer) {
     clearInterval(pollTimer);
     pollTimer = null;
@@ -71,8 +92,8 @@ onUnmounted(() => {
       <Activity class="w-4 h-4 text-indigo-400" />
       <span class="text-xs font-bold text-slate-200 uppercase tracking-wider font-mono">System Monitor</span>
       <span
-        class="w-2 h-2 rounded-full animate-pulse ml-auto"
-        :class="stats.online ? 'bg-emerald-500' : 'bg-rose-500'"
+        class="w-2 h-2 rounded-full ml-auto"
+        :class="[stats.online ? 'bg-emerald-500' : 'bg-rose-500', props.lowPerformanceMode ? '' : 'animate-pulse']"
       ></span>
       <button
         type="button"

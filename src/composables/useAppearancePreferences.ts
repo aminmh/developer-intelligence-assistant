@@ -20,6 +20,7 @@ const DEFAULT_PREFERENCES: AppearancePreferences = {
   codeFontFamily: 'JetBrains Mono',
   showSystemMonitor: true,
   showWelcomeBanner: true,
+  lowPerformanceMode: false,
 };
 
 const isMode = (value: unknown): value is AppearanceMode =>
@@ -94,6 +95,7 @@ export const useAppearancePreferences = () => {
         if (isCodeFontFamily(stored.codeFontFamily)) preferences.codeFontFamily = stored.codeFontFamily;
         if (typeof stored.showSystemMonitor === 'boolean') preferences.showSystemMonitor = stored.showSystemMonitor;
         if (typeof stored.showWelcomeBanner === 'boolean') preferences.showWelcomeBanner = stored.showWelcomeBanner;
+        if (typeof stored.lowPerformanceMode === 'boolean') preferences.lowPerformanceMode = stored.lowPerformanceMode;
       }
     } catch {
       // Invalid local preferences fall back to the defaults above.

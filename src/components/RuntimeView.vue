@@ -6,6 +6,7 @@ import RemoteHostMonitor from './RemoteHostMonitor.vue';
 import ToggleCard from './ToggleCard.vue';
 import { makeRequest } from '../ui/makeRequest';
 import { subscribeRuntimeUpdates } from '../ui/runtimeEvents';
+import { useUrlTab } from '../composables/useUrlTab';
 import type { RuntimeAnalysisFinding, RuntimeDatabaseCall, RuntimeDiffPreview, RuntimeProjectRecord, RuntimeRequest, RuntimeRequestAnalysis, RuntimeRequestDetail, RuntimeSnapshotData } from '../types';
 
 const props = defineProps<{ useRemote: boolean }>();
@@ -32,7 +33,7 @@ const requestDetailTabs = [
   { id: 'analysis', label: 'AI analysis' },
 ] as const;
 type RequestDetailTab = typeof requestDetailTabs[number]['id'];
-const activeRequestDetailTab = ref<RequestDetailTab>('overview');
+const activeRequestDetailTab = useUrlTab<RequestDetailTab>({ values: requestDetailTabs.map((tab) => tab.id), fallback: 'overview' });
 const requestDetails = ref<Record<string, RuntimeRequestDetail>>({});
 const requestDetailLoading = ref<Record<string, boolean>>({});
 const requestDetailErrors = ref<Record<string, string>>({});
