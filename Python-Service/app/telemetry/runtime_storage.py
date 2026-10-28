@@ -361,9 +361,14 @@ def clickhouse_connection(registry=None) -> dict:
     if target["mode"] == "disabled":
         return {"mode": "disabled", "url": "", "username": "", "password": "", "database": target["database"], "ssl_context": None}
     username, password = clickhouse_credentials()
+    endpoint = (
+        "http://telemetry-clickhouse-router:8123"
+        if target["mode"] == "remote"
+        else os.getenv("TELEMETRY_CLICKHOUSE_URL", "http://telemetry-clickhouse:8123")
+    ).rstrip("/")
     return {
         "mode": target["mode"],
-        "url": "http://telemetry-clickhouse-router:8123",
+        "url": endpoint,
         "username": username,
         "password": password,
         "database": target["database"],

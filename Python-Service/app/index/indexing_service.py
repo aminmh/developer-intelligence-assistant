@@ -26,6 +26,10 @@ class IndexingService:
         collection_name: str = "",
         symbol_index: dict[str, Any] | None = None,
         error: str | None = None,
+        graph_nodes: int = 0,
+        graph_relations: int = 0,
+        graph_index_complete: bool = False,
+        graph_status: str = "pending",
     ) -> None:
         try:
             status_path = Path(settings.download_dir) / f"{download_id}.status.json"
@@ -36,6 +40,10 @@ class IndexingService:
                 "collection_name": collection_name,
                 "symbol_index": symbol_index,
                 "error": error,
+                "graph_nodes": graph_nodes,
+                "graph_relations": graph_relations,
+                "graph_index_complete": graph_index_complete,
+                "graph_status": graph_status,
             }))
         except Exception:  # noqa: BLE001 — progress is best-effort
             pass
@@ -59,10 +67,14 @@ class IndexingService:
 
             def report_progress(stage: str, completed: int, total: int) -> None:
                 self.write_status(
-                    download_id, stage, total, completed, collection_name
+                    download_id, stage, total, completed, collection_name,
                 )
 
             def ingest_snapshot() -> dict[str, Any]:
+                self.write_status(
+                    download_id, "graph_indexing", len(chunks), 0,
+                    collection_name, graph_status="checking",
+                )
                 ingest_kwargs: dict[str, Any] = {}
                 if symbol_definitions or symbol_references:
                     ingest_kwargs = {
@@ -112,10 +124,26 @@ class IndexingService:
                 ingested,
                 collection_name,
                 symbol_index,
+                graph_nodes=int(result.get("graph_nodes", 0) or 0),
+                graph_relations=int(result.get("graph_relations", 0) or 0),
+                graph_index_complete=(
+                    int(result.get("graph_nodes", 0) or 0)
+                    == int(result.get("chunk_count", len(chunks)) or 0)
+                    and int(result.get("chunk_count", len(chunks)) or 0) > 0
+                ),
+                graph_status="ready",
             )
         except Exception as exc:  # noqa: BLE001 — job failure is reported in status
             logger.error("Background indexing failed for '%s': %s", collection_name, exc, exc_info=True)
-            self.write_status(download_id, "error", len(chunks), 0, collection_name, error="Embedding failed. Check API logs and retry.")
+            self.write_status(
+                download_id,
+                "error",
+                len(chunks),
+                0,
+                collection_name,
+                error=f"Project indexing failed: {type(exc).__name__}. Check Neo4j/Qdrant readiness and retry.",
+                graph_status="unverified",
+            )
 
     def parse_and_index(
         self, download_id: str, filename: str, zip_data: bytes, collection_name: str,

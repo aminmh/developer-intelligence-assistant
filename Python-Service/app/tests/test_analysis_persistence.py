@@ -180,7 +180,6 @@ class TestAnalysisStore:
         store.save("k1", "job-k", "x.zip", kind="structure")
         assert store.list_by_filename("missing.zip") == []
 
-
     def test_delete_removes_row_and_artifacts(self, tmp_path):
         store = self._store(tmp_path)
         store.save("s1", "job-1", "a.zip", profile=SAMPLE)
@@ -206,3 +205,53 @@ class TestAnalysisStore:
         conn.close()
         assert "analysis_sessions" in tables
         assert "settings" in tables  # untouched KV table coexists
+
+
+def test_code_index_persistence_failure_is_not_saved_as_complete(monkeypatch, tmp_path):
+    from analysis import analysis_service
+    from projects import lang_index
+
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    monkeypatch.setattr(analysis_service, "load_bundle", lambda _job: {
+        "filename": "sample.zip",
+        "structure_profile": {},
+    })
+    monkeypatch.setattr(analysis_service, "_retained_workspace", lambda _filename: str(workspace))
+    monkeypatch.setattr(lang_index, "produce_chunks", lambda _workspace: {
+        "language": "typescript",
+        "chunks": [{"name": "handler"}],
+        "files": 1,
+        "producer": "tree-sitter-typescript",
+        "coverage": "partial",
+        "unsupported_constructs": [{"file": "src/app.ts", "construct": "unresolved_call_target"}],
+        "malformed_files": [],
+    })
+
+    class BrokenGraph:
+        def ingest(self, *_args, **_kwargs):
+            raise RuntimeError("Neo4j graph store unavailable")
+
+    monkeypatch.setattr("index.llamaindex_layer.CodePropertyGraph", BrokenGraph)
+
+    class Store:
+        saved = None
+
+        def get_by_job(self, _job):
+            return None
+
+        def save(self, **values):
+            self.saved = {"id": values["session_id"], **values}
+
+        def get(self, _session_id):
+            return self.saved
+
+    store = Store()
+    monkeypatch.setattr(analysis_service, "analysis_store", store)
+
+    saved = analysis_service.persist_code_index("job-1")
+
+    assert "code index failed" in saved["summary"]
+    assert saved["counts"]["graph_index_complete"] is False
+    assert saved["counts"]["source_coverage"] == "partial"
+    assert saved["counts"]["unsupported_constructs"][0]["construct"] == "unresolved_call_target"

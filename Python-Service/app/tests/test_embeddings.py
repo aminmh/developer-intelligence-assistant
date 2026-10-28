@@ -26,15 +26,16 @@ def _patch_urlopen(monkeypatch, opener):
     monkeypatch.setattr(urllib.request, "urlopen", opener)
 
 
-def _isolate_embedding_settings(monkeypatch):
+def _isolate_embedding_settings(monkeypatch, provider="ollama"):
     """Force deterministic embedding settings for tests."""
+    monkeypatch.setattr(embeddings.settings, "embedding_provider", provider)
     monkeypatch.setattr(embeddings.settings, "embedding_base_url", "")
     monkeypatch.setattr(embeddings.settings, "ollama_base_url", "http://ollama:11434")
     monkeypatch.setattr(embeddings.settings, "ollama_embedding_model", "BGE-M3")
 
 
 def test_openai_compatible_dispatch(monkeypatch):
-    _isolate_embedding_settings(monkeypatch)
+    _isolate_embedding_settings(monkeypatch, "openAICompatible")
     monkeypatch.setattr(embeddings.settings, "embedding_base_url", "http://localhost:1234")
     captured = {}
 
@@ -65,7 +66,7 @@ def test_openai_compatible_dispatch(monkeypatch):
 
 
 def test_openai_v1_suffix_stripped(monkeypatch):
-    _isolate_embedding_settings(monkeypatch)
+    _isolate_embedding_settings(monkeypatch, "openAICompatible")
     monkeypatch.setattr(
         embeddings.settings, "embedding_base_url", "http://localhost:1234/v1/"
     )
@@ -84,7 +85,7 @@ def test_openai_v1_suffix_stripped(monkeypatch):
 
 
 def test_openai_invalid_response_raises(monkeypatch):
-    _isolate_embedding_settings(monkeypatch)
+    _isolate_embedding_settings(monkeypatch, "openAICompatible")
     monkeypatch.setattr(embeddings.settings, "embedding_base_url", "http://localhost:1234")
 
     def fake(request, timeout=None):
@@ -230,7 +231,9 @@ def test_llamaindex_embed_model_dispatch(monkeypatch):
     _isolate_embedding_settings(monkeypatch)
     # Ollama path keeps the LlamaIndex adapter and forwards the configured TTL.
     model = embeddings.get_llamaindex_embed_model()
-    assert type(model).__module__.startswith("llama_index")
+    from llama_index.embeddings.ollama import OllamaEmbedding
+
+    assert isinstance(model, OllamaEmbedding)
     assert model.model_name == "BGE-M3"
     monkeypatch.setattr(embeddings.settings, "ollama_keep_alive", "30s")
     captured = {}

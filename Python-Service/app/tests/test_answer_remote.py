@@ -5,6 +5,7 @@ import json
 import pytest
 
 import rag.answer as answer
+import runtime.llm as llm
 
 
 def test_generate_answer_routes_remote_when_opted_in(monkeypatch):
@@ -45,6 +46,61 @@ def test_generate_answer_defaults_to_local(monkeypatch):
     assert result["answer"] == "local answer"
     assert result["model"] == answer.settings.ollama_llm_model
     assert result["provider"] == "local"
+
+
+def test_remote_completion_timeout_does_not_start_a_second_unbounded_local_request(monkeypatch):
+    captured = {}
+
+    def timeout(*args, **kwargs):
+        captured["timeout"] = kwargs.get("timeout")
+        raise TimeoutError("provider timed out")
+
+    monkeypatch.setattr(llm, "remote_configured", lambda: True)
+    monkeypatch.setattr(llm, "_get_remote_client", lambda: object())
+    monkeypatch.setattr(llm, "_run_chat", timeout)
+    monkeypatch.setattr(llm, "_get_openai_client", lambda: pytest.fail("must not start local fallback"))
+
+    with pytest.raises(TimeoutError, match="provider timed out"):
+        llm.complete_with_model(
+            "score", provider="remote", timeout=120, fallback_to_local=False,
+        )
+
+    assert captured["timeout"] == 120
+
+
+@pytest.mark.parametrize(
+    ("base_url", "model", "expected_extra_body"),
+    [
+        ("https://api.groq.com/openai/v1", "openai/gpt-oss-120b", {"reasoning_format": "hidden"}),
+        ("https://api.example.test/v1", "openai/gpt-oss-120b", None),
+        ("https://api.groq.com/openai/v1", "qwen/qwen3-32b", None),
+    ],
+)
+def test_remote_json_completion_adds_groq_gpt_oss_reasoning_format_only_when_required(
+    monkeypatch, base_url, model, expected_extra_body,
+):
+    captured = {}
+
+    monkeypatch.setattr(llm, "remote_configured", lambda: True)
+    monkeypatch.setattr(llm, "_get_remote_client", lambda: object())
+    monkeypatch.setattr(llm.settings, "llm_remote_base_url", base_url)
+    monkeypatch.setattr(llm.settings, "llm_remote_model", model)
+    monkeypatch.setattr(
+        llm,
+        "_run_chat",
+        lambda *_args, **kwargs: (captured.update(kwargs) or "{}", None),
+    )
+
+    result = llm.complete_with_model(
+        "Return a JSON object.",
+        provider="remote",
+        response_format={"type": "json_object"},
+        fallback_to_local=False,
+    )
+
+    assert result[2] == "remote"
+    assert captured["response_format"] == {"type": "json_object"}
+    assert captured["extra_body"] == expected_extra_body
 
 
 # ─── /health/llm ────────────────────────────────────────────────────────────

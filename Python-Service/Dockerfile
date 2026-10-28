@@ -35,6 +35,16 @@ RUN --mount=type=cache,target=./tmp/pip-cache \
     pip install --upgrade pip && \
     pip install -r requirements.txt
 
+# Bundle both syntax grammars into the image so project parsing never needs a
+# first-use grammar download when the API is running offline.
+RUN python -c "from tree_sitter_language_pack import download; download(['javascript', 'typescript'])"
+
+# Keep the static analyzer isolated from the API's Python dependencies. Semgrep
+# has its own dependency constraints and must not alter the API's JWT stack.
+RUN python -m venv /opt/semgrep \
+    && /opt/semgrep/bin/pip install --no-cache-dir semgrep==1.181.0 \
+    && ln -s /opt/semgrep/bin/semgrep /usr/local/bin/semgrep
+
 # PHP CLI project (nikic/php-parser etc.). Lives outside /app so the dev
 # bind-mount of ./Python-Service/app/ -> /app does not shadow it.
 COPY php/ /opt/php-cli/

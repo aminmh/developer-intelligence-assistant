@@ -13,9 +13,17 @@ services:
       TUSD_HOOK_SECRET: ${TUSD_HOOK_SECRET}
       DOWNLOAD_TOKEN_SECRET: ${DOWNLOAD_TOKEN_SECRET}
       RAG_CALLBACK_SECRET: ${RAG_CALLBACK_SECRET}
+      APP_DEPLOYMENT_MODE: ${APP_DEPLOYMENT_MODE:-developer}
+      ANALYZER_WORKER_URL: ${ANALYZER_WORKER_URL:-https://analyzer-worker:9443}
+      ANALYZER_WORKER_CERT_SHA256: ${ANALYZER_WORKER_CERT_SHA256:-}
+      ANALYZER_WORKER_CA_FILE: /run/analyzer-tls/worker-ca.crt
+      ANALYZER_WORKER_CLIENT_CERT_FILE: /run/analyzer-tls/api.crt
+      ANALYZER_WORKER_CLIENT_KEY_FILE: /run/analyzer-tls/api.key
       OLLAMA_BASE_URL: http://host.docker.internal:11434
       OLLAMA_EMBED_MODEL: ${OLLAMA_EMBED_MODEL}
       OLLAMA_KEEP_ALIVE: ${OLLAMA_KEEP_ALIVE:-5m}
+      LLM_CONTEXT_WINDOW_TOKENS: ${LLM_CONTEXT_WINDOW_TOKENS:-0}
+      ASSESSMENT_REQUEST_TOKEN_LIMIT: ${ASSESSMENT_REQUEST_TOKEN_LIMIT:-0}
       LSP_WARMUP_ENABLED: ${LSP_WARMUP_ENABLED:-false}
       NEO4J_URL: bolt://neo4j:7687
       NEO4J_USER: ${NEO4J_USER:-neo4j}
@@ -52,15 +60,97 @@ services:
       - telemetry-collector-control:/var/lib/devassistant/collector-control
       - "${RUNTIME_SSH_AGENT_SOURCE:-${HOME}/.local/state/devassistant/runtime-host/ssh-agent.sock}:/run/devassistant/runtime-host/ssh-agent.sock:ro"
       - ./telemetry-dev/collector-runtime.yaml:/etc/devassistant/collector-runtime.base.yaml:ro
+      - "${ANALYZER_API_TLS_DIR:-./analyzer-worker/certs/api}:/run/analyzer-tls:ro"
     depends_on:
       minio:
         condition: service_healthy
       qdrant:
         condition: service_started
+      neo4j:
+        condition: service_healthy
     networks:
       - default
       - devassistant_net
       - telemetry_runtime
+      - analyzer_private
+
+  # Optional local SonarQube services. The worker can run alone against a remote SonarQube server.
+  analyzer-db:
+    profiles: [analyzer]
+    image: postgres:16.15-alpine
+    environment:
+      POSTGRES_DB: sonarqube
+      POSTGRES_USER: sonar
+      POSTGRES_PASSWORD: ${ANALYZER_POSTGRES_PASSWORD:-}
+    volumes:
+      - analyzer-postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U sonar -d sonarqube"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+    mem_limit: 1g
+    restart: unless-stopped
+    networks: [analyzer_private]
+
+  sonarqube:
+    profiles: [analyzer]
+    image: ${SONARQUBE_IMAGE:-sonarqube:26.9.0.129388-community}
+    environment:
+      SONAR_JDBC_URL: jdbc:postgresql://analyzer-db:5432/sonarqube
+      SONAR_JDBC_USERNAME: sonar
+      SONAR_JDBC_PASSWORD: ${ANALYZER_POSTGRES_PASSWORD:-}
+      SONAR_WEB_HOST: 0.0.0.0
+    volumes:
+      - sonarqube-data:/opt/sonarqube/data
+      - sonarqube-extensions:/opt/sonarqube/extensions
+      - sonarqube-logs:/opt/sonarqube/logs
+    depends_on:
+      analyzer-db:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS http://127.0.0.1:9000/api/system/status >/dev/null"]
+      interval: 15s
+      timeout: 5s
+      retries: 30
+      start_period: 90s
+    mem_limit: 4g
+    cpus: 2.0
+    restart: unless-stopped
+    networks: [analyzer_private]
+
+  analyzer-worker:
+    profiles: [analyzer]
+    build:
+      context: .
+      dockerfile: analyzer-worker/Dockerfile
+    environment:
+      APP_DEPLOYMENT_MODE: ${APP_DEPLOYMENT_MODE:-developer}
+      ANALYZER_WORKER_TLS_CERT_FILE: /run/analyzer-tls/worker.crt
+      ANALYZER_WORKER_TLS_KEY_FILE: /run/analyzer-tls/worker.key
+      ANALYZER_WORKER_API_CA_FILE: /run/analyzer-tls/api-ca.crt
+      ANALYZER_ALLOWED_SONAR_HOSTS: ${ANALYZER_ALLOWED_SONAR_HOSTS:-sonarqube}
+    ports:
+      - "${ANALYZER_WORKER_BIND:-127.0.0.1}:${ANALYZER_WORKER_PORT:-9443}:9443"
+    volumes:
+      - "${ANALYZER_WORKER_TLS_DIR:-./analyzer-worker/certs/worker}:/run/analyzer-tls:ro"
+    group_add:
+      - "${ANALYZER_CERT_GID:-10001}"
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,size=2g,mode=1777
+    healthcheck:
+      test: ["CMD", "python", "-c", "from pathlib import Path; raise SystemExit(0 if b'/opt/analyzer-worker/worker.py' in Path('/proc/1/cmdline').read_bytes() else 1)"]
+      interval: 20s
+      timeout: 5s
+      retries: 3
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    pids_limit: 512
+    mem_limit: 4g
+    cpus: 2.0
+    restart: unless-stopped
+    networks: [analyzer_private, default]
 
   # The only ingress intended for per-host deployment reports. Host agents
   # join telemetry_ingress; the published port is loopback-only for local use.
@@ -162,7 +252,7 @@ services:
       - devassistant_net
 
   qdrant:
-    image: qdrant/qdrant:latest
+    image: qdrant/qdrant:v1.18.2
     container_name: qdrant
     mem_limit: 1g
     volumes:
@@ -181,6 +271,12 @@ services:
     environment:
       NEO4J_AUTH: ${NEO4J_USER:-neo4j}/${NEO4J_PASSWORD:-password}
       NEO4J_server_memory_heap_max__size: 512m
+    healthcheck:
+      test: ["CMD-SHELL", "cypher-shell -u \"$${NEO4J_USER:-neo4j}\" -p \"$${NEO4J_PASSWORD:-password}\" 'RETURN 1' >/dev/null"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 20s
     volumes:
       - "neo4j-data:/data"
     ports:
@@ -306,6 +402,10 @@ volumes:
   telemetry-collector-control:
   telemetry-caddy-data:
   telemetry-caddy-config:
+  analyzer-postgres-data:
+  sonarqube-data:
+  sonarqube-extensions:
+  sonarqube-logs:
 
 networks:
   default: {}
@@ -316,4 +416,6 @@ networks:
   telemetry_ssh_egress: {}
   telemetry_ingress:
     name: devassistant_telemetry_ingress
+    internal: true
+  analyzer_private:
     internal: true

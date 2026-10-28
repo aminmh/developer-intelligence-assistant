@@ -1,6 +1,7 @@
 """Read-side runtime aggregates from ClickHouse, separate from the symbol graph."""
 from __future__ import annotations
 
+import base64
 from datetime import datetime, timezone
 import json
 import os
@@ -224,7 +225,6 @@ class ClickHouseRuntime:
     def rows(self, sql: str, project_id: str, revision_id: str, extra_parameters: dict[str, str] | None = None) -> list[dict]:
         parameters = urlencode({"param_project_id": project_id, "param_revision_id": revision_id, **(extra_parameters or {})})
         url = f"{self.url}/?{parameters}"
-        import base64
         token = base64.b64encode(f"{self.user}:{self.password}".encode()).decode("ascii")
         request = Request(
             url,

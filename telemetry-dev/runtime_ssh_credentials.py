@@ -24,12 +24,33 @@ KEYCHAIN_HELPER = Path(__file__).with_name("runtime_keychain.swift")
 SHARED_AGENT_SOCKET = Path(os.environ["RUNTIME_SSH_AGENT_SOCKET"]) if os.environ.get("RUNTIME_SSH_AGENT_SOCKET") else None
 PUBLIC_KEY_FILE = STATE_DIR / "runtime-ssh-key.pub"
 BEARER_SERVICE = "com.devassistant.code-quality.bearer"
+GITHUB_SERVICE = "com.devassistant.code-quality.github"
+OUTLINE_SERVICE = "com.devassistant.code-quality.outline"
+SONARQUBE_SERVICE = "com.devassistant.code-quality.sonarqube"
 
 
 def _bearer_account(target_id: str) -> str:
     if not re.fullmatch(r"[0-9a-fA-F-]{36}", target_id):
         raise ValueError("Invalid performance target identity.")
     return "target-" + hashlib.sha256(target_id.lower().encode("ascii")).hexdigest()
+
+
+def _github_account(target_id: str) -> str:
+    if not re.fullmatch(r"[0-9a-fA-F-]{36}", target_id):
+        raise ValueError("Invalid Git source credential identity.")
+    return "git-source-" + hashlib.sha256(target_id.lower().encode("ascii")).hexdigest()
+
+
+def _outline_account(target_id: str) -> str:
+    if not re.fullmatch(r"[0-9a-fA-F-]{36}", target_id):
+        raise ValueError("Invalid Outline credential identity.")
+    return "outline-" + hashlib.sha256(target_id.lower().encode("ascii")).hexdigest()
+
+
+def _sonarqube_account(target_id: str) -> str:
+    if not re.fullmatch(r"[0-9a-fA-F-]{36}", target_id):
+        raise ValueError("Invalid SonarQube credential identity.")
+    return "sonarqube-" + hashlib.sha256(target_id.lower().encode("ascii")).hexdigest()
 
 
 class CredentialStoreError(RuntimeError):
@@ -201,6 +222,214 @@ def remove_bearer_token(target_id: str) -> dict:
         _keychain_request("delete", service=BEARER_SERVICE, account=account)
     else:
         result = _run(["secret-tool", "clear", "app", account, "purpose", "code-quality-bearer"])
+        if result.returncode:
+            text = result.stderr.decode("utf-8", "replace").lower()
+            if any(word in text for word in ("locked", "unlock", "interaction not allowed", "no such secret collection")):
+                raise CredentialStoreError("Unlock the OS keyring and retry.", locked=True)
+    return {"deleted": True}
+
+
+def save_outline_token(target_id: str, token: str) -> dict:
+    if not isinstance(token, str) or not token.strip() or len(token) > 8192:
+        raise ValueError("Provide a valid Outline API token.")
+    account = _outline_account(target_id)
+    value = {"token": token.strip()}
+    if _provider() == "keychain":
+        _keychain_request("store", value, service=OUTLINE_SERVICE, account=account)
+    else:
+        result = _run(["secret-tool", "store", "--label=Developer Assistant Outline API token",
+                       "app", account, "purpose", "code-quality-outline"],
+                      input_data=json.dumps(value, separators=(",", ":")).encode("utf-8"))
+        if result.returncode:
+            text = result.stderr.decode("utf-8", "replace").lower()
+            locked = any(word in text for word in ("locked", "unlock", "interaction not allowed", "no such secret collection"))
+            raise CredentialStoreError("Unlock the OS keyring and retry." if locked else "The Outline token could not be saved to the OS credential store.", locked=locked)
+    return {"saved": True}
+
+
+def _read_outline_token(target_id: str) -> dict | None:
+    account = _outline_account(target_id)
+    if _provider() == "keychain":
+        response = _keychain_request("read", service=OUTLINE_SERVICE, account=account)
+        value = response.get("value") if response.get("found") is True else None
+    else:
+        result = _run(["secret-tool", "lookup", "app", account, "purpose", "code-quality-outline"])
+        if result.returncode:
+            text = result.stderr.decode("utf-8", "replace").lower()
+            if any(word in text for word in ("locked", "unlock", "interaction not allowed", "no such secret collection")):
+                raise CredentialStoreError("Unlock the OS keyring and retry.", locked=True)
+            value = None
+        else:
+            try:
+                value = json.loads(result.stdout.decode("utf-8").strip())
+            except (UnicodeError, ValueError) as exc:
+                raise CredentialStoreError("The saved Outline token is invalid. Replace it and retry.") from exc
+    if value is not None and (not isinstance(value, dict) or not isinstance(value.get("token"), str)):
+        raise CredentialStoreError("The saved Outline token is invalid. Replace it and retry.")
+    return value
+
+
+def outline_token_status(target_id: str) -> dict:
+    return {"saved": _read_outline_token(target_id) is not None}
+
+
+def use_outline_token(target_id: str) -> str:
+    value = _read_outline_token(target_id)
+    token = value.get("token") if isinstance(value, dict) else None
+    if not isinstance(token, str) or not token:
+        raise ValueError("No Outline API token is saved. Save one and retry.")
+    return token
+
+
+def remove_outline_token(target_id: str) -> dict:
+    account = _outline_account(target_id)
+    if _provider() == "keychain":
+        _keychain_request("delete", service=OUTLINE_SERVICE, account=account)
+    else:
+        result = _run(["secret-tool", "clear", "app", account, "purpose", "code-quality-outline"])
+        if result.returncode:
+            text = result.stderr.decode("utf-8", "replace").lower()
+            if any(word in text for word in ("locked", "unlock", "interaction not allowed", "no such secret collection")):
+                raise CredentialStoreError("Unlock the OS keyring and retry.", locked=True)
+    return {"deleted": True}
+
+
+def save_sonarqube_token(target_id: str, token: str) -> dict:
+    if not isinstance(token, str) or not token.strip() or len(token) > 8192:
+        raise ValueError("Provide a valid SonarQube token.")
+    account = _sonarqube_account(target_id)
+    value = {"token": token.strip()}
+    if _provider() == "keychain":
+        _keychain_request("store", value, service=SONARQUBE_SERVICE, account=account)
+    else:
+        result = _run(["secret-tool", "store", "--label=Developer Assistant SonarQube token",
+                       "app", account, "purpose", "code-quality-sonarqube"],
+                      input_data=json.dumps(value, separators=(",", ":")).encode("utf-8"))
+        if result.returncode:
+            diagnostic = result.stderr.decode("utf-8", "replace").lower()
+            locked = any(word in diagnostic for word in ("locked", "unlock", "interaction not allowed", "no such secret collection"))
+            raise CredentialStoreError("Unlock the OS keyring and retry." if locked
+                                       else "The SonarQube token could not be saved to the OS credential store.", locked=locked)
+    return {"saved": True}
+
+
+def _read_sonarqube_token(target_id: str) -> dict | None:
+    account = _sonarqube_account(target_id)
+    if _provider() == "keychain":
+        response = _keychain_request("read", service=SONARQUBE_SERVICE, account=account)
+        value = response.get("value") if response.get("found") is True else None
+    else:
+        result = _run(["secret-tool", "lookup", "app", account, "purpose", "code-quality-sonarqube"])
+        if result.returncode:
+            diagnostic = result.stderr.decode("utf-8", "replace").lower()
+            if any(word in diagnostic for word in ("locked", "unlock", "interaction not allowed", "no such secret collection")):
+                raise CredentialStoreError("Unlock the OS keyring and retry.", locked=True)
+            value = None
+        else:
+            try:
+                value = json.loads(result.stdout.decode("utf-8").strip())
+            except (UnicodeError, ValueError) as exc:
+                raise CredentialStoreError("The saved SonarQube token is invalid. Replace it and retry.") from exc
+    if value is not None and (not isinstance(value, dict) or not isinstance(value.get("token"), str)):
+        raise CredentialStoreError("The saved SonarQube token is invalid. Replace it and retry.")
+    return value
+
+
+def sonarqube_token_status(target_id: str) -> dict:
+    return {"saved": _read_sonarqube_token(target_id) is not None}
+
+
+def use_sonarqube_token(target_id: str) -> str:
+    value = _read_sonarqube_token(target_id)
+    token = value.get("token") if isinstance(value, dict) else None
+    if not isinstance(token, str) or not token:
+        raise ValueError("No SonarQube token is saved. Save one and retry.")
+    return token
+
+
+def remove_sonarqube_token(target_id: str) -> dict:
+    account = _sonarqube_account(target_id)
+    if _provider() == "keychain":
+        _keychain_request("delete", service=SONARQUBE_SERVICE, account=account)
+    else:
+        result = _run(["secret-tool", "clear", "app", account, "purpose", "code-quality-sonarqube"])
+        if result.returncode:
+            diagnostic = result.stderr.decode("utf-8", "replace").lower()
+            if any(word in diagnostic for word in ("locked", "unlock", "interaction not allowed", "no such secret collection")):
+                raise CredentialStoreError("Unlock the OS keyring and retry.", locked=True)
+    return {"deleted": True}
+
+
+def save_github_token(target_id: str, token: str) -> dict:
+    """Save a GitHub read-only token under an isolated source identity."""
+    if not isinstance(token, str) or not token.strip() or len(token) > 8192:
+        raise ValueError("Provide a GitHub token up to 8192 characters.")
+    account = _github_account(target_id)
+    value = {"token": token.strip()}
+    if _provider() == "keychain":
+        _keychain_request("store", value, service=GITHUB_SERVICE, account=account)
+    else:
+        result = _run(["secret-tool", "store", "--label=Developer Assistant GitHub source token",
+                       "app", account, "purpose", "code-quality-github-source"],
+                      input_data=json.dumps(value, separators=(",", ":")).encode("utf-8"))
+        if result.returncode:
+            text = result.stderr.decode("utf-8", "replace").lower()
+            locked = any(word in text for word in ("locked", "unlock", "interaction not allowed", "no such secret collection"))
+            raise CredentialStoreError("Unlock the OS keyring and retry." if locked else "The GitHub token could not be saved to the OS credential store.", locked=locked)
+    return {"saved": True}
+
+
+def github_token_status(target_id: str) -> dict:
+    account = _github_account(target_id)
+    if _provider() == "keychain":
+        response = _keychain_request("read", service=GITHUB_SERVICE, account=account)
+        value = response.get("value") if response.get("found") is True else None
+    else:
+        result = _run(["secret-tool", "lookup", "app", account, "purpose", "code-quality-github-source"])
+        if result.returncode:
+            text = result.stderr.decode("utf-8", "replace").lower()
+            if any(word in text for word in ("locked", "unlock", "interaction not allowed", "no such secret collection")):
+                raise CredentialStoreError("Unlock the OS keyring and retry.", locked=True)
+            value = None
+        else:
+            try:
+                value = json.loads(result.stdout.decode("utf-8").strip())
+            except (UnicodeError, ValueError) as exc:
+                raise CredentialStoreError("The saved GitHub token is invalid. Replace it and retry.") from exc
+    if value is not None and (not isinstance(value, dict) or not isinstance(value.get("token"), str)):
+        raise CredentialStoreError("The saved GitHub token is invalid. Replace it and retry.")
+    return {"saved": value is not None}
+
+
+def use_github_token_for_fetch(target_id: str) -> str:
+    account = _github_account(target_id)
+    if _provider() == "keychain":
+        response = _keychain_request("read", service=GITHUB_SERVICE, account=account)
+        value = response.get("value") if response.get("found") is True else None
+    else:
+        result = _run(["secret-tool", "lookup", "app", account, "purpose", "code-quality-github-source"])
+        if result.returncode:
+            text = result.stderr.decode("utf-8", "replace").lower()
+            if any(word in text for word in ("locked", "unlock", "interaction not allowed", "no such secret collection")):
+                raise CredentialStoreError("Unlock the OS keyring and retry.", locked=True)
+            value = None
+        else:
+            try:
+                value = json.loads(result.stdout.decode("utf-8").strip())
+            except (UnicodeError, ValueError) as exc:
+                raise CredentialStoreError("The saved GitHub token is invalid. Replace it and retry.") from exc
+    token = value.get("token") if isinstance(value, dict) else None
+    if not isinstance(token, str) or not token:
+        raise CredentialStoreError("No GitHub token is saved for this project. Save one and retry.")
+    return token
+
+
+def remove_github_token(target_id: str) -> dict:
+    account = _github_account(target_id)
+    if _provider() == "keychain":
+        _keychain_request("delete", service=GITHUB_SERVICE, account=account)
+    else:
+        result = _run(["secret-tool", "clear", "app", account, "purpose", "code-quality-github-source"])
         if result.returncode:
             text = result.stderr.decode("utf-8", "replace").lower()
             if any(word in text for word in ("locked", "unlock", "interaction not allowed", "no such secret collection")):

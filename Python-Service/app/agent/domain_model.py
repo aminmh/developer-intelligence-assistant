@@ -627,8 +627,19 @@ def enrich_domain_model(model: dict[str, Any], profile: dict[str, Any] | None = 
     """Explicitly enrich a deterministic model; authoritative facts survive."""
     profile = profile or {}
     try:
-        prompt_path = Path(__file__).resolve().parents[3] / "prompts" / "plantuml.MD"
-        template = prompt_path.read_text(encoding="utf-8") if prompt_path.is_file() else "Return the requested entity model JSON."
+        prompt_path = next(
+            (
+                parent / "prompts" / "plantuml.MD"
+                for parent in Path(__file__).resolve().parents
+                if (parent / "prompts" / "plantuml.MD").is_file()
+            ),
+            None,
+        )
+        template = (
+            prompt_path.read_text(encoding="utf-8")
+            if prompt_path is not None
+            else "Return the requested entity model JSON."
+        )
     except OSError:
         template = "Return the requested entity model JSON."
     context = json.dumps({"entities": model.get("entities", []), "relationships": model.get("relationships", []), "profile": profile}, ensure_ascii=False, sort_keys=True, default=str)[:28000]

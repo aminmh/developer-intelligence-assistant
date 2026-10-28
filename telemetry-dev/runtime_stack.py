@@ -68,7 +68,7 @@ def verify_backend(mode: str) -> None:
 
 
 def start_bridge() -> None:
-    compose("up", "-d", "--build", "python-api", "telemetry-clickhouse-router", "runtime-ssh-tunnel", profile="runtime")
+    compose("up", "-d", "python-api", "telemetry-clickhouse-router", "runtime-ssh-tunnel", profile="runtime")
 
 
 def start_local_clickhouse() -> None:

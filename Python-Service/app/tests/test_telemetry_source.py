@@ -12,7 +12,8 @@ import pytest
 
 from telemetry import http
 from telemetry.registry import SnapshotConflict, SnapshotRegistry
-from telemetry.source import SourceService, validate_archive
+from telemetry.source import SourceService, index_source, validate_archive
+from telemetry.snapshot import Snapshot
 
 SHA = "a" * 40
 IMAGE = "sha256:" + "c" * 64
@@ -91,8 +92,43 @@ def test_source_lifecycle_retry_conflict_and_isolation(tmp_path):
     assert SnapshotRegistry(tmp_path).get("one", SHA)["state"] == "ready"
 
 
+def test_source_only_revision_can_be_ready_without_php_graph_data(tmp_path):
+    registry = SnapshotRegistry(tmp_path)
+    storage = Storage()
+    result = {"chunk_count": 0, "ingested": 0, "graph_nodes": 0,
+              "graph_relations": 0, "embed_fails": 0,
+              "semantic_index_status": "unavailable",
+              "semantic_index_reason": "The current symbol and call graph exporter supports PHP only."}
+    service = SourceService(registry, storage, lambda *_args: result)
+    source = io.BytesIO()
+    with zipfile.ZipFile(source, "w") as archive_file:
+        archive_file.writestr("app/main.py", "def main(): return 'ok'\n")
+    deploy(registry)
+    service.upload("one", SHA, source.getvalue())
+
+    assert service.process_one()
+
+    ready = registry.get("one", SHA)
+    assert ready["state"] == "ready"
+    assert ready["collection_name"]
+
+
+def test_non_php_source_reports_semantic_index_unavailable(tmp_path):
+    (tmp_path / "app").mkdir()
+    (tmp_path / "app" / "main.py").write_text("def main(): return 'ok'\n")
+
+    result = index_source(str(tmp_path), Snapshot("one", SHA, "b" * 64))
+
+    assert result["semantic_index_status"] == "unavailable"
+    assert result["chunk_count"] == result["graph_nodes"] == 0
+    assert "PHP only" in result["semantic_index_reason"]
+
+
 @pytest.mark.parametrize("result", [None, {"chunk_count": 2, "ingested": 1, "graph_nodes": 2},
-                                      {"chunk_count": 1, "ingested": 1, "graph_nodes": 0}])
+                                      {"chunk_count": 1, "ingested": 1, "graph_nodes": 0},
+                                      {"chunk_count": 0, "ingested": 0, "graph_nodes": 0,
+                                       "graph_relations": 1, "embed_fails": 0,
+                                       "semantic_index_status": "unavailable"}])
 def test_failed_indexing_never_publishes_ready_and_retries(tmp_path, result):
     registry = SnapshotRegistry(tmp_path)
     def fail(*args):

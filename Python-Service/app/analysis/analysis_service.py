@@ -490,7 +490,7 @@ def persist_code_index(job_id: str, label: str = "") -> dict[str, Any] | None:
         workspace_path = _prepare_workspace_http(filename)
 
     result: dict[str, Any] = {}
-    ingest: dict[str, Any] = {"ingested": 0, "skipped": "no chunks"}
+    ingest: dict[str, Any] = {"ingested": 0, "error": "indexer produced no source chunks"}
     sym: dict[str, Any] | None = None
     try:
         if not workspace_path:
@@ -532,15 +532,27 @@ def persist_code_index(job_id: str, label: str = "") -> dict[str, Any] | None:
     chunks = result.get("chunks") or []
     language = result.get("language")
     producer = result.get("producer")
-    error = result.get("error")
+    expected_chunks = int(ingest.get("chunk_count", len(chunks)) or 0)
+    graph_nodes = int(ingest.get("graph_nodes", 0) or 0)
+    graph_index_complete = expected_chunks > 0 and graph_nodes == expected_chunks
+    error = result.get("error") or ingest.get("error")
+    if not error and chunks and not graph_index_complete:
+        error = "Neo4j graph persistence did not verify every indexed source chunk"
 
     counts: dict[str, Any] = {
         "chunks": len(chunks),
         "files": int(result.get("files") or 0),
         "language": language,
         "producer": producer,
+        "graph_index_complete": graph_index_complete,
+        "source_coverage": result.get("coverage") or "unknown",
+        "unsupported_construct_count": len(result.get("unsupported_constructs") or []),
+        "unsupported_constructs": (result.get("unsupported_constructs") or [])[:50],
+        "malformed_file_count": len(result.get("malformed_files") or []),
+        "malformed_files": (result.get("malformed_files") or [])[:50],
+        "vector_index_complete": expected_chunks > 0 and int(ingest.get("ingested", 0) or 0) == expected_chunks,
     }
-    for key in ("ingested", "graph_nodes", "graph_relations", "embed_fails"):
+    for key in ("ingested", "chunk_count", "graph_nodes", "graph_relations", "embed_fails"):
         counts[key] = ingest.get(key, 0)
     if sym:
         counts["sym_nodes"] = int(sym.get("nodes") or 0)
@@ -550,11 +562,21 @@ def persist_code_index(job_id: str, label: str = "") -> dict[str, Any] | None:
     if error:
         summary = f"code index failed: {error}"[:500]
     else:
-        summary = f"{len(chunks)} {language or ''} chunk(s) via {producer or '?'}".strip()[:500]
+        summary = (
+            f"{len(chunks)} {language or ''} chunk(s) via {producer or '?'}; "
+            f"Neo4j graph verified ({graph_nodes} symbols, "
+            f"{int(ingest.get('graph_relations', 0) or 0)} relationships); "
+            f"source coverage {result.get('coverage') or 'unknown'}"
+        ).strip()[:500]
     grounding_md = (
         f"Code index: {len(chunks)} {language or ''} chunk(s) via {producer or '?'}.\n"
-        f"Collection: {collection}"
+        f"Collection: {collection}\n"
+        f"Neo4j graph complete: {graph_index_complete}; source coverage: {result.get('coverage') or 'unknown'}"
     )
+    if result.get("unsupported_constructs"):
+        grounding_md += f"\nUnsupported constructs: {json.dumps(result['unsupported_constructs'][:50], ensure_ascii=False)}"
+    if result.get("malformed_files"):
+        grounding_md += f"\nMalformed files: {', '.join(result['malformed_files'][:50])}"
     if sym and sym.get("collection"):
         grounding_md += f"\nSymbol graph: {sym.get('collection')}"
 

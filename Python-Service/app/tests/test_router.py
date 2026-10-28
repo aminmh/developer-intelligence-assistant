@@ -8,6 +8,7 @@ always faked — no live LM Studio dependency.
 
 import json
 import uuid
+from types import SimpleNamespace
 
 import rag.router as rt
 
@@ -33,6 +34,11 @@ class _FakeQdrant:
 
     def create_collection(self, **kwargs):
         pass
+
+    def get_collection(self, collection_name):
+        return SimpleNamespace(
+            config=SimpleNamespace(params=SimpleNamespace(vectors=SimpleNamespace(size=4)))
+        )
 
     def upsert(self, collection_name, wait, points):
         self.upserts.append((collection_name, points))
@@ -85,6 +91,7 @@ def _install_llm_response(monkeypatch, parsed):
 
 
 def test_submit_feedback_upserts(monkeypatch):
+    monkeypatch.setattr(rt.settings, "embedding_provider", "ollama")
     monkeypatch.setattr(rt, "encoder", _FakeEncoder())
     fake = _FakeQdrant(existing=[rt.FEEDBACK_COLLECTION])
     monkeypatch.setattr(rt, "_get_qdrant", lambda: fake)
@@ -116,6 +123,7 @@ def test_submit_feedback_rejects_unknown_route(monkeypatch):
 
 
 def test_feedback_override_triggers_above_threshold(monkeypatch):
+    monkeypatch.setattr(rt.settings, "embedding_provider", "ollama")
     fake = _FakeQdrant(existing=[rt.FEEDBACK_COLLECTION], hits=[_hit(0.98, "debug")])
     monkeypatch.setattr(rt, "_get_qdrant", lambda: fake)
 

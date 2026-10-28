@@ -1,7 +1,7 @@
 """Validated snapshot metadata and storage identity; no legacy migration."""
 from __future__ import annotations
 
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, replace
 import hashlib
 import json
 import re
@@ -41,6 +41,7 @@ class Snapshot:
     source_archive_sha256: str
     dirty: bool = False
     telemetry_schema_version: str = SCHEMA_VERSION
+    revision_id: str | None = None
 
     def __post_init__(self) -> None:
         validate_scope(self.project_id, self.commit_sha)
@@ -50,6 +51,8 @@ class Snapshot:
             raise ValueError("CI snapshots require clean source; dirty evidence is approximate only")
         if self.telemetry_schema_version != SCHEMA_VERSION:
             raise ValueError("Unsupported telemetry schema version")
+        if self.revision_id is not None:
+            validate_revision_id(self.revision_id)
 
     @property
     def key(self) -> str:
@@ -92,6 +95,21 @@ def prepare_chunks(chunks: list[dict[str, Any]], snapshot: Snapshot) -> list[dic
 
 
 def identity_metadata(chunk: dict[str, Any]) -> dict[str, Any]:
-    keys = ("symbol_id", "symbol_identity_error", "project_id", "commit_sha",
+    keys = ("symbol_id", "symbol_identity_error", "project_id", "commit_sha", "revision_id",
             "source_archive_sha256", "dirty", "telemetry_schema_version")
     return {key: chunk[key] for key in keys if chunk.get(key) is not None}
+
+
+def resolve_registered_revision(snapshot: Snapshot) -> Snapshot:
+    """Attach the registry's immutable revision ID before indexing its chunks."""
+    from telemetry.registry import default_registry
+
+    current = default_registry().get(snapshot.project_id, snapshot.commit_sha)
+    revision_id = current.get("revision_id")
+    if not revision_id:
+        return snapshot
+    if current.get("source_archive_sha256") != snapshot.source_archive_sha256:
+        raise ValueError("Snapshot content does not match its registered revision")
+    if snapshot.revision_id and snapshot.revision_id != revision_id:
+        raise ValueError("Snapshot revision ID does not match its registry entry")
+    return replace(snapshot, revision_id=revision_id)

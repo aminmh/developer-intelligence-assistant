@@ -17,9 +17,26 @@ from telemetry.source import MAX_ARCHIVE_BYTES, SourceService
 router = APIRouter(prefix="/telemetry/projects", tags=["Telemetry snapshots"])
 host_router = APIRouter(prefix="/telemetry/host", tags=["Telemetry deployments"])
 runtime_router = APIRouter(prefix="/telemetry/runtime", tags=["Runtime telemetry"])
+git_router = APIRouter(prefix="/telemetry/git", tags=["Git source synchronization"])
 MAX_HOST_REPORT_BYTES = 2 * 1024 * 1024
 MAX_PROFILE_BATCH_BYTES = 2 * 1024 * 1024
 MAX_RUNTIME_SETUP_BYTES = 100 * 1024
+MAX_GIT_SOURCE_REQUEST_BYTES = 16 * 1024
+
+
+async def _read_git_source_json(request: Request) -> dict:
+    body = bytearray()
+    async for chunk in request.stream():
+        body.extend(chunk)
+        if len(body) > MAX_GIT_SOURCE_REQUEST_BYTES:
+            raise HTTPException(413, "Git source request exceeds its size limit.")
+    try:
+        payload = json.loads(body)
+    except (ValueError, TypeError) as exc:
+        raise HTTPException(400, "Git source request must contain valid JSON.") from exc
+    if not isinstance(payload, dict):
+        raise HTTPException(400, "Git source request must contain a JSON object.")
+    return payload
 
 
 def authorize(request: Request, project_id: str) -> None:
@@ -50,6 +67,71 @@ def authorize_internal(request: Request) -> None:
     if (not expected or len(expected) < 32
             or not hmac.compare_digest(provided.encode(), expected.encode())):
         raise HTTPException(401, "Internal service credentials required")
+
+
+def _git_user(request: Request) -> str:
+    authorize_internal(request)
+    user_id = request.headers.get("x-user-id", "")
+    if not user_id or len(user_id) > 512:
+        raise HTTPException(401, "Authenticated user identity required")
+    return user_id
+
+
+@git_router.get("/projects/{project_id}")
+def git_source_status(project_id: str, request: Request) -> dict:
+    from telemetry.git_source import GitSourceService
+    user_id = _git_user(request)
+    try:
+        status = GitSourceService().status(user_id, project_id)
+    except ValueError as exc:
+        raise HTTPException(422, "Invalid project identity") from exc
+    return {"source": status}
+
+
+@git_router.put("/projects/{project_id}")
+async def configure_git_source(project_id: str, request: Request) -> dict:
+    from telemetry.git_source import GitSourceService
+    user_id = _git_user(request)
+    try:
+        payload = await _read_git_source_json(request)
+        source = GitSourceService().configure(user_id, project_id,
+                                              payload.get("repository"), payload.get("branch"))
+        return {"source": {key: source.get(key) for key in (
+            "project_id", "repository", "branch", "status", "credential_id", "updated_at")}}
+    except ValueError as exc:
+        raise HTTPException(422, str(exc)) from exc
+    except Exception as exc:
+        raise HTTPException(503, "Git source configuration could not be saved.") from exc
+
+
+@git_router.post("/projects/{project_id}/sync")
+async def synchronize_git_source(project_id: str, request: Request) -> dict:
+    from telemetry.git_source import GitSourceService, GitSyncError
+    user_id = _git_user(request)
+    try:
+        payload = await _read_git_source_json(request)
+        result = await run_in_threadpool(GitSourceService().synchronize, user_id, project_id, payload.get("token"))
+        return result
+    except GitSyncError as exc:
+        raise HTTPException(422 if exc.code in {"git_source_missing", "git_credential_invalid"} else 503,
+                            str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(422, "Invalid Git source identity") from exc
+
+
+@git_router.get("/webhook-target")
+def git_webhook_target(repository: str, request: Request) -> dict:
+    authorize_internal(request)
+    from telemetry.git_source import GitSourceService
+    try:
+        source = GitSourceService().source_for_repository(repository)
+    except ValueError as exc:
+        raise HTTPException(422, "Invalid repository identity") from exc
+    if source is None:
+        raise HTTPException(404, "No configured project uses this repository.")
+    return {"project_id": source["project_id"], "user_id": source["user_id"],
+            "repository": source["repository"], "branch": source["branch"],
+            "credential_id": source["credential_id"]}
 
 
 @runtime_router.get("/projects")

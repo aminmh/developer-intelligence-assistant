@@ -53,9 +53,15 @@ def _resolve_root(workspace_path: str | Path | None) -> Path | None:
 
 
 def _module_dotted(rel: str) -> str:
-    """'pkg/mod.py' -> 'pkg.mod' (POSIX rel paths only)."""
+    """Return a stable PHP-compatible namespace for a Python source path."""
     stripped = re.sub(r"\.py$", "", rel, flags=re.IGNORECASE)
-    return stripped.replace("/", ".")
+    parts = []
+    for part in stripped.split("/"):
+        name = re.sub(r"\W", "_", part, flags=re.ASCII)
+        if not name or name[0].isdigit():
+            name = f"_{name}"
+        parts.append(name)
+    return "\\".join(parts)
 
 
 def _annotation_text(annotation: ast.AST | None) -> str | None:
@@ -167,31 +173,44 @@ def _iter_call_nodes(node: ast.AST):
         stack.extend(ast.iter_child_nodes(child))
 
 
-def _call_fqn(call: ast.Call, import_map: dict[str, str]) -> str | None:
+def _call_fqn(
+    call: ast.Call, import_map: dict[str, str], module_namespace: str = "",
+    class_name: str | None = None,
+) -> str | None:
     """Best-effort dotted call target, else the last attribute segment."""
     func = call.func
     if isinstance(func, ast.Name):
         resolved = import_map.get(func.id)
-        return resolved if resolved else func.id
+        if resolved:
+            return resolved.replace(".", "\\")
+        return f"{module_namespace}\\{func.id}" if module_namespace else func.id
     if isinstance(func, ast.Attribute):
         parts: list[str] = []
         node: ast.AST = func
         while isinstance(node, ast.Attribute):
             parts.append(node.attr)
             node = node.value
+        if isinstance(node, ast.Name) and node.id in {"self", "cls"} and class_name:
+            if len(parts) == 1:
+                return f"{module_namespace}\\{class_name}::{parts[0]}"
+            return None
         if isinstance(node, ast.Name):
             resolved = import_map.get(node.id)
             if resolved:
-                return f"{resolved}.{'.'.join(reversed(parts))}"
+                suffix = "\\".join(reversed(parts))
+                return f"{resolved}\\{suffix}"
         return parts[0]
     return None
 
 
-def _calls_of(node: ast.AST, import_map: dict[str, str]) -> list[str]:
+def _calls_of(
+    node: ast.AST, import_map: dict[str, str], module_namespace: str,
+    class_name: str | None,
+) -> list[str]:
     """Sorted, deduped, capped call list for a definition node."""
     targets: set[str] = set()
     for call in _iter_call_nodes(node):
-        target = _call_fqn(call, import_map)
+        target = _call_fqn(call, import_map, module_namespace, class_name)
         if target:
             targets.add(target)
     return sorted(targets)[:_MAX_CALLS]
@@ -217,11 +236,11 @@ def _definition_chunk(
 ) -> dict[str, Any]:
     """One flat chunk dict in the exact shape llamaindex_layer consumes."""
     if kind == "class":
-        class_fqn = f"{module_dotted}.{name}"
+        class_fqn = f"{module_dotted}\\{name}"
     elif kind == "method" and class_name:
-        class_fqn = f"{module_dotted}.{class_name}"
+        class_fqn = f"{module_dotted}\\{class_name}"
     else:
-        class_fqn = f"{module_dotted}.{name}"
+        class_fqn = f"{module_dotted}\\{name}"
     return {
         "type": kind,
         "name": name[: _MAX_NAME_CHARS],
@@ -234,7 +253,7 @@ def _definition_chunk(
         "modifiers": modifiers or [],
         "parameters": parameters or [],
         "return_type": return_type,
-        "calls": _calls_of(node, import_map or {}),
+        "calls": _calls_of(node, import_map or {}, module_dotted, class_name),
         "callers": [],
         "has_docblock": has_doc,
         "docblock": doc,
@@ -243,17 +262,27 @@ def _definition_chunk(
 
 
 def _py_file_chunks(
-    rel: str, path: Path, lines: list[str], module_dotted: str
+    rel: str, path: Path, lines: list[str], module_dotted: str,
+    coverage: dict[str, Any] | None = None,
 ) -> list[dict[str, Any]]:
     """Chunks for one python file — deterministic, never raises."""
     try:
         tree = ast.parse("".join(lines))
-    except (SyntaxError, ValueError):
+    except (SyntaxError, ValueError) as exc:
+        if coverage is not None:
+            coverage.setdefault("malformed_files", []).append(rel)
+            coverage.setdefault("unsupported_constructs", []).append({
+                "file": rel,
+                "line": getattr(exc, "lineno", None),
+                "construct": "malformed_python_syntax",
+            })
         return []
     chunks: list[dict[str, Any]] = []
+    supported_nodes: set[int] = set()
     import_map = _module_import_map(tree.body)
     for stmt in tree.body:
         if isinstance(stmt, ast.ClassDef):
+            supported_nodes.add(id(stmt))
             has_doc, doc = _docstring(stmt)
             class_name = stmt.name
             chunks.append(
@@ -273,6 +302,7 @@ def _py_file_chunks(
             )
             for child in stmt.body:
                 if isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                    supported_nodes.add(id(child))
                     has_doc, doc = _docstring(child)
                     chunks.append(
                         _definition_chunk(
@@ -294,6 +324,7 @@ def _py_file_chunks(
                         )
                     )
         elif isinstance(stmt, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            supported_nodes.add(id(stmt))
             has_doc, doc = _docstring(stmt)
             chunks.append(
                 _definition_chunk(
@@ -314,6 +345,55 @@ def _py_file_chunks(
                     import_map=import_map,
                 )
             )
+    if coverage is not None:
+        local_functions = {
+            stmt.name for stmt in tree.body
+            if isinstance(stmt, (ast.FunctionDef, ast.AsyncFunctionDef))
+        }
+        local_methods = {
+            (stmt.name, child.name)
+            for stmt in tree.body if isinstance(stmt, ast.ClassDef)
+            for child in stmt.body
+            if isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef))
+        }
+        imported_names = set(import_map)
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Lambda):
+                coverage.setdefault("unsupported_constructs", []).append({
+                    "file": rel, "line": getattr(node, "lineno", None),
+                    "construct": "lambda",
+                })
+            elif isinstance(node, (ast.ClassDef, ast.FunctionDef, ast.AsyncFunctionDef)) and id(node) not in supported_nodes:
+                coverage.setdefault("unsupported_constructs", []).append({
+                    "file": rel, "line": getattr(node, "lineno", None),
+                    "construct": "nested_definition",
+                })
+            elif isinstance(node, ast.Call):
+                target = None
+                if isinstance(node.func, ast.Name):
+                    target = node.func.id
+                    if target in local_functions:
+                        continue
+                    construct = "external_or_unresolved_call"
+                elif isinstance(node.func, ast.Attribute):
+                    receiver = node.func.value
+                    if (
+                        isinstance(receiver, ast.Name)
+                        and receiver.id in {"self", "cls"}
+                        and any(method == node.func.attr for _owner, method in local_methods)
+                    ):
+                        continue
+                    target = ast.unparse(node.func)
+                    construct = "external_or_dynamic_call"
+                else:
+                    target = ast.unparse(node.func)
+                    construct = "dynamic_call"
+                if target in imported_names:
+                    construct = "external_import_call"
+                coverage.setdefault("unsupported_constructs", []).append({
+                    "file": rel, "line": getattr(node, "lineno", None),
+                    "construct": construct, "target": str(target)[:160],
+                })
     return chunks
 
 
@@ -344,9 +424,15 @@ def _py_chunks(
     root: Path,
     skip_lower: frozenset[str],
     progress: Callable[[int, str], None] | None = None,
+    coverage: dict[str, Any] | None = None,
 ) -> tuple[list[dict[str, Any]], int]:
     """AST chunks for up to ``_MAX_PY_FILES`` python files. Pure + total."""
-    files = _py_files(root, skip_lower)[:_MAX_PY_FILES]
+    all_files = _py_files(root, skip_lower)
+    files = all_files[:_MAX_PY_FILES]
+    if coverage is not None and len(all_files) > _MAX_PY_FILES:
+        coverage.setdefault("unsupported_constructs", []).append({
+            "construct": "file_count_limit", "limit": _MAX_PY_FILES,
+        })
     total = len(files)
     chunks: list[dict[str, Any]] = []
     files_done = 0
@@ -356,10 +442,15 @@ def _py_chunks(
                 lines = handle.readlines()
         except OSError:
             files_done += 1
+            if coverage is not None:
+                coverage.setdefault("malformed_files", []).append(rel)
+                coverage.setdefault("unsupported_constructs", []).append({
+                    "file": rel, "construct": "source_read_error",
+                })
             _report(progress, int((index + 1) / total * 100), f"{index + 1}/{total} files")
             continue
         module_dotted = _module_dotted(rel)
-        file_chunks = _py_file_chunks(rel, path, lines, module_dotted)
+        file_chunks = _py_file_chunks(rel, path, lines, module_dotted, coverage)
         chunks.extend(file_chunks)
         files_done += 1
         _report(progress, int((index + 1) / total * 100), f"{index + 1}/{total} files")
@@ -391,6 +482,8 @@ def _produce_php(workspace_path: str, php_files: int) -> tuple[list[dict[str, An
 _PRODUCER_NAMES: dict[str, str] = {
     "php": "code-parse",
     "python": "python-ast",
+    "javascript": "tree-sitter-javascript",
+    "typescript": "tree-sitter-typescript",
 }
 
 
@@ -458,16 +551,32 @@ def produce_chunks(
                 "files": files,
                 "producer": producer,
                 "error": None,
+                "coverage": "complete",
+                "unsupported_constructs": [],
+                "malformed_files": [],
             }
         if primary == "python":
-            chunks, files = _py_chunks(root, _skip_dir_names_lower(), progress)
+            coverage: dict[str, Any] = {"unsupported_constructs": [], "malformed_files": []}
+            chunks, files = _py_chunks(root, _skip_dir_names_lower(), progress, coverage)
             return {
                 "language": primary,
                 "chunks": chunks,
                 "files": files,
                 "producer": producer,
                 "error": None,
+                **coverage,
+                "coverage": "partial" if coverage["unsupported_constructs"] else "complete",
             }
+        if primary in {"javascript", "typescript"}:
+            from projects.js_ts_index import produce_chunks as produce_js_ts_chunks
+
+            result = produce_js_ts_chunks(root, primary)
+            result.update({
+                "language": primary,
+                "producer": producer,
+                "files": int(result.get("files") or lang_files),
+            })
+            return result
         # unreachable — kept for total-ness if _PRODUCER_NAMES grows
         return {
             "language": primary,

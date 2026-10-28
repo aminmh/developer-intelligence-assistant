@@ -170,6 +170,16 @@ def test_complete_with_model_forwards_json_response_format(monkeypatch):
     assert remote_client.calls[0]["response_format"] == {"type": "json_object"}
 
 
+def test_complete_with_model_forwards_per_request_timeout(monkeypatch):
+    _configure_remote(monkeypatch)
+    remote_client = _FakeClient(content="ok")
+    monkeypatch.setattr(llm, "_get_remote_client", lambda: remote_client)
+
+    llm.complete_with_model("hello", provider="remote", timeout=45)
+
+    assert remote_client.calls[0]["timeout"] == 45
+
+
 def test_complete_with_model_remote_error_falls_back_to_local(monkeypatch):
     _configure_remote(monkeypatch)
 

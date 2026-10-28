@@ -9,6 +9,7 @@ import re
 import threading
 import time
 from typing import Any, List, Optional, Tuple
+from urllib.parse import urlsplit
 import urllib.request
 
 import instructor
@@ -276,6 +277,8 @@ def _run_chat(
     top_p: Optional[float] = None,
     max_tokens: int = 2048,
     response_format: Optional[dict] = None,
+    extra_body: Optional[dict] = None,
+    timeout: float | None = None,
 ) -> tuple[str, dict | None]:
     """Run a chat completion and return text plus normalized provider usage."""
     messages: List[dict] = []
@@ -294,6 +297,10 @@ def _run_chat(
         kwargs["top_p"] = top_p
     if response_format is not None:
         kwargs["response_format"] = response_format
+    if extra_body is not None:
+        kwargs["extra_body"] = extra_body
+    if timeout is not None:
+        kwargs["timeout"] = timeout
 
     response = client.chat.completions.create(**kwargs)
     content = response.choices[0].message.content if response.choices else ""
@@ -308,15 +315,25 @@ def complete_with_model(
     max_tokens: int = 2048,
     provider: str = "local",
     response_format: Optional[dict] = None,
+    timeout: float | None = None,
+    fallback_to_local: bool = True,
 ) -> CompletionResult:
     """Return (content, model_used, provider_used).
 
     provider_used is "remote" only when the remote path actually succeeded,
-    otherwise "local". An unconfigured or failing remote silently falls back to
-    the local Ollama chat model — no error is raised for remote failures.
+    otherwise "local". Remote failures fall back to local by default; callers
+    can disable fallback and set a per-request timeout for bounded operations.
     """
     if provider == "remote" and remote_configured():
         model = settings.llm_remote_model or settings.ollama_llm_model
+        remote_host = urlsplit(settings.llm_remote_base_url).hostname
+        extra_body = (
+            {"reasoning_format": "hidden"}
+            if response_format is not None
+            and remote_host == "api.groq.com"
+            and model.startswith("openai/gpt-oss-")
+            else None
+        )
         try:
             content, usage = _run_chat(
                 _get_remote_client(),
@@ -327,12 +344,19 @@ def complete_with_model(
                 top_p=top_p,
                 max_tokens=max_tokens,
                 response_format=response_format,
+                extra_body=extra_body,
+                timeout=timeout,
             )
             if content:
                 return CompletionResult(content, model, "remote", usage)
             # Empty/falsy content is a remote failure — fall through to local.
         except Exception:
-            pass  # silently fall back to the local model
+            if not fallback_to_local:
+                raise
+        if not fallback_to_local:
+            raise RuntimeError("The configured remote model returned an empty completion.")
+    elif provider == "remote" and not fallback_to_local:
+        raise RuntimeError("The configured remote model is unavailable.")
 
     model = settings.local_llm_model or settings.ollama_llm_model
     _cancel_local_model_unload()
@@ -346,6 +370,7 @@ def complete_with_model(
             top_p=top_p,
             max_tokens=max_tokens,
             response_format=response_format,
+            timeout=timeout,
         )
     finally:
         _schedule_local_model_unload(model, enabled=not bool(settings.local_llm_url))

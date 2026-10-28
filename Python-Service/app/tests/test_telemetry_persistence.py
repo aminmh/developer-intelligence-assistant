@@ -2,15 +2,16 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 from pathlib import Path
 import subprocess
 
 import pytest
 from qdrant_client import QdrantClient
 
-from index.llamaindex_layer import CodePropertyGraph, _chunk_node_id, node_id_for
+from index.llamaindex_layer import CodePropertyGraph, _chunk_node_id, _payload, _point_id_for, node_id_for
 from inspection.service import InspectionService
-from telemetry.snapshot import Snapshot, storage_id
+from telemetry.snapshot import Snapshot, identity_metadata, prepare_chunks, storage_id
 from telemetry.registry import SnapshotRegistry
 
 
@@ -62,6 +63,7 @@ def test_real_ingest_isolates_two_projects_and_two_commits(monkeypatch):
             for _ in range(2):
                 result = graph.ingest(chunks(), snapshot.collection, snapshot=snapshot)
                 assert result["ingested"] == result["graph_nodes"] == 2
+                assert result["vector_point_count"] == 2
             records, _ = vectors.scroll(snapshot.collection, with_payload=True)
             assert len(records) == 2
             for record in records:
@@ -93,6 +95,66 @@ def test_snapshot_requires_graph_and_embeddings(monkeypatch):
         graph.ingest(chunks(), snapshot.collection, snapshot=snapshot)
 
 
+def test_snapshot_requires_persisted_vector_readback(monkeypatch):
+    graph, store, vectors = index_with_local_vectors(monkeypatch)
+    snapshot = Snapshot("one", "a" * 40, "b" * 64)
+    vectors.create_collection(
+        collection_name=snapshot.collection,
+        vectors_config={"size": 3, "distance": "Cosine"},
+    )
+    monkeypatch.setattr(graph, "_ingest_vectors", lambda *args, **kwargs: (2, 0))
+
+    with pytest.raises(RuntimeError, match=r"verification failed \(expected=2, persisted=0, retrieved=0\)"):
+        graph.ingest(chunks(), snapshot.collection, snapshot=snapshot)
+
+
+def test_snapshot_readback_fetches_only_identity_payload(monkeypatch):
+    graph, store, vectors = index_with_local_vectors(monkeypatch)
+    snapshot = Snapshot("one", "a" * 40, "b" * 64)
+    original_retrieve = vectors.retrieve
+    calls = []
+
+    def record_retrieve(**kwargs):
+        calls.append(kwargs)
+        return original_retrieve(**kwargs)
+
+    monkeypatch.setattr(vectors, "retrieve", record_retrieve)
+    graph.ingest(chunks(), snapshot.collection, snapshot=snapshot)
+
+    assert len(calls) == 1
+    assert calls[0]["with_payload"] == list(identity_metadata(snapshot.metadata()))
+    assert "code" not in calls[0]["with_payload"]
+    assert len(calls[0]["ids"]) == 2
+
+
+def test_snapshot_readback_rejects_points_with_wrong_revision_metadata(monkeypatch):
+    from qdrant_client.models import PointStruct
+
+    graph, store, vectors = index_with_local_vectors(monkeypatch)
+    snapshot = Snapshot("one", "a" * 40, "b" * 64, revision_id="rev_" + "d" * 32)
+    prepared = prepare_chunks(chunks(), snapshot)
+    vectors.create_collection(
+        collection_name=snapshot.collection,
+        vectors_config={"size": 3, "distance": "Cosine"},
+    )
+    vectors.upsert(
+        collection_name=snapshot.collection,
+        wait=True,
+        points=[
+            PointStruct(
+                id=_point_id_for(_chunk_node_id(chunk)),
+                vector=[0.2, 0.4, 0.6],
+                payload={**_payload(chunk, snapshot.collection), "revision_id": "rev_" + "e" * 32},
+            )
+            for chunk in prepared
+        ],
+    )
+    monkeypatch.setattr(graph, "_ingest_vectors", lambda *args, **kwargs: (2, 0))
+
+    with pytest.raises(RuntimeError, match=r"persisted=2, retrieved=0\)"):
+        graph.ingest(chunks(), snapshot.collection, snapshot=snapshot)
+
+
 def test_snapshot_requires_successful_relation_writes(monkeypatch):
     graph, store, vectors = index_with_local_vectors(monkeypatch)
     original = store.structured_query
@@ -109,7 +171,8 @@ def test_snapshot_requires_successful_relation_writes(monkeypatch):
 
 def test_legacy_ids_stay_stable_and_new_closures_are_distinct():
     assert _chunk_node_id(chunks()[0]) == hashlib.sha1(b"App\\Orders::store").hexdigest()
-    path = Path(__file__).parents[2] / "php/tests/telemetry/export_fixture.php"
+    php_root = Path(os.environ.get("PHP_CLI_ROOT", Path(__file__).parents[2] / "php"))
+    path = php_root / "tests/telemetry/export_fixture.php"
     exported = json.loads(subprocess.check_output(["php", str(path)]))["chunks"]
     closures = [c for c in exported if c["type"] in ("closure", "arrow_function")]
     assert len(closures) >= 2

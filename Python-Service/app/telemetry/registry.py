@@ -64,8 +64,18 @@ class SnapshotRegistry:
             db.execute("""CREATE TABLE IF NOT EXISTS index_jobs (
                 project_id TEXT NOT NULL, commit_sha TEXT NOT NULL,
                 state TEXT NOT NULL DEFAULT 'queued', attempts INTEGER NOT NULL DEFAULT 0,
+                source_only INTEGER NOT NULL DEFAULT 0,
                 updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
                 PRIMARY KEY(project_id, commit_sha))""")
+            job_columns = {row[1] for row in db.execute("PRAGMA table_info(index_jobs)")}
+            if "source_only" not in job_columns:
+                db.execute("ALTER TABLE index_jobs ADD COLUMN source_only INTEGER NOT NULL DEFAULT 0")
+            db.execute("""CREATE TABLE IF NOT EXISTS git_sources (
+                user_id TEXT NOT NULL, project_id TEXT NOT NULL, repository TEXT NOT NULL UNIQUE,
+                branch TEXT NOT NULL, credential_id TEXT NOT NULL, status TEXT NOT NULL DEFAULT 'configured',
+                last_commit_sha TEXT, last_revision_id TEXT, error_code TEXT,
+                updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                PRIMARY KEY(user_id, project_id), UNIQUE(repository, project_id))""")
             db.execute("""CREATE TABLE IF NOT EXISTS runtime_settings (
                 setting_key TEXT PRIMARY KEY, setting_value TEXT NOT NULL,
                 updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP)""")
@@ -289,7 +299,11 @@ class SnapshotRegistry:
             for row in ready:
                 db.execute("INSERT OR IGNORE INTO index_jobs(project_id,commit_sha) VALUES(?,?)", tuple(row))
                 db.execute("UPDATE snapshots SET state='queued',updated_at=CURRENT_TIMESTAMP WHERE project_id=? AND commit_sha=? AND state NOT IN ('ready','failed')", tuple(row))
-            row = db.execute("SELECT project_id,commit_sha FROM index_jobs WHERE state IN ('queued','running') ORDER BY updated_at LIMIT 1").fetchone()
+            row = db.execute("""SELECT j.project_id,j.commit_sha FROM index_jobs j
+                WHERE j.state IN ('queued','running') AND (j.source_only=1 OR EXISTS (
+                    SELECT 1 FROM deployments d WHERE d.project_id=j.project_id
+                    AND d.commit_sha=j.commit_sha AND d.state='running'))
+                ORDER BY j.updated_at LIMIT 1""").fetchone()
             if row:
                 db.execute("UPDATE index_jobs SET state='running',attempts=attempts+1,updated_at=CURRENT_TIMESTAMP WHERE project_id=? AND commit_sha=?", tuple(row))
                 db.execute("UPDATE snapshots SET state='indexing',updated_at=CURRENT_TIMESTAMP WHERE project_id=? AND commit_sha=?", tuple(row))
@@ -332,6 +346,63 @@ class SnapshotRegistry:
                 VALUES (?, ?, ?, ?, ?, 'awaiting_source', ?)""",
                 (snapshot.project_id, snapshot.commit_sha, snapshot.source_archive_sha256,
                  json.dumps(snapshot.metadata()), snapshot.key, "rev_" + uuid4().hex))
+
+    def save_git_source(self, user_id: str, project_id: str, repository: str, branch: str,
+                        credential_id: str) -> dict:
+        if not user_id or len(user_id) > 512:
+            raise ValueError("Invalid user identity")
+        validate_project_id(project_id)
+        try:
+            with self._connect() as db:
+                db.execute("""INSERT INTO git_sources(user_id,project_id,repository,branch,credential_id,status)
+                    VALUES(?,?,?,?,?,'configured') ON CONFLICT(user_id,project_id) DO UPDATE SET
+                    repository=excluded.repository, branch=excluded.branch, credential_id=excluded.credential_id,
+                    status='configured',
+                    last_commit_sha=CASE WHEN git_sources.repository!=excluded.repository OR git_sources.branch!=excluded.branch THEN NULL ELSE git_sources.last_commit_sha END,
+                    last_revision_id=CASE WHEN git_sources.repository!=excluded.repository OR git_sources.branch!=excluded.branch THEN NULL ELSE git_sources.last_revision_id END,
+                    error_code=NULL, updated_at=CURRENT_TIMESTAMP""",
+                    (user_id, project_id, repository, branch, credential_id))
+        except sqlite3.IntegrityError as exc:
+            raise ValueError("This GitHub repository is already connected to another project.") from exc
+        return self.get_git_source(user_id, project_id)
+
+    def get_git_source(self, user_id: str, project_id: str) -> dict | None:
+        validate_project_id(project_id)
+        with self._connect() as db:
+            row = db.execute("SELECT * FROM git_sources WHERE user_id=? AND project_id=?",
+                             (user_id, project_id)).fetchone()
+        return dict(row) if row else None
+
+    def git_source_for_repository(self, repository: str) -> dict | None:
+        with self._connect() as db:
+            row = db.execute("SELECT * FROM git_sources WHERE repository=? ORDER BY updated_at DESC LIMIT 1",
+                             (repository,)).fetchone()
+        return dict(row) if row else None
+
+    def update_git_source_status(self, user_id: str, project_id: str, *, status: str,
+                                 commit_sha: str | None = None, revision_id: str | None = None,
+                                 error_code: str | None = None) -> None:
+        with self._connect() as db:
+            db.execute("""UPDATE git_sources SET status=?, last_commit_sha=COALESCE(?,last_commit_sha),
+                last_revision_id=COALESCE(?,last_revision_id), error_code=?, updated_at=CURRENT_TIMESTAMP
+                WHERE user_id=? AND project_id=?""",
+                (status, commit_sha, revision_id, error_code, user_id, project_id))
+
+    def queue_source_index(self, project_id: str, commit_sha: str) -> bool:
+        """Queue a Git source snapshot without asserting a Runtime deployment exists."""
+        validate_scope(project_id, commit_sha)
+        with self._connect() as db:
+            row = db.execute("SELECT state,archive_key FROM snapshots WHERE project_id=? AND commit_sha=?",
+                             (project_id, commit_sha)).fetchone()
+            if not row or not row["archive_key"] or row["state"] == "ready":
+                return False
+            db.execute("""INSERT INTO index_jobs(project_id,commit_sha,state,source_only)
+                VALUES(?,?,'queued',1) ON CONFLICT(project_id,commit_sha) DO UPDATE SET
+                state=CASE WHEN index_jobs.state='running' THEN index_jobs.state ELSE 'queued' END,
+                source_only=1, updated_at=CURRENT_TIMESTAMP""", (project_id, commit_sha))
+            db.execute("""UPDATE snapshots SET state='queued',error_code=NULL,updated_at=CURRENT_TIMESTAMP
+                WHERE project_id=? AND commit_sha=? AND state!='ready'""", (project_id, commit_sha))
+        return True
 
     def is_ready_collection(self, collection: str) -> bool:
         with self._connect() as db:

@@ -64,6 +64,7 @@ class Settings(BaseModel):
     temperature: float = float(os.getenv("LLM_TEMPERATURE", "0.7"))
     top_p: float = float(os.getenv("LLM_TOP_P", "0.9"))
     llm_context_window_tokens: int = int(os.getenv("LLM_CONTEXT_WINDOW_TOKENS", "0"))
+    assessment_request_token_limit: int = int(os.getenv("ASSESSMENT_REQUEST_TOKEN_LIMIT", "0"))
 
     # Context-window preview toggle: "off" | "inline" | "gate".
     context_preview_mode: str = os.getenv("CONTEXT_PREVIEW_MODE", "off")

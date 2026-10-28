@@ -62,6 +62,14 @@ def _normalize_exported_paths(exported: dict[str, list[dict[str, Any]]], workspa
 
 
 def index_source(workspace: str, snapshot: Snapshot) -> dict:
+    if not any(path.is_file() and path.suffix.lower() == ".php" for path in Path(workspace).rglob("*")):
+        # Static assessment supports more languages than the current call graph
+        # exporter. Publish the source snapshot while marking semantic indexing
+        # unavailable; callers must not interpret this as an empty clean graph.
+        return {"chunk_count": 0, "ingested": 0, "graph_nodes": 0, "graph_relations": 0,
+                "embed_fails": 0, "semantic_index_status": "unavailable",
+                "semantic_index_reason": "The current symbol and call graph exporter supports PHP only."}
+
     from infra.php_cli import PhpCli
     from index.llamaindex_layer import CodePropertyGraph
     from inspection.service import InspectionService
@@ -105,6 +113,22 @@ class SourceService:
             self.registry.queue_if_deployable(project_id, commit_sha, retry_failed=True)
             return self.registry.get(project_id, commit_sha)
 
+    def upload_git_snapshot(self, project_id: str, commit_sha: str, data: bytes) -> dict:
+        """Stage a fetched Git revision and queue indexing independently of deployment state."""
+        snapshot = Snapshot(project_id, commit_sha, hashlib.sha256(data).hexdigest())
+        validate_archive(data)
+        with self.registry.lock(project_id, commit_sha):
+            self.registry.register(snapshot)
+            current = self.registry.get(project_id, commit_sha)
+            if current["state"] == "ready":
+                return current
+            if not self.registry.archive_key(project_id, commit_sha):
+                self.registry.transition(snapshot, "storing")
+                key = self.storage.put_snapshot_archive(snapshot.key, snapshot.source_archive_sha256, data)
+                self.registry.transition(snapshot, "indexing", archive_key=key)
+            self.registry.queue_source_index(project_id, commit_sha)
+            return self.registry.get(project_id, commit_sha)
+
     def process_one(self) -> bool:
         """Run one durable job. A running job is reclaimable after process restart."""
         with (self.registry.root / "index-worker.lock").open("a") as lock:
@@ -127,8 +151,12 @@ class SourceService:
                     extract_zip_safely(data, workspace)
                     result = self.indexer(workspace, snapshot)
                 count = result.get("chunk_count", 0)
-                if (not count or result.get("ingested") != count
-                        or result.get("graph_nodes") != count or result.get("embed_fails", 0)):
+                semantic_unavailable = result.get("semantic_index_status") == "unavailable"
+                if (semantic_unavailable and any(result.get(key) for key in (
+                        "chunk_count", "ingested", "graph_nodes", "graph_relations", "embed_fails"))):
+                    raise RuntimeError("Unavailable semantic indexing returned graph data")
+                if (not semantic_unavailable and (not count or result.get("ingested") != count
+                        or result.get("graph_nodes") != count or result.get("embed_fails", 0))):
                     raise RuntimeError("Incomplete snapshot indexing")
                 self.registry.finish_job(project_id, commit_sha, success=True)
             except Exception as exc:

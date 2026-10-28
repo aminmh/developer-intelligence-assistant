@@ -33,7 +33,7 @@ LABELS = {
 }
 SLUG = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$")
 COMMIT = re.compile(r"^(?:[0-9a-f]{40}|[0-9a-f]{64})$")
-HELPER_HOST = "127.0.0.1"
+HELPER_HOST = os.environ.get("RUNTIME_HELPER_BIND", "127.0.0.1")
 HELPER_PORT = 47831
 HELPER_COMMAND_TIMEOUT_SECONDS = 600
 TERMINAL_OPERATION_START_TIMEOUT_SECONDS = 30
@@ -185,7 +185,9 @@ def serve_helper() -> None:
             origin = self.headers.get("Origin", "")
             allowed = helper_origin()
             host = self.headers.get("Host", "")
-            if origin != allowed or host not in {f"127.0.0.1:{HELPER_PORT}", f"localhost:{HELPER_PORT}"}:
+            if origin != allowed or host not in {
+                    f"127.0.0.1:{HELPER_PORT}", f"localhost:{HELPER_PORT}",
+                    f"host.docker.internal:{HELPER_PORT}"}:
                 return False
             scheme, _, authority = origin.partition("://")
             if scheme not in {"http", "https"} or not authority or authority.startswith("["):
@@ -215,6 +217,109 @@ def serve_helper() -> None:
             self.end_headers()
 
         def do_POST(self) -> None:
+            if self.path in {"/code-quality-github", "/code-quality-github-use"}:
+                length = self.headers.get("Content-Length", "0")
+                if not length.isdigit() or not 1 <= int(length) <= 12 * 1024:
+                    return self._json(400, {"detail": "Invalid GitHub source credential request."})
+                try:
+                    body = json.loads(self.rfile.read(int(length)))
+                    project_id = body.get("project_id") if isinstance(body, dict) else None
+                    target_id = body.get("target_id") if isinstance(body, dict) else None
+                    if (not isinstance(project_id, str) or not SLUG.fullmatch(project_id)
+                            or not isinstance(target_id, str) or not re.fullmatch(r"[0-9a-fA-F-]{36}", target_id)):
+                        raise ValueError
+                except (ValueError, json.JSONDecodeError):
+                    return self._json(400, {"detail": "Invalid GitHub source credential identity."})
+                use = self.path == "/code-quality-github-use"
+                operation = "code-quality-github-fetch" if use else "code-quality-github-manage"
+                if not self._authorized(operation=operation, project_id=project_id, target_id=target_id):
+                    return self._json(403, {"detail": "GitHub source credential authorization is invalid or expired."})
+                if not self._consume_authorization():
+                    return self._json(403, {"detail": "This GitHub source credential authorization has already been used."})
+                try:
+                    if use:
+                        token = ssh_credentials.use_github_token_for_fetch(target_id)
+                        return self._json(200, {"token": token})
+                    if body.get("action") == "save":
+                        result = ssh_credentials.save_github_token(target_id, body.get("token"))
+                    elif body.get("action") == "status":
+                        result = ssh_credentials.github_token_status(target_id)
+                    else:
+                        raise ValueError("Choose save or status.")
+                    return self._json(200, result)
+                except (ValueError, ssh_credentials.CredentialStoreError) as exc:
+                    status = 423 if isinstance(exc, ssh_credentials.CredentialStoreError) and exc.locked else 422
+                    return self._json(status, {"detail": str(exc)})
+                except Exception:
+                    return self._json(503, {"detail": "The GitHub token operation could not complete."})
+            if self.path in {"/code-quality-outline", "/code-quality-outline-use"}:
+                length = self.headers.get("Content-Length", "0")
+                if not length.isdigit() or not 1 <= int(length) <= 12 * 1024:
+                    return self._json(400, {"detail": "Invalid Outline credential request."})
+                try:
+                    body = json.loads(self.rfile.read(int(length)))
+                    project_id = body.get("project_id") if isinstance(body, dict) else None
+                    target_id = body.get("target_id") if isinstance(body, dict) else None
+                    if (not isinstance(project_id, str) or not SLUG.fullmatch(project_id)
+                            or not isinstance(target_id, str) or not re.fullmatch(r"[0-9a-fA-F-]{36}", target_id)):
+                        raise ValueError
+                except (ValueError, json.JSONDecodeError):
+                    return self._json(400, {"detail": "Invalid Outline credential identity."})
+                use = self.path == "/code-quality-outline-use"
+                operation = "code-quality-outline-fetch" if use else "code-quality-outline-manage"
+                if not self._authorized(operation=operation, project_id=project_id, target_id=target_id):
+                    return self._json(403, {"detail": "Outline credential authorization is invalid or expired."})
+                if not self._consume_authorization():
+                    return self._json(403, {"detail": "This Outline credential authorization has already been used."})
+                try:
+                    if use:
+                        return self._json(200, {"token": ssh_credentials.use_outline_token(target_id)})
+                    if body.get("action") == "save":
+                        result = ssh_credentials.save_outline_token(target_id, body.get("token"))
+                    elif body.get("action") == "status":
+                        result = ssh_credentials.outline_token_status(target_id)
+                    else:
+                        raise ValueError("Choose save or status.")
+                    return self._json(200, result)
+                except (ValueError, ssh_credentials.CredentialStoreError) as exc:
+                    status = 423 if isinstance(exc, ssh_credentials.CredentialStoreError) and exc.locked else 422
+                    return self._json(status, {"detail": str(exc)})
+                except Exception:
+                    return self._json(503, {"detail": "The Outline token operation could not complete."})
+            if self.path in {"/code-quality-sonarqube", "/code-quality-sonarqube-use"}:
+                length = self.headers.get("Content-Length", "0")
+                if not length.isdigit() or not 1 <= int(length) <= 12 * 1024:
+                    return self._json(400, {"detail": "Invalid SonarQube credential request."})
+                try:
+                    body = json.loads(self.rfile.read(int(length)))
+                    project_id = body.get("project_id") if isinstance(body, dict) else None
+                    target_id = body.get("target_id") if isinstance(body, dict) else None
+                    if (not isinstance(project_id, str) or not SLUG.fullmatch(project_id)
+                            or not isinstance(target_id, str) or not re.fullmatch(r"[0-9a-fA-F-]{36}", target_id)):
+                        raise ValueError
+                except (ValueError, json.JSONDecodeError):
+                    return self._json(400, {"detail": "Invalid SonarQube credential identity."})
+                use = self.path == "/code-quality-sonarqube-use"
+                operation = "code-quality-sonarqube-fetch" if use else "code-quality-sonarqube-manage"
+                if not self._authorized(operation=operation, project_id=project_id, target_id=target_id):
+                    return self._json(403, {"detail": "SonarQube credential authorization is invalid or expired."})
+                if not self._consume_authorization():
+                    return self._json(403, {"detail": "This SonarQube credential authorization has already been used."})
+                try:
+                    if use:
+                        return self._json(200, {"token": ssh_credentials.use_sonarqube_token(target_id)})
+                    if body.get("action") == "save":
+                        result = ssh_credentials.save_sonarqube_token(target_id, body.get("token"))
+                    elif body.get("action") == "status":
+                        result = ssh_credentials.sonarqube_token_status(target_id)
+                    else:
+                        raise ValueError("Choose save or status.")
+                    return self._json(200, result)
+                except (ValueError, ssh_credentials.CredentialStoreError) as exc:
+                    status = 423 if isinstance(exc, ssh_credentials.CredentialStoreError) and exc.locked else 422
+                    return self._json(status, {"detail": str(exc)})
+                except Exception:
+                    return self._json(503, {"detail": "The SonarQube token operation could not complete."})
             if self.path in {"/code-quality-bearer", "/code-quality-bearer-use"}:
                 length = self.headers.get("Content-Length", "0")
                 if not length.isdigit() or not 1 <= int(length) <= 12 * 1024:
@@ -360,7 +465,9 @@ def serve_helper() -> None:
             return self._json(202, {"status": "starting"})
 
         def do_GET(self) -> None:
-            if self.path == "/health": return self._json(200, {"ok": True, "api_version": 25})
+            if self.path == "/health": return self._json(200, {
+                "ok": True, "api_version": 27, "helper_bind": HELPER_HOST,
+            })
             if self.path == "/runtime-ssh-credentials":
                 if not self._authorized(unscoped=True):
                     return self._json(403, {"detail": "Runtime credential authorization is invalid or expired."})
@@ -390,6 +497,75 @@ def serve_helper() -> None:
             return self._json(200, state)
 
         def do_DELETE(self) -> None:
+            if self.path == "/code-quality-sonarqube":
+                length = self.headers.get("Content-Length", "0")
+                if not length.isdigit() or not 1 <= int(length) <= 2 * 1024:
+                    return self._json(400, {"detail": "Invalid SonarQube credential identity."})
+                try:
+                    body = json.loads(self.rfile.read(int(length)))
+                    project_id = body.get("project_id") if isinstance(body, dict) else None
+                    target_id = body.get("target_id") if isinstance(body, dict) else None
+                except (ValueError, json.JSONDecodeError):
+                    project_id = target_id = None
+                if (not isinstance(project_id, str) or not SLUG.fullmatch(project_id)
+                        or not isinstance(target_id, str) or not re.fullmatch(r"[0-9a-fA-F-]{36}", target_id)):
+                    return self._json(400, {"detail": "Invalid SonarQube credential identity."})
+                if not self._authorized(operation="code-quality-sonarqube-manage", project_id=project_id, target_id=target_id):
+                    return self._json(403, {"detail": "SonarQube credential authorization is invalid or expired."})
+                if not self._consume_authorization():
+                    return self._json(403, {"detail": "This SonarQube credential authorization has already been used."})
+                try:
+                    return self._json(200, ssh_credentials.remove_sonarqube_token(target_id))
+                except ssh_credentials.CredentialStoreError as exc:
+                    return self._json(423 if exc.locked else 503, {"detail": str(exc)})
+                except Exception:
+                    return self._json(503, {"detail": "The SonarQube token could not be removed from the OS credential store."})
+            if self.path == "/code-quality-outline":
+                length = self.headers.get("Content-Length", "0")
+                if not length.isdigit() or not 1 <= int(length) <= 2 * 1024:
+                    return self._json(400, {"detail": "Invalid Outline credential identity."})
+                try:
+                    body = json.loads(self.rfile.read(int(length)))
+                    project_id = body.get("project_id") if isinstance(body, dict) else None
+                    target_id = body.get("target_id") if isinstance(body, dict) else None
+                except (ValueError, json.JSONDecodeError):
+                    project_id = target_id = None
+                if (not isinstance(project_id, str) or not SLUG.fullmatch(project_id)
+                        or not isinstance(target_id, str) or not re.fullmatch(r"[0-9a-fA-F-]{36}", target_id)):
+                    return self._json(400, {"detail": "Invalid Outline credential identity."})
+                if not self._authorized(operation="code-quality-outline-manage", project_id=project_id, target_id=target_id):
+                    return self._json(403, {"detail": "Outline credential authorization is invalid or expired."})
+                if not self._consume_authorization():
+                    return self._json(403, {"detail": "This Outline credential authorization has already been used."})
+                try:
+                    return self._json(200, ssh_credentials.remove_outline_token(target_id))
+                except ssh_credentials.CredentialStoreError as exc:
+                    return self._json(423 if exc.locked else 503, {"detail": str(exc)})
+                except Exception:
+                    return self._json(503, {"detail": "The Outline token could not be removed from the OS credential store."})
+            if self.path == "/code-quality-github":
+                length = self.headers.get("Content-Length", "0")
+                if not length.isdigit() or not 1 <= int(length) <= 2048:
+                    return self._json(400, {"detail": "Invalid GitHub source credential identity."})
+                try:
+                    body = json.loads(self.rfile.read(int(length)))
+                    project_id = body.get("project_id") if isinstance(body, dict) else None
+                    target_id = body.get("target_id") if isinstance(body, dict) else None
+                except (ValueError, json.JSONDecodeError):
+                    project_id = target_id = None
+                if (not isinstance(project_id, str) or not SLUG.fullmatch(project_id)
+                        or not isinstance(target_id, str) or not re.fullmatch(r"[0-9a-fA-F-]{36}", target_id)):
+                    return self._json(400, {"detail": "Invalid GitHub source credential identity."})
+                if not self._authorized(operation="code-quality-github-manage", project_id=project_id, target_id=target_id):
+                    return self._json(403, {"detail": "GitHub source credential authorization is invalid or expired."})
+                if not self._consume_authorization():
+                    return self._json(403, {"detail": "This GitHub source credential authorization has already been used."})
+                try:
+                    return self._json(200, ssh_credentials.remove_github_token(target_id))
+                except ssh_credentials.CredentialStoreError as exc:
+                    return self._json(423 if exc.locked else 503, {"detail": str(exc)})
+                except ValueError as exc:
+                    return self._json(422, {"detail": str(exc)})
             if self.path == "/code-quality-bearer":
                 length = self.headers.get("Content-Length", "0")
                 if not length.isdigit() or not 1 <= int(length) <= 2048:
@@ -429,7 +605,7 @@ def serve_helper() -> None:
         helper_secret()
         server = ThreadingHTTPServer((HELPER_HOST, HELPER_PORT), Handler)
     except OSError as exc:
-        raise RuntimeError(f"Cannot bind Runtime setup helper to loopback port {HELPER_PORT}: {exc}") from exc
+        raise RuntimeError(f"Cannot bind Runtime setup helper to {HELPER_HOST}:{HELPER_PORT}: {exc}") from exc
     print(f"Runtime setup helper listening on http://{HELPER_HOST}:{HELPER_PORT}")
     signal.signal(signal.SIGTERM, lambda *_: threading.Thread(target=server.shutdown, daemon=True).start())
     server.serve_forever(poll_interval=0.5)

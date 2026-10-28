@@ -37,6 +37,7 @@ class FakeQdrant:
         self._payloads: dict[tuple[str, str], dict] = {}
         self._hits: dict[str, list[_Hit]] = {}
         self.retrieve_calls: list[tuple[str, list]] = []
+        self.search_error = False
 
     def add_point(self, collection, payload):
         stored = dict(payload)
@@ -58,6 +59,8 @@ class FakeQdrant:
         )
 
     def search(self, collection_name, query_vector, limit=5, query_filter=None):
+        if self.search_error:
+            raise RuntimeError("simulated qdrant search failure")
         return list(self._hits.get(collection_name, []))[:limit]
 
     def retrieve(self, collection_name, ids):
@@ -213,7 +216,7 @@ def _retrieve(monkeypatch, qdrant, store, *, sym_exists=None, **kwargs):
     monkeypatch.setattr(lli.CodePropertyGraph, "_get_qdrant", lambda self: qdrant)
     monkeypatch.setattr(
         lli.CodePropertyGraph, "_get_embed_model",
-        lambda self: SimpleNamespace(get_text_embedding=lambda q: [0.1] * 4),
+        lambda self: SimpleNamespace(get_query_embedding=lambda q: [0.1] * 4),
     )
     monkeypatch.setattr(lli.CodePropertyGraph, "_get_graph_store", lambda self: store)
     monkeypatch.setattr(lli, "record_retrieval_trace",
@@ -230,6 +233,26 @@ def _by_node(results):
         for r in results
         if (r.get("payload") or {}).get("node_id")
     }
+
+
+def test_hybrid_retrieve_distinguishes_missing_collection_and_search_failure(monkeypatch):
+    store = FakeStore()
+    missing, _ = _retrieve(
+        monkeypatch, FakeQdrant(), store,
+        query="search", collection_name="chunk_code_missing", graph_legs=[],
+    )
+    assert missing["mode"] == "no_results"
+    assert missing["failure_code"] == "collection_missing"
+
+    qdrant = FakeQdrant()
+    qdrant.collections.add("chunk_code_present")
+    qdrant.search_error = True
+    failed, _ = _retrieve(
+        monkeypatch, qdrant, store,
+        query="search", collection_name="chunk_code_present", graph_legs=[],
+    )
+    assert failed["mode"] == "vector_only"
+    assert failed["failure_code"] == "qdrant_search_failed"
 
 
 # --- default = legacy CALLS only --------------------------------------------

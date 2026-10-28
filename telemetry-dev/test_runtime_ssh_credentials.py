@@ -74,6 +74,19 @@ class RuntimeSshCredentialTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "target identity"):
             credentials.save_bearer_token("not-a-target", "token")
 
+    def test_github_source_token_uses_separate_project_credential_service(self):
+        target_id = "12345678-1234-5678-1234-567812345678"
+        with patch.object(credentials, "_provider", return_value="keychain"), \
+                patch.object(credentials, "_keychain_request", return_value={"saved": True}) as request:
+            self.assertEqual(credentials.save_github_token(target_id, "github-read-only"), {"saved": True})
+        self.assertEqual(request.call_args.kwargs["service"], credentials.GITHUB_SERVICE)
+        self.assertEqual(request.call_args.args[1], {"token": "github-read-only"})
+        self.assertNotEqual(request.call_args.kwargs["account"], credentials._bearer_account(target_id))
+
+    def test_github_source_token_invalid_values_are_rejected(self):
+        with self.assertRaisesRegex(ValueError, "GitHub token"):
+            credentials.save_github_token("12345678-1234-5678-1234-567812345678", " ")
+
     def _generated_key(self, directory: str, name: str, passphrase: str) -> tuple[str, str]:
         key_path = Path(directory) / name
         subprocess.run(

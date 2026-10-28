@@ -1,0 +1,134 @@
+rules:
+  - id: builtin-php-extract
+    message: extract() creates local variables from array keys; use explicit key access to keep variable origins clear.
+    severity: INFO
+    languages: [php]
+    pattern: extract(...)
+    metadata:
+      category: clean_code
+  - id: builtin-php-global-state
+    message: A global variable creates a hidden dependency; pass the value explicitly or use the project's dependency container.
+    severity: INFO
+    languages: [php]
+    pattern: global $VARIABLE;
+    metadata:
+      category: clean_code
+  - id: builtin-php-loose-null-comparison
+    message: Loose comparison with null uses PHP type juggling; use an explicit null check when that is the intent.
+    severity: INFO
+    languages: [php]
+    patterns:
+      - pattern-either:
+          - pattern: $VALUE == null
+          - pattern: null == $VALUE
+          - pattern: $VALUE != null
+          - pattern: null != $VALUE
+    metadata:
+      category: clean_code
+  - id: builtin-php-error-suppression
+    message: The error suppression operator hides failures; handle the expected error explicitly.
+    severity: WARNING
+    languages: [php]
+    pattern: '@$EXPR'
+    metadata:
+      category: clean_code
+  - id: builtin-javascript-debugger
+    message: A debugger statement appears in application source and may be leftover debugging code.
+    severity: WARNING
+    languages: [javascript, typescript]
+    pattern: debugger
+    metadata:
+      category: clean_code
+  - id: builtin-javascript-console-log
+    message: Review whether this console.log call is temporary debug output.
+    severity: INFO
+    languages: [javascript, typescript]
+    pattern: console.log(...)
+    metadata:
+      category: clean_code
+  - id: builtin-php-debug-output
+    message: Review whether this debug output should remain in application source.
+    severity: INFO
+    languages: [php]
+    patterns:
+      - pattern-either:
+          - pattern: var_dump(...)
+          - pattern: print_r(...)
+          - pattern: dd(...)
+          - pattern: dump(...)
+    metadata:
+      category: clean_code
+  - id: builtin-java-debug-output
+    message: Review whether direct console output should use the project's logging convention.
+    severity: INFO
+    languages: [java]
+    pattern: System.out.println(...)
+    metadata:
+      category: clean_code
+  - id: builtin-select-star
+    message: SQL SELECT * can transfer unused columns on hot paths.
+    severity: WARNING
+    languages: [generic]
+    pattern-regex: '(?i)\bselect\s+\*\s+from\b'
+    metadata:
+      category: performance
+  - id: builtin-dynamic-code-execution
+    message: Dynamic code execution call requires review.
+    severity: WARNING
+    languages: [generic]
+    pattern-regex: '\b(?:eval|exec)\s*\('
+    metadata:
+      category: security
+  - id: builtin-shell-execution
+    message: Shell execution call requires input and argument-boundary review.
+    severity: WARNING
+    languages: [generic]
+    pattern-regex: '\b(?:shell_exec|system|passthru|popen|Popen)\s*\('
+    metadata:
+      category: security
+  - id: builtin-disabled-tls-verification
+    message: TLS certificate verification appears disabled.
+    severity: ERROR
+    languages: [generic]
+    pattern-regex: '(?i)(?:verify\s*=\s*false|rejectUnauthorized\s*:\s*false|CURLOPT_SSL_VERIFYPEER\s*,\s*false)'
+    metadata:
+      category: security
+  - id: builtin-embedded-credential
+    message: A credential-like string literal may be embedded in source.
+    severity: WARNING
+    languages: [generic]
+    pattern-regex: '(?i)\b(?:api[_-]?key|password|client[_-]?secret)\s*[:=]\s*[\"''][^\"'']{8,}[\"'']'
+    metadata:
+      category: security
+  - id: builtin-unsafe-deserialization
+    message: Unsafe deserialization call requires review.
+    severity: WARNING
+    languages: [generic]
+    pattern-regex: '\b(?:pickle\.loads|yaml\.unsafe_load|unserialize)\s*\('
+    metadata:
+      category: security
+  - id: builtin-empty-exception
+    message: Exception handling appears to discard the failure.
+    severity: WARNING
+    languages: [python]
+    pattern: |
+      try:
+        ...
+      except Exception:
+        pass
+    metadata:
+      category: reliability
+  - id: builtin-empty-catch
+    message: Exception handling appears to discard the failure.
+    severity: WARNING
+    languages: [generic]
+    pattern-regex: '(?s)catch\s*\([^)]*\)\s*\{\s*\}'
+    metadata:
+      category: reliability
+  - id: builtin-unbounded-while
+    message: Unconditional loop requires a bounded exit or cancellation check.
+    severity: WARNING
+    languages: [generic]
+    pattern-regex: '(?m)^\s*while\s*\(?\s*true\s*\)?\s*:\s*$|^\s*while\s*\(\s*true\s*\)\s*\{'
+    metadata:
+      category: reliability

@@ -225,6 +225,7 @@ def _patch_env(
     store: ConceptStore | None = None,
 ) -> ConceptStore:
     concept_store = store or _tmp_store(tmp_path)
+    monkeypatch.setattr(indexer_module.settings, "embedding_provider", "ollama")
     monkeypatch.setattr(indexer_module, "_store", concept_store)
     monkeypatch.setattr(indexer_module, "_qdrant", lambda: fake)
     monkeypatch.setattr(indexer_module, "embed_texts", embed)

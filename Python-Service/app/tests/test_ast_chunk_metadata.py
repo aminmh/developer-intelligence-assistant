@@ -135,16 +135,14 @@ class _BatchQdrant:
         self.upserts.append((collection_name, wait, list(points)))
 
 
-class _Embedder:
-    def get_text_embedding(self, _text):
-        return [0.1, 0.2, 0.3]
-
-
-def test_qdrant_ingest_batches_large_projects():
+def test_qdrant_ingest_batches_large_projects(monkeypatch):
     graph = CodePropertyGraph()
     qdrant = _BatchQdrant()
     graph._get_qdrant = lambda: qdrant  # type: ignore[method-assign]
-    graph._get_embed_model = lambda: _Embedder()  # type: ignore[method-assign]
+    monkeypatch.setattr(
+        "index.llamaindex_layer.embed_texts",
+        lambda texts, **_kwargs: [[0.1, 0.2, 0.3] for _ in texts],
+    )
     chunks = [
         {
             "class_fqn": "App\\Service",

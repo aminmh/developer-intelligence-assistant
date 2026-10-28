@@ -1,0 +1,37 @@
+services:
+  analyzer-worker:
+    image: devassistant/analyzer-worker:joern-4.0.664-scanner-8.1.0.6389
+    environment:
+      APP_DEPLOYMENT_MODE: developer
+      ANALYZER_WORKER_TLS_CERT_FILE: /run/analyzer-tls/worker.crt
+      ANALYZER_WORKER_TLS_KEY_FILE: /run/analyzer-tls/worker.key
+      ANALYZER_WORKER_API_CA_FILE: /run/analyzer-tls/api-ca.crt
+      ANALYZER_ALLOWED_SONAR_HOSTS: sonarqube
+    ports:
+      - "${ANALYZER_WORKER_BIND:-192.168.1.107}:${ANALYZER_WORKER_PORT:-9443}:9443"
+    volumes:
+      - "${ANALYZER_WORKER_TLS_DIR:-./worker-tls}:/run/analyzer-tls:ro"
+    group_add:
+      - "${ANALYZER_CERT_GID:-10001}"
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,size=2g,mode=1777
+    depends_on:
+      sonarqube:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "python", "-c", "from pathlib import Path; raise SystemExit(0 if b'/opt/analyzer-worker/worker.py' in Path('/proc/1/cmdline').read_bytes() else 1)"]
+      interval: 20s
+      timeout: 5s
+      retries: 3
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    pids_limit: 512
+    mem_limit: 4g
+    cpus: 2.0
+    restart: unless-stopped
+    networks:
+      analyzer_worker_sonar:
+        ipv4_address: 172.24.0.3
+      analyzer_ingress:
+        ipv4_address: 172.23.0.2

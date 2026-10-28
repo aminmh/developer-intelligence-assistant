@@ -7,7 +7,9 @@ def test_index_chunks_background_writes_terminal_status(monkeypatch, tmp_path):
     monkeypatch.setattr(module.settings, "download_dir", str(tmp_path))
     monkeypatch.setattr(
         "index.llamaindex_layer.CodePropertyGraph",
-        type("Graph", (), {"ingest": lambda self, chunks, collection, **kwargs: {"ingested": len(chunks)}}),
+        type("Graph", (), {"ingest": lambda self, chunks, collection, **kwargs: {
+            "ingested": len(chunks), "graph_nodes": len(chunks), "graph_relations": 0,
+        }}),
     )
 
     service = module.IndexingService()
@@ -16,6 +18,25 @@ def test_index_chunks_background_writes_terminal_status(monkeypatch, tmp_path):
     status = (tmp_path / "job-1.status.json").read_text()
     assert '"status": "done"' in status
     assert '"indexed": 1' in status
+    assert '"graph_index_complete": true' in status
+
+
+def test_graph_failure_never_reports_complete_index(monkeypatch, tmp_path):
+    monkeypatch.setattr(module.settings, "download_dir", str(tmp_path))
+
+    class UnavailableGraph:
+        def ingest(self, *args, **kwargs):
+            raise RuntimeError("Neo4j is unavailable")
+
+    monkeypatch.setattr("index.llamaindex_layer.CodePropertyGraph", UnavailableGraph)
+    service = module.IndexingService()
+    service.index_chunks_background("job-graph-down", "project.zip", [{"name": "x"}], "project")
+
+    status = (tmp_path / "job-graph-down.status.json").read_text()
+    assert '"status": "error"' in status
+    assert '"graph_index_complete": false' in status
+    assert '"graph_status": "unverified"' in status
+    assert "readiness" in status
 
 
 def test_parse_and_index_cleans_workspace_and_delegates(monkeypatch, tmp_path):

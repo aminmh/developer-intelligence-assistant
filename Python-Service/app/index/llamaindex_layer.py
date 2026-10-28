@@ -42,7 +42,7 @@ from qdrant_client.models import (
 from infra.settings import settings
 from infra.settings_store import settings_store
 from infra.exception_logger import get_exception_logger
-from telemetry.snapshot import Snapshot, identity_metadata, prepare_chunks
+from telemetry.snapshot import Snapshot, identity_metadata, prepare_chunks, resolve_registered_revision
 from telemetry.symbols import from_chunk, normalize as canonical_symbol
 
 # Heavy raw attributes kept out of LLM-visible metadata (token bloat), but still
@@ -74,6 +74,7 @@ _MAX_TEXT_CHARS = 4000
 # ingested through several durable upserts instead of losing the whole index.
 _QDRANT_UPSERT_MAX_POINTS = 64
 _QDRANT_UPSERT_MAX_BYTES = 8 * 1024 * 1024
+_QDRANT_READBACK_BATCH_SIZE = 512
 _TRACE_LOCK = threading.Lock()
 _TRACE_CACHE: Dict[str, Dict[str, Any]] = {}
 _TRACE_CACHE_LIMIT = 200
@@ -770,6 +771,7 @@ class CodePropertyGraph:
         if snapshot is not None:
             if collection_name != snapshot.collection:
                 raise ValueError("Snapshot collection does not match its scope")
+            snapshot = resolve_registered_revision(snapshot)
             chunks = prepare_chunks(chunks, snapshot)
 
         # Dedup by deterministic node id (idempotent re-runs).
@@ -784,14 +786,9 @@ class CodePropertyGraph:
         deduped = list(unique.values())
 
         if not deduped:
-            return {
-                "collection_name": collection_name,
-                "ingested": 0,
-                "chunk_count": 0,
-                "graph_nodes": 0,
-                "graph_relations": 0,
-            }
+            raise ValueError("Project index has no indexable source chunks")
 
+        persisted_points: Optional[int] = None
         if snapshot is not None:
             if not deduped:
                 raise ValueError("Snapshot has no indexable source")
@@ -807,8 +804,53 @@ class CodePropertyGraph:
                     f"vectors={ingested}, embedding_failures={embed_fails}, "
                     f"embedding_error={getattr(self, '_last_embedding_error', None) or 'unknown'})"
                 )
+            vector_collection = vector_collection_name or collection_name
+            try:
+                persisted_points = self._get_qdrant().count(
+                    collection_name=vector_collection,
+                    exact=True,
+                ).count
+                expected_identity = identity_metadata(snapshot.metadata())
+                point_ids = [
+                    _point_id_for(_chunk_node_id(chunk)) for chunk in deduped
+                ]
+                retrieved_ids: set[str] = set()
+                qdrant = self._get_qdrant()
+                for offset in range(0, len(point_ids), _QDRANT_READBACK_BATCH_SIZE):
+                    records = qdrant.retrieve(
+                        collection_name=vector_collection,
+                        ids=point_ids[offset:offset + _QDRANT_READBACK_BATCH_SIZE],
+                        with_payload=list(expected_identity),
+                        with_vectors=False,
+                    )
+                    for record in records:
+                        payload = record.payload or {}
+                        if any(payload.get(key) != value for key, value in expected_identity.items()):
+                            continue
+                        retrieved_ids.add(str(record.id))
+            except Exception as exc:
+                get_exception_logger().warning(
+                    "Snapshot vector read-back failed for project=%s revision=%s error_type=%s",
+                    snapshot.project_id,
+                    snapshot.revision_id,
+                    type(exc).__name__,
+                )
+                raise RuntimeError("Snapshot vector index verification failed") from exc
+            if persisted_points != len(deduped) or len(retrieved_ids) != len(point_ids):
+                raise RuntimeError(
+                    "Snapshot vector index verification failed "
+                    f"(expected={len(deduped)}, persisted={persisted_points}, "
+                    f"retrieved={len(retrieved_ids)})"
+                )
         else:
-            graph_nodes, graph_relations = self._ingest_graph(deduped, collection_name)
+            graph_nodes, graph_relations = self._ingest_graph(
+                deduped, collection_name, strict=True
+            )
+            if graph_nodes != len(deduped):
+                raise RuntimeError(
+                    "Project graph persistence is incomplete "
+                    f"(chunks={len(deduped)}, graph_nodes={graph_nodes})"
+                )
             ingested, embed_fails = self._ingest_vectors(
                 deduped, vector_collection_name or collection_name,
                 progress_callback=progress_callback,
@@ -831,6 +873,7 @@ class CodePropertyGraph:
             "graph_nodes": graph_nodes,
             "graph_relations": graph_relations,
             "embed_fails": embed_fails,
+            "vector_point_count": persisted_points,
             "embedding_error": getattr(self, "_last_embedding_error", None),
             "symbol_definitions": len(symbol_definitions or []),
             "symbol_references": len(symbol_references or []),
@@ -842,7 +885,7 @@ class CodePropertyGraph:
         store = self._get_graph_store()
         if store is None:
             if strict:
-                raise RuntimeError("Snapshot graph store unavailable")
+                raise RuntimeError("Neo4j graph store unavailable")
             return 0, 0
 
         known_ids = {_chunk_node_id(c) for c in chunks}
@@ -864,7 +907,16 @@ class CodePropertyGraph:
             str(c.get("fq_symbol_name") or c.get("class_fqn") or c.get("name") or ""): _chunk_node_id(c)
             for c in chunks
         }
-        canonical_ids = {c["symbol_id"]: _chunk_node_id(c) for c in chunks if c.get("symbol_id")}
+        canonical_ids = {}
+        for chunk in chunks:
+            symbol_id = chunk.get("symbol_id")
+            if not symbol_id:
+                try:
+                    symbol_id = from_chunk(chunk)
+                except ValueError:
+                    symbol_id = None
+            if symbol_id:
+                canonical_ids[str(symbol_id)] = _chunk_node_id(chunk)
         for c in chunks:
             src = _chunk_node_id(c)
             for target in _flatten_call_values(c.get("calls")):
@@ -1093,16 +1145,21 @@ class CodePropertyGraph:
         query_vec: List[float],
         limit: int,
         query_filter: Optional[Filter],
-    ) -> list:
+    ) -> tuple[list, bool]:
         try:
             return qdrant.search(
                 collection_name=col_name,
                 query_vector=query_vec,
                 limit=max(1, limit),
                 query_filter=query_filter,
+            ), False
+        except Exception as exc:
+            get_exception_logger().warning(
+                "Qdrant search failed for collection=%s error_type=%s",
+                col_name,
+                type(exc).__name__,
             )
-        except Exception:
-            return []
+            return [], True
 
     def hybrid_retrieve(
         self,
@@ -1159,10 +1216,16 @@ class CodePropertyGraph:
 
         try:
             collections = qdrant.get_collections().collections
-        except Exception:
+        except Exception as exc:
+            get_exception_logger().warning(
+                "Qdrant collection discovery failed error_type=%s",
+                type(exc).__name__,
+            )
             trace["mode"] = "vector_unavailable"
+            trace["failure_code"] = "qdrant_unavailable"
             record_retrieval_trace(trace_id or "", trace)
-            return {"results": [], "searched_collections": []}
+            return {"results": [], "searched_collections": [], "mode": trace["mode"],
+                    "failure_code": trace["failure_code"]}
 
         collection_names = {c.name for c in collections}
         target_collections: List[str] = []
@@ -1211,15 +1274,23 @@ class CodePropertyGraph:
 
         if not target_collections:
             trace["mode"] = "no_results"
+            trace["failure_code"] = "collection_missing"
             record_retrieval_trace(trace_id or "", trace)
-            return {"results": [], "searched_collections": []}
+            return {"results": [], "searched_collections": [], "mode": trace["mode"],
+                    "failure_code": trace["failure_code"]}
 
         try:
             query_vec = self._get_embed_model().get_query_embedding(query)
-        except Exception:
+        except Exception as exc:
+            get_exception_logger().warning(
+                "Query embedding failed error_type=%s",
+                type(exc).__name__,
+            )
             trace["mode"] = "vector_unavailable"
+            trace["failure_code"] = "embedding_unavailable"
             record_retrieval_trace(trace_id or "", trace)
-            return {"results": [], "searched_collections": target_collections}
+            return {"results": [], "searched_collections": target_collections,
+                    "mode": trace["mode"], "failure_code": trace["failure_code"]}
 
         # Optional metadata filter (from extracted intent entities).
         query_filter = _build_query_filter(class_name=class_name, file=file)
@@ -1269,12 +1340,15 @@ class CodePropertyGraph:
         seen_ids: set[str] = set()
         seen_sym: set[tuple[Any, ...]] = set()
         vector_hit_payloads: List[Dict[str, Any]] = []
+        failed_searches = 0
 
         for col_name in target_collections:
-            hits = self._search(qdrant, col_name, query_vec, candidate_limit, query_filter)
+            hits, search_failed = self._search(qdrant, col_name, query_vec, candidate_limit, query_filter)
             if not hits and query_filter is not None:
                 # Filtered search found nothing — fall back to unfiltered.
-                hits = self._search(qdrant, col_name, query_vec, candidate_limit, None)
+                hits, fallback_failed = self._search(qdrant, col_name, query_vec, candidate_limit, None)
+                search_failed = search_failed and fallback_failed
+            failed_searches += int(search_failed)
 
             vector_ids = []
             for h in hits:
@@ -1364,6 +1438,8 @@ class CodePropertyGraph:
             trace["mode"] = "hybrid"
         elif trace["mode"] == "hybrid":
             trace["mode"] = "vector_only"
+        if failed_searches == len(target_collections):
+            trace["failure_code"] = "qdrant_search_failed"
         trace["sources"] = [
             {
                 "file": (r.get("payload") or {}).get("file", ""),
@@ -1378,6 +1454,9 @@ class CodePropertyGraph:
         return {
             "results": all_results[:final_limit],
             "searched_collections": target_collections,
+            "mode": trace["mode"],
+            "failure_code": trace.get("failure_code"),
+            "candidate_count": trace["vector_result_count"],
         }
 
     @staticmethod

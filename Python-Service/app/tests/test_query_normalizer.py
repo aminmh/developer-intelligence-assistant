@@ -38,6 +38,7 @@ def test_empty_input():
 
 
 def test_encoder_invokes_normalize_query(monkeypatch):
+    monkeypatch.setattr(embeddings.settings, "embedding_provider", "ollama")
     called = []
     monkeypatch.setattr(router, "normalize_query", lambda t: called.append(t) or t)
 

@@ -1,15 +1,18 @@
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
 import subprocess
 
 import pytest
 
 from telemetry.symbols import from_chunk, normalize
-from telemetry.snapshot import Snapshot, prepare_chunks, storage_id
+from telemetry.registry import SnapshotRegistry
+from telemetry.snapshot import Snapshot, prepare_chunks, resolve_registered_revision, storage_id
 
-FIXTURES = Path(__file__).parents[2] / "php/tests/telemetry"
+PHP_ROOT = Path(os.environ.get("PHP_CLI_ROOT", Path(__file__).parents[2] / "php"))
+FIXTURES = PHP_ROOT / "tests/telemetry"
 CASES = json.loads((FIXTURES / "symbol_ids.json").read_text())
 
 
@@ -84,6 +87,20 @@ def test_anonymous_class_methods_are_indexed_without_runtime_identity():
     prepared = prepare_chunks([chunk], Snapshot("pizza", "a" * 40, "c" * 64))[0]
     assert prepared["symbol_id"] is None
     assert prepared["storage_id"]
+
+
+def test_indexed_chunks_carry_registered_immutable_revision_id(tmp_path, monkeypatch):
+    monkeypatch.setenv("TELEMETRY_SNAPSHOT_ROOT", str(tmp_path))
+    registry = SnapshotRegistry(tmp_path)
+    snapshot = Snapshot("pizza", "a" * 40, "c" * 64)
+    registry.register(snapshot)
+
+    resolved = resolve_registered_revision(snapshot)
+    prepared = prepare_chunks([{"type": "method", "class_fqn": "App\\User", "method_name": "save",
+                               "file_path": "app/User.php", "start_line": 8, "end_line": 12}], resolved)[0]
+
+    assert resolved.revision_id == registry.get("pizza", "a" * 40)["revision_id"]
+    assert prepared["revision_id"] == resolved.revision_id
 
 
 @pytest.mark.parametrize("kwargs", [

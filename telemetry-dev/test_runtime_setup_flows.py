@@ -36,6 +36,21 @@ class RuntimeSetupFlowTests(unittest.TestCase):
             self.assertFalse(runtime_setup.verify_helper_token(
                 token, claims["origin"], operation="code-quality-benchmark-use", target_id="87654321-4321-8765-4321-876543218765"))
 
+    def test_github_helper_authorization_is_scoped_to_project_and_operation(self):
+        signing_key = b"test-helper-signing-key"
+        claims = {"aud": "runtime-helper", "origin": "http://localhost:3000",
+                  "operation": "code-quality-github-fetch", "project_id": "pizza",
+                  "target_id": "12345678-1234-5678-1234-567812345678",
+                  "exp": runtime_setup.time.time() + 60}
+        encode = lambda value: base64.urlsafe_b64encode(json.dumps(value).encode()).decode().rstrip("=")
+        head, body = encode({"alg": "HS256", "typ": "JWT"}), encode(claims)
+        signature = base64.urlsafe_b64encode(hmac.new(signing_key, f"{head}.{body}".encode(), hashlib.sha256).digest()).decode().rstrip("=")
+        token = f"{head}.{body}.{signature}"
+        with patch.object(runtime_setup, "helper_secret", return_value=signing_key):
+            self.assertTrue(runtime_setup.verify_helper_token(token, claims["origin"],
+                operation="code-quality-github-fetch", project_id="pizza", target_id=claims["target_id"]))
+            self.assertFalse(runtime_setup.verify_helper_token(token, claims["origin"],
+                operation="code-quality-github-fetch", project_id="other", target_id=claims["target_id"]))
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory(prefix="runtime-flow-")
         self.root = Path(self.temp.name)
