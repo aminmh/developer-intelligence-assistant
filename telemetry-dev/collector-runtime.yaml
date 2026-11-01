@@ -82,7 +82,7 @@ exporters:
     database: ${env:TELEMETRY_CLICKHOUSE_DATABASE:-telemetry}
     traces_table_name: otel_spans_full
     create_schema: true
-    ttl: ${env:TELEMETRY_AGGREGATION_RETENTION_HOURS:-168}h
+    ttl: ${env:TELEMETRY_AGGREGATION_RETENTION_HOURS:-72}h
     async_insert: false
     sending_queue:
       enabled: true
@@ -97,7 +97,7 @@ exporters:
     database: ${env:TELEMETRY_CLICKHOUSE_DATABASE:-telemetry}
     traces_table_name: otel_traces
     create_schema: true
-    ttl: ${env:TELEMETRY_RETENTION_HOURS:-168}h
+    ttl: ${env:TELEMETRY_RETENTION_HOURS:-72}h
     async_insert: false
     sending_queue:
       enabled: true
@@ -111,7 +111,7 @@ exporters:
     password: ${env:TELEMETRY_CLICKHOUSE_PASSWORD}
     database: ${env:TELEMETRY_CLICKHOUSE_DATABASE:-telemetry}
     create_schema: true
-    ttl: ${env:TELEMETRY_RETENTION_HOURS:-168}h
+    ttl: ${env:TELEMETRY_RETENTION_HOURS:-72}h
     async_insert: false
     sending_queue:
       enabled: true

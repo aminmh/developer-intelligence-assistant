@@ -6,7 +6,7 @@ from pathlib import PurePosixPath
 from typing import Any
 import logging
 
-from telemetry.snapshot import Snapshot, validate_project_id, validate_revision_id
+from telemetry.snapshot import Snapshot, source_filter, validate_project_id, validate_revision_id
 
 RETRIEVER_VERSION = "revision-context-7"
 MAX_QUERIES = 10
@@ -42,6 +42,7 @@ def _unavailable(
     rejected_revision_count: int = 0,
     rejected_source_count: int = 0,
     category_search: dict[str, dict[str, int]] | None = None,
+    diagnostic_detail: str | None = None,
 ) -> dict[str, Any]:
     return {
         "status": "unavailable",
@@ -55,6 +56,7 @@ def _unavailable(
         "rejected_revision_count": rejected_revision_count,
         "rejected_source_count": rejected_source_count,
         "category_search": category_search or {},
+        "diagnostic_detail": diagnostic_detail,
         "reason": reason,
     }
 
@@ -89,6 +91,7 @@ def retrieve_revision_context(
     snapshot: dict[str, Any],
     business_files: list[str],
     business_rules: list[dict[str, Any]] | None = None,
+    *, include_clean_code: bool = True,
 ) -> tuple[dict[str, Any], list[dict[str, Any]]]:
     """Search one ready snapshot and return bounded, citation-ready excerpts.
 
@@ -100,7 +103,7 @@ def retrieve_revision_context(
     commit_sha = snapshot.get("commit_sha")
     archive_hash = snapshot.get("source_archive_sha256")
     if (snapshot.get("state") != "ready" or snapshot.get("project_id") != project_id
-            or snapshot.get("revision_id") != revision_id or not commit_sha or not archive_hash):
+            or snapshot.get("revision_id") != revision_id or not archive_hash):
         return _unavailable(revision_id, _FAILURE_REASONS["index_not_ready"], "index_not_ready"), []
 
     expected_collection = Snapshot(project_id, commit_sha, archive_hash).collection
@@ -147,7 +150,8 @@ def retrieve_revision_context(
             for rule in ordered_rules[:MAX_RULE_QUERIES]
             if isinstance(rule.get("title"), str) and isinstance(rule.get("statement"), str)
         ]
-        category_queries = [(category, query, None) for category, query in _CATEGORY_QUERIES[:MAX_QUERIES]]
+        category_queries = [(category, query, None) for category, query in _CATEGORY_QUERIES[:MAX_QUERIES]
+                            if include_clean_code or category != "clean_code"]
         # Always search the five scoring categories before optional business-rule
         # queries so a large rule set cannot starve Reliability or Performance.
         queries = category_queries + rule_queries
@@ -191,6 +195,7 @@ def retrieve_revision_context(
                     rejected_revision_count=rejected_revision_count,
                     rejected_source_count=rejected_source_count,
                     category_search=category_search,
+                    diagnostic_detail=result.get("failure_detail"),
                 ), []
             for hit in result.get("results") or []:
                 candidate_count += 1
@@ -209,7 +214,7 @@ def retrieve_revision_context(
                         category_stats["rejected_source_count"] += 1
                     continue
                 if (payload.get("project_id") != project_id
-                        or payload.get("commit_sha") != commit_sha
+                        or any(payload.get(key) != value for key, value in source_filter(snapshot).items())
                         or payload.get("source_archive_sha256") != archive_hash
                         or payload.get("dirty") is not False):
                     rejected_revision_count += 1

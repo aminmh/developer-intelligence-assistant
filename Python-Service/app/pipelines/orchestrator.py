@@ -1179,6 +1179,7 @@ class Orchestrator:
                 "filename": job.get("filename"),
                 "project_id": (job.get("snapshot_identity") or {}).get("project_id"),
                 "commit_sha": (job.get("snapshot_identity") or {}).get("commit_sha"),
+                "source_ref": (job.get("snapshot_identity") or {}).get("source_ref"),
                 "prompt": job.get("prompt"),
                 "route": job.get("route"),
                 "started_at": job.get("started_at"),

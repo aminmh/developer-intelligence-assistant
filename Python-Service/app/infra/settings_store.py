@@ -20,6 +20,9 @@ from typing import Any, Dict, Optional
 RAG_CONFIG_DEFAULTS: Dict[str, Any] = {
     "embeddingProvider": "ollama",
     "cohereApiKey": "",
+    "cloudflareAccountId": "",
+    "cloudflareApiToken": "",
+    "cloudflareEmbeddingModel": "@cf/baai/bge-base-en-v1.5",
     "ollamaBaseUrl": "http://host.docker.internal:11434",
     "ollamaEmbedModel": "BGE-M3",
     "embeddingBaseUrl": "",
@@ -50,7 +53,7 @@ RAG_CONFIG_DEFAULTS: Dict[str, Any] = {
 
 # Fields returned masked by GET /settings. They are write-only: a PUT only
 # overwrites them when a non-empty value is supplied.
-SECRET_KEYS = {"qdrantApiKey", "llmRemoteApiKey", "runpodApiKey", "cohereApiKey"}
+SECRET_KEYS = {"qdrantApiKey", "llmRemoteApiKey", "runpodApiKey", "cohereApiKey", "cloudflareApiToken"}
 
 MASKED_VALUE = ""
 

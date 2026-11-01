@@ -11,7 +11,7 @@ from uuid import uuid4
 from datetime import datetime, timedelta, timezone
 from typing import Iterator
 
-from telemetry.snapshot import Snapshot, storage_id, validate_project_id, validate_revision_id, validate_scope
+from telemetry.snapshot import Snapshot, storage_id, validate_project_id, validate_revision_id, validate_scope, validate_source_ref
 
 
 # The host reporter reconciles every 60 seconds. Treat a running row without a
@@ -110,24 +110,26 @@ class SnapshotRegistry:
             )
 
     @contextmanager
-    def lock(self, project_id: str, commit_sha: str) -> Iterator[None]:
+    def lock(self, project_id: str, commit_sha: str, *, blocking: bool = True) -> Iterator[None]:
         # File locks serialize retries across threads/processes and release on
         # process death. A retry can safely resume interrupted indexing.
         path = self.root / (storage_id(project_id, commit_sha, "") + ".lock")
         with path.open("a") as handle:
-            fcntl.flock(handle, fcntl.LOCK_EX)
+            fcntl.flock(handle, fcntl.LOCK_EX | (0 if blocking else fcntl.LOCK_NB))
             try:
                 yield
             finally:
                 fcntl.flock(handle, fcntl.LOCK_UN)
 
     def get(self, project_id: str, commit_sha: str) -> dict:
-        validate_scope(project_id, commit_sha)
+        # The historical SQL key column stores source references, including uploads.
+        validate_source_ref(project_id, commit_sha)
         with self._connect() as db:
             row = db.execute("SELECT * FROM snapshots WHERE project_id=? AND commit_sha=?",
                              (project_id, commit_sha)).fetchone()
         if row is None:
-            return {"project_id": project_id, "commit_sha": commit_sha, "state": "awaiting_source"}
+            return {"project_id": project_id, "source_ref": commit_sha,
+                    "commit_sha": None if commit_sha.startswith("upload_") else commit_sha, "state": "awaiting_source"}
         metadata = json.loads(row["metadata"])
         result = {**metadata, "revision_id": row["revision_id"], "state": row["state"], "error_code": row["error_code"],
                   "updated_at": row["updated_at"]}
@@ -274,7 +276,7 @@ class SnapshotRegistry:
                 "WHERE s.project_id=? AND s.commit_sha=?",
                 (project_id, commit_sha),
             ).fetchone()
-            if not row or not row["archive_key"] or row["state"] == "ready":
+            if not row or not row["archive_key"] or row["state"] in ("ready", "deleting"):
                 return False
             if row["job_state"] == "running":
                 return False
@@ -294,13 +296,13 @@ class SnapshotRegistry:
         with self._connect() as db:
             db.execute("BEGIN IMMEDIATE")
             ready = db.execute("""SELECT s.project_id,s.commit_sha FROM snapshots s WHERE s.archive_key IS NOT NULL
-                AND s.state NOT IN ('ready','failed') AND EXISTS (SELECT 1 FROM deployments d
+                AND s.state NOT IN ('ready','failed','deleting') AND EXISTS (SELECT 1 FROM deployments d
                     WHERE d.project_id=s.project_id AND d.commit_sha=s.commit_sha AND d.state='running')""").fetchall()
             for row in ready:
                 db.execute("INSERT OR IGNORE INTO index_jobs(project_id,commit_sha) VALUES(?,?)", tuple(row))
-                db.execute("UPDATE snapshots SET state='queued',updated_at=CURRENT_TIMESTAMP WHERE project_id=? AND commit_sha=? AND state NOT IN ('ready','failed')", tuple(row))
+                db.execute("UPDATE snapshots SET state='queued',updated_at=CURRENT_TIMESTAMP WHERE project_id=? AND commit_sha=? AND state NOT IN ('ready','failed','deleting')", tuple(row))
             row = db.execute("""SELECT j.project_id,j.commit_sha FROM index_jobs j
-                WHERE j.state IN ('queued','running') AND (j.source_only=1 OR EXISTS (
+                WHERE j.state IN ('queued','running') AND EXISTS (SELECT 1 FROM snapshots s WHERE s.project_id=j.project_id AND s.commit_sha=j.commit_sha AND s.state!='deleting') AND (j.source_only=1 OR EXISTS (
                     SELECT 1 FROM deployments d WHERE d.project_id=j.project_id
                     AND d.commit_sha=j.commit_sha AND d.state='running'))
                 ORDER BY j.updated_at LIMIT 1""").fetchone()
@@ -337,14 +339,16 @@ class SnapshotRegistry:
     def register(self, snapshot: Snapshot) -> None:
         with self._connect() as db:
             db.execute("BEGIN IMMEDIATE")
-            row = db.execute("SELECT checksum FROM snapshots WHERE project_id=? AND commit_sha=?",
-                             (snapshot.project_id, snapshot.commit_sha)).fetchone()
+            row = db.execute("SELECT checksum,state FROM snapshots WHERE project_id=? AND commit_sha=?",
+                             (snapshot.project_id, snapshot.reference)).fetchone()
             if row and row["checksum"] != snapshot.source_archive_sha256:
                 raise SnapshotConflict("This clean snapshot already has a different source archive")
+            if row and row["state"] == "deleting":
+                raise SnapshotConflict("This revision is being removed. Retry after removal finishes.")
             db.execute("""INSERT OR IGNORE INTO snapshots
                 (project_id, commit_sha, checksum, metadata, snapshot_key, state, revision_id)
                 VALUES (?, ?, ?, ?, ?, 'awaiting_source', ?)""",
-                (snapshot.project_id, snapshot.commit_sha, snapshot.source_archive_sha256,
+                (snapshot.project_id, snapshot.reference, snapshot.source_archive_sha256,
                  json.dumps(snapshot.metadata()), snapshot.key, "rev_" + uuid4().hex))
 
     def save_git_source(self, user_id: str, project_id: str, repository: str, branch: str,
@@ -394,7 +398,7 @@ class SnapshotRegistry:
         with self._connect() as db:
             row = db.execute("SELECT state,archive_key FROM snapshots WHERE project_id=? AND commit_sha=?",
                              (project_id, commit_sha)).fetchone()
-            if not row or not row["archive_key"] or row["state"] == "ready":
+            if not row or not row["archive_key"] or row["state"] in ("ready", "deleting"):
                 return False
             db.execute("""INSERT INTO index_jobs(project_id,commit_sha,state,source_only)
                 VALUES(?,?,'queued',1) ON CONFLICT(project_id,commit_sha) DO UPDATE SET
@@ -412,12 +416,12 @@ class SnapshotRegistry:
 
     def transition(self, snapshot: Snapshot, state: str, *, archive_key: str | None = None,
                    error_code: str | None = None) -> None:
-        if state not in {"storing", "awaiting_deployment", "indexing", "failed", "ready"}:
+        if state not in {"uploaded", "storing", "awaiting_deployment", "indexing", "failed", "ready"}:
             raise ValueError("Invalid snapshot state")
         with self._connect() as db:
             db.execute("""UPDATE snapshots SET state=?, archive_key=COALESCE(?, archive_key),
-                error_code=?, updated_at=CURRENT_TIMESTAMP WHERE project_id=? AND commit_sha=?""",
-                (state, archive_key, error_code, snapshot.project_id, snapshot.commit_sha))
+                error_code=?, updated_at=CURRENT_TIMESTAMP WHERE project_id=? AND commit_sha=? AND state!='deleting'""",
+                (state, archive_key, error_code, snapshot.project_id, snapshot.reference))
 
 
 def default_registry() -> SnapshotRegistry:

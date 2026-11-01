@@ -8,6 +8,7 @@ import io
 import json
 import os
 import re
+import socket
 import ssl
 import zipfile
 from typing import Any
@@ -24,6 +25,22 @@ _ALLOWED_STATUSES = {"complete", "partial", "failed", "unavailable", "disabled"}
 
 class RemoteWorkerError(ValueError):
     """Safe error for worker connection, identity, or response failures."""
+
+
+def _transport_error(exc: Exception) -> RemoteWorkerError:
+    if isinstance(exc, ssl.SSLCertVerificationError):
+        message = "The analyzer worker certificate is not trusted for this HTTPS hostname. Verify the worker CA and endpoint."
+    elif isinstance(exc, socket.gaierror):
+        message = "The API container could not resolve the analyzer worker hostname. Check the endpoint and container DNS."
+    elif isinstance(exc, TimeoutError):
+        message = "The analyzer worker connection timed out. Check that its HTTPS port is reachable from the API container."
+    elif isinstance(exc, ConnectionRefusedError):
+        message = "The analyzer worker refused the connection. Start the worker's HTTPS service and check its port. The endpoint must be reachable from the API container."
+    elif isinstance(exc, ssl.SSLError):
+        message = "The analyzer worker TLS handshake failed. Check that the worker trusts the API client certificate and serves HTTPS on this port."
+    else:
+        message = "The analyzer worker connection failed. Check the endpoint, worker service, and network access from the API container."
+    return RemoteWorkerError(message)
 
 
 def _connection(target: dict[str, Any], timeout: float,
@@ -61,14 +78,10 @@ def get_worker_fingerprint(endpoint: str) -> dict[str, str]:
         if not peer:
             raise RemoteWorkerError("The analyzer worker did not present a TLS certificate.")
         return {"certificate_sha256": hashlib.sha256(peer).hexdigest()}
-    except ssl.SSLCertVerificationError as exc:
-        raise RemoteWorkerError(
-            "The analyzer worker certificate is not trusted for this HTTPS hostname. Verify the worker CA and endpoint."
-        ) from exc
     except RemoteWorkerError:
         raise
     except (OSError, ssl.SSLError, http.client.HTTPException, TimeoutError) as exc:
-        raise RemoteWorkerError("The configured analyzer worker could not be reached. Check its TLS setup and retry.") from exc
+        raise _transport_error(exc) from exc
     finally:
         connection.close()
 
@@ -117,7 +130,7 @@ def _request(target: dict[str, Any], method: str, path: str,
     except RemoteWorkerError:
         raise
     except (OSError, ssl.SSLError, http.client.HTTPException, TimeoutError) as exc:
-        raise RemoteWorkerError("The configured analyzer worker could not be reached. Check its TLS setup and retry.") from exc
+        raise _transport_error(exc) from exc
     finally:
         connection.close()
 
@@ -193,7 +206,7 @@ def _filtered_source_bundle(archive_data: bytes, files: list[str]) -> tuple[byte
 
 def run_worker(target: dict[str, Any], settings: dict[str, Any], archive_data: bytes,
                files: list[str], languages: dict[str, int], revision_id: str,
-               commit_sha: str, token: str | None) -> dict[str, Any]:
+               commit_sha: str | None, token: str | None) -> dict[str, Any]:
     if not target.get("source_transfer_consent"):
         reason = "Explicit consent is required before transferring source to the configured analyzer worker."
         return {name: _unavailable(name, reason) for name in _ALLOWED_ANALYZERS}

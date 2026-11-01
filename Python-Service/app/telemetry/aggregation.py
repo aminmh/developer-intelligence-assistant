@@ -262,35 +262,38 @@ def aggregate_runtime() -> dict:
             continue
         seen.add(pair)
         try:
-            definitions = snapshot_definitions(project_id, commit_sha)
-            known = {item.get("symbol_id") for item in definitions if item.get("symbol_id")}
-            telemetry = clickhouse.summary(project_id, revision_id, known)
-            if not telemetry.get("available"):
-                continue
-            collection = "sym_snapshot_" + storage_id(project_id, commit_sha, "")
-            facts = _graph_facts(project_id, revision_id, commit_sha, collection, definitions, telemetry)
-            graph.upsert_runtime_facts(collection, facts)
-            now = datetime.now(timezone.utc).isoformat(timespec="milliseconds")
-            for row in telemetry.get("symbols", []):
-                symbol_id = row.get("symbol_id")
-                if symbol_id:
-                    unresolved_rows.append({
-                        "project_id": project_id, "revision_id": revision_id,
-                        "commit_sha": commit_sha,
-                        "symbol_id": symbol_id, "observed_spans": int(row.get("runs", 0) or 0),
-                        "last_seen": row.get("last_seen") or now,
-                        "snapshot_updated_at": now,
-                        "is_unresolved": int(symbol_id not in known),
-                    })
-            _store_exception_vectors(
-                clickhouse, project_id, revision_id, commit_sha,
-                int(telemetry.get("aggregation_window_hours", 24)),
-            )
-            processed += 1
+            with registry.lock(project_id, commit_sha):
+                current = registry.get_by_revision_id(project_id, revision_id)
+                if not current or current.get("state") != "ready":
+                    continue
+                project_unresolved = []
+                definitions = snapshot_definitions(project_id, commit_sha)
+                known = {item.get("symbol_id") for item in definitions if item.get("symbol_id")}
+                telemetry = clickhouse.summary(project_id, revision_id, known)
+                if not telemetry.get("available"):
+                    continue
+                collection = "sym_snapshot_" + storage_id(project_id, commit_sha, "")
+                facts = _graph_facts(project_id, revision_id, commit_sha, collection, definitions, telemetry)
+                graph.upsert_runtime_facts(collection, facts)
+                now = datetime.now(timezone.utc).isoformat(timespec="milliseconds")
+                for row in telemetry.get("symbols", []):
+                    symbol_id = row.get("symbol_id")
+                    if symbol_id:
+                        project_unresolved.append({
+                            "project_id": project_id, "revision_id": revision_id,
+                            "commit_sha": commit_sha,
+                            "symbol_id": symbol_id, "observed_spans": int(row.get("runs", 0) or 0),
+                            "last_seen": row.get("last_seen") or now,
+                            "snapshot_updated_at": now,
+                            "is_unresolved": int(symbol_id not in known),
+                        })
+                _store_exception_vectors(
+                    clickhouse, project_id, revision_id, commit_sha,
+                    int(telemetry.get("aggregation_window_hours", 24)),
+                )
+                processed += 1
+                clickhouse.store_unresolved_symbols(project_unresolved)
+                unresolved_rows.extend(project_unresolved)
         except Exception as exc:  # noqa: BLE001 — retry this scope on the next aggregation tick
             logger.warning("Runtime aggregation failed for project %s: %s", project_id, exc)
-    try:
-        clickhouse.store_unresolved_symbols(unresolved_rows)
-    except Exception as exc:  # noqa: BLE001 — table availability is visible in pipeline health
-        logger.warning("Unresolved-symbol persistence failed: %s", exc)
     return {"processed": processed, "unmatched_records": len(unresolved_rows)}

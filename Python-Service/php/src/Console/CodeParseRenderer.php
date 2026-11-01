@@ -25,7 +25,7 @@ final class CodeParseRenderer
     private function json(array $chunks): string
     {
         $data = array_map(static fn(CodeChunk $chunk): array => $chunk->toMetadata(), $chunks);
-        return json_encode($data, JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE) . "\n";
+        return json_encode($data, JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE | JSON_THROW_ON_ERROR) . "\n";
     }
 
     /** @param CodeChunk[] $chunks */

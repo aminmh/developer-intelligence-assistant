@@ -98,20 +98,22 @@ class SourceService:
                  indexer: Callable[[str, Snapshot], dict] = index_source):
         self.registry, self.storage, self.indexer = registry, storage, indexer
 
-    def upload(self, project_id: str, commit_sha: str, data: bytes) -> dict:
+    def upload(self, project_id: str, commit_sha: str | None, data: bytes) -> dict:
         snapshot = Snapshot(project_id, commit_sha, hashlib.sha256(data).hexdigest())
         validate_archive(data)
-        with self.registry.lock(project_id, commit_sha):
+        source_ref = snapshot.reference
+        with self.registry.lock(project_id, source_ref):
             self.registry.register(snapshot)
-            current = self.registry.get(project_id, commit_sha)
+            current = self.registry.get(project_id, source_ref)
             if current["state"] == "ready":
                 return current
-            if not self.registry.archive_key(project_id, commit_sha):
+            if not self.registry.archive_key(project_id, source_ref):
                 self.registry.transition(snapshot, "storing")
                 key = self.storage.put_snapshot_archive(snapshot.key, snapshot.source_archive_sha256, data)
                 self.registry.transition(snapshot, "awaiting_deployment", archive_key=key)
-            self.registry.queue_if_deployable(project_id, commit_sha, retry_failed=True)
-            return self.registry.get(project_id, commit_sha)
+            if commit_sha:
+                self.registry.queue_if_deployable(project_id, source_ref, retry_failed=True)
+            return self.registry.get(project_id, source_ref)
 
     def upload_git_snapshot(self, project_id: str, commit_sha: str, data: bytes) -> dict:
         """Stage a fetched Git revision and queue indexing independently of deployment state."""
@@ -141,7 +143,7 @@ class SourceService:
                 return False
             project_id, commit_sha = job
             current = self.registry.get(project_id, commit_sha)
-            snapshot = Snapshot(project_id, commit_sha, current["source_archive_sha256"])
+            snapshot = Snapshot(project_id, current.get("commit_sha"), current["source_archive_sha256"])
             try:
                 key = self.registry.archive_key(project_id, commit_sha)
                 if not key:
@@ -182,13 +184,22 @@ class SourceService:
         self.registry.stopped_deployments_before()
 
 
-def index_uploaded_snapshot(snapshot: Snapshot, indexer: Callable[[], dict]) -> dict:
+def index_uploaded_snapshot(
+    snapshot: Snapshot,
+    indexer: Callable[[], dict],
+    *,
+    force_reindex: bool = False,
+) -> dict:
     """Index a browser upload now and publish it through the snapshot gate."""
     registry = default_registry()
-    with registry.lock(snapshot.project_id, snapshot.commit_sha):
-        registry.register(snapshot)
-        current = registry.get(snapshot.project_id, snapshot.commit_sha)
-        if current.get("state") == "ready":
+    with registry.lock(snapshot.project_id, snapshot.reference):
+        if snapshot.revision_id is None:
+            registry.register(snapshot)
+        current = registry.get(snapshot.project_id, snapshot.reference)
+        if (not current.get("revision_id") or current.get("state") == "deleting"
+                or (snapshot.revision_id and current.get("revision_id") != snapshot.revision_id)):
+            raise RuntimeError("The uploaded revision is no longer available for indexing")
+        if current.get("state") == "ready" and not force_reindex:
             return {
                 "collection_name": current.get("collection_name", snapshot.collection),
                 "already_indexed": True,
@@ -206,8 +217,8 @@ def index_uploaded_snapshot(snapshot: Snapshot, indexer: Callable[[], dict]) -> 
                     or int(result.get("graph_nodes", 0) or 0) != count
                     or int(result.get("embed_fails", 0) or 0)):
                 raise RuntimeError("Incomplete snapshot indexing")
-            registry.finish_job(snapshot.project_id, snapshot.commit_sha, success=True)
+            registry.finish_job(snapshot.project_id, snapshot.reference, success=True)
             return result
         except Exception:
-            registry.finish_job(snapshot.project_id, snapshot.commit_sha, success=False)
+            registry.finish_job(snapshot.project_id, snapshot.reference, success=False)
             raise

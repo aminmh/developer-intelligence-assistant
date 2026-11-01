@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 namespace App\CodeParser;
 
+use App\Inspection\PhpFileFinder;
 use PhpParser\Node;
 use PhpParser\Node\Name;
 use PhpParser\Node\Stmt\Class_;
@@ -37,7 +38,7 @@ final class WorkspaceTypeScanner
     public function scan(string $workspacePath): array
     {
         $map = [];
-        $files = $this->findPhpFiles($workspacePath);
+        $files = (new PhpFileFinder())->find($workspacePath);
 
         foreach ($files as $filePath) {
             $source = file_get_contents($filePath);
@@ -254,23 +255,5 @@ final class WorkspaceTypeScanner
         }
 
         return null;
-    }
-
-    /**
-     * @return string[]
-     */
-    private function findPhpFiles(string $directory): array
-    {
-        $files = [];
-        $iterator = new \RecursiveIteratorIterator(
-            new \RecursiveDirectoryIterator($directory, \FilesystemIterator::SKIP_DOTS)
-        );
-        foreach ($iterator as $file) {
-            if ($file->getExtension() === 'php') {
-                $files[] = $file->getPathname();
-            }
-        }
-        sort($files);
-        return $files;
     }
 }

@@ -124,12 +124,16 @@ def test_graph_properties_do_not_send_nested_reference_maps_to_neo4j():
 class _BatchQdrant:
     def __init__(self):
         self.upserts = []
+        self.payload_indexes = []
 
     def delete_collection(self, _collection):
         return None
 
     def create_collection(self, **_kwargs):
         return None
+
+    def create_payload_index(self, **kwargs):
+        self.payload_indexes.append(kwargs["field_name"])
 
     def upsert(self, *, collection_name, wait, points):
         self.upserts.append((collection_name, wait, list(points)))
@@ -156,4 +160,5 @@ def test_qdrant_ingest_batches_large_projects(monkeypatch):
 
     assert ingested == 130
     assert embed_fails == 0
+    assert qdrant.payload_indexes == ["revision_id", "node_type", "file_path"]
     assert [len(points) for _, _, points in qdrant.upserts] == [64, 64, 2]

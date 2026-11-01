@@ -72,6 +72,23 @@ def collection_exists(collection_name: str) -> bool:
         return False
 
 
+def collection_vector_size(collection_name: str) -> int | None:
+    """Return a single-vector Qdrant collection's dimension when available."""
+    try:
+        qdrant = QdrantClient(url=settings.qdrant_url)
+        vectors = qdrant.get_collection(collection_name).config.params.vectors
+        size = getattr(vectors, "size", None)
+        if isinstance(size, int):
+            return size
+        if isinstance(vectors, dict) and len(vectors) == 1:
+            value = next(iter(vectors.values()))
+            size = getattr(value, "size", None)
+            return size if isinstance(size, int) else None
+    except Exception:
+        pass
+    return None
+
+
 def _mint_download_token(download_id: str, filename: str) -> str:
     expires_at = datetime.now(timezone.utc) + timedelta(hours=24)
     return pyjwt.encode(
@@ -835,15 +852,21 @@ def rag_parse_code(body: dict):
         raise HTTPException(status_code=404, detail=f"File not found in uploads: {filename}")
 
     identity = None
-    if match.get("project_id") and match.get("commit_sha"):
-        if body.get("project_id") != match["project_id"] or body.get("commit_sha") != match["commit_sha"]:
+    if match.get("project_id"):
+        if (body.get("project_id") != match["project_id"] or body.get("commit_sha") != match.get("commit_sha")
+                or (body.get("revision_id") and body["revision_id"] != match.get("revision_id"))
+                or (body.get("source_ref") and body["source_ref"] != match.get("source_ref"))):
             raise HTTPException(status_code=403, detail="Upload project identity does not match the archive record.")
         if not match.get("archive_sha256"):
             raise HTTPException(status_code=409, detail="Upload archive checksum is unavailable.")
+        if not match.get("revision_id"):
+            raise HTTPException(status_code=409, detail="Upload revision identity is unavailable. Upload the project again.")
         identity = {
             "project_id": match["project_id"],
-            "commit_sha": match["commit_sha"],
+            "commit_sha": match.get("commit_sha"),
+            "source_ref": match.get("source_ref") or match.get("commit_sha"),
             "source_archive_sha256": match["archive_sha256"],
+            "revision_id": match.get("revision_id"),
         }
     elif body.get("project_id") or body.get("commit_sha"):
         raise HTTPException(status_code=409, detail="Legacy uploads cannot be assigned an inferred project identity.")
@@ -853,6 +876,7 @@ def rag_parse_code(body: dict):
         raise HTTPException(status_code=500, detail="Failed to read file from index.storage.")
 
     vector_collection_name = None
+    force_reindex = False
     if identity:
         from telemetry.snapshot import Snapshot
         collection_name = Snapshot(
@@ -872,6 +896,24 @@ def rag_parse_code(body: dict):
                 vector_collection_name = f"{collection_name}_cohere_{uuid.uuid4().hex}"
         else:
             already = already and ready
+            if ready and not already:
+                # A previously published Cohere generation may leave the base
+                # collection absent. The provider switch must rebuild vectors
+                # instead of letting the ready registry short-circuit work.
+                force_reindex = True
+            if already:
+                from index.embeddings import embedding_profile
+                expected_size = embedding_profile("search_document").get("dimensions")
+                actual_size = collection_vector_size(collection_name)
+                if expected_size and actual_size and actual_size != expected_size:
+                    dl_logger.info(
+                        "Reindexing %s after embedding provider dimension change: %s -> %s",
+                        collection_name,
+                        actual_size,
+                        expected_size,
+                    )
+                    already = False
+                    force_reindex = True
     download_id = str(uuid.uuid4())
     token = _mint_download_token(download_id, filename)
 
@@ -890,7 +932,7 @@ def rag_parse_code(body: dict):
 
     thread = threading.Thread(
         target=indexing_service.parse_and_index,
-        args=(download_id, filename, data, collection_name, identity, vector_collection_name),
+        args=(download_id, filename, data, collection_name, identity, vector_collection_name, force_reindex),
         daemon=True,
     )
     thread.start()
@@ -955,7 +997,7 @@ def tusd_hook(body: dict):
         commit_sha = claims.get("commit_sha")
         project_id, commit_sha = upload_service.validate_identity(project_id, commit_sha)
         storage.set_rag_identity(
-            dest_key, project_id, commit_sha, hashlib.sha256(archive_bytes).hexdigest()
+            dest_key, project_id, commit_sha, hashlib.sha256(archive_bytes).hexdigest(), data=archive_bytes
         )
     except Exception as exc:
         dl_logger.error("tusd hook copy failed: %s", exc, exc_info=True)
@@ -1962,8 +2004,8 @@ def evaluate_prompt(body: dict):
 def _coerce_setting(key: str, value):
     default = RAG_CONFIG_DEFAULTS.get(key)
     if key == "embeddingProvider":
-        if value not in {"ollama", "openAICompatible", "cohere"}:
-            raise HTTPException(status_code=400, detail="embeddingProvider must be ollama, openAICompatible, or cohere")
+        if value not in {"ollama", "openAICompatible", "cohere", "cloudflareWorkersAI"}:
+            raise HTTPException(status_code=400, detail="embeddingProvider must be ollama, openAICompatible, cohere, or cloudflareWorkersAI")
         return value
     if key == "logDeletionMode":
         return value if value in {"soft", "hard"} else default
@@ -2030,8 +2072,8 @@ def update_settings(body: dict):
             status_code=400,
             detail="contextPreviewMode must be one of off, inline, gate",
         )
-    if "embeddingProvider" in incoming and incoming["embeddingProvider"] not in {"ollama", "openAICompatible", "cohere"}:
-        raise HTTPException(status_code=400, detail="embeddingProvider must be ollama, openAICompatible, or cohere")
+    if "embeddingProvider" in incoming and incoming["embeddingProvider"] not in {"ollama", "openAICompatible", "cohere", "cloudflareWorkersAI"}:
+        raise HTTPException(status_code=400, detail="embeddingProvider must be ollama, openAICompatible, cohere, or cloudflareWorkersAI")
     updates = {}
     for key in RAG_CONFIG_DEFAULTS:
         if key not in incoming:
@@ -2132,14 +2174,17 @@ def start_orchestration(body: dict):
         match = storage.find_rag_file(filename, upload_session_id)
         if not match:
             raise HTTPException(status_code=404, detail="Uploaded archive not found.")
-        if match.get("project_id") and match.get("commit_sha"):
-            if body.get("project_id") != match["project_id"] or body.get("commit_sha") != match["commit_sha"]:
+        if match.get("project_id"):
+            if (body.get("project_id") != match["project_id"] or body.get("commit_sha") != match.get("commit_sha")
+                    or (body.get("revision_id") and body["revision_id"] != match.get("revision_id"))
+                    or (body.get("source_ref") and body["source_ref"] != match.get("source_ref"))):
                 raise HTTPException(status_code=403, detail="Upload project identity does not match the archive record.")
             if not match.get("archive_sha256"):
                 raise HTTPException(status_code=409, detail="Upload archive checksum is unavailable.")
             snapshot_identity = {
                 "project_id": match["project_id"],
-                "commit_sha": match["commit_sha"],
+                "commit_sha": match.get("commit_sha"),
+                "source_ref": match.get("source_ref") or match.get("commit_sha"),
                 "source_archive_sha256": match["archive_sha256"],
             }
         elif body.get("project_id") or body.get("commit_sha"):

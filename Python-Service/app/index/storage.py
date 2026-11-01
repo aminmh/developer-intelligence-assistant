@@ -17,7 +17,7 @@ from datetime import datetime, timezone
 from typing import Any, Optional
 
 from minio import Minio
-from minio.commonconfig import CopySource
+from minio.commonconfig import CopySource, Tags
 
 from infra.settings import settings
 from infra.settings_store import settings_store
@@ -69,7 +69,7 @@ class Storage:
                 filename = "/".join(parts[2:])
                 last_modified = obj.last_modified.isoformat() if obj.last_modified else None
                 try:
-                    tags = client.get_object_tags(bucket, key).to_dict()
+                    tags = dict(client.get_object_tags(bucket, key) or {})
                 except Exception:
                     tags = {}
                 files.append({
@@ -80,6 +80,8 @@ class Storage:
                         "upload_session_id": session_dir,
                         "project_id": tags.get("project-id"),
                         "commit_sha": tags.get("commit-sha"),
+                        "source_ref": tags.get("source-ref"),
+                        "revision_id": tags.get("revision-id"),
                         "archive_sha256": tags.get("archive-sha256"),
                     })
         except Exception:
@@ -121,50 +123,69 @@ class Storage:
         with self._identity_lock:
             if project_id is None and commit_sha is None:
                 return self._put_archive(f"{RAG_UPLOADS_PREFIX}/{session_id}/{filename}", data, self._content_type(filename))
-            if not project_id or not commit_sha:
-                raise ValueError("project_id and commit_sha must be provided together")
+            if not project_id:
+                raise ValueError("project_id is required")
             checksum = hashlib.sha256(data).hexdigest()
             for item in self.list_rag_files():
-                if item.get("project_id") == project_id and item.get("commit_sha") == commit_sha:
+                if commit_sha and item.get("project_id") == project_id and item.get("commit_sha") == commit_sha:
                     if item.get("archive_sha256") != checksum:
                         raise ValueError("A different archive is already registered for this project and commit.")
             self._register_snapshot_identity(project_id, commit_sha, checksum)
             key = f"{RAG_UPLOADS_PREFIX}/{session_id}/{filename}"
             self._put_archive(key, data, self._content_type(filename))
-            self.set_rag_identity(key, project_id, commit_sha, checksum)
+            self.set_rag_identity(key, project_id, commit_sha, checksum, data=data)
             return key
 
-    def set_rag_identity(self, key: str, project_id: str, commit_sha: str, checksum: str) -> None:
+    def set_rag_identity(self, key: str, project_id: str, commit_sha: str | None, checksum: str, *, data: bytes) -> None:
+        if hashlib.sha256(data).hexdigest() != checksum:
+            raise ValueError("Upload content does not match its checksum")
         with self._identity_lock:
             for item in self.list_rag_files():
-                if (item.get("path") != key and item.get("project_id") == project_id
+                if (commit_sha and item.get("path") != key and item.get("project_id") == project_id
                         and item.get("commit_sha") == commit_sha
                         and item.get("archive_sha256") != checksum):
                     self._get_client().remove_object(self.tus_bucket, key)
                     raise ValueError("A different archive is already registered for this project and commit.")
             try:
-                self._register_snapshot_identity(project_id, commit_sha, checksum)
+                revision = self._register_snapshot_identity(project_id, commit_sha, checksum)
             except ValueError:
                 self._get_client().remove_object(self.tus_bucket, key)
                 raise
-            self._get_client().set_object_tags(self.tus_bucket, key, {
+            from telemetry.registry import default_registry
+            from telemetry.snapshot import Snapshot
+            snapshot = Snapshot(project_id, commit_sha, checksum)
+            registry = default_registry()
+            with registry.lock(project_id, snapshot.reference):
+                if not registry.archive_key(project_id, snapshot.reference):
+                    current = registry.get(project_id, snapshot.reference)
+                    archive_key = self.put_snapshot_archive(snapshot.key, checksum, data)
+                    registry.transition(snapshot, "ready" if current["state"] == "ready" else "uploaded", archive_key=archive_key)
+            tags = Tags.new_object_tags()
+            for name, value in {
                 "project-id": project_id,
-                "commit-sha": commit_sha,
                 "archive-sha256": checksum,
-            })
+                "source-ref": revision["source_ref"],
+                "revision-id": revision["revision_id"],
+            }.items():
+                tags[name] = value
+            if commit_sha:
+                tags["commit-sha"] = commit_sha
+            self._get_client().set_object_tags(self.tus_bucket, key, tags)
 
     @staticmethod
-    def _register_snapshot_identity(project_id: str, commit_sha: str, checksum: str) -> None:
+    def _register_snapshot_identity(project_id: str, commit_sha: str | None, checksum: str) -> dict:
         from telemetry.registry import SnapshotConflict, default_registry
         from telemetry.snapshot import Snapshot
 
         snapshot = Snapshot(project_id, commit_sha, checksum)
         registry = default_registry()
-        with registry.lock(project_id, commit_sha):
+        with registry.lock(project_id, snapshot.reference):
             try:
                 registry.register(snapshot)
             except SnapshotConflict as exc:
                 raise ValueError("A different archive is already registered for this project and commit.") from exc
+            current = registry.get(project_id, snapshot.reference)
+            return {**current, "source_ref": snapshot.reference}
 
     def put_snapshot_archive(self, snapshot_key: str, checksum: str, data: bytes) -> str:
         """Immutable CI archive namespace, outside mutable legacy upload lists."""

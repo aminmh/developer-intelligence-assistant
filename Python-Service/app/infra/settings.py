@@ -29,6 +29,10 @@ class Settings(BaseModel):
     # Cohere credentials are UI-managed through settings.db; this empty field
     # lets the dynamic overlay provide its normal write-only value.
     cohere_api_key: str = ""
+    # Cloudflare Workers AI credentials are UI-managed through settings.db.
+    cloudflare_account_id: str = ""
+    cloudflare_api_token: str = ""
+    cloudflare_embedding_model: str = "@cf/baai/bge-base-en-v1.5"
     ollama_llm_model: str = os.getenv("OLLAMA_LLM_MODEL", "gemma3-4b")
     # How long the local Ollama chat model may remain resident after its last
     # request. Supports Ollama duration strings such as ``30s`` or ``5m``;
@@ -132,6 +136,9 @@ class RuntimeSettings:
 
     _DYNAMIC = {
         "cohere_api_key": "cohereApiKey",
+        "cloudflare_account_id": "cloudflareAccountId",
+        "cloudflare_api_token": "cloudflareApiToken",
+        "cloudflare_embedding_model": "cloudflareEmbeddingModel",
         "ollama_base_url": "ollamaBaseUrl",
         "ollama_embedding_model": "ollamaEmbedModel",
         "embedding_base_url": "embeddingBaseUrl",

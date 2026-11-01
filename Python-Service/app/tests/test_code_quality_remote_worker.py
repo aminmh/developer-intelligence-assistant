@@ -96,7 +96,8 @@ def test_worker_findings_must_reference_selected_source_and_valid_lines():
         remote_worker._validate_result("joern", output, {"src/app.py"}, {"src/app.py": 2})
 
 
-def test_worker_job_payload_binds_source_digest_and_revision(monkeypatch):
+@pytest.mark.parametrize("commit_sha", ["c" * 40, None])
+def test_worker_job_payload_binds_source_digest_and_revision(monkeypatch, commit_sha):
     app_path = str(__import__("pathlib").Path(__file__).parents[3] / "analyzer-worker")
     api_path = str(__import__("pathlib").Path(__file__).parents[1])
     monkeypatch.syspath_prepend(app_path)
@@ -108,7 +109,7 @@ def test_worker_job_payload_binds_source_digest_and_revision(monkeypatch):
         "schema_version": 1,
         "job_id": str(uuid4()),
         "revision_id": "rev_" + "d" * 32,
-        "commit_sha": "c" * 40,
+        "commit_sha": commit_sha,
         "archive_base64": base64.b64encode(archive).decode("ascii"),
         "bundle_sha256": hashlib.sha256(archive).hexdigest(),
         "files": ["src/app.py"],

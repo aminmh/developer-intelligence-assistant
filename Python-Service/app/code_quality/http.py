@@ -21,7 +21,13 @@ from code_quality.performance import PerformanceError, PerformanceStore, compare
 from code_quality.rules import CustomRuleStore, MAX_RULE_BYTES
 from code_quality.analyzers import validate_semgrep_yaml
 from code_quality.service import preview_custom_rule
-from code_quality.source_view import SourceViewError, list_source_directories, read_source_window
+from code_quality.source_view import (
+    SourceViewError,
+    list_indexed_source_directories,
+    list_source_directories,
+    MAX_DIRECTORY_ARCHIVE_BYTES,
+    read_source_window,
+)
 from code_quality.business_rules import BusinessRuleStore
 from code_quality.outline import OutlineConnectionStore, OutlineError, discover_collections, fetch_business_rule_documents
 from code_quality.external_analyzers import (
@@ -40,7 +46,8 @@ from code_quality.remote_worker import (
     check_worker,
     get_worker_fingerprint,
 )
-from telemetry.snapshot import validate_project_id, validate_revision_id
+from telemetry.snapshot import source_reference, validate_project_id, validate_revision_id
+from code_quality.revision_deletion import RevisionBusy, RevisionStorageUnavailable, remove_revision
 
 router = APIRouter(prefix="/code-quality", tags=["Code quality assessment"])
 MAX_PERFORMANCE_REQUEST_BYTES = 100_000
@@ -530,7 +537,7 @@ async def preview_rule(project_id: str, revision_id: str, request: Request) -> d
         snapshot = registry.get_by_revision_id(project_id, revision_id)
         if snapshot is None or snapshot.get("state") != "ready":
             raise HTTPException(404, "The selected indexed revision is unavailable.")
-        archive_key = registry.archive_key(project_id, snapshot["commit_sha"])
+        archive_key = registry.archive_key(project_id, source_reference(snapshot))
         if not archive_key:
             raise HTTPException(409, "The source archive for this revision is no longer available.")
         from index.storage import storage
@@ -782,6 +789,52 @@ async def compare_performance_runs(project_id: str, request: Request) -> dict:
         raise HTTPException(422, "Select two valid performance runs.") from exc
 
 
+@router.get("/projects/{project_id}/revisions/{revision_id}/precheck")
+async def assessment_precheck(project_id: str, revision_id: str, request: Request) -> dict:
+    _authorize(request)
+    try:
+        validate_project_id(project_id)
+        validate_revision_id(revision_id)
+    except (ValueError, TypeError) as exc:
+        raise HTTPException(422, "Invalid project revision identity.") from exc
+    from code_quality.index_readiness import assessment_index_readiness
+    from telemetry.registry import default_registry
+    return await run_in_threadpool(assessment_index_readiness, project_id, revision_id, default_registry())
+
+
+@router.delete("/projects/{project_id}/revisions/{revision_id}")
+async def delete_revision(project_id: str, revision_id: str, request: Request) -> dict:
+    _authorize(request)
+    try:
+        validate_project_id(project_id)
+        validate_revision_id(revision_id)
+        if not await run_in_threadpool(remove_revision, project_id, revision_id):
+            raise HTTPException(404, "Project revision was not found.")
+        return {"deleted": True}
+    except HTTPException:
+        raise
+    except RevisionBusy as exc:
+        raise HTTPException(409, str(exc)) from exc
+    except RevisionStorageUnavailable as exc:
+        logger.warning("revision_removal_storage_unavailable project=%s revision=%s error_type=%s", project_id, revision_id, type(exc.__cause__).__name__)
+        raise HTTPException(503, str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(422, "Invalid project revision identity.") from exc
+    except Exception as exc:
+        logger.exception("revision_removal_failed project=%s revision=%s", project_id, revision_id)
+        raise HTTPException(503, "Revision removal is incomplete. Check storage availability and retry removal.") from exc
+
+
+def _assess_locked(registry, project_id, revision_id, snapshot, archive, user_id,
+                   outline_token, outline_credential_error, sonarqube_token):
+    with registry.lock(project_id, source_reference(snapshot)):
+        current = registry.get_by_revision_id(project_id, revision_id)
+        if not current or current.get("state") != "ready":
+            raise AssessmentError("The selected revision is no longer available for assessment.")
+        return assess_revision(project_id, revision_id, snapshot, archive, user_id,
+                               None, outline_token, outline_credential_error, sonarqube_token)
+
+
 @router.post("/projects/{project_id}/revisions/{revision_id}/assess")
 async def assess(project_id: str, revision_id: str, request: Request) -> dict:
     user_id = _authorize(request)
@@ -800,10 +853,14 @@ async def assess(project_id: str, revision_id: str, request: Request) -> dict:
             raise HTTPException(422, "Outline credential status is invalid.")
         from telemetry.registry import default_registry
         registry = default_registry()
+        from code_quality.index_readiness import assessment_index_readiness
+        readiness = await run_in_threadpool(assessment_index_readiness, project_id, revision_id, registry)
+        if not readiness["ready"]:
+            raise HTTPException(503 if readiness["status"] == "index_unavailable" else 409, readiness["reason"])
         snapshot = registry.get_by_revision_id(project_id, revision_id)
         if snapshot is None or snapshot.get("state") != "ready":
             raise HTTPException(404, "The selected indexed revision is unavailable.")
-        archive_key = registry.archive_key(project_id, snapshot["commit_sha"])
+        archive_key = registry.archive_key(project_id, source_reference(snapshot))
         if not archive_key:
             raise HTTPException(409, "The source archive for this revision is no longer available for assessment.")
         from index.storage import storage
@@ -820,8 +877,8 @@ async def assess(project_id: str, revision_id: str, request: Request) -> dict:
                 503,
                 "The selected revision's source archive could not be retrieved. Retry or re-index the project.",
             ) from exc
-        return await run_in_threadpool(assess_revision, project_id, revision_id, snapshot, archive, user_id,
-                                       None, outline_token, outline_credential_error, sonarqube_token)
+        return await run_in_threadpool(_assess_locked, registry, project_id, revision_id, snapshot, archive, user_id,
+                                       outline_token, outline_credential_error, sonarqube_token)
     except HTTPException:
         raise
     except AssessmentError as exc:
@@ -882,7 +939,7 @@ async def source_window(
         snapshot = registry.get_by_revision_id(project_id, revision_id)
         if snapshot is None or snapshot.get("state") != "ready":
             raise HTTPException(404, "The selected indexed revision is unavailable.")
-        archive_key = registry.archive_key(project_id, snapshot["commit_sha"])
+        archive_key = registry.archive_key(project_id, source_reference(snapshot))
         if not archive_key:
             raise HTTPException(409, "The source archive for this revision is no longer available.")
         from index.storage import storage
@@ -916,12 +973,17 @@ async def source_directories(project_id: str, revision_id: str, request: Request
         snapshot = registry.get_by_revision_id(project_id, revision_id)
         if snapshot is None or snapshot.get("state") != "ready":
             raise HTTPException(404, "The selected indexed revision is unavailable.")
-        archive_key = registry.archive_key(project_id, snapshot["commit_sha"])
+        archive_key = registry.archive_key(project_id, source_reference(snapshot))
         if not archive_key:
             raise HTTPException(409, "The source archive for this revision is no longer available.")
         from index.storage import storage
         archive = await run_in_threadpool(storage.get_snapshot_archive, archive_key)
-        directories = await run_in_threadpool(list_source_directories, archive)
+        if archive and len(archive) > MAX_DIRECTORY_ARCHIVE_BYTES:
+            directories = await run_in_threadpool(
+                list_indexed_source_directories, project_id, revision_id, snapshot,
+            )
+        else:
+            directories = await run_in_threadpool(list_source_directories, archive)
         return {"directories": directories}
     except HTTPException:
         raise

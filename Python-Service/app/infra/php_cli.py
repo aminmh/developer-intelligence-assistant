@@ -114,7 +114,7 @@ def _decode_json_array(stdout: str) -> list[dict[str, Any]] | None:
     """Decode the CLI's JSON array, tolerating a leading diagnostic line."""
     text = stdout.strip()
     if not text:
-        return []
+        return None
     try:
         parsed = json.loads(text)
     except json.JSONDecodeError:

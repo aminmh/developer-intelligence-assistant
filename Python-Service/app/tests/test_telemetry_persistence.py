@@ -55,11 +55,14 @@ def index_with_local_vectors(monkeypatch):
     return graph, store, vectors
 
 
-def test_real_ingest_isolates_two_projects_and_two_commits(monkeypatch):
+@pytest.mark.parametrize("git_backed", [True, False])
+def test_real_ingest_isolates_projects_and_source_revisions(monkeypatch, git_backed):
     graph, store, vectors = index_with_local_vectors(monkeypatch)
     for project in ("one", "two"):
-        for commit in ("a" * 40, "b" * 40):
-            snapshot = Snapshot(project, commit, "c" * 64)
+        for version in ("a" * 40, "b" * 40):
+            commit = version if git_backed else None
+            checksum = "c" * 64 if git_backed else hashlib.sha256(version.encode()).hexdigest()
+            snapshot = Snapshot(project, commit, checksum)
             for _ in range(2):
                 result = graph.ingest(chunks(), snapshot.collection, snapshot=snapshot)
                 assert result["ingested"] == result["graph_nodes"] == 2
@@ -68,13 +71,14 @@ def test_real_ingest_isolates_two_projects_and_two_commits(monkeypatch):
             assert len(records) == 2
             for record in records:
                 assert record.payload["project_id"] == project
-                assert record.payload["commit_sha"] == commit
+                assert record.payload.get("commit_sha") == commit
+                assert record.payload["source_ref"] == snapshot.reference
                 assert record.payload["dirty"] is False
-                assert record.payload["source_archive_sha256"] == "c" * 64
+                assert record.payload["source_archive_sha256"] == checksum
     assert len(store.nodes) == 8
     for edge in store.edges:
         source, target = store.nodes[edge["source_id"]], store.nodes[edge["target_id"]]
-        assert (source["project_id"], source["commit_sha"]) == (target["project_id"], target["commit_sha"])
+        assert (source["project_id"], source["source_ref"]) == (target["project_id"], target["source_ref"])
         assert source["symbol_id"] == "App\\Orders::store"
         assert target["symbol_id"] == "App\\Orders::save"
     assert len({edge["source_id"] for edge in store.edges}) == 4

@@ -1,4 +1,4 @@
-"""Embedding client dispatch — Ollama, OpenAI-compatible, or Cohere.
+"""Embedding client dispatch — Ollama, OpenAI-compatible, Cohere, or Cloudflare.
 
 The embedding server is configurable via the dynamic ``embedding_base_url``
 (``embeddingBaseUrl``) setting:
@@ -6,9 +6,10 @@ The embedding server is configurable via the dynamic ``embedding_base_url``
 * ``ollama`` -> Ollama ``/api/embeddings`` (default),
 * ``openAICompatible`` -> ``{base}/v1/embeddings`` (LM Studio, Bionic, ...),
 * ``cohere`` -> Cohere v2 ``/embed`` with role-specific models.
+* ``cloudflareWorkersAI`` -> Cloudflare Workers AI account REST endpoint.
 
-The model name comes from ``ollama_embedding_model`` (``ollamaEmbedModel``) for
-both backends. The low-level ``embed_texts`` path is stdlib-only (``urllib``),
+Ollama and OpenAI-compatible models come from ``ollama_embedding_model``;
+Cloudflare uses ``cloudflare_embedding_model``. The low-level ``embed_texts`` path is stdlib-only (``urllib``),
 mirroring ``lmstudio.py``; the llama_index / langchain adapters are provided
 for the ingestion and evaluation pipelines.
 """
@@ -17,12 +18,54 @@ from __future__ import annotations
 
 import json
 import time
+from datetime import datetime, timezone
+from email.utils import parsedate_to_datetime
 from urllib.error import HTTPError
 import urllib.request as request
 import urllib.request
+from urllib.parse import quote
 from typing import Any
 
 from infra.settings import settings
+
+
+class EmbeddingProviderError(RuntimeError):
+    """Provider rejection safe to display without response bodies or credentials."""
+
+    def __init__(self, provider: str, code: int, retry_after_seconds: float | None = None):
+        self.provider = provider
+        self.code = code
+        self.retry_after_seconds = retry_after_seconds
+        hint = {
+            401: "Check the saved embedding API key.",
+            403: "Check provider permissions and API access from the API server.",
+            429: "Check the provider quota or rate limit before retrying.",
+        }.get(code, "Check the embedding model, endpoint, and provider availability.")
+        if provider == "cloudflareWorkersAI" and code in (401, 403):
+            hint = "Check the Cloudflare account ID and the token's Workers AI Read and Edit permissions and account scope."
+        cooldown = ""
+        if code == 429:
+            if retry_after_seconds is not None:
+                cooldown = f" Retry after about {max(1, round(retry_after_seconds))} seconds."
+            else:
+                cooldown = " The provider did not provide a retry window; wait before retrying."
+        super().__init__(f"Embedding provider {provider} rejected the request (HTTP {code}). {hint}{cooldown}")
+
+
+class _CohereRateLimitError(RuntimeError):
+    """Internal rate-limit signal that preserves safe provider cooldown metadata."""
+
+    def __init__(self, retry_after_seconds: float | None = None):
+        self.retry_after_seconds = retry_after_seconds
+        super().__init__("Cohere rate limit reached")
+
+
+_CLOUDFLARE_EMBEDDING_DIMENSIONS = {
+    "@cf/baai/bge-small-en-v1.5": 384,
+    "@cf/baai/bge-base-en-v1.5": 768,
+    "@cf/baai/bge-large-en-v1.5": 1024,
+    "@cf/baai/bge-m3": 1024,
+}
 
 
 def embedding_base_url() -> str:
@@ -48,6 +91,13 @@ def embedding_profile(role: str = "search_document") -> dict[str, Any]:
     if provider == "cohere":
         model = "embed-v5.0-fast" if role == "search_query" else "embed-v5.0-pro"
         return {"provider": provider, "model": model, "dimensions": 2048}
+    if provider == "cloudflareWorkersAI":
+        model = (settings.cloudflare_embedding_model or "@cf/baai/bge-base-en-v1.5").strip()
+        return {
+            "provider": provider,
+            "model": model,
+            "dimensions": _CLOUDFLARE_EMBEDDING_DIMENSIONS.get(model),
+        }
     if provider == "openAICompatible":
         return {"provider": provider, "model": settings.ollama_embedding_model, "base_url": _openai_v1_base()}
     return {"provider": "ollama", "model": settings.ollama_embedding_model, "base_url": settings.ollama_base_url.rstrip("/")}
@@ -58,6 +108,7 @@ def embed_texts(
     *,
     input_type: str = "search_document",
     progress: Any = None,
+    retry_rate_limits: bool = True,
 ) -> list[list[float]]:
     """Embed ``texts`` and return one vector per input.
 
@@ -69,12 +120,20 @@ def embed_texts(
     if input_type not in {"search_document", "search_query", "classification"}:
         raise ValueError("Unsupported embedding input_type")
     provider = provider_name()
-    if provider == "cohere":
-        return _embed_cohere(texts, input_type, progress)
-    if provider == "openAICompatible":
-        return _embed_openai(texts, progress)
-    if provider == "ollama":
-        return _embed_ollama(texts, progress)
+    try:
+        if provider == "cohere":
+            return _embed_cohere(texts, input_type, progress, retry_rate_limits)
+        if provider == "cloudflareWorkersAI":
+            return _embed_cloudflare(texts, progress)
+        if provider == "openAICompatible":
+            return _embed_openai(texts, progress)
+        if provider == "ollama":
+            return _embed_ollama(texts, progress)
+    except _CohereRateLimitError as exc:
+        raise EmbeddingProviderError(provider, 429, exc.retry_after_seconds) from exc
+    except HTTPError as exc:
+        exc.close()
+        raise EmbeddingProviderError(provider, exc.code) from exc
     raise ValueError(f"Unsupported embedding provider: {provider}")
 
 
@@ -83,7 +142,12 @@ def _report_progress(progress: Any, count: int) -> None:
         progress(count)
 
 
-def _embed_cohere(texts: list[str], input_type: str, progress: Any = None) -> list[list[float]]:
+def _embed_cohere(
+    texts: list[str],
+    input_type: str,
+    progress: Any = None,
+    retry_rate_limits: bool = True,
+) -> list[list[float]]:
     if not settings.cohere_api_key:
         raise RuntimeError("Cohere API key is not configured")
     vectors: list[list[float]] = []
@@ -103,7 +167,7 @@ def _embed_cohere(texts: list[str], input_type: str, progress: Any = None) -> li
             headers={"Content-Type": "application/json", "Authorization": f"Bearer {settings.cohere_api_key}"},
             method="POST",
         )
-        with _cohere_urlopen(req) as response:
+        with _cohere_urlopen(req, retry_rate_limits=retry_rate_limits) as response:
             data = json.loads(response.read().decode("utf-8"))
         rows = (data.get("embeddings") or {}).get("float") if isinstance(data, dict) else None
         if not isinstance(rows, list) or len(rows) != len(batch) or not all(isinstance(row, list) and row for row in rows):
@@ -113,23 +177,70 @@ def _embed_cohere(texts: list[str], input_type: str, progress: Any = None) -> li
     return vectors
 
 
-def _cohere_urlopen(req: urllib.request.Request):
+def _embed_cloudflare(texts: list[str], progress: Any = None) -> list[list[float]]:
+    if not settings.cloudflare_account_id.strip():
+        raise RuntimeError("Cloudflare account ID is not configured")
+    if not settings.cloudflare_api_token.strip():
+        raise RuntimeError("Cloudflare Workers AI API token is not configured")
+    model = (settings.cloudflare_embedding_model or "@cf/baai/bge-base-en-v1.5").strip()
+    account_id = quote(settings.cloudflare_account_id.strip(), safe="")
+    model_path = quote(model, safe="@/")
+    endpoint = f"https://api.cloudflare.com/client/v4/accounts/{account_id}/ai/run/{model_path}"
+    vectors: list[list[float]] = []
+    for offset in range(0, len(texts), 32):
+        batch = texts[offset : offset + 32]
+        body = json.dumps({"text": batch}).encode("utf-8")
+        req = urllib.request.Request(
+            endpoint,
+            data=body,
+            headers={
+                "Content-Type": "application/json",
+                "Authorization": f"Bearer {settings.cloudflare_api_token}",
+            },
+            method="POST",
+        )
+        with urllib.request.urlopen(req, timeout=120) as response:
+            payload = json.loads(response.read().decode("utf-8"))
+        result = payload.get("result") if isinstance(payload, dict) else None
+        rows = result.get("data") if isinstance(result, dict) else None
+        if not isinstance(rows, list) or len(rows) != len(batch) or not all(isinstance(row, list) and row for row in rows):
+            raise TypeError("Invalid embedding response from Cloudflare Workers AI")
+        vectors.extend(rows)
+        _report_progress(progress, len(batch))
+    return vectors
+
+
+def _retry_after_seconds(exc: HTTPError) -> float | None:
+    retry_after = exc.headers.get("Retry-After") if exc.headers is not None else None
+    if retry_after is None:
+        return None
+    try:
+        return max(0.0, float(retry_after))
+    except (TypeError, ValueError):
+        try:
+            retry_at = parsedate_to_datetime(retry_after)
+            if retry_at.tzinfo is None:
+                retry_at = retry_at.replace(tzinfo=timezone.utc)
+            return max(0.0, (retry_at - datetime.now(timezone.utc)).total_seconds())
+        except (TypeError, ValueError, OverflowError):
+            return None
+
+
+def _cohere_urlopen(req: urllib.request.Request, *, retry_rate_limits: bool = True):
     """Retry Cohere rate limits using its Retry-After header when available."""
     max_retries = 2
     for attempt in range(max_retries + 1):
         try:
             return urllib.request.urlopen(req, timeout=120)
         except HTTPError as exc:
-            if exc.code != 429 or attempt == max_retries:
+            if exc.code != 429:
                 raise
-            retry_after = None
-            if exc.headers is not None:
-                retry_after = exc.headers.get("Retry-After")
+            retry_after_seconds = _retry_after_seconds(exc)
+            if not retry_rate_limits or attempt == max_retries:
+                exc.close()
+                raise _CohereRateLimitError(retry_after_seconds) from exc
             exc.close()
-            try:
-                delay = max(0.0, float(retry_after)) if retry_after is not None else 60.0
-            except (TypeError, ValueError):
-                delay = 60.0
+            delay = retry_after_seconds if retry_after_seconds is not None else 60.0
             time.sleep(delay)
 
 

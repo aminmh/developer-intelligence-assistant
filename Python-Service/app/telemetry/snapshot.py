@@ -18,6 +18,25 @@ def validate_scope(project_id: str, commit_sha: str) -> None:
         raise ValueError("Commit must be a full lowercase Git SHA")
 
 
+def validate_source_ref(project_id: str, source_ref: str) -> None:
+    validate_project_id(project_id)
+    if not isinstance(source_ref, str) or not re.fullmatch(r"(?:[0-9a-f]{40}|[0-9a-f]{64}|upload_[0-9a-f]{64})", source_ref):
+        raise ValueError("Invalid source reference")
+
+
+def source_reference(metadata: dict[str, Any]) -> str:
+    """Return a source key without representing archive identity as Git metadata."""
+    snapshot = Snapshot(metadata["project_id"], metadata.get("commit_sha"), metadata["source_archive_sha256"])
+    if metadata.get("source_ref") not in (None, snapshot.reference):
+        raise ValueError("Source reference does not match archive identity")
+    return snapshot.reference
+
+
+def source_filter(metadata: dict[str, Any]) -> dict[str, str]:
+    reference = source_reference(metadata)
+    return {"commit_sha": reference} if metadata.get("commit_sha") else {"source_ref": reference}
+
+
 def validate_project_id(project_id: str) -> None:
     if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,127}", project_id):
         raise ValueError("Invalid project ID")
@@ -29,7 +48,7 @@ def validate_revision_id(revision_id: str) -> None:
 
 
 def storage_id(project_id: str, commit_sha: str, symbol_id: str) -> str:
-    validate_scope(project_id, commit_sha)
+    validate_source_ref(project_id, commit_sha)
     raw = json.dumps([project_id, commit_sha, symbol_id], ensure_ascii=False, separators=(",", ":"))
     return hashlib.sha256(raw.encode("utf-8")).hexdigest()
 
@@ -37,14 +56,16 @@ def storage_id(project_id: str, commit_sha: str, symbol_id: str) -> str:
 @dataclass(frozen=True)
 class Snapshot:
     project_id: str
-    commit_sha: str
+    commit_sha: str | None
     source_archive_sha256: str
     dirty: bool = False
     telemetry_schema_version: str = SCHEMA_VERSION
     revision_id: str | None = None
 
     def __post_init__(self) -> None:
-        validate_scope(self.project_id, self.commit_sha)
+        validate_project_id(self.project_id)
+        if self.commit_sha is not None:
+            validate_scope(self.project_id, self.commit_sha)
         if not re.fullmatch(r"[0-9a-f]{64}", self.source_archive_sha256):
             raise ValueError("Source checksum must be SHA256")
         if self.dirty is not False:
@@ -55,15 +76,19 @@ class Snapshot:
             validate_revision_id(self.revision_id)
 
     @property
+    def reference(self) -> str:
+        return self.commit_sha or "upload_" + self.source_archive_sha256
+
+    @property
     def key(self) -> str:
-        return storage_id(self.project_id, self.commit_sha, "")
+        return storage_id(self.project_id, self.reference, "")
 
     @property
     def collection(self) -> str:
         return "snapshot_" + self.key
 
     def metadata(self) -> dict[str, Any]:
-        return asdict(self)
+        return {**asdict(self), "source_ref": self.reference}
 
 
 def prepare_chunks(chunks: list[dict[str, Any]], snapshot: Snapshot) -> list[dict[str, Any]]:
@@ -89,13 +114,13 @@ def prepare_chunks(chunks: list[dict[str, Any]], snapshot: Snapshot) -> list[dic
         seen.add(identity)
         chunk.update(snapshot.metadata())
         chunk.update(symbol_id=canonical, file_path=path, file=path,
-                     storage_id=storage_id(snapshot.project_id, snapshot.commit_sha, identity))
+                     storage_id=storage_id(snapshot.project_id, snapshot.reference, identity))
         result.append(chunk)
     return result
 
 
 def identity_metadata(chunk: dict[str, Any]) -> dict[str, Any]:
-    keys = ("symbol_id", "symbol_identity_error", "project_id", "commit_sha", "revision_id",
+    keys = ("symbol_id", "symbol_identity_error", "project_id", "commit_sha", "source_ref", "revision_id",
             "source_archive_sha256", "dirty", "telemetry_schema_version")
     return {key: chunk[key] for key in keys if chunk.get(key) is not None}
 
@@ -104,7 +129,7 @@ def resolve_registered_revision(snapshot: Snapshot) -> Snapshot:
     """Attach the registry's immutable revision ID before indexing its chunks."""
     from telemetry.registry import default_registry
 
-    current = default_registry().get(snapshot.project_id, snapshot.commit_sha)
+    current = default_registry().get(snapshot.project_id, snapshot.reference)
     revision_id = current.get("revision_id")
     if not revision_id:
         return snapshot

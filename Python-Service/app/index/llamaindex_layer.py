@@ -27,7 +27,7 @@ import time
 import uuid
 from typing import Any, Dict, List, Optional
 
-from index.embeddings import embed_texts, get_llamaindex_embed_model
+from index.embeddings import EmbeddingProviderError, embed_texts, get_llamaindex_embed_model
 from qdrant_client import QdrantClient
 from qdrant_client.models import (
     Distance,
@@ -36,6 +36,7 @@ from qdrant_client.models import (
     MatchText,
     MatchValue,
     PointStruct,
+    PayloadSchemaType,
     VectorParams,
 )
 
@@ -52,6 +53,29 @@ EXCLUDED_LLM_METADATA_KEYS = ("calls", "callers", "project_id")
 # Pseudo receivers emitted by the PHP extractor for unresolved/global calls.
 # These have no concrete target node, so no CALLS edge is materialised for them.
 _PSEUDO_RECEIVERS = ("__unknown", "__function", "__global__")
+
+CODE_METRIC_FIELDS = (
+    "metric_schema", "content_hash", "cyclomatic", "max_nesting", "param_count",
+    "reads_properties", "writes_properties", "type_checks", "instantiates", "throws",
+    "constructor_dependencies",
+)
+PAYLOAD_INDEX_FIELDS = ("revision_id", "node_type", "file_path")
+
+
+def ensure_payload_indexes(qdrant: Any, collection_name: str) -> None:
+    """Create keyword payload indexes used by filtered chunk scans; existing indexes are fine."""
+    for field in PAYLOAD_INDEX_FIELDS:
+        try:
+            qdrant.create_payload_index(
+                collection_name=collection_name,
+                field_name=field,
+                field_schema=PayloadSchemaType.KEYWORD,
+            )
+        except Exception as exc:
+            if "already exists" not in str(exc).lower():
+                raise RuntimeError(
+                    f"Could not create Qdrant payload index {field} on {collection_name}"
+                ) from exc
 
 # Named graph-expansion legs hybrid_retrieve can run after vector search. The
 # default keeps ONLY CALLS so callers predating the richer legs observe the
@@ -672,6 +696,7 @@ def _payload(chunk: Dict[str, Any], collection_name: str) -> Dict[str, Any]:
             "code": chunk.get("code", ""),
             "calls": chunk.get("calls", []) or [],
             "collection": collection_name,
+            **{field: chunk[field] for field in CODE_METRIC_FIELDS if chunk.get(field) is not None},
         }
     )
 
@@ -751,6 +776,7 @@ class CodePropertyGraph:
         snapshot: Snapshot | None = None,
         progress_callback=None,
         vector_collection_name: str | None = None,
+        force_reindex: bool = False,
     ) -> Dict[str, Any]:
         """Ingest code chunks into the Neo4j graph and Qdrant vectors.
 
@@ -795,7 +821,7 @@ class CodePropertyGraph:
             graph_nodes, graph_relations = self._ingest_graph(deduped, collection_name, strict=True)
             ingested, embed_fails = self._ingest_vectors(
                 deduped, vector_collection_name or collection_name,
-                replace=False, progress_callback=progress_callback,
+                replace=force_reindex, progress_callback=progress_callback,
             )
             if graph_nodes != len(deduped) or ingested != len(deduped) or embed_fails:
                 raise RuntimeError(
@@ -1062,6 +1088,8 @@ class CodePropertyGraph:
                 )
                 if len(vectors) != len(batch):
                     raise RuntimeError("Embedding provider returned an incomplete batch")
+            except EmbeddingProviderError:
+                raise
             except Exception as exc:
                 embed_fails += len(batch)
                 if self._last_embedding_error is None:
@@ -1083,6 +1111,7 @@ class CodePropertyGraph:
                         )
                     except Exception:
                         pass
+                    ensure_payload_indexes(qdrant, collection_name)
                 points.append(PointStruct(
                     id=_point_id_for(_chunk_node_id(chunk)),
                     vector=embedding,
@@ -1236,11 +1265,8 @@ class CodePropertyGraph:
                 if not default_registry().is_ready_collection(collection_name):
                     raise ValueError("Snapshot is not ready for retrieval")
                 if settings.embedding_provider == "cohere":
-                    generation_state = default_registry().get_runtime_setting(
-                        "cohere_embedding_generations"
-                    ) or {}
-                    active = (generation_state.get("value") or {}).get("active", {})
-                    generation = active.get(collection_name) if isinstance(active, dict) else None
+                    from index.embedding_rebuild import active_vector_collection
+                    generation = active_vector_collection(collection_name)
                     if not generation:
                         raise ValueError(
                             "This revision needs a Cohere embedding rebuild before retrieval"
@@ -1286,11 +1312,14 @@ class CodePropertyGraph:
                 "Query embedding failed error_type=%s",
                 type(exc).__name__,
             )
+            failure_detail = str(exc).strip()[:300] or type(exc).__name__
             trace["mode"] = "vector_unavailable"
             trace["failure_code"] = "embedding_unavailable"
+            trace["failure_detail"] = failure_detail
             record_retrieval_trace(trace_id or "", trace)
             return {"results": [], "searched_collections": target_collections,
-                    "mode": trace["mode"], "failure_code": trace["failure_code"]}
+                    "mode": trace["mode"], "failure_code": trace["failure_code"],
+                    "failure_detail": failure_detail}
 
         # Optional metadata filter (from extracted intent entities).
         query_filter = _build_query_filter(class_name=class_name, file=file)

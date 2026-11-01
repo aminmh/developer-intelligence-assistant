@@ -89,7 +89,7 @@ def _validate_job(payload: dict[str, Any]) -> tuple[str, bytes, list[str], dict[
     if not isinstance(revision_id, str) or not _REVISION_ID.fullmatch(revision_id):
         raise HTTPException(422, "Analyzer job revision identity is invalid.")
     commit_sha = payload.get("commit_sha")
-    if not isinstance(commit_sha, str) or not _SHA.fullmatch(commit_sha):
+    if commit_sha is not None and (not isinstance(commit_sha, str) or not _SHA.fullmatch(commit_sha)):
         raise HTTPException(422, "Analyzer job revision is invalid.")
     encoded = payload.get("archive_base64")
     if not isinstance(encoded, str) or len(encoded) > MAX_ARCHIVE_B64_BYTES:
@@ -191,7 +191,7 @@ def _run_job(payload: dict[str, Any]) -> dict[str, Any]:
             analyzers[name] = run_joern(settings, archive, files, languages)
     return {"schema_version": 1, "job_id": job_id,
             "revision_id": payload["revision_id"],
-            "commit_sha": payload["commit_sha"], "bundle_sha256": payload["bundle_sha256"],
+            "commit_sha": payload.get("commit_sha"), "bundle_sha256": payload["bundle_sha256"],
             "analyzers": analyzers}
 
 

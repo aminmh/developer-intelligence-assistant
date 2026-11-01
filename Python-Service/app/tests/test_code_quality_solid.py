@@ -73,6 +73,15 @@ def _solid_fixture():
             "method", BUSINESS_FILES[0], number + 2, code,
             parent_symbol="App\\Domain\\PaymentCoordinator", method_name=f"run{number}",
         ))
+    for chunk in chunks:
+        chunk["metric_schema"] = "code-metrics-1"
+        if chunk["node_type"] in {"class", "interface"}:
+            chunk["fq_symbol_name"] = chunk["class_fqn"]
+        if chunk.get("method_name") == "run0":
+            chunk["type_checks"] = 3
+            chunk["instantiates"] = ["PDO"]
+        if chunk.get("method_name") == "export" and chunk["file_path"] == BUSINESS_FILES[2]:
+            chunk["throws"] = ["BadMethodCallException"]
     return chunks
 
 
@@ -89,8 +98,8 @@ def test_php_design_signals_are_cited_deterministic_and_limited_to_supported_pat
     assert summary == repeated_summary
     assert findings == repeated_findings
     assert summary["status"] == "complete"
-    assert summary["principles_with_static_signals"] == ["SRP", "OCP", "ISP", "DIP"]
-    assert {finding["design_principle"] for finding in findings} == {"SRP", "OCP", "ISP", "DIP"}
+    assert summary["principles_with_static_signals"] == ["DIP", "ISP", "LSP", "OCP", "SRP"]
+    assert {finding["design_principle"] for finding in findings} == {"SRP", "OCP", "LSP", "DIP"}
     assert all(finding["category"] == "clean_code" for finding in findings)
     assert all(finding["kind"] == "finding" for finding in findings)
     assert all(finding["file"] in BUSINESS_FILES and finding["line"] > 0 for finding in findings)
@@ -158,7 +167,7 @@ def test_php_design_signals_fall_back_to_bounded_local_parser(monkeypatch):
     assert summary["source"] == "local-php-ast-fallback"
     assert summary["status"] == "complete"
     assert summary["signal_count"] > 0
-    assert {finding["design_principle"] for finding in findings} == {"SRP", "OCP", "ISP", "DIP"}
+    assert {finding["design_principle"] for finding in findings} == {"SRP", "OCP", "LSP", "DIP"}
     assert all(finding["file"] in BUSINESS_FILES for finding in findings)
     assert review_context
     assert len(review_context) <= 8

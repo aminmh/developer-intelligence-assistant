@@ -35,8 +35,8 @@ services:
       TELEMETRY_CLICKHOUSE_DATABASE: ${TELEMETRY_CLICKHOUSE_DATABASE:-telemetry}
       TELEMETRY_CLICKHOUSE_TABLE: ${TELEMETRY_CLICKHOUSE_TABLE:-otel_traces}
       TELEMETRY_CLICKHOUSE_FULL_TABLE: ${TELEMETRY_CLICKHOUSE_FULL_TABLE:-otel_spans_full}
-      TELEMETRY_RETENTION_HOURS: ${TELEMETRY_RETENTION_HOURS:-168}
-      TELEMETRY_AGGREGATION_RETENTION_HOURS: ${TELEMETRY_AGGREGATION_RETENTION_HOURS:-168}
+      TELEMETRY_RETENTION_HOURS: ${TELEMETRY_RETENTION_HOURS:-72}
+      TELEMETRY_AGGREGATION_RETENTION_HOURS: ${TELEMETRY_AGGREGATION_RETENTION_HOURS:-72}
       TELEMETRY_RECORDING_PERCENT: ${TELEMETRY_RECORDING_PERCENT:-10}
       TELEMETRY_SAMPLING_POLICY_PATH: /var/lib/devassistant/runtime/sampling-policy.json
       TELEMETRY_RUNTIME_STATE_DIR: /var/lib/devassistant/runtime
@@ -297,6 +297,7 @@ services:
     volumes:
       - telemetry-runtime-data:/var/lib/clickhouse
       - ./telemetry-dev/clickhouse-memory.xml:/etc/clickhouse-server/config.d/zz-runtime-memory.xml:ro
+      - ./telemetry-dev/clickhouse-runtime.xml:/etc/clickhouse-server/config.d/zz-runtime-tuning.xml:ro
       - ./telemetry-dev/clickhouse-users-memory.xml:/etc/clickhouse-server/users.d/zz-runtime-memory.xml:ro
     healthcheck:
       test: ["CMD-SHELL", "clickhouse-client --user \"$$CLICKHOUSE_USER\" --password \"$$CLICKHOUSE_PASSWORD\" --query 'SELECT 1' >/dev/null"]
@@ -356,8 +357,8 @@ services:
       TELEMETRY_CLICKHOUSE_USER: ${TELEMETRY_CLICKHOUSE_USER:-telemetry}
       TELEMETRY_CLICKHOUSE_PASSWORD: ${TELEMETRY_CLICKHOUSE_PASSWORD:-telemetry-local-dev-only}
       TELEMETRY_CLICKHOUSE_DATABASE: ${TELEMETRY_CLICKHOUSE_DATABASE:-telemetry}
-      TELEMETRY_RETENTION_HOURS: ${TELEMETRY_RETENTION_HOURS:-168}
-      TELEMETRY_AGGREGATION_RETENTION_HOURS: ${TELEMETRY_AGGREGATION_RETENTION_HOURS:-168}
+      TELEMETRY_RETENTION_HOURS: ${TELEMETRY_RETENTION_HOURS:-72}
+      TELEMETRY_AGGREGATION_RETENTION_HOURS: ${TELEMETRY_AGGREGATION_RETENTION_HOURS:-72}
       TELEMETRY_RECORDING_PERCENT: ${TELEMETRY_RECORDING_PERCENT:-10}
     volumes:
       - ./telemetry-dev/start-runtime-collector.sh:/usr/local/bin/start-runtime-collector.sh:ro

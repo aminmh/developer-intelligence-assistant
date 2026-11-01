@@ -214,6 +214,7 @@ final class ChunkCollector extends NodeVisitorAbstract
             literals: $this->extractLiterals($node),
             frameworkHints: $this->frameworkHints(),
             lowInformation: $this->isLowInformation($name),
+            metrics: ChunkMetrics::forCallable($code, $node->stmts ?? [], $node->params, fn(Node\Name $name) => $this->resolveMetricType($name)),
         );
     }
 
@@ -257,7 +258,49 @@ final class ChunkCollector extends NodeVisitorAbstract
             imports: array_values($this->useMap), extends: $extends, implements: $implements, traits: $traits,
             summary: $summary, annotations: $this->extractAnnotations($this->extractNodeDocblock($node)),
             frameworkHints: $this->frameworkHints(),
+            metrics: [
+                'metric_schema' => ChunkMetrics::SCHEMA,
+                'content_hash' => ChunkMetrics::contentHash($code),
+                'constructor_dependencies' => $this->constructorDependencies($node),
+            ],
         );
+    }
+
+    private function constructorDependencies(Class_|Interface_|Trait_|Enum_ $node): array
+    {
+        $dependencies = [];
+        foreach ($node->getMethods() as $method) {
+            if (strtolower($method->name->toString()) !== '__construct') continue;
+            foreach ($method->params as $param) {
+                if (!($param->var instanceof Node\Expr\Variable) || !is_string($param->var->name) || !$param->type) continue;
+                $dependencies[] = [
+                    'name' => '$' . $param->var->name,
+                    'type' => $this->resolveMetricType($param->type) ?? $this->nodeTypeToString($param->type),
+                ];
+            }
+            break;
+        }
+        return $dependencies;
+    }
+
+    private function resolveMetricType(Node $type): ?string
+    {
+        if ($type instanceof Node\NullableType) return $this->resolveMetricType($type->type);
+        if ($type instanceof Node\UnionType || $type instanceof Node\IntersectionType) {
+            foreach ($type->types as $part) {
+                if (($resolved = $this->resolveMetricType($part)) !== null) return $resolved;
+            }
+            return null;
+        }
+        if (!$type instanceof Node\Name) return null;
+        $name = $type->toString();
+        if ($type instanceof Node\Name\FullyQualified) return $name;
+        $parts = explode('\\', $name);
+        if (isset($this->useMap[$parts[0]])) {
+            $parts[0] = $this->useMap[$parts[0]];
+            return implode('\\', $parts);
+        }
+        return $this->currentNamespace ? $this->currentNamespace . '\\' . $name : $name;
     }
 
     private function buildMemberDeclarationChunk(Node $node): CodeChunk

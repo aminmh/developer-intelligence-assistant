@@ -26,7 +26,10 @@ BUSINESS_RULE_RUBRIC_VERSION = "code-quality-rubric-5"
 AI_CLEAN_CODE_REVIEW_VERSION = "ai-clean-code-review-2"
 DETERMINISTIC_SCORING_VERSION = "deterministic-category-score-1"
 SCORING_PARAMETERS = {"temperature": 0.0, "top_p": 1.0}
-MAX_ARCHIVE_BYTES = 64 * 1024 * 1024
+# Indexed revisions may include dependency and build artifacts that make the
+# immutable ZIP larger than the model/scanner input. Keep archive loading
+# bounded while retaining the stricter per-file and total-source scan limits.
+MAX_ARCHIVE_BYTES = 256 * 1024 * 1024
 MAX_FILES = 20_000
 MAX_ARCHIVE_ENTRIES = MAX_FILES * 5
 MAX_FILE_BYTES = 2 * 1024 * 1024
@@ -459,15 +462,21 @@ def _score(
     evidence: list[dict], coverage: dict[str, dict], languages: dict[str, int],
     scan_stats: dict[str, Any], analyzer_failures: list[dict],
     business_rules: list[dict[str, Any]] | None = None,
+    *, design_mode: bool = False,
 ) -> tuple[dict, str, str, dict[str, Any], list[dict[str, Any]], list[dict[str, Any]]]:
     from runtime.llm import complete_with_model, remote_configured
+
+    scoring_categories = tuple(category for category in CATEGORIES if not design_mode or category != "clean_code")
+    if design_mode:
+        evidence = [({**row, "category": "business_rule"} if row.get("category") == "clean_code" else row)
+                    for row in evidence if row.get("category") != "clean_code" or row.get("business_rule_id")]
 
     active_rules = sorted((item for item in (business_rules or []) if item.get("enabled") is True),
                           key=lambda item: (item.get("created_at", ""), item["rule_id"]))
     rubric_version = BUSINESS_RULE_RUBRIC_VERSION if active_rules else RUBRIC_VERSION
     reviewable_rules = active_rules[:20]
     omitted_rule_ids = [item["rule_id"] for item in active_rules[20:]]
-    model_context = {"languages": languages, "coverage": coverage,
+    model_context = {"languages": languages, "coverage": {key: value for key, value in coverage.items() if key in scoring_categories},
                      "scan_limits": {key: value for key, value in scan_stats.items() if key != "unsupported_extensions"},
                      "unsupported_extensions": scan_stats["unsupported_extensions"],
                      "analyzer_failures": analyzer_failures[:20], "evidence": []}
@@ -491,7 +500,7 @@ def _score(
     evidence_by_category = {
         category: [row for row in remaining_evidence
                    if row.get("category") == category and row.get("kind") != "coverage"]
-        for category in CATEGORIES
+        for category in scoring_categories
     }
     # Interleave categories so a large analyzer batch in one category cannot
     # consume the byte budget before smaller categories' concrete findings.
@@ -502,7 +511,7 @@ def _score(
                                  if index < len(rows))
     categorized_ids = {row["evidence_id"] for rows in evidence_by_category.values() for row in rows}
     primary_category_evidence = [
-        rows[0] for category in CATEGORIES
+        rows[0] for category in scoring_categories
         if (rows := evidence_by_category[category])
     ]
     primary_ids = {row["evidence_id"] for row in primary_category_evidence}
@@ -524,7 +533,8 @@ def _score(
     candidate_ids: dict[str, list[str]] = {}
     for rule in reviewable_rules:
         candidates = [row["evidence_id"] for row in ordered_evidence
-                      if (rule["category"] == "business_rule" or row.get("category") == rule["category"])
+                      if (rule["category"] == "business_rule" or row.get("category") == rule["category"]
+                          or row.get("business_rule_id") == rule["rule_id"])
                       and (row.get("kind") in {"finding", "semantic_trace"}
                            or row.get("kind") == "semantic_context"
                            and row.get("business_rule_id") in {None, rule["rule_id"]})]
@@ -573,6 +583,20 @@ def _score(
         + ("For each supplied business rule, return exactly one review using only that rule's listed evidence IDs. Keep each reason under 240 characters. Use supported only when evidence demonstrates the stated behavior; use concern only when evidence demonstrates a conflict; otherwise use unknown. If statement_truncated is true and omitted text could change the interpretation, return unknown. Do not treat incomplete traces or missing matches as proof. " if model_review_rules else "")
         + "Do not invent unsupported findings or source references. Evidence: "
     )
+    if design_mode:
+        prompt_instructions = prompt_instructions.replace(
+            f"Score these five software quality categories: {', '.join(CATEGORIES)}.",
+            f"Score these four software quality categories: {', '.join(scoring_categories)}.",
+        )
+        prompt_instructions = prompt_instructions.replace(
+            '"clean_code":{"assessed":true,"score":67,"reason":"Evidence-based reason.","evidence_ids":["supplied-id"]},', ""
+        )
+        prompt_instructions = prompt_instructions.replace('"clean_code_findings":[],', "")
+        prompt_instructions = prompt_instructions.replace('"clean_code_findings":[]', '"notes":[]')
+        prompt_instructions = prompt_instructions.replace("all five categories", "all four categories")
+        start = prompt_instructions.index("For clean_code_findings,")
+        end = prompt_instructions.index("Business rule statements", start) if model_review_rules else prompt_instructions.index("Semantic traces", start)
+        prompt_instructions = prompt_instructions[:start] + prompt_instructions[end:]
     system_prompt = "You are a cautious code quality evaluator. Follow the response schema exactly."
 
     def render_prompt() -> str:
@@ -655,7 +679,7 @@ def _score(
     included_category_evidence = {
         category: [row for row in model_context["evidence"]
                    if row.get("category") == category and row.get("kind") != "coverage"]
-        for category in CATEGORIES
+        for category in scoring_categories
     }
     missing_evidence_categories = [category for category, rows in included_category_evidence.items() if not rows]
     if missing_evidence_categories:
@@ -702,8 +726,8 @@ def _score(
     category_evidence = model_context["evidence"]
     valid_ids = {category: {row["evidence_id"] for row in category_evidence
                             if row["category"] == category and row.get("kind") != "coverage"}
-                 for category in CATEGORIES}
-    for category in CATEGORIES:
+                 for category in scoring_categories}
+    for category in scoring_categories:
         result = raw["categories"].get(category)
         if not isinstance(result, dict):
             categories[category] = {
@@ -733,11 +757,11 @@ def _score(
             "reason": reason,
             "evidence_ids": ids if assessed else [],
         }
-    unscored_categories = [category for category in CATEGORIES if not categories[category]["assessed"]]
+    unscored_categories = [category for category in scoring_categories if not categories[category]["assessed"]]
     if unscored_categories:
         labels = ", ".join(category.replace("_", " ") for category in unscored_categories)
         raise AssessmentError(
-            f"The evaluator did not return evidence-cited scores for all five categories ({labels}); "
+            f"The evaluator did not return evidence-cited scores for all {'four' if design_mode else 'five'} categories ({labels}); "
             "no partial report was saved. Retry this assessment."
         )
 
@@ -787,12 +811,12 @@ def _score(
     business_reviews.extend({"rule_id": rule_id, "version": next(item["version"] for item in active_rules if item["rule_id"] == rule_id),
                              "status": "unknown", "reason": "This rule was not evaluated because the assessment rule limit was reached.",
                              "evidence_ids": []} for rule_id in omitted_rule_ids)
-    clean_code_findings = _normalize_ai_clean_code_findings(raw, model_context["evidence"])
+    clean_code_findings = [] if design_mode else _normalize_ai_clean_code_findings(raw, model_context["evidence"])
     clean_code_context_ids = {
         row["evidence_id"] for row in model_context["evidence"]
         if row.get("kind") == "semantic_context" and row.get("category") == "clean_code"
     }
-    if (categories["clean_code"]["assessed"] and not clean_code_findings
+    if (not design_mode and categories["clean_code"]["assessed"] and not clean_code_findings
             and clean_code_context_ids.intersection(categories["clean_code"]["evidence_ids"])):
         categories["clean_code"]["reason"] = (
             "The cited source excerpts supported a Clean Code score, but the evaluator "
@@ -890,7 +914,7 @@ def assess_revision(project_id: str, revision_id: str, snapshot: dict, archive_d
         try:
             worker_results = run_worker(
                 worker_target, external_settings, archive_data, files, languages,
-                revision_id, str(snapshot.get("commit_sha") or ""), sonarqube_token,
+                revision_id, snapshot.get("commit_sha"), sonarqube_token,
             )
             worker_identity = "worker-" + str(worker_target["certificate_sha256"]).lower()[:16]
         except Exception:
@@ -940,14 +964,51 @@ def assess_revision(project_id: str, revision_id: str, snapshot: dict, archive_d
     semgrep_findings, semgrep_failures, semgrep_result = _run_static_rules(archive_data, files, custom_rule_sets)
     findings = (findings + semgrep_findings)[:MAX_FINDINGS]
     analyzer_failures.extend(semgrep_failures)
+    from code_quality.design_metrics import load_rubric, read_revision_chunks, build_units, select_candidates, score_design
+    try:
+        design_rubric, design_rubric_hash = load_rubric()
+    except ValueError as exc:
+        raise AssessmentError(str(exc)) from exc
+    design_units = []
+    design_partial = False
+    design_partial_reasons = []
+    design_reason = "No inventoried language has a Clean Code metric producer; re-index a supported PHP revision."
+    if "php" in languages:
+        design_chunks, design_partial, design_reason = read_revision_chunks(
+            project_id, revision_id, snapshot, files, design_rubric["limits"]["max_chunks"],
+        )
+        design_units = build_units(design_chunks, design_rubric)
+        if design_partial:
+            design_partial_reasons.append(f"The indexed chunk limit of {design_rubric['limits']['max_chunks']} was reached.")
+        missing_metrics = any(
+            chunk.get("node_type") in {"class", "trait", "enum", "interface", "method"}
+            and chunk.get("language") == "php" and chunk.get("metric_schema") != design_rubric["metric_schema"]
+            for chunk in design_chunks
+        )
+        if missing_metrics:
+            design_partial_reasons.append("Some PHP chunks lack the required metric schema; re-index this revision.")
+        if any(language != "php" for language in languages):
+            design_partial_reasons.append("Only PHP has a design metric producer; other languages are not included in this score.")
+        design_partial = bool(design_partial_reasons)
+        if not design_units and not design_reason:
+            design_reason = "This revision has no supported metric-bearing units; re-index it to enable deterministic Clean Code scoring."
+    design_mode = bool(design_units)
     from code_quality.semantic_context import retrieve_revision_context
-    semantic_summary, semantic_evidence = retrieve_revision_context(
-        project_id, revision_id, snapshot, files, enabled_business_rules,
-    )
+    if design_mode:
+        semantic_summary, semantic_evidence = retrieve_revision_context(
+            project_id, revision_id, snapshot, files, enabled_business_rules, include_clean_code=False,
+        )
+    else:
+        semantic_summary, semantic_evidence = retrieve_revision_context(
+            project_id, revision_id, snapshot, files, enabled_business_rules,
+        )
     from code_quality.flow_tracing import retrieve_revision_call_traces
-    flow_summary, flow_evidence = retrieve_revision_call_traces(
-        project_id, revision_id, snapshot, files,
-    )
+    if design_mode:
+        flow_summary, flow_evidence = retrieve_revision_call_traces(
+            project_id, revision_id, snapshot, files, include_design_signals=False,
+        )
+    else:
+        flow_summary, flow_evidence = retrieve_revision_call_traces(project_id, revision_id, snapshot, files)
     php_design_summary = flow_summary.get("php_design_signals", {
         "status": "unavailable", "analyzer_version": "php-solid-design-signals-1",
         "signal_count": 0, "reason": "PHP design signals were not available for this revision.",
@@ -957,7 +1018,7 @@ def assess_revision(project_id: str, revision_id: str, snapshot: dict, archive_d
         and isinstance(row.get("context_snippet"), str) and row["context_snippet"].strip()
         for row in semantic_evidence
     )
-    if "php" in languages and not has_clean_code_context:
+    if "php" in languages and not has_clean_code_context and not design_mode:
         from code_quality.php_design import build_php_assessment_evidence_from_archive
 
         php_design_summary, local_php_design_findings, local_php_review_context = build_php_assessment_evidence_from_archive(
@@ -972,12 +1033,14 @@ def assess_revision(project_id: str, revision_id: str, snapshot: dict, archive_d
                            if row.get("tool") == "php-solid-design-signals"]
     flow_evidence = [row for row in flow_evidence
                      if row.get("tool") != "php-solid-design-signals"]
-    findings = (findings + php_design_findings)[:MAX_FINDINGS]
+    if not design_mode:
+        findings = (findings + php_design_findings)[:MAX_FINDINGS]
     evidence_categories = {
         row.get("category") for row in (*findings, *flow_evidence, *semantic_evidence)
         if row.get("kind") in {"finding", "semantic_trace", "semantic_context"}
     }
-    missing_context_categories = [category for category in CATEGORIES if category not in evidence_categories]
+    missing_context_categories = [category for category in CATEGORIES if category not in evidence_categories
+                                  and (not design_mode or category != "clean_code")]
     category_review_context = {
         "status": "not_needed", "source": None, "excerpt_count": 0,
         "categories": {category: 0 for category in CATEGORIES},
@@ -1001,9 +1064,61 @@ def assess_revision(project_id: str, revision_id: str, snapshot: dict, archive_d
     if languages:
         index_available = semantic_summary.get("status") != "unavailable"
         rules_for_evaluator = enabled_business_rules if index_available else []
-        categories, model, provider, token_usage, business_rule_reviews, ai_clean_code_findings = _score(
-            evidence, coverage, languages, scan_stats, analyzer_failures, rules_for_evaluator,
+        score_args = (evidence, coverage, languages, scan_stats, analyzer_failures, rules_for_evaluator)
+        categories, model, provider, token_usage, business_rule_reviews, ai_clean_code_findings = (
+            _score(*score_args, design_mode=True) if design_mode else _score(*score_args)
         )
+        if design_mode:
+            from code_quality.design_judge import PROMPT_HASH, judge_candidates
+            from runtime.llm import complete_with_model, remote_configured
+            candidates, principle_counts = select_candidates(project_id, revision_id, design_units, design_rubric)
+            remote = remote_configured()
+            judge_model = (settings.llm_remote_model or settings.ollama_llm_model) if remote else (settings.local_llm_model or settings.ollama_llm_model)
+            limits = [value for value in (getattr(settings, "llm_context_window_tokens", 0),
+                      getattr(settings, "assessment_request_token_limit", 0) if remote else 0)
+                      if isinstance(value, int) and value > 0]
+            token_limit = min(limits) if limits else design_rubric["limits"]["request_token_limit_fallback"]
+            judge_usages = []
+            verdicts = judge_candidates(project_id, candidates, design_rubric, store, judge_model,
+                                         "remote" if remote else "local", complete_with_model, token_limit,
+                                         usage_for=_assessment_token_usage, usages=judge_usages,
+                                         timeout=ASSESSMENT_MODEL_TIMEOUT_SECONDS)
+            clean_category, design_provenance, design_observations = score_design(
+                design_units, candidates, verdicts, principle_counts, design_rubric, design_rubric_hash, design_partial,
+            )
+            categories["clean_code"] = clean_category
+            design_provenance["judge_model"] = judge_model
+            design_provenance["prompt_hash"] = PROMPT_HASH
+            design_provenance["judge_call_count"] = len(judge_usages)
+            design_provenance["partial_reasons"] = design_partial_reasons
+            if design_partial_reasons:
+                clean_category["confidence_reasons"].extend(design_partial_reasons)
+            php_design_summary = {
+                "status": design_provenance["status"], "revision_id": revision_id,
+                "analyzer_version": design_rubric["score_method"], "languages": ["php"],
+                "principles_with_static_signals": sorted(principle_counts),
+                "principles_requiring_semantic_evidence": sorted(principle_counts),
+                "chunk_count": len(design_chunks), "class_count": len(design_units),
+                "method_count": sum(len(unit["methods"]) for unit in design_units),
+                "signal_count": len(candidates), "signals_truncated": any(value["unjudged"] for value in principle_counts.values()),
+                "limits": design_rubric["limits"],
+                "reason": "Design candidates are measured from indexed source and reviewed using closed verdicts.",
+            }
+            flow_summary["php_design_signals"] = php_design_summary
+            if judge_usages:
+                all_usages = [token_usage, *judge_usages]
+                token_usage = {**token_usage, **{
+                    key: sum(item[key] for item in all_usages) if all(isinstance(item.get(key), int) for item in all_usages) else None
+                    for key in ("prompt_tokens", "completion_tokens", "total_tokens")
+                }, "estimated": any(item.get("estimated") for item in all_usages),
+                    "source": "estimate" if any(item.get("estimated") for item in all_usages) else "provider",
+                    "judge_call_count": len(judge_usages)}
+            findings = (findings + design_observations)[:MAX_FINDINGS]
+            evidence.extend(design_observations)
+        else:
+            categories["clean_code"]["score_method"] = "model-evaluator-legacy"
+            design_provenance = {"status": "unavailable", "reason": design_reason,
+                                 "metric_schema": design_rubric["metric_schema"], "rubric_version": design_rubric["version"]}
         if set(categories) != set(CATEGORIES) or any(
             not categories[category].get("assessed") for category in CATEGORIES
         ):
@@ -1030,6 +1145,8 @@ def assess_revision(project_id: str, revision_id: str, snapshot: dict, archive_d
                       for category in CATEGORIES}
         model, provider = "not-run", "not-run"
         token_usage = None
+        design_provenance = {"status": "unavailable", "reason": reason,
+                             "metric_schema": design_rubric["metric_schema"], "rubric_version": design_rubric["version"]}
         ai_clean_code_findings = []
         business_rule_reviews = [{"rule_id": item["rule_id"], "version": item["version"],
                                   "status": "unknown", "reason": reason, "evidence_ids": []}
@@ -1099,13 +1216,14 @@ def assess_revision(project_id: str, revision_id: str, snapshot: dict, archive_d
                                      "files_per_language": 20_000, "findings": 500, "output_bytes": 2_000_000}})
     analyzers.append({"name": "revision-scoped-semantic-context",
                       "version": semantic_summary["retriever_version"],
-                      "languages": sorted(languages), "categories": list(CATEGORIES),
+                      "languages": sorted(languages), "categories": [category for category in CATEGORIES if not design_mode or category != "clean_code"],
                       "limits": {"queries": semantic_summary["query_count"],
                                  "results": semantic_summary["evidence_count"]}})
     clean_code_context_count = sum(1 for row in semantic_evidence
                                    if row.get("category") == "clean_code"
                                    and row.get("kind") == "semantic_context")
-    analyzers.append({"name": "ai-semantic-clean-code-review",
+    if not design_mode:
+        analyzers.append({"name": "ai-semantic-clean-code-review",
                       "version": AI_CLEAN_CODE_REVIEW_VERSION,
                       "model": model, "languages": sorted(languages),
                       "categories": ["clean_code"],
@@ -1114,7 +1232,7 @@ def assess_revision(project_id: str, revision_id: str, snapshot: dict, archive_d
                       else "unavailable" if semantic_summary.get("status") == "unavailable"
                       else "no_context",
                       "finding_count": len(ai_clean_code_findings),
-                      "source_evidence_count": clean_code_context_count})
+                          "source_evidence_count": clean_code_context_count})
     if "php" in languages:
         analyzers.append({"name": "revision-scoped-php-call-reachability",
                           "version": flow_summary["tracer_version"],
@@ -1122,7 +1240,8 @@ def assess_revision(project_id: str, revision_id: str, snapshot: dict, archive_d
                           "edge_types": flow_summary.get("edge_types", []),
                           "flow_types": flow_summary["flow_types"],
                           "limits": flow_summary["limits"]})
-        analyzers.append({"name": "php-solid-design-signals",
+        if not design_mode:
+            analyzers.append({"name": "php-solid-design-signals",
                           "version": php_design_summary.get("analyzer_version", "unknown"),
                           "languages": ["php"], "categories": ["clean_code"],
                           "source": php_design_summary.get("source", "revision-index"),
@@ -1131,7 +1250,12 @@ def assess_revision(project_id: str, revision_id: str, snapshot: dict, archive_d
                           "principles_with_static_signals": php_design_summary.get("principles_with_static_signals", []),
                           "principles_requiring_semantic_evidence": php_design_summary.get("principles_requiring_semantic_evidence", []),
                           "reason": php_design_summary.get("reason"),
-                          "limits": php_design_summary.get("limits", {})})
+                              "limits": php_design_summary.get("limits", {})})
+        else:
+            analyzers.append({"name": "deterministic-clean-code-design", "version": design_rubric["score_method"],
+                              "rules_version": design_rubric["version"], "languages": ["php"],
+                              "categories": ["clean_code"], "status": design_provenance["status"],
+                              "limits": design_rubric["limits"]})
     persisted_evidence = [
         {key: value for key, value in row.items() if key != "context_snippet"}
         for row in evidence
@@ -1141,10 +1265,12 @@ def assess_revision(project_id: str, revision_id: str, snapshot: dict, archive_d
         "project_id": project_id,
         "revision_id": revision_id,
         "commit_sha": snapshot["commit_sha"],
+        "source_ref": snapshot.get("source_ref"),
         "source_archive_sha256": snapshot.get("source_archive_sha256"),
         "created_at": datetime.now(timezone.utc).isoformat(),
         "overall_score": overall,
         "categories": categories,
+        "clean_code_design": design_provenance,
         "shadow_scoring": {"version": DETERMINISTIC_SCORING_VERSION,
                            "status": "experimental", "categories": deterministic_categories},
         "weights": weights,

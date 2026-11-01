@@ -87,7 +87,8 @@ def test_source_view_endpoint_loads_only_the_requested_ready_revision(monkeypatc
     class Registry:
         def get_by_revision_id(self, project, revision):
             registry_calls.append((project, revision))
-            return {"state": "ready", "commit_sha": commit_sha}
+            return {"state": "ready", "project_id": project_id, "commit_sha": commit_sha,
+                    "source_archive_sha256": "c" * 64}
 
         def archive_key(self, project, commit):
             assert (project, commit) == (project_id, commit_sha)

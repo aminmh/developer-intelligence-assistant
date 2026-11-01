@@ -21,12 +21,14 @@ class UploadService:
     """Own upload token creation, binary storage, and workspace extraction."""
 
     @staticmethod
-    def validate_identity(project_id: str, commit_sha: str) -> tuple[str, str]:
+    def validate_identity(project_id: str, commit_sha: str | None) -> tuple[str, str | None]:
         project_id = project_id.strip() if isinstance(project_id, str) else ""
-        commit_sha = commit_sha.strip() if isinstance(commit_sha, str) else ""
+        if commit_sha is not None and not isinstance(commit_sha, str):
+            raise ValueError("commit_sha must be a full Git SHA or omitted.")
+        commit_sha = (commit_sha.strip().lower() or None) if isinstance(commit_sha, str) else None
         if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,127}", project_id):
             raise ValueError("project_id must be a 1-128 character ASCII slug.")
-        if not re.fullmatch(r"(?:[0-9a-f]{40}|[0-9a-f]{64})", commit_sha):
+        if commit_sha is not None and not re.fullmatch(r"(?:[0-9a-f]{40}|[0-9a-f]{64})", commit_sha):
             raise ValueError("commit_sha must be a full lowercase Git SHA-1 or SHA-256.")
         return project_id, commit_sha
 
@@ -74,7 +76,12 @@ class UploadService:
         else:
             project_id, commit_sha = self.validate_identity(project_id or "", commit_sha or "")
             storage.put_rag_file(upload_session_id, filename, decoded, project_id, commit_sha)
-            identity = {"project_id": project_id, "commit_sha": commit_sha}
+            from telemetry.snapshot import Snapshot
+            from telemetry.registry import default_registry
+            snapshot = Snapshot(project_id, commit_sha, hashlib.sha256(decoded).hexdigest())
+            current = default_registry().get(project_id, snapshot.reference)
+            identity = {"project_id": project_id, "commit_sha": commit_sha,
+                        "source_ref": snapshot.reference, "revision_id": current["revision_id"]}
         return {
             "upload_session_id": upload_session_id,
             "filename": filename,

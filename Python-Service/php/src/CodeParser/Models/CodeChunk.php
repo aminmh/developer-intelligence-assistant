@@ -24,6 +24,7 @@ final readonly class CodeChunk
         public array $referencedSymbols = [], public array $literals = [], public array $annotations = [],
         public array $frameworkHints = [], public array $domainTags = [], public bool $lowInformation = false,
         public ?string $summary = null, public string $schemaVersion = self::SCHEMA_VERSION,
+        public array $metrics = [],
     ) {}
 
     /** Flat normalized metadata, with legacy aliases retained for compatibility. */
@@ -51,6 +52,8 @@ final readonly class CodeChunk
             'modifiers' => $this->modifiers, 'parameters' => $this->parameters, 'return_type' => $this->returnType,
             'calls' => $this->flattenCalls(), 'callers' => [], 'has_docblock' => $this->docblock !== null,
         ];
+        $metadata['content_hash'] = ChunkMetrics::contentHash($this->code);
+        if ($this->metrics !== []) $metadata = array_merge($metadata, $this->metrics);
         try {
             $symbolId = SymbolId::fromChunk($metadata);
             if ($symbolId !== null) $metadata['symbol_id'] = $symbolId;

@@ -80,6 +80,16 @@ def active_generation(snapshot_collection: str) -> str | None:
     return active.get(snapshot_collection) if isinstance(active, dict) else None
 
 
+def active_vector_collection(snapshot_collection: str) -> str | None:
+    """Resolve published vectors without falling back to retained generations."""
+    if settings.embedding_provider != "cohere":
+        return snapshot_collection
+    generation = active_generation(snapshot_collection)
+    if not isinstance(generation, str) or not generation.startswith(snapshot_collection + "_cohere_"):
+        return None
+    return generation
+
+
 def start_rebuild(job_id: str, filename: str, archive: bytes, identity: dict[str, str],
                   snapshot_collection: str) -> None:
     """Queue one revision rebuild; active generation changes only on success."""
@@ -98,6 +108,25 @@ def start_rebuild(job_id: str, filename: str, archive: bytes, identity: dict[str
 
 def _run_rebuild(lock: threading.Lock, job_id: str, filename: str, archive: bytes,
                  identity: dict[str, str], snapshot_collection: str) -> None:
+    from telemetry.registry import default_registry
+    from telemetry.snapshot import Snapshot
+
+    snapshot = Snapshot(identity["project_id"], identity["commit_sha"], identity["source_archive_sha256"])
+    registry = default_registry()
+    try:
+        with registry.lock(snapshot.project_id, snapshot.reference):
+            current = registry.get(snapshot.project_id, snapshot.reference)
+            if current.get("state") != "ready" or current.get("revision_id") != identity.get("revision_id"):
+                raise RuntimeError("The selected revision is no longer available for rebuilding")
+            _run_rebuild_locked(lock, job_id, filename, archive, identity, snapshot_collection)
+    except Exception as exc:
+        logger.exception("Embedding rebuild could not start for %s", snapshot_collection)
+        write_status(job_id, status="error", stage="error", error=str(exc)[:300], collection_name=snapshot_collection)
+        lock.release()
+
+
+def _run_rebuild_locked(lock: threading.Lock, job_id: str, filename: str, archive: bytes,
+                        identity: dict[str, str], snapshot_collection: str) -> None:
     generation = f"{snapshot_collection}_cohere_{uuid.uuid4().hex}"
     workdir = Path(settings.download_dir) / f"embedding-work-{job_id}"
     try:

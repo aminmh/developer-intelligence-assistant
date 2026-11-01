@@ -110,6 +110,49 @@ def remote_test_connection():
     return llm_module.test_remote()
 
 
+@router.post("/health/test/embedding", tags=["Embedding Providers"], summary="Test Embedding Provider")
+def embedding_test_connection():
+    started = time.monotonic()
+    try:
+        from index.embeddings import EmbeddingProviderError, embed_texts, embedding_profile
+
+        profile = embedding_profile("search_query")
+        vectors = embed_texts(
+            ["code quality assessment query"],
+            input_type="search_query",
+            retry_rate_limits=False,
+        )
+        dimensions = len(vectors[0]) if vectors and isinstance(vectors[0], list) else 0
+        return {
+            "ok": dimensions > 0,
+            "provider": profile.get("provider"),
+            "model": profile.get("model"),
+            "dimensions": dimensions,
+            "latency_ms": round((time.monotonic() - started) * 1000),
+            "detail": "query embedding accepted" if dimensions > 0 else "provider returned no vector",
+        }
+    except EmbeddingProviderError as exc:
+        return {
+            "ok": False,
+            "provider": settings.embedding_provider,
+            "model": None,
+            "dimensions": 0,
+            "latency_ms": round((time.monotonic() - started) * 1000),
+            "detail": str(exc)[:300] or f"{type(exc).__name__} during embedding request",
+            "status_code": exc.code,
+            "retry_after_seconds": exc.retry_after_seconds,
+        }
+    except Exception as exc:  # noqa: BLE001 — provider diagnostics are safe and bounded
+        return {
+            "ok": False,
+            "provider": settings.embedding_provider,
+            "model": None,
+            "dimensions": 0,
+            "latency_ms": round((time.monotonic() - started) * 1000),
+            "detail": str(exc)[:300] or f"{type(exc).__name__} during embedding request",
+        }
+
+
 @router.get("/lmstudio/models", tags=["LM Studio"], summary="List LM Studio Models")
 def lmstudio_models_endpoint(base_url: str | None = None):
     result = lmstudio_models(base_url or settings.llm_remote_base_url or "")

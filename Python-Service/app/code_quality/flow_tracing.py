@@ -11,7 +11,7 @@ import re
 from pathlib import PurePosixPath
 from typing import Any
 
-from telemetry.snapshot import Snapshot, validate_project_id, validate_revision_id
+from telemetry.snapshot import Snapshot, source_filter, validate_project_id, validate_revision_id
 
 TRACER_VERSION = "php-call-reachability-1"
 MAX_GRAPH_NODES = 20_000
@@ -140,7 +140,7 @@ def build_call_traces(
             continue
         if (payload.get("project_id") != project_id
                 or payload.get("revision_id") != revision_id
-                or payload.get("commit_sha") != commit_sha
+                or any(payload.get(key) != value for key, value in source_filter(snapshot).items())
                 or payload.get("source_archive_sha256") != archive_hash
                 or payload.get("dirty") is not False
                 or payload.get("collection") != expected_collection):
@@ -319,6 +319,7 @@ def retrieve_revision_call_traces(
     revision_id: str,
     snapshot: dict[str, Any],
     business_files: list[str],
+    *, include_design_signals: bool = True,
 ) -> tuple[dict[str, Any], list[dict[str, Any]]]:
     """Read only the selected ready snapshot's Qdrant payloads and trace calls."""
     validate_project_id(project_id)
@@ -336,28 +337,37 @@ def retrieve_revision_call_traces(
         expected_collection = Snapshot(project_id, commit_sha, archive_hash).collection
         if snapshot.get("collection_name") != expected_collection:
             return _unavailable(revision_id, "The selected revision index identity does not match its source snapshot."), []
+        from index.embedding_rebuild import active_vector_collection
+        vector_collection = active_vector_collection(expected_collection)
+        if vector_collection is None:
+            return _unavailable(revision_id, "Rebuild Cohere embeddings for this revision in Knowledge Base before assessment."), []
         qdrant = CodePropertyGraph()._get_qdrant()
         scroll_filter = Filter(must=[
             FieldCondition(key="project_id", match=MatchValue(value=project_id)),
             FieldCondition(key="revision_id", match=MatchValue(value=revision_id)),
-            FieldCondition(key="commit_sha", match=MatchValue(value=commit_sha)),
+            *[FieldCondition(key=key, match=MatchValue(value=value))
+              for key, value in source_filter(snapshot).items()],
             FieldCondition(key="source_archive_sha256", match=MatchValue(value=archive_hash)),
             FieldCondition(key="dirty", match=MatchValue(value=False)),
-            FieldCondition(key="collection", match=MatchValue(value=expected_collection)),
+            FieldCondition(key="collection", match=MatchValue(value=vector_collection)),
         ])
         rows: list[dict[str, Any]] = []
         offset = None
         truncated = False
         while True:
             records, next_offset = qdrant.scroll(
-                collection_name=expected_collection,
+                collection_name=vector_collection,
                 scroll_filter=scroll_filter,
                 limit=min(256, MAX_GRAPH_NODES + 1 - len(rows)),
                 offset=offset,
                 with_payload=True,
                 with_vectors=False,
             )
-            rows.extend(dict(record.payload or {}) for record in records)
+            for record in records:
+                payload = dict(record.payload or {})
+                if payload.get("collection") == vector_collection:
+                    # Pure trace builders consume the logical snapshot identity.
+                    rows.append({**payload, "collection": expected_collection})
             if len(rows) > MAX_GRAPH_NODES:
                 rows = rows[:MAX_GRAPH_NODES]
                 truncated = True
@@ -368,6 +378,8 @@ def retrieve_revision_call_traces(
         flow_summary, flow_evidence = build_call_traces(
             project_id, revision_id, snapshot, rows, business_files, truncated=truncated,
         )
+        if not include_design_signals:
+            return flow_summary, flow_evidence
         try:
             from code_quality.php_design import build_php_design_signals
 

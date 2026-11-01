@@ -5,6 +5,7 @@ declare(strict_types=1);
 namespace App\Console;
 
 use App\CodeParser\WorkspaceTypeScanner;
+use App\Inspection\PhpFileFinder;
 use Throwable;
 
 /** Resolves scan inputs and loads the optional workspace type map. */
@@ -53,15 +54,8 @@ final class CodeParseInput
             return [['absolute' => $this->path, 'relative' => basename($this->path)]];
         }
 
-        $iterator = new \RecursiveIteratorIterator(
-            new \RecursiveDirectoryIterator($this->path, \FilesystemIterator::SKIP_DOTS)
-        );
         $files = [];
-        foreach ($iterator as $file) {
-            if ($file->getExtension() !== 'php') {
-                continue;
-            }
-            $absolute = $file->getPathname();
+        foreach ((new PhpFileFinder())->find($this->path) as $absolute) {
             $files[] = [
                 'absolute' => $absolute,
                 'relative' => ltrim(str_replace($this->path, '', $absolute), DIRECTORY_SEPARATOR),

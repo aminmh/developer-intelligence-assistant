@@ -105,7 +105,7 @@ class InspectionService:
                     continue
                 symbol = canonical_definition(record)
                 identity = symbol or f"declaration:{record.get('kind')}:{record.get('fqn')}"
-                scoped = storage_id(snapshot.project_id, snapshot.commit_sha, identity)
+                scoped = storage_id(snapshot.project_id, snapshot.reference, identity)
                 if scoped in scoped_ids.values() or node["id"] in scoped_ids:
                     raise ValueError("Ambiguous duplicate inspection definition")
                 scoped_ids[node["id"]] = scoped

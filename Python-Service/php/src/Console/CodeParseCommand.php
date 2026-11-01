@@ -57,7 +57,12 @@ final class CodeParseCommand
             return 1;
         }
 
-        echo (new CodeParseRenderer())->render($options->output, $chunks);
+        try {
+            echo (new CodeParseRenderer())->render($options->output, $chunks);
+        } catch (\JsonException $error) {
+            $this->error('Unable to encode parsed chunks as JSON: ' . $error->getMessage());
+            return 1;
+        }
 
         if ($report->hasErrors()) {
             $this->error(count($report->errors()) . ' file(s) had parse errors:');

@@ -206,12 +206,15 @@ def rebuild_feedback_collection(progress=None) -> dict:
     qdrant = _get_qdrant()
     collections = {item.name for item in qdrant.get_collections().collections}
     current = _active_feedback_collection()
+    if current and current not in collections:
+        raise RuntimeError(
+            "The active routing-feedback collection is missing. "
+            "Restore it in Qdrant before rebuilding."
+        )
     sources = [source for source in (current, FEEDBACK_COLLECTION)
                if source and source in collections]
-    if not sources:
-        raise RuntimeError("There are no saved route-feedback vectors to rebuild")
-
     rows_by_id: dict[str, dict] = {}
+    saved_points = 0
     for source in dict.fromkeys(sources):
         offset = None
         while True:
@@ -222,6 +225,7 @@ def rebuild_feedback_collection(progress=None) -> dict:
                 with_payload=True,
                 with_vectors=False,
             )
+            saved_points += len(points)
             for point in points:
                 payload = dict(point.payload or {})
                 if isinstance(payload.get("original_query"), str) and payload.get("route") in ROUTE_NAMES:
@@ -230,7 +234,15 @@ def rebuild_feedback_collection(progress=None) -> dict:
                 break
     rows = list(rows_by_id.items())
     if not rows:
-        raise RuntimeError("There are no saved route-feedback queries to rebuild")
+        if saved_points:
+            raise RuntimeError(
+                "Saved routing feedback has no usable queries or routes. "
+                "Submit routing corrections in Chat before rebuilding."
+            )
+        return {
+            "stage": "empty", "collection_name": current or "",
+            "total": 0, "indexed": 0,
+        }
 
     from index.embeddings import embed_texts
     texts = [payload["original_query"] for _, payload in rows]

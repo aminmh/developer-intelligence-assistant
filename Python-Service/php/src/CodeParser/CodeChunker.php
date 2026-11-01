@@ -18,6 +18,7 @@ declare(strict_types=1);
 namespace App\CodeParser;
 
 use App\CodeParser\Models\CodeChunk;
+use App\Inspection\PhpFileFinder;
 use PhpParser\PrettyPrinter\Standard as PrettyPrinter;
 
 // ─── Data shape ────────────────────────────────────────────────────────────────
@@ -81,14 +82,7 @@ final readonly class CodeChunker
      */
     public function chunkDirectory(string $rootPath, array $typeMap = []): \Generator
     {
-        $iterator = new \RecursiveIteratorIterator(
-            new \RecursiveDirectoryIterator($rootPath, \FilesystemIterator::SKIP_DOTS)
-        );
-
-        foreach ($iterator as $file) {
-            if ($file->getExtension() !== 'php') continue;
-
-            $abs = $file->getPathname();
+        foreach ((new PhpFileFinder())->find($rootPath) as $abs) {
             $relative = ltrim(str_replace($rootPath, '', $abs), DIRECTORY_SEPARATOR);
 
             foreach ($this->chunkFile($abs, $relative, $typeMap) as $chunk) {
