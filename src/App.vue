@@ -19,6 +19,7 @@ import {
 import type { RAGConfig, SearchMatch, LLMUsage, ContextUsage } from './types';
 import { makeRequest } from './ui/makeRequest';
 import { useProjectFiles } from './composables/useProjectFiles';
+import { validateUploadIdentity } from './services/uploadIdentity';
 import { useAppearancePreferences } from './composables/useAppearancePreferences';
 
 import RAGChat from './components/RAGChat.vue';
@@ -102,6 +103,9 @@ const toggleSidebar = () => {
 const config = ref<RAGConfig>({
   embeddingProvider: 'ollama',
   cohereApiKey: '',
+  cloudflareAccountId: '',
+  cloudflareApiToken: '',
+  cloudflareEmbeddingModel: '@cf/baai/bge-base-en-v1.5',
   ollamaBaseUrl: 'http://host.docker.internal:11434',
   ollamaEmbedModel: 'BGE-M3',
   embeddingBaseUrl: '',
@@ -208,13 +212,7 @@ const {
   selectAttachment,
 } = useProjectFiles({
   triggerToast,
-  getUploadIdentity: () => {
-    const project_id = uploadProjectId.value.trim();
-    const commit_sha = uploadCommitSha.value.trim();
-    return project_id && /^(?:[0-9a-f]{40}|[0-9a-f]{64})$/.test(commit_sha)
-      ? { project_id, commit_sha }
-      : null;
-  },
+  getUploadIdentity: () => validateUploadIdentity(uploadProjectId.value, uploadCommitSha.value).identity,
 });
 
 const mapSteps = (raw: any[]): PipelineStep[] =>
@@ -1065,9 +1063,9 @@ onUnmounted(() => window.removeEventListener('popstate', syncTabFromHistory));
       
       <!-- Top navbar -->
       <div class="flex flex-wrap items-center gap-2 border-b border-slate-800/70 bg-slate-950/40 px-4 py-2">
-        <label class="text-[10px] text-slate-500" for="upload-project-id">Upload identity</label>
-        <input id="upload-project-id" v-model="uploadProjectId" class="w-36 rounded-md border border-slate-800 bg-slate-900 px-2 py-1 text-xs text-slate-200" placeholder="project-id" />
-        <input v-model="uploadCommitSha" class="min-w-64 flex-1 rounded-md border border-slate-800 bg-slate-900 px-2 py-1 font-mono text-[10px] text-slate-200" placeholder="full lowercase commit SHA (40 or 64 chars)" />
+        <label v-if="activeTab !== 'files'" class="text-[10px] text-slate-500" for="upload-project-id">Upload identity</label>
+        <input v-if="activeTab !== 'files'" id="upload-project-id" v-model="uploadProjectId" class="w-36 rounded-md border border-slate-800 bg-slate-900 px-2 py-1 text-xs text-slate-200" placeholder="project-id" />
+        <input v-if="activeTab !== 'files'" v-model="uploadCommitSha" aria-label="Upload commit SHA (optional)" class="min-w-64 flex-1 rounded-md border border-slate-800 bg-slate-900 px-2 py-1 font-mono text-[10px] text-slate-200" placeholder="Optional Git commit SHA" />
         <button v-if="authProjects.some((project) => project.project_id === uploadProjectId && project.role === 'admin' || project.project_id === '*' && project.role === 'admin')" @click="memberPanelOpen = !memberPanelOpen; if (memberPanelOpen) loadProjectMembers()" class="rounded-md border border-slate-700 px-2 py-1 text-[10px] text-slate-300">Project access</button>
         <span class="text-[10px] text-slate-500">{{ authUser.email || authUser.name || authUser.sub }}</span>
         <button @click="logout" class="rounded-md px-2 py-1 text-[10px] text-slate-400 hover:text-white">Sign out</button>
@@ -1142,7 +1140,8 @@ onUnmounted(() => window.removeEventListener('popstate', syncTabFromHistory));
         :indexingProgress="indexingProgress"
         :indexedFileIds="indexedFileIds"
         :embeddingProvider="config.embeddingProvider"
-        :project-id="uploadProjectId.trim()"
+        v-model:project-id="uploadProjectId"
+        v-model:commit-sha="uploadCommitSha"
         @uploadFiles="processFiles"
         @deleteFile="deleteFile"
         @indexFile="indexFile"
@@ -1164,7 +1163,7 @@ onUnmounted(() => window.removeEventListener('popstate', syncTabFromHistory));
       <DomainKnowledgeView v-else-if="activeTab === 'domain'" @ask-about-concept="askAboutDomainConcept" />
 
       <RuntimeView v-else-if="activeTab === 'runtime'" :use-remote="useRemote" />
-      <CodeQualityView v-else-if="activeTab === 'code-quality'" />
+      <CodeQualityView v-else-if="activeTab === 'code-quality'" :files="files" @open-knowledge-base="activeTab = 'files'" @revision-removed="fetchFiles" />
       </div>
       </Transition>
 

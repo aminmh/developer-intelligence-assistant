@@ -17,7 +17,7 @@ interface RagUploadSession {
   expires_at: string;
 }
 
-export interface UploadIdentity { project_id: string; commit_sha: string }
+export interface UploadIdentity { project_id: string; commit_sha?: string }
 
 async function createRagUploadSession(file: File, identity: UploadIdentity): Promise<RagUploadSession> {
   const res = await fetch(`${UPLOAD_API_URL}/api/rag/upload`, {
@@ -49,7 +49,7 @@ export async function uploadViaTus(
   return new Promise((resolve, reject) => {
     const upload = new tus.Upload(file, {
       endpoint: session.tus_endpoint,
-      fingerprint: async (sourceFile) => `${sourceFile.name}:${sourceFile.size}:${identity.project_id}:${identity.commit_sha}`,
+      fingerprint: async (sourceFile) => `${sourceFile.name}:${sourceFile.size}:${(sourceFile as File).lastModified}:${identity.project_id}:${identity.commit_sha || 'upload'}`,
       retryDelays: [0, 1000, 3000, 5000, 10000],
       chunkSize: 8 * 1024 * 1024,
       removeFingerprintOnSuccess: true,
@@ -63,7 +63,7 @@ export async function uploadViaTus(
         upload_session_id: session.upload_session_id,
         upload_token: session.upload_token,
         project_id: identity.project_id,
-        commit_sha: identity.commit_sha,
+        ...(identity.commit_sha ? { commit_sha: identity.commit_sha } : {}),
       },
       onError: (error) => reject(error),
       onProgress: (bytesUploaded, bytesTotal) => onProgress({ bytesUploaded, bytesTotal }),

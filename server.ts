@@ -20,7 +20,7 @@ const SYS_MON_URL = process.env.SYS_MON_URL || 'http://host.docker.internal:8765
 const SYS_MON_LOCAL_URL = 'http://localhost:8765';
 
 // Secret fields masked before returning config to the browser (write-only).
-const MASKED_SECRET_KEYS = ['qdrantApiKey', 'llmRemoteApiKey', 'cohereApiKey'];
+const MASKED_SECRET_KEYS = ['qdrantApiKey', 'llmRemoteApiKey', 'cohereApiKey', 'cloudflareApiToken'];
 function maskConfig(config: Record<string, any>) {
   const masked = { ...config };
   for (const key of MASKED_SECRET_KEYS) {
@@ -102,9 +102,9 @@ function runtimeQuestion(query: string): boolean {
   return /\b(used|usage|used by|calls?|called by|hot|dead code|unused|slow|latency|failure|fails|route|endpoint|table|database|break|impact|runtime|running)\b/i.test(query);
 }
 
-function indexedProjectKey(filename: string, projectId?: string, commitSha?: string): string {
-  return projectId && commitSha
-    ? `snapshot:${projectId}:${commitSha}`
+function indexedProjectKey(filename: string, projectId?: string, sourceRef?: string): string {
+  return projectId && sourceRef
+    ? `snapshot:${projectId}:${sourceRef}`
     : `legacy:${filename}`;
 }
 
@@ -146,8 +146,8 @@ async function authorizeAttachedUpload(
     res.status(404).json({ success: false, error: 'Uploaded archive not found.' });
     return false;
   }
-  if (file.project_id && file.commit_sha) {
-    if (projectId !== file.project_id || commitSha !== file.commit_sha) {
+  if (file.project_id) {
+    if (projectId !== file.project_id || (commitSha || null) !== (file.commit_sha || null)) {
       res.status(403).json({ success: false, error: 'Upload project identity does not match the archive record.' });
       return false;
     }
@@ -155,6 +155,7 @@ async function authorizeAttachedUpload(
       res.status(403).json({ success: false, error: 'Project access denied.' });
       return false;
     }
+    res.locals.uploadSourceRef = file.source_ref || file.commit_sha;
   } else if (projectId || commitSha) {
     res.status(409).json({ success: false, error: 'Legacy uploads cannot be assigned an inferred project identity.' });
     return false;
@@ -667,6 +668,7 @@ async function startServer() {
     webOrigin: process.env.WEB_ORIGIN || 'http://localhost:3000',
     getUser: (res) => (res.locals as any).authUser,
     canAccessProject: (user, projectId) => Boolean(user && (authIsBootstrapAdmin(user) || authRoleFor(user, projectId))),
+    canManageProject: (user, projectId) => Boolean(user && (authIsBootstrapAdmin(user) || authRoleFor(user, projectId) === 'admin')),
     isGlobalAdmin: (user) => Boolean(user && authIsBootstrapAdmin(user)),
   });
 
@@ -1408,6 +1410,27 @@ async function startServer() {
     }
   });
 
+  // Embedding provider: test the same query-embedding path used by retrieval.
+  app.post('/api/health/test/embedding', async (req, res) => {
+    try {
+      const pyRes = await fetch(`${PYTHON_API_URL}/health/test/embedding`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+      });
+      const body = await pyRes.text();
+      let payload: any;
+      try {
+        payload = body ? JSON.parse(body) : { ok: false, error: 'Embedding test returned an empty response.' };
+      } catch {
+        payload = { ok: false, error: 'Embedding test returned an invalid response.' };
+      }
+      return res.status(pyRes.status).json(payload);
+    } catch (error: any) {
+      console.error('Failed to test embedding provider via Python:', error.message);
+      return res.status(500).json({ ok: false, error: error.message || 'Embedding test failed.' });
+    }
+  });
+
   // Documentation retrieval probe (Context7 → GitMCP pipeline test)
   app.post('/api/docretrieval/test', async (req, res) => {
     try {
@@ -1483,6 +1506,9 @@ async function startServer() {
               uploadSessionId: f.upload_session_id ?? undefined,
               projectId: f.project_id ?? undefined,
               commitSha: f.commit_sha ?? undefined,
+              revisionId: f.revision_id ?? undefined,
+              sourceRef: f.source_ref ?? undefined,
+              archiveSha256: f.archive_sha256 ?? undefined,
             });
           }
         }
@@ -1599,6 +1625,9 @@ async function startServer() {
           uploadSessionId: pyData.upload_session_id,
           projectId: pyData.project_id,
           commitSha: pyData.commit_sha,
+          revisionId: pyData.revision_id,
+          sourceRef: pyData.source_ref,
+          archiveSha256: pyData.archive_sha256,
         },
       });
     } catch (error: any) {
@@ -1746,7 +1775,7 @@ async function startServer() {
               project_id,
               commit_sha,
               prompt: query,
-              skip_index: indexedProjects.has(indexedProjectKey(filename, project_id, commit_sha)),
+              skip_index: indexedProjects.has(indexedProjectKey(filename, project_id, res.locals.uploadSourceRef)),
               entities,
             }),
           });
@@ -1945,7 +1974,7 @@ async function startServer() {
       // collection. Do not mark it indexed, otherwise a later code question
       // will incorrectly pass skip_index=true and never create the collection.
       if (isDone && status.filename && status.collection_name) {
-        indexedProjects.add(indexedProjectKey(status.filename, status.project_id, status.commit_sha));
+        indexedProjects.add(indexedProjectKey(status.filename, status.project_id, status.source_ref || status.commit_sha));
       }
 
       // Return steps for frontend progress

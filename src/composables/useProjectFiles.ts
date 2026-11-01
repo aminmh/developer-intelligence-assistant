@@ -79,10 +79,8 @@ export function useProjectFiles({ triggerToast, getUploadIdentity }: UseProjectF
     }
   };
 
-  const uploadLargeFile = async (file: File) => {
+  const uploadLargeFile = async (file: File, identity: UploadIdentity) => {
     try {
-      const identity = getUploadIdentity();
-      if (!identity) throw new Error('Enter a project ID and full commit SHA before uploading.');
       await uploadViaTus(file, identity, (progress) => {
         uploadProgress.value = {
           ...uploadProgress.value,
@@ -103,23 +101,21 @@ export function useProjectFiles({ triggerToast, getUploadIdentity }: UseProjectF
   };
 
   const processFiles = async (fileList: FileList) => {
+    const identity = getUploadIdentity();
+    if (!identity) {
+      triggerToast('Enter a project ID and check the optional Commit SHA in Knowledge Base → Files & indexing before uploading.', false);
+      return;
+    }
+    const batch = Array.from(fileList);
     uploading.value = true;
     let successCount = 0;
     let failCount = 0;
 
-    for (let i = 0; i < fileList.length; i++) {
-      const file = fileList[i];
-      const identity = getUploadIdentity();
-      if (!identity) {
-        triggerToast('Enter a project ID and full commit SHA before uploading.', false);
-        failCount += fileList.length - i;
-        break;
-      }
-
+    for (const file of batch) {
       if (file.size >= UPLOAD_THRESHOLD_BYTES) {
         // Large files: resumable direct-to-tusd upload, indexed asynchronously.
         // Don't block the rest of the batch on this one file's upload.
-        void uploadLargeFile(file);
+        void uploadLargeFile(file, identity);
         continue;
       }
 
@@ -196,7 +192,8 @@ export function useProjectFiles({ triggerToast, getUploadIdentity }: UseProjectF
     triggerToast(`Parsing "${name}" — extracting PHP code...`, true);
     try {
       const file = files.value.find((item) => item.id === id);
-      const identity = file?.projectId && file.commitSha ? { project_id: file.projectId, commit_sha: file.commitSha } : {};
+      const identity = file?.projectId ? { project_id: file.projectId, commit_sha: file.commitSha,
+        revision_id: file.revisionId, source_ref: file.sourceRef } : {};
       const res = await makeRequest('/api/rag/parse-code', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -227,7 +224,9 @@ export function useProjectFiles({ triggerToast, getUploadIdentity }: UseProjectF
           if (status.status === 'done') {
             clearInterval(poll);
             if (status.graph_index_complete !== true) {
-              const error = 'The Neo4j graph could not be verified complete. Retry after checking Neo4j readiness.';
+              const graphNodes = Number(status.graph_nodes) || 0;
+              const expectedNodes = Number(status.total) || 0;
+              const error = status.error || `The Neo4j graph could not be verified complete (${graphNodes}/${expectedNodes} source chunks). Retry after checking Neo4j readiness.`;
               indexingProgress.value = { ...status, status: 'error', stage: 'error', graph_status: 'unverified', error };
               triggerToast(`Indexing stopped: ${error}`, false);
               parsingFileId.value = null;
@@ -270,7 +269,7 @@ export function useProjectFiles({ triggerToast, getUploadIdentity }: UseProjectF
 
   const rebuildCohereEmbeddings = async (id: string, name: string) => {
     const file = files.value.find((item) => item.id === id);
-    if (!file?.projectId || !file.commitSha || !file.uploadSessionId) {
+    if (!file?.projectId || (!file.commitSha && !file.revisionId) || !file.uploadSessionId) {
       triggerToast('This upload has no indexed project revision to rebuild.', false);
       return;
     }
@@ -286,6 +285,8 @@ export function useProjectFiles({ triggerToast, getUploadIdentity }: UseProjectF
           upload_session_id: file.uploadSessionId,
           project_id: file.projectId,
           commit_sha: file.commitSha,
+          revision_id: file.revisionId,
+          source_ref: file.sourceRef,
         }),
       });
       const created = await response.json();
@@ -321,7 +322,7 @@ export function useProjectFiles({ triggerToast, getUploadIdentity }: UseProjectF
   const attachZip = async (file: File) => {
     try {
       const identity = getUploadIdentity();
-      if (!identity) throw new Error('Enter a project ID and full commit SHA before uploading.');
+      if (!identity) throw new Error('Enter a project ID and check the optional Commit SHA in Knowledge Base → Files & indexing before uploading.');
       const base64 = await new Promise<string>((resolve, reject) => {
         const reader = new FileReader();
         reader.onload = () => resolve((reader.result as string).split(',')[1]);

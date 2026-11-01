@@ -18,7 +18,7 @@ type SourceWindow = {
 const props = defineProps<{
   projectId: string;
   revisionId: string;
-  commitSha: string;
+  commitSha: string | null;
   filePath: string;
   line: number;
 }>();
@@ -66,7 +66,7 @@ watch(() => [props.projectId, props.revisionId, props.filePath, props.line], () 
       <div class="min-w-0">
         <h3 class="text-sm font-semibold text-slate-100">Source from assessed revision</h3>
         <p class="mt-1 break-all font-mono text-xs text-indigo-200">{{ filePath }}<span v-if="line">:{{ line }}</span></p>
-        <p class="mt-1 text-xs text-slate-500">Commit {{ commitSha.slice(0, 12) }} · {{ source?.total_lines ?? '…' }} lines</p>
+        <p class="mt-1 text-xs text-slate-500">{{ commitSha ? `Commit ${commitSha.slice(0, 12)}` : `Upload revision ${revisionId}` }} · {{ source?.total_lines ?? '…' }} lines</p>
       </div>
       <button type="button" class="rounded-lg p-2 text-slate-400 hover:bg-slate-800 hover:text-white focus-visible:outline focus-visible:outline-2 focus-visible:outline-indigo-400" aria-label="Close source preview" @click="emit('close')"><X :size="16" /></button>
     </div>

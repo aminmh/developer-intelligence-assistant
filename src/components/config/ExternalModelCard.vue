@@ -13,9 +13,52 @@ const embeddingProviders = [
   { id: 'ollama', label: 'Ollama' },
   { id: 'openAICompatible', label: 'OpenAI-compatible' },
   { id: 'cohere', label: 'Cohere' },
+  { id: 'cloudflareWorkersAI', label: 'Cloudflare Workers AI' },
 ] as const;
 const feedbackRebuild = ref<{ job_id?: string; status: string; stage?: string; total: number; indexed: number; error?: string } | null>(null);
 const rebuildingFeedback = ref(false);
+const embeddingResult = ref<{ ok: boolean; latency_ms: number; detail: string; provider?: string; model?: string | null; dimensions?: number; status_code?: number | null; retry_after_seconds?: number | null } | null>(null);
+const testingEmbedding = ref(false);
+
+const embeddingLabel = computed(() => {
+  const result = embeddingResult.value;
+  if (!result) return 'Not tested';
+  return result.ok
+    ? `Connected · ${result.latency_ms}ms${result.model ? ` · ${result.model}` : ''}`
+    : result.detail || 'Failed';
+});
+
+const testEmbeddingConnection = async () => {
+  testingEmbedding.value = true;
+  embeddingResult.value = null;
+  try {
+    const response = await makeRequest('/api/health/test/embedding', { method: 'POST' });
+    const body = await response.text();
+    let data: any = null;
+    try {
+      data = body ? JSON.parse(body) : null;
+    } catch {
+      data = null;
+    }
+    if (!data || typeof data !== 'object') {
+      throw new Error(`Embedding test returned an invalid response (${response.status}).`);
+    }
+    embeddingResult.value = {
+      ok: Boolean(data.ok),
+      latency_ms: Number(data.latency_ms) || 0,
+      detail: String(data.detail ?? data.error ?? 'request failed'),
+      provider: String(data.provider ?? ''),
+      model: data.model ? String(data.model) : null,
+      dimensions: Number(data.dimensions) || 0,
+      status_code: Number(data.status_code) || null,
+      retry_after_seconds: Number(data.retry_after_seconds) || null,
+    };
+  } catch (error: any) {
+    embeddingResult.value = { ok: false, latency_ms: 0, detail: String(error) };
+  } finally {
+    testingEmbedding.value = false;
+  }
+};
 
 const rebuildRouteFeedback = async () => {
   rebuildingFeedback.value = true;
@@ -263,7 +306,7 @@ onMounted(() => {
           <div class="flex items-center justify-between gap-3">
             <div>
               <p class="text-[10px] text-slate-300">Route feedback vectors</p>
-              <p class="text-[9px] text-slate-500">Rebuild saved routing corrections in Cohere’s query space.</p>
+              <p class="text-[9px] text-slate-500">Rebuild routing corrections saved through Chat using Cohere. No rebuild is needed until you have saved feedback.</p>
             </div>
             <button
               type="button"
@@ -275,7 +318,9 @@ onMounted(() => {
             </button>
           </div>
           <div v-if="feedbackRebuild && feedbackRebuild.status !== 'error'" role="status" aria-live="polite" class="space-y-1.5">
-            <div class="flex justify-between text-[9px] text-slate-400">
+            <p v-if="feedbackRebuild.stage === 'empty'" class="text-[10px] text-slate-400">No routing feedback saved yet. There’s nothing to rebuild. To save a correction in Chat, select “wrong route?” below a response and choose the correct route.</p>
+            <p v-else-if="feedbackRebuild.status === 'done'" class="text-[10px] text-emerald-300">Rebuilt {{ feedbackRebuild.indexed }} routing corrections using Cohere.</p>
+            <div v-else class="flex justify-between text-[9px] text-slate-400">
               <span>{{ feedbackRebuild.stage === 'upserting' ? 'Saving feedback vectors…' : (feedbackRebuild.stage === 'activating' ? 'Activating feedback vectors…' : `Embedding feedback: ${feedbackRebuild.indexed}/${feedbackRebuild.total}`) }}</span>
               <span v-if="feedbackRebuild.total">{{ Math.round((feedbackRebuild.indexed / feedbackRebuild.total) * 100) }}%</span>
             </div>
@@ -286,8 +331,62 @@ onMounted(() => {
           <p v-if="feedbackRebuild?.status === 'error'" role="alert" class="text-[10px] text-rose-300">{{ feedbackRebuild.error }}</p>
         </div>
       </div>
+      <div v-else-if="config.embeddingProvider === 'cloudflareWorkersAI'" class="space-y-3">
+        <div class="space-y-1.5">
+          <label for="cloudflare-account-id" class="text-xs text-slate-400 font-mono">Cloudflare account ID</label>
+          <input
+            id="cloudflare-account-id"
+            :value="config.cloudflareAccountId"
+            @input="updateField('cloudflareAccountId', ($event.target as HTMLInputElement).value)"
+            type="text"
+            autocomplete="off"
+            class="w-full bg-[#11162d] border border-slate-800 rounded-xl px-4 py-2.5 text-xs font-mono focus:outline-none focus:border-sky-500 text-slate-200"
+            placeholder="Your Cloudflare account ID"
+          />
+        </div>
+        <div class="space-y-1.5">
+          <label for="cloudflare-api-token" class="text-xs text-slate-400 font-mono">Cloudflare API token</label>
+          <input
+            id="cloudflare-api-token"
+            :value="config.cloudflareApiToken"
+            @input="updateField('cloudflareApiToken', ($event.target as HTMLInputElement).value)"
+            type="password"
+            autocomplete="new-password"
+            class="w-full bg-[#11162d] border border-slate-800 rounded-xl px-4 py-2.5 text-xs font-mono focus:outline-none focus:border-sky-500 text-slate-200"
+            placeholder="Leave blank to keep the saved token"
+          />
+        </div>
+        <div class="space-y-1.5">
+          <label for="cloudflare-embedding-model" class="text-xs text-slate-400 font-mono">Embedding model</label>
+          <input
+            id="cloudflare-embedding-model"
+            :value="config.cloudflareEmbeddingModel"
+            @input="updateField('cloudflareEmbeddingModel', ($event.target as HTMLInputElement).value)"
+            type="text"
+            class="w-full bg-[#11162d] border border-slate-800 rounded-xl px-4 py-2.5 text-xs font-mono focus:outline-none focus:border-sky-500 text-slate-200"
+            placeholder="@cf/baai/bge-base-en-v1.5"
+          />
+          <p class="text-[9px] text-slate-500">Use a token with Workers AI Read and Edit permissions scoped to this account. Switching providers requires reindexing the revision.</p>
+        </div>
+      </div>
       <p v-else-if="config.embeddingProvider === 'openAICompatible'" class="text-[9px] text-slate-500">Uses the configured embedding base URL and model.</p>
       <p v-else class="text-[9px] text-slate-500">Ollama remains the default embedding provider.</p>
+      <div class="pt-3 border-t border-slate-800 flex items-center justify-between gap-2">
+        <div class="min-w-0 flex-1 truncate text-[10px] font-mono" :class="embeddingResult?.ok ? 'text-emerald-300' : embeddingResult ? 'text-rose-300' : 'text-slate-500'">
+          <CheckCircle v-if="embeddingResult?.ok" class="w-3 h-3 inline mr-1 shrink-0" />
+          <AlertTriangle v-else-if="embeddingResult" class="w-3 h-3 inline mr-1 shrink-0" />
+          <span :title="embeddingLabel">{{ embeddingLabel }}</span>
+        </div>
+        <button
+          type="button"
+          @click="testEmbeddingConnection"
+          :disabled="testingEmbedding"
+          class="text-[10px] font-mono text-slate-400 hover:text-sky-300 flex items-center gap-1 disabled:opacity-50 shrink-0"
+        >
+          <RefreshCw class="w-3 h-3" :class="testingEmbedding ? 'animate-spin' : ''" />
+          {{ testingEmbedding ? 'Testing…' : 'Test embedding' }}
+        </button>
+      </div>
     </div>
 
     <div class="bg-slate-900/30 border border-slate-800 rounded-2xl p-6 space-y-4 max-w-2xl">

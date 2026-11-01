@@ -1,5 +1,6 @@
 import type { Express, Response } from 'express';
 import { createHmac, randomUUID, timingSafeEqual } from 'node:crypto';
+import { RAGService } from './rag';
 
 type AuthUser = { sub: string; email?: string; name?: string } | null;
 
@@ -8,6 +9,7 @@ type RouteDependencies = {
   internalSecret: string;
   getUser: (response: Response) => AuthUser;
   canAccessProject: (user: AuthUser, projectId: string) => boolean;
+  canManageProject?: (user: AuthUser, projectId: string) => boolean;
   isGlobalAdmin: (user: AuthUser) => boolean;
   helperUrl: string;
   webOrigin: string;
@@ -383,11 +385,10 @@ export function registerCodeQualityRoutes(app: Express, dependencies: RouteDepen
       const upstream = await forward('/telemetry/runtime/projects', user);
       const data = await upstream.json().catch(() => []);
       if (!upstream.ok || !Array.isArray(data)) return res.status(upstream.status || 502).json({ detail: 'Indexed project inventory is unavailable.' });
-      const projects = data.filter((item: any) => item.state === 'ready'
-        && typeof item.project_id === 'string' && typeof item.revision_id === 'string'
+      const projects = data.filter((item: any) => typeof item.project_id === 'string' && typeof item.revision_id === 'string'
         && dependencies.canAccessProject(user, item.project_id))
         .map((item: any) => ({ project_id: item.project_id, revision_id: item.revision_id,
-          commit_sha: item.commit_sha, updated_at: item.updated_at }));
+          commit_sha: item.commit_sha, source_ref: item.source_ref, state: item.state, updated_at: item.updated_at }));
       return res.json({ projects });
     } catch {
       return res.status(502).json({ detail: 'Indexed project inventory is unavailable.' });
@@ -789,6 +790,35 @@ export function registerCodeQualityRoutes(app: Express, dependencies: RouteDepen
       return await reply(res, await forward(path, user), 'Revision directories are unavailable.');
     } catch {
       return res.status(502).json({ detail: 'Revision directories are unavailable.' });
+    }
+  });
+
+  app.delete('/api/code-quality/projects/:projectId/revisions/:revisionId', async (req, res) => {
+    const user = allowed(res, req.params.projectId);
+    if (!user) return;
+    if (!dependencies.canManageProject?.(user, req.params.projectId)) {
+      return res.status(403).json({ detail: 'Only a project administrator can remove a revision.' });
+    }
+    try {
+      const path = `/code-quality/projects/${encodeURIComponent(req.params.projectId)}/revisions/${encodeURIComponent(req.params.revisionId)}`;
+      const upstream = await forward(path, user, { method: 'DELETE' });
+      if (upstream.ok) {
+        for (const file of [...RAGService.getFiles()]) {
+          if (file.projectId === req.params.projectId && file.revisionId === req.params.revisionId) await RAGService.deleteFile(file.id);
+        }
+      }
+      return await reply(res, upstream, 'Revision could not be removed.');
+    } catch { return res.status(502).json({ detail: 'Revision removal could not complete. Retry after checking API availability.' }); }
+  });
+
+  app.get('/api/code-quality/projects/:projectId/revisions/:revisionId/precheck', async (req, res) => {
+    const user = allowed(res, req.params.projectId);
+    if (!user) return;
+    try {
+      const path = `/code-quality/projects/${encodeURIComponent(req.params.projectId)}/revisions/${encodeURIComponent(req.params.revisionId)}/precheck`;
+      return await reply(res, await forward(path, user), 'The project index could not be checked.');
+    } catch {
+      return res.status(502).json({ detail: 'The project index could not be checked. Retry after checking API availability.' });
     }
   });
 

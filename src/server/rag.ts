@@ -9,7 +9,7 @@ const STORE_DIR = path.join(process.cwd(), 'data');
 const FILES_PATH = path.join(STORE_DIR, 'files.json');
 
 // Secret fields are write-only: masked on read, only overwritten on non-empty write.
-const SECRET_CONFIG_KEYS = ['qdrantApiKey', 'llmRemoteApiKey', 'runpodApiKey', 'cohereApiKey'] as const;
+const SECRET_CONFIG_KEYS = ['qdrantApiKey', 'llmRemoteApiKey', 'runpodApiKey', 'cohereApiKey', 'cloudflareApiToken'] as const;
 
 // Ensure directory exists
 if (!fs.existsSync(STORE_DIR)) {
@@ -20,6 +20,9 @@ if (!fs.existsSync(STORE_DIR)) {
 let ragConfig: RAGConfig = {
   embeddingProvider: 'ollama',
   cohereApiKey: '',
+  cloudflareAccountId: '',
+  cloudflareApiToken: '',
+  cloudflareEmbeddingModel: '@cf/baai/bge-base-en-v1.5',
   ollamaBaseUrl: process.env.OLLAMA_URL || 'http://host.docker.internal:11434',
   ollamaEmbedModel: process.env.OLLAMA_MODEL || 'BGE-M3',
   embeddingBaseUrl: '',

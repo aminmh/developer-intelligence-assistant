@@ -10,6 +10,11 @@ import DirectoryExclusionTree from './code-quality/DirectoryExclusionTree.vue';
 import BusinessRuleReviews from './code-quality/BusinessRuleReviews.vue';
 import ExternalAnalyzerSetup from './code-quality/ExternalAnalyzerSetup.vue';
 import { useUrlTab } from '../composables/useUrlTab';
+import type { UploadedFile } from '../types';
+import { assessmentRevisions, revisionKey, type ProjectRevision } from '../code-quality/projectRevisions';
+
+const props = defineProps<{ files: UploadedFile[] }>();
+const emit = defineEmits<{ openKnowledgeBase: []; revisionRemoved: [] }>();
 
 const categories = [
   { id: 'security', label: 'Security' },
@@ -19,9 +24,8 @@ const categories = [
   { id: 'performance', label: 'Performance' },
 ] as const;
 type CategoryId = typeof categories[number]['id'];
-type ProjectRevision = { project_id: string; revision_id: string; commit_sha: string; updated_at?: string };
 type AiOpinion = { assessed: boolean; score: number | null; reason: string; evidence_ids: string[] };
-type CategoryScore = { assessed: boolean; score: number | null; reason: string; evidence_ids: string[]; score_method?: string; assessment_status?: 'scored' | 'provisional' | 'unavailable'; confidence?: 'high' | 'medium' | 'low'; confidence_reasons?: string[]; finding_count?: number; deterministic_evidence_ids?: string[]; ai_opinion?: AiOpinion };
+type CategoryScore = { assessed: boolean; score: number | null; reason: string; evidence_ids: string[]; score_method?: string; metric_schema?: string; rubric_version?: string; assessment_status?: 'scored' | 'provisional' | 'unavailable'; confidence?: 'high' | 'medium' | 'low'; confidence_reasons?: string[]; finding_count?: number; deterministic_evidence_ids?: string[]; ai_opinion?: AiOpinion };
 type FlowTrace = { nodes: Array<{ symbol: string; file: string; start_line: number; end_line: number }>; edges: Array<{ type: string; from: string; to: string; file: string; line: number }> };
 type PhpDesignSignals = { status: 'complete' | 'partial' | 'unavailable'; revision_id: string; analyzer_version: string; languages: string[]; principles_with_static_signals: string[]; principles_requiring_semantic_evidence: string[]; chunk_count: number; class_count: number; method_count: number; signal_count: number; signals_truncated: boolean; limits?: Record<string, number>; reason: string };
 type AssessmentEvidence = { evidence_id: string; kind?: 'finding' | 'coverage' | 'semantic_trace' | 'semantic_context' | 'architectural_signal' | 'runtime_measurement'; category: CategoryId | 'business_rule'; rule: string; file: string | null; line: number | null; message: string; trace?: FlowTrace };
@@ -29,9 +33,9 @@ type BusinessRuleSnapshot = { rule_id: string; version: number; title: string; s
 type BusinessRuleReview = { rule_id: string; version: number; status: 'supported' | 'concern' | 'unknown'; reason: string; evidence_ids: string[] };
 type TokenUsage = { prompt_tokens: number | null; completion_tokens: number | null; total_tokens: number; estimated: boolean; source: 'provider' | 'estimate'; batch_count?: number; summarized_evidence_count?: number };
 type Report = {
-  report_id: string; project_id: string; revision_id: string; commit_sha: string; created_at: string;
+  report_id: string; project_id: string; revision_id: string; commit_sha: string | null; created_at: string;
   overall_score: number | null; categories: Record<CategoryId, CategoryScore>; weights: Record<CategoryId, number>; shadow_scoring?: { version: string; status: string; categories: Record<CategoryId, CategoryScore> };
-  coverage: { files: number; scanned_files: number; skipped_files: number; excluded_files?: number; user_excluded_files?: number; user_exclusion_patterns?: string[]; scanned_bytes: number; languages: Record<string, number>; unsupported_extensions: Record<string, number>; analyzer_failures: Array<{ name: string; reason: string }>; categories: Record<CategoryId, { supported: boolean; status?: 'covered' | 'partial' | 'unavailable'; evidence_count: number; reason?: string | null }>; analyzers: Array<{ name: string; version: string; rules_version?: string; languages: string[]; categories: string[]; status?: string; server_version?: string; server_edition?: string; scanned_files?: number; skipped_files?: number; finding_count?: number; reason?: string | null; unresolved?: string[] }>; external_analyzers?: { sonarqube?: { status: string; version?: string; server_version?: string; server_edition?: string; scanned_files?: number; skipped_files?: number; finding_count?: number; reason?: string | null }; joern?: { status: string; version?: string; languages?: string[]; scanned_files?: number; skipped_files?: number; finding_count?: number; reason?: string | null; unresolved?: string[] } }; business_rule_review?: { status: string; reason?: string | null; collection_id?: string | null; document_count?: number; imported_count?: number; omitted_count?: number; oversized_count?: number; limit_exceeded?: boolean; synchronized_at?: string | null }; semantic_context?: { status: 'available' | 'available_no_matches' | 'unavailable'; revision_id: string; retriever_version: string; query_count: number; business_rule_query_count?: number; omitted_business_rule_ids?: string[]; evidence_count: number; failure_code?: string | null; searched_collection_count?: number; candidate_count?: number; rejected_revision_count?: number; rejected_source_count?: number; category_search?: Partial<Record<CategoryId, { attempted_queries: number; candidate_count: number; accepted_count: number; rejected_revision_count: number; rejected_source_count: number }>>; reason?: string | null }; category_review_context?: { status: 'available' | 'partial' | 'unavailable' | 'not_needed'; source: string | null; excerpt_count: number; categories: Record<CategoryId, number>; scanned_files: number; scanned_bytes: number; reason: string }; semantic_flow_tracing?: { status: 'complete' | 'partial' | 'unavailable'; revision_id: string; tracer_version: string; languages?: string[]; flow_types: string[]; node_count: number; edge_count: number; trace_count: number; unresolved_edge_count: number; unresolved_edges?: Array<{ source_symbol: string; file: string; line: number; target_symbol: string | null; reason: string; count: number }>; limits_reached?: string[]; reason: string }; php_design_signals?: PhpDesignSignals };
+  coverage: { files: number; scanned_files: number; skipped_files: number; excluded_files?: number; user_excluded_files?: number; user_exclusion_patterns?: string[]; scanned_bytes: number; languages: Record<string, number>; unsupported_extensions: Record<string, number>; analyzer_failures: Array<{ name: string; reason: string }>; categories: Record<CategoryId, { supported: boolean; status?: 'covered' | 'partial' | 'unavailable'; evidence_count: number; reason?: string | null }>; analyzers: Array<{ name: string; version: string; rules_version?: string; languages: string[]; categories: string[]; status?: string; server_version?: string; server_edition?: string; scanned_files?: number; skipped_files?: number; finding_count?: number; reason?: string | null; unresolved?: string[] }>; external_analyzers?: { sonarqube?: { status: string; version?: string; server_version?: string; server_edition?: string; scanned_files?: number; skipped_files?: number; finding_count?: number; reason?: string | null }; joern?: { status: string; version?: string; languages?: string[]; scanned_files?: number; skipped_files?: number; finding_count?: number; reason?: string | null; unresolved?: string[] } }; business_rule_review?: { status: string; reason?: string | null; collection_id?: string | null; document_count?: number; imported_count?: number; omitted_count?: number; oversized_count?: number; limit_exceeded?: boolean; synchronized_at?: string | null }; semantic_context?: { status: 'available' | 'available_no_matches' | 'unavailable'; revision_id: string; retriever_version: string; query_count: number; business_rule_query_count?: number; omitted_business_rule_ids?: string[]; evidence_count: number; failure_code?: string | null; diagnostic_detail?: string | null; searched_collection_count?: number; candidate_count?: number; rejected_revision_count?: number; rejected_source_count?: number; category_search?: Partial<Record<CategoryId, { attempted_queries: number; candidate_count: number; accepted_count: number; rejected_revision_count: number; rejected_source_count: number }>>; reason?: string | null }; category_review_context?: { status: 'available' | 'partial' | 'unavailable' | 'not_needed'; source: string | null; excerpt_count: number; categories: Record<CategoryId, number>; scanned_files: number; scanned_bytes: number; reason: string }; semantic_flow_tracing?: { status: 'complete' | 'partial' | 'unavailable'; revision_id: string; tracer_version: string; languages?: string[]; flow_types: string[]; node_count: number; edge_count: number; trace_count: number; unresolved_edge_count: number; unresolved_edges?: Array<{ source_symbol: string; file: string; line: number; target_symbol: string | null; reason: string; count: number }>; limits_reached?: string[]; reason: string }; php_design_signals?: PhpDesignSignals };
   token_usage?: TokenUsage | null;
   custom_rules?: Array<{ rule_id: string; title: string; content_hash: string; yaml: string }>;
   findings: Array<{ evidence_id: string; category: CategoryId; rule: string; file: string; line: number; message: string; severity?: string; tool?: string; tool_version?: string }>;
@@ -44,7 +48,8 @@ type ReportFinding = Report['findings'][number];
 type ReportEvidenceRow = { evidenceId: string; evidence: AssessmentEvidence | null; finding: ReportFinding | null };
 type HistoryRow = Pick<Report, 'report_id' | 'project_id' | 'revision_id' | 'commit_sha' | 'created_at' | 'overall_score' | 'categories' | 'weights' | 'rubric_version' | 'scoring_parameters' | 'model' | 'provider' | 'token_usage'> & { coverage: number; languages: Record<string, number> };
 
-const projects = ref<ProjectRevision[]>([]);
+const registeredRevisions = ref<ProjectRevision[]>([]);
+const projects = computed(() => assessmentRevisions(props.files, registeredRevisions.value));
 type QualityTab = 'assessment' | 'compare' | 'performance' | 'rules' | 'external';
 const activeTab = useUrlTab<QualityTab>({ values: ['assessment', 'compare', 'performance', 'rules', 'external'], fallback: 'assessment' });
 const selectedRevision = ref('');
@@ -72,10 +77,16 @@ const loadingSourceDirectories = ref(false);
 const sourceDirectoryError = ref('');
 const customExclusionInput = ref('');
 const assessing = ref(false);
+const checkingIndex = ref(false);
+const indexReadiness = ref<{ ready: boolean; reason: string } | null>(null);
+let indexCheckRequest = 0;
 const savingWeights = ref(false);
 const deletingReportId = ref('');
 const deleteTarget = ref<HistoryRow | null>(null);
 const deleteReportError = ref('');
+const revisionDeleteTarget = ref<ProjectRevision | null>(null);
+const deletingRevision = ref(false);
+const revisionDeleteError = ref('');
 const error = ref('');
 const preferenceMessage = ref('');
 const recoveryAction = ref<'projects' | 'history' | 'report' | 'comparison' | 'weights' | 'exclusions' | 'saveExclusions' | 'assessment'>('projects');
@@ -83,7 +94,7 @@ let historyRequest = 0;
 let reportRequest = 0;
 let exclusionsRequest = 0;
 
-const selectedProject = computed(() => projects.value.find((item) => `${item.project_id}:${item.revision_id}` === selectedRevision.value) || null);
+const selectedProject = computed(() => projects.value.find((item) => revisionKey(item) === selectedRevision.value) || null);
 const totalWeight = computed(() => categories.reduce((total, item) => total + Number(weights.value[item.id] || 0), 0));
 const weightsChanged = computed(() => categories.some((item) => Number(weights.value[item.id]) !== savedWeights.value[item.id]));
 const parsedExclusionPatterns = computed(() => [...new Set(exclusionPatterns.value.map((item) => item.trim()).filter(Boolean))].sort());
@@ -96,6 +107,9 @@ const compareIsEquivalent = computed(() => {
   if (!left || !right) return true;
   const analyzer = (report: Report) => report.coverage.analyzers.map((item) => `${item.name}:${item.version}:${item.rules_version || ''}`).sort();
   return left.rubric_version === right.rubric_version
+    && left.categories.clean_code?.score_method === right.categories.clean_code?.score_method
+    && left.categories.clean_code?.metric_schema === right.categories.clean_code?.metric_schema
+    && left.categories.clean_code?.rubric_version === right.categories.clean_code?.rubric_version
     && left.model === right.model
     && left.provider === right.provider
     && JSON.stringify(left.scoring_parameters || null) === JSON.stringify(right.scoring_parameters || null)
@@ -211,6 +225,27 @@ const readError = async (response: Response, fallback: string) => {
   return body.detail || body.error || fallback;
 };
 
+const removeRevision = async () => {
+  const target = revisionDeleteTarget.value;
+  if (!target?.revision_id || deletingRevision.value) return;
+  deletingRevision.value = true;
+  revisionDeleteError.value = '';
+  try {
+    const response = await makeRequest(`/api/code-quality/projects/${encodeURIComponent(target.project_id)}/revisions/${encodeURIComponent(target.revision_id)}`, { method: 'DELETE' });
+    if (!response.ok) throw new Error(await readError(response, 'Revision could not be removed.'));
+    revisionDeleteTarget.value = null;
+    registeredRevisions.value = registeredRevisions.value.filter(item => item.revision_id !== target.revision_id);
+    currentReport.value = null;
+    history.value = [];
+    emit('revisionRemoved');
+    await loadProjectsAndPreferences();
+  } catch (cause: any) {
+    revisionDeleteError.value = cause?.message || 'Revision could not be removed.';
+  } finally {
+    deletingRevision.value = false;
+  }
+};
+
 const loadProjectsAndPreferences = async () => {
   loadingProjects.value = true;
   error.value = '';
@@ -219,13 +254,13 @@ const loadProjectsAndPreferences = async () => {
       makeRequest('/api/code-quality/projects'), makeRequest('/api/code-quality/preferences'),
     ]);
     if (!projectResponse.ok) throw new Error(await readError(projectResponse, 'Indexed projects are unavailable.'));
-    projects.value = (await projectResponse.json()).projects || [];
+    registeredRevisions.value = (await projectResponse.json()).projects || [];
     if (!preferenceResponse.ok) throw new Error(await readError(preferenceResponse, 'Assessment preferences are unavailable.'));
     const preference = await preferenceResponse.json();
     if (preference.weights) { weights.value = preference.weights; savedWeights.value = { ...preference.weights }; }
-    if (projects.value.length && !selectedRevision.value) {
+    if (projects.value.length && !projects.value.some((project) => revisionKey(project) === selectedRevision.value)) {
       const first = projects.value[0];
-      selectedRevision.value = `${first.project_id}:${first.revision_id}`;
+      selectedRevision.value = revisionKey(first);
     }
   } catch (cause: any) {
     recoveryAction.value = 'projects';
@@ -271,7 +306,7 @@ const loadSourceDirectories = async () => {
   const project = selectedProject.value;
   const requestId = ++sourceDirectoriesRequest;
   sourceDirectoryError.value = '';
-  if (!project) {
+  if (!project?.revision_id || project.state !== 'ready') {
     sourceDirectories.value = [];
     loadingSourceDirectories.value = false;
     return;
@@ -300,7 +335,8 @@ const toggleFolderExclusion = (value: { path: string; excluded: boolean }) => {
     if (!exclusionPatterns.value.includes(folderPattern)) exclusionPatterns.value = [...exclusionPatterns.value, folderPattern];
     return;
   }
-  exclusionPatterns.value = exclusionPatterns.value.filter((pattern) => pattern !== folderPattern && pattern !== value.path);
+  exclusionPatterns.value = exclusionPatterns.value.filter((pattern) =>
+    pattern !== folderPattern && pattern !== value.path && !pattern.startsWith(`${value.path}/`));
 };
 
 const addCustomExclusion = () => {
@@ -458,7 +494,8 @@ const saveWeights = async () => {
 
 const runAssessment = async () => {
   const project = selectedProject.value;
-  if (!project || exclusionSettingsUnavailable.value || loadingExclusions.value) return;
+  if (!project?.revision_id || checkingIndex.value || exclusionSettingsUnavailable.value || loadingExclusions.value) return;
+  if (!(await checkIndex())) return;
   assessing.value = true;
   error.value = '';
   try {
@@ -510,9 +547,39 @@ const scoreDelta = (category: CategoryId) => {
   return left == null || right == null ? null : right - left;
 };
 
-watch(selectedRevision, () => {
+const checkIndex = async () => {
+  const requestId = ++indexCheckRequest;
+  const project = selectedProject.value;
+  indexReadiness.value = null;
+  checkingIndex.value = true;
+  try {
+    if (!project?.revision_id) {
+      indexReadiness.value = { ready: false, reason: 'Index this project revision in Knowledge Base → Files & indexing before running an assessment.' };
+      return false;
+    }
+    const response = await makeRequest(`/api/code-quality/projects/${encodeURIComponent(project.project_id)}/revisions/${encodeURIComponent(project.revision_id)}/precheck`);
+    if (!response.ok) throw new Error(await readError(response, 'The project index could not be checked.'));
+    const result = await response.json();
+    if (requestId !== indexCheckRequest) return false;
+    indexReadiness.value = { ready: result.ready === true, reason: result.reason || 'Index this revision in Knowledge Base before assessment.' };
+    return indexReadiness.value.ready;
+  } catch (cause: any) {
+    if (requestId === indexCheckRequest) indexReadiness.value = { ready: false, reason: cause?.message || 'The project index could not be checked. Retry.' };
+    return false;
+  } finally {
+    if (requestId === indexCheckRequest) checkingIndex.value = false;
+  }
+};
+
+watch(selectedProject, () => {
   void loadHistory();
   void loadSourceDirectories();
+  void checkIndex();
+});
+watch(projects, (revisions) => {
+  if (!revisions.some((project) => revisionKey(project) === selectedRevision.value)) {
+    selectedRevision.value = revisions.length ? revisionKey(revisions[0]) : '';
+  }
 });
 watch(() => selectedProject.value?.project_id, (projectId) => loadProjectExclusions(projectId), { immediate: true });
 watch([leftCompareId, rightCompareId], loadComparison);
@@ -529,15 +596,27 @@ onMounted(loadProjectsAndPreferences);
       </div>
       <div class="flex flex-col gap-2 sm:min-w-[24rem]">
         <label for="quality-revision" class="text-xs font-medium text-slate-400">Project revision</label>
-        <select id="quality-revision" v-model="selectedRevision" :disabled="loadingProjects || !projects.length" class="rounded-lg border border-slate-700 bg-slate-900 px-3 py-2.5 text-sm outline-none focus:border-indigo-400 focus:ring-2 focus:ring-indigo-400/20">
-          <option v-if="loadingProjects" value="">Loading indexed revisions…</option>
-          <option v-else-if="!projects.length" value="">No indexed revisions available</option>
-          <option v-for="project in projects" :key="`${project.project_id}:${project.revision_id}`" :value="`${project.project_id}:${project.revision_id}`">
-            {{ project.project_id }} · {{ project.commit_sha?.slice(0, 10) }}
-          </option>
-        </select>
+        <div class="flex flex-wrap items-center gap-2">
+          <select id="quality-revision" v-model="selectedRevision" :disabled="loadingProjects || assessing || checkingIndex || !projects.length" class="min-w-0 flex-1 rounded-lg border border-slate-700 bg-slate-900 px-3 py-2.5 text-sm outline-none focus:border-indigo-400 focus:ring-2 focus:ring-indigo-400/20">
+            <option v-if="loadingProjects" value="">Loading project revisions…</option>
+            <option v-else-if="!projects.length" value="">No project revisions in Knowledge Base</option>
+            <option v-for="project in projects" :key="revisionKey(project)" :value="revisionKey(project)" :title="project.revision_id || project.commit_sha || 'Upload revision'">
+              {{ project.project_id }}
+            </option>
+          </select>
+          <button v-if="selectedProject?.revision_id" type="button" class="shrink-0 rounded-lg border border-rose-500/40 px-3 py-2 text-sm text-rose-300 hover:bg-rose-500/10 disabled:opacity-50" :disabled="assessing || deletingRevision" @click="revisionDeleteTarget = selectedProject; revisionDeleteError = ''">Remove revision</button>
+        </div>
       </div>
     </header>
+
+    <div v-if="checkingIndex" role="status" class="flex items-center gap-2 rounded-xl border border-slate-700 p-4 text-sm text-slate-300"><LoaderCircle :size="16" class="motion-safe:animate-spin" />Checking the selected revision's index…</div>
+    <div v-else-if="!loadingProjects && (!selectedProject || indexReadiness?.ready === false)" role="status" class="rounded-xl border border-amber-400/30 bg-amber-400/10 p-4 text-sm text-amber-100">
+      <p>{{ indexReadiness?.reason || 'Add a project revision to Knowledge Base and index it before running an assessment.' }}</p>
+      <div class="mt-3 flex flex-wrap gap-3">
+        <button type="button" class="min-h-9 rounded-lg border border-amber-300/30 px-3 font-medium hover:bg-amber-300/10" @click="emit('openKnowledgeBase')">Open Knowledge Base</button>
+        <button v-if="selectedProject" type="button" class="min-h-9 rounded-lg px-3 underline underline-offset-2" @click="loadProjectsAndPreferences().then(checkIndex)">Check again</button>
+      </div>
+    </div>
 
     <nav role="tablist" aria-label="Code Quality sections" class="flex flex-wrap gap-2 border-b border-slate-800 pb-3">
       <button id="quality-assessment-tab" role="tab" :aria-selected="activeTab === 'assessment'" aria-controls="quality-assessment-panel" class="min-h-10 rounded-lg px-4 text-sm font-medium transition" :class="activeTab === 'assessment' ? 'bg-indigo-500/15 text-indigo-100 ring-1 ring-indigo-400/30' : 'text-slate-400 hover:bg-slate-800 hover:text-slate-100'" @click="activeTab = 'assessment'">Static assessment</button>
@@ -558,7 +637,7 @@ onMounted(loadProjectsAndPreferences);
         <div class="rounded-2xl border border-slate-800 bg-slate-900/65 p-5 sm:p-6">
           <div class="flex flex-col gap-4 sm:flex-row sm:items-center sm:justify-between">
             <div><h2 class="text-lg font-semibold">Category weights</h2><p class="mt-1 text-sm text-slate-400">The weighted total appears only when all five categories are assessed.</p></div>
-            <button :disabled="assessing || savingWeights || savingExclusions || loadingExclusions || exclusionSettingsUnavailable || !selectedProject || totalWeight !== 100" class="inline-flex min-h-10 items-center justify-center gap-2 rounded-lg bg-indigo-500 px-4 text-sm font-semibold text-white transition hover:bg-indigo-400 disabled:cursor-not-allowed disabled:opacity-50" @click="runAssessment">
+            <button :disabled="assessing || checkingIndex || indexReadiness?.ready !== true || savingWeights || savingExclusions || loadingExclusions || exclusionSettingsUnavailable || !selectedProject || totalWeight !== 100" class="inline-flex min-h-10 items-center justify-center gap-2 rounded-lg bg-indigo-500 px-4 text-sm font-semibold text-white transition hover:bg-indigo-400 disabled:cursor-not-allowed disabled:opacity-50" @click="runAssessment">
               <LoaderCircle v-if="assessing" class="motion-safe:animate-spin" :size="16" /><Play v-else :size="16" />
               {{ assessing ? 'Assessing revision…' : weightsChanged ? 'Save weights and assess' : 'Assess this revision' }}
             </button>
@@ -626,7 +705,7 @@ onMounted(loadProjectsAndPreferences);
 
         <section v-if="currentReport" class="rounded-2xl border border-slate-800 bg-slate-900/65 p-5 sm:p-6">
           <div class="flex flex-wrap items-start justify-between gap-4">
-            <div><div class="text-xs font-medium uppercase tracking-wider text-slate-500">Assessment report</div><h2 class="mt-1 text-xl font-semibold">{{ currentReport.overall_score == null ? 'Overall score unavailable' : `${currentReport.overall_score} / 100` }}</h2><p v-if="currentReport.overall_score == null && unassessedCategories.length" class="mt-1 text-sm text-amber-200">Not assessed: {{ unassessedCategories.join(', ') }}. See each category for its evidence reason.</p><p class="mt-1 text-xs text-slate-400">{{ formatDate(currentReport.created_at) }} · {{ currentReport.commit_sha.slice(0, 12) }}</p></div>
+            <div><div class="text-xs font-medium uppercase tracking-wider text-slate-500">Assessment report</div><h2 class="mt-1 text-xl font-semibold">{{ currentReport.overall_score == null ? 'Overall score unavailable' : `${currentReport.overall_score} / 100` }}</h2><p v-if="currentReport.overall_score == null && unassessedCategories.length" class="mt-1 text-sm text-amber-200">Not assessed: {{ unassessedCategories.join(', ') }}. See each category for its evidence reason.</p><p class="mt-1 text-xs text-slate-400">{{ formatDate(currentReport.created_at) }} · {{ currentReport.commit_sha?.slice(0, 12) || currentReport.revision_id }}</p></div>
             <span class="rounded-lg border border-slate-700 bg-slate-950 px-3 py-2 text-xs text-slate-400">{{ currentReport.coverage.scanned_files }} / {{ currentReport.coverage.files }} scanned<span v-if="currentReport.coverage.skipped_files"> · {{ currentReport.coverage.skipped_files }} over limits</span><span v-if="currentReport.coverage.excluded_files"> · {{ currentReport.coverage.excluded_files }} artifacts excluded</span><span v-if="currentReport.coverage.user_excluded_files"> · {{ currentReport.coverage.user_excluded_files }} excluded by project settings</span> · {{ Object.keys(currentReport.coverage.languages).join(', ') || 'No detected languages' }}</span>
           </div>
           <details v-if="currentReport.coverage.user_exclusion_patterns?.length" class="mt-4 rounded-lg border border-slate-800 bg-slate-950/40 px-4 py-3 text-xs">
@@ -664,7 +743,7 @@ onMounted(loadProjectsAndPreferences);
               {{ currentReport.coverage.semantic_context.reason || 'Retrieved snippets provide context; they do not prove complete control-flow coverage.' }}
             </p>
             <p v-if="currentReport.coverage.semantic_context.failure_code" class="mt-2 text-xs text-slate-500">
-              Diagnostic: {{ currentReport.coverage.semantic_context.failure_code.replaceAll('_', ' ') }} · {{ currentReport.coverage.semantic_context.candidate_count ?? 0 }} candidates · {{ currentReport.coverage.semantic_context.searched_collection_count ?? 0 }} collections searched<span v-if="currentReport.coverage.semantic_context.rejected_revision_count"> · {{ currentReport.coverage.semantic_context.rejected_revision_count }} revision-mismatched candidates discarded</span><span v-if="currentReport.coverage.semantic_context.rejected_source_count"> · {{ currentReport.coverage.semantic_context.rejected_source_count }} out-of-scope candidates discarded</span>
+              Diagnostic: {{ currentReport.coverage.semantic_context.failure_code.replaceAll('_', ' ') }}<span v-if="currentReport.coverage.semantic_context.diagnostic_detail"> · {{ currentReport.coverage.semantic_context.diagnostic_detail }}</span> · {{ currentReport.coverage.semantic_context.candidate_count ?? 0 }} candidates · {{ currentReport.coverage.semantic_context.searched_collection_count ?? 0 }} collections searched<span v-if="currentReport.coverage.semantic_context.rejected_revision_count"> · {{ currentReport.coverage.semantic_context.rejected_revision_count }} revision-mismatched candidates discarded</span><span v-if="currentReport.coverage.semantic_context.rejected_source_count"> · {{ currentReport.coverage.semantic_context.rejected_source_count }} out-of-scope candidates discarded</span>
             </p>
             <div v-if="currentReport.coverage.semantic_context.category_search" class="mt-3 grid gap-2 sm:grid-cols-2 xl:grid-cols-5" aria-label="Semantic retrieval by assessment category">
               <div v-for="category in categories" :key="category.id" class="rounded-lg border border-slate-800/80 bg-slate-900/50 px-3 py-2">
@@ -777,7 +856,7 @@ onMounted(loadProjectsAndPreferences);
               <span class="flex items-center justify-between gap-2"><span class="text-sm font-semibold">{{ report.overall_score == null ? 'No overall score' : `${report.overall_score} / 100` }}</span><span class="text-[11px] text-slate-500">{{ report.coverage }} files</span></span>
               <span class="mt-1.5 block text-xs text-slate-400">{{ formatDate(report.created_at) }}</span>
               <span class="mt-1 block text-xs text-slate-500">Evaluator: {{ formatTokenUsage(report.token_usage, report.provider) }}</span>
-              <span class="mt-1 block truncate font-mono text-[10px] text-slate-600">{{ report.commit_sha }}</span>
+              <span class="mt-1 block truncate font-mono text-[10px] text-slate-600">{{ report.commit_sha || report.revision_id }}</span>
             </button>
             <button type="button" class="absolute right-1 top-1 z-10 rounded-lg p-2 text-slate-500 transition hover:bg-rose-500/10 hover:text-rose-300 focus-visible:outline focus-visible:outline-2 focus-visible:outline-rose-400 disabled:opacity-50" :aria-label="`Delete assessment from ${formatDate(report.created_at)}`" :title="deletingReportId === report.report_id ? 'Deleting report' : 'Delete report'" :disabled="!!deletingReportId" @click="deleteTarget = report; deleteReportError = ''">
               <LoaderCircle v-if="deletingReportId === report.report_id" class="motion-safe:animate-spin" :size="16" />
@@ -827,6 +906,7 @@ onMounted(loadProjectsAndPreferences);
     </div>
   </section>
   <ConfirmModal :show="!!deleteTarget" title="Delete assessment report?" :message="deleteTarget ? `This permanently removes the report from ${formatDate(deleteTarget.created_at)} and comparison history. This cannot be undone.` : ''" confirm-label="Delete report" :busy="!!deletingReportId" :error="deleteReportError" @confirm="removeReport" @cancel="deleteTarget = null; deleteReportError = ''" />
+  <ConfirmModal :show="!!revisionDeleteTarget" title="Remove project revision?" :message="revisionDeleteTarget ? `Permanently remove ${revisionDeleteTarget.project_id} (${revisionDeleteTarget.revision_id}), its uploaded source, graph, vectors, assessment reports and configured runtime telemetry. Other revisions and shared project settings remain. This cannot be undone.` : ''" confirm-label="Remove revision" :busy="deletingRevision" :error="revisionDeleteError" @confirm="removeRevision" @cancel="revisionDeleteTarget = null; revisionDeleteError = ''" />
 </template>
 
 <style scoped>

@@ -20,7 +20,8 @@ const props = defineProps<{
   parsingFileId: string | null;
   indexingProgress: { total: number; indexed: number; status: string; stage?: string; error?: string; graph_status?: string; graph_index_complete?: boolean; graph_nodes?: number; graph_relations?: number };
   indexedFileIds: Set<string>;
-  embeddingProvider: 'ollama' | 'openAICompatible' | 'cohere';
+  embeddingProvider: 'ollama' | 'openAICompatible' | 'cohere' | 'cloudflareWorkersAI';
+  canUpload: boolean;
 }>();
 
 const emit = defineEmits<{
@@ -28,6 +29,7 @@ const emit = defineEmits<{
   (e: 'deleteFile', id: string, name: string): void;
   (e: 'indexFile', id: string, name: string): void;
   (e: 'rebuildCohereEmbeddings', id: string, name: string): void;
+  (e: 'requestUploadIdentity'): void;
 }>();
 
 const dragOver = ref(false);
@@ -64,6 +66,11 @@ onMounted(loadRuntimeProjects);
 
 const handleFileUpload = (event: Event) => {
   const target = event.target as HTMLInputElement;
+  if (!props.canUpload || props.uploading) {
+    target.value = '';
+    emit('requestUploadIdentity');
+    return;
+  }
   if (target.files && target.files.length > 0) {
     emit('uploadFiles', target.files);
     target.value = '';
@@ -72,12 +79,20 @@ const handleFileUpload = (event: Event) => {
 
 const handleDrop = (event: DragEvent) => {
   dragOver.value = false;
+  if (!props.canUpload || props.uploading) {
+    emit('requestUploadIdentity');
+    return;
+  }
   if (event.dataTransfer?.files && event.dataTransfer.files.length > 0) {
     emit('uploadFiles', event.dataTransfer.files);
   }
 };
 
 const triggerUpload = () => {
+  if (!props.canUpload || props.uploading) {
+    emit('requestUploadIdentity');
+    return;
+  }
   document.getElementById('file-upload-input')?.click();
 };
 
@@ -124,7 +139,7 @@ const handleIndexFile = () => {
         class="bg-slate-900/30 border border-slate-800 rounded-2xl p-6"
         @dragover.prevent="dragOver = true"
         @dragleave="dragOver = false"
-        @drop="handleDrop"
+        @drop.prevent="handleDrop"
         :class="dragOver ? 'border-indigo-500 bg-indigo-500/5' : ''"
       >
         <div class="flex items-center justify-between mb-4">
@@ -135,22 +150,26 @@ const handleIndexFile = () => {
           <span class="text-[10px] text-slate-500">Accepted: ZIP</span>
         </div>
 
-        <div
-          @click="triggerUpload"
-          class="border-2 border-dashed border-slate-800 rounded-xl p-8 text-center cursor-pointer hover:border-indigo-500/50 transition-all"
-        >
           <input
             id="file-upload-input"
             type="file"
             multiple
             accept=".zip"
             class="hidden"
+            :disabled="!props.canUpload || props.uploading"
             @change="handleFileUpload"
           />
+        <button
+          type="button"
+          :disabled="!props.canUpload || props.uploading"
+          aria-describedby="knowledge-upload-help"
+          @click="triggerUpload"
+          class="w-full border-2 border-dashed border-slate-800 rounded-xl p-8 text-center enabled:cursor-pointer enabled:hover:border-indigo-500/50 disabled:cursor-not-allowed disabled:opacity-60 focus-visible:outline focus-visible:outline-2 focus-visible:outline-indigo-400 transition-all"
+        >
           <FileText class="w-8 h-8 text-slate-600 mx-auto mb-3" />
-          <p class="text-sm text-slate-400 font-medium">Click or drop project ZIP archives here for PHP code indexing</p>
-          <p class="text-[10px] text-slate-500 mt-2">PHP source is parsed on demand — index a project to enable code search.</p>
-        </div>
+          <span class="block text-sm text-slate-400 font-medium">{{ props.canUpload ? 'Choose or drop project ZIP archives' : 'Complete the project details above to upload' }}</span>
+          <span class="block text-[10px] text-slate-500 mt-2">Source is parsed on demand — index a project to enable code search.</span>
+        </button>
 
         <div v-if="uploading" class="mt-4 flex items-center gap-3 p-3 bg-emerald-950/10 border border-emerald-500/20 rounded-xl text-xs text-emerald-300">
           <div class="w-4 h-4 border-2 border-emerald-400 border-t-transparent rounded-full animate-spin"></div>
@@ -204,9 +223,10 @@ const handleIndexFile = () => {
                     {{ file.chunkCount }} chunk<span v-if="file.chunkCount !== 1">s</span> • {{ file.type.toUpperCase() }} • {{ (file.size / 1024).toFixed(1) }} KB
                   </p>
                   <p class="text-[10px] text-slate-500 font-mono">
-                    <template v-if="file.projectId && file.commitSha">{{ file.projectId }} · {{ file.commitSha }}</template>
-                    <template v-else>Legacy upload · no project/commit attribution</template>
+                    <template v-if="file.projectId">{{ file.projectId }} · {{ file.revisionId || file.commitSha || 'Revision registration pending' }}</template>
+                    <template v-else>Legacy upload · no project attribution</template>
                   </p>
+                  <p v-if="file.projectId && file.revisionId" class="text-[10px] text-slate-500 font-mono break-all" :title="file.archiveSha256">{{ file.commitSha ? `Git commit ${file.commitSha}` : 'Upload revision · no Git commit required' }}</p>
                   <p v-if="file.projectId && file.commitSha" class="text-[10px] mt-0.5" :class="runtimeFor(file)?.deployment_mismatch ? 'text-amber-300' : runtimeFor(file)?.running_project_containers ? 'text-emerald-300' : 'text-slate-500'">
                     {{ runtimeFor(file)?.deployment_mismatch ? 'Warning: running deployment uses a different commit' : runtimeFor(file)?.running_project_containers ? `Running in Docker · ${runtimeFor(file)?.running_project_containers} container(s)` : runtimeLoadError ? 'Runtime deployment status unavailable' : 'No running Docker deployment reported' }}
                   </p>
@@ -252,30 +272,32 @@ const handleIndexFile = () => {
               <p class="text-[10px] text-slate-500 mb-2 font-mono">
                 {{ file.type === 'zip' ? 'PHP project archive — index to enable code search' : file.chunkCount > 0 ? 'Indexed — ' + file.chunkCount + ' chunks' : 'Not yet indexed — click Index to process' }}
               </p>
-              <span
-                v-if="indexedFileIds.has(file.id) && file.chunkCount > 0 && parsingFileId !== file.id"
-                class="inline-flex items-center gap-1.5 text-[10px] font-mono px-2 py-1 rounded-full bg-emerald-500/10 text-emerald-400 border border-emerald-500/20"
-              >
-                <CheckCircle2 class="w-3 h-3" />
-                Indexed in Qdrant
-              </span>
-              <button
-                v-else-if="parsingFileId !== file.id"
-                @click="handleIndexFile"
-                class="flex items-center gap-1.5 px-3 py-1.5 text-[11px] font-semibold text-white bg-indigo-600 hover:bg-indigo-500 rounded-lg transition-colors shadow-sm shadow-indigo-600/20"
-              >
-                <Cpu class="w-3.5 h-3.5" />
-                {{ file.chunkCount > 0 ? 'Re-index' : 'Index' }}
-              </button>
-              <button
-                v-if="embeddingProvider === 'cohere' && file.projectId && file.commitSha && file.uploadSessionId && parsingFileId !== file.id"
-                type="button"
-                @click="emit('rebuildCohereEmbeddings', file.id, file.name)"
-                class="flex items-center gap-1.5 px-3 py-1.5 text-[11px] font-semibold text-cyan-100 bg-cyan-700 hover:bg-cyan-600 rounded-lg transition-colors"
-              >
-                <Cpu class="w-3.5 h-3.5" />
-                Rebuild Cohere embeddings
-              </button>
+              <div class="flex flex-wrap items-center gap-2">
+                <span
+                  v-if="indexedFileIds.has(file.id) && file.chunkCount > 0 && parsingFileId !== file.id"
+                  class="inline-flex items-center gap-1.5 text-[10px] font-mono px-2 py-1 rounded-full bg-emerald-500/10 text-emerald-400 border border-emerald-500/20"
+                >
+                  <CheckCircle2 class="w-3 h-3" />
+                  Indexed in Qdrant
+                </span>
+                <button
+                  v-else-if="parsingFileId !== file.id"
+                  @click="handleIndexFile"
+                  class="flex items-center gap-1.5 px-3 py-1.5 text-[11px] font-semibold text-white bg-indigo-600 hover:bg-indigo-500 rounded-lg transition-colors shadow-sm shadow-indigo-600/20"
+                >
+                  <Cpu class="w-3.5 h-3.5" />
+                  {{ file.chunkCount > 0 ? 'Re-index' : 'Index' }}
+                </button>
+                <button
+                  v-if="embeddingProvider === 'cohere' && file.projectId && (file.commitSha || file.revisionId) && file.uploadSessionId && parsingFileId !== file.id"
+                  type="button"
+                  @click="emit('rebuildCohereEmbeddings', file.id, file.name)"
+                  class="flex items-center gap-1.5 px-3 py-1.5 text-[11px] font-semibold text-cyan-100 bg-cyan-700 hover:bg-cyan-600 rounded-lg transition-colors"
+                >
+                  <Cpu class="w-3.5 h-3.5" />
+                  Rebuild Cohere embeddings
+                </button>
+              </div>
               <div
                 v-if="parsingFileId === file.id && indexingProgress.total > 0"
                 class="space-y-2"

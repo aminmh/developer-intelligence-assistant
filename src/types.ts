@@ -1,6 +1,9 @@
 export interface RAGConfig {
-  embeddingProvider: 'ollama' | 'openAICompatible' | 'cohere';
+  embeddingProvider: 'ollama' | 'openAICompatible' | 'cohere' | 'cloudflareWorkersAI';
   cohereApiKey: string;
+  cloudflareAccountId: string;
+  cloudflareApiToken: string;
+  cloudflareEmbeddingModel: string;
   ollamaBaseUrl: string;
   ollamaEmbedModel: string;
   embeddingBaseUrl: string;
@@ -85,6 +88,9 @@ export interface UploadedFile {
   uploadSessionId?: string;
   projectId?: string;
   commitSha?: string;
+  revisionId?: string;
+  sourceRef?: string;
+  archiveSha256?: string;
 }
 
 export interface FileChunk {

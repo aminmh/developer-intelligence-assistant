@@ -1,6 +1,6 @@
 <script setup lang="ts">
-import { computed, ref } from 'vue';
-import { Check, ChevronDown, ChevronRight, Folder } from 'lucide-vue-next';
+import { computed, ref, watchEffect } from 'vue';
+import { Check, ChevronDown, ChevronRight, Folder, Minus } from 'lucide-vue-next';
 
 export type DirectoryNode = { name: string; path: string; children: DirectoryNode[] };
 const props = defineProps<{
@@ -11,6 +11,7 @@ const props = defineProps<{
 }>();
 const emit = defineEmits<{ toggle: [value: { path: string; excluded: boolean }] }>();
 const expanded = ref(props.depth === 0);
+const checkbox = ref<HTMLInputElement | null>(null);
 const hasChildren = computed(() => props.node.children.length > 0);
 
 const segmentMatches = (pattern: string, value: string) => {
@@ -49,10 +50,30 @@ const patternMatchesDirectory = (pattern: string, directory: string) => {
   const pathParts = directory.split('/');
   return pathParts.some((_, index) => matchesSegments(patternParts, pathParts.slice(0, index + 1)));
 };
-const checked = computed(() => props.patterns.some((pattern) => patternMatchesDirectory(pattern, props.node.path)));
+const excludedByPattern = (path: string) => props.patterns.some((pattern) => patternMatchesDirectory(pattern, path));
 const hasDirectExclusion = computed(() => props.patterns.some((pattern) =>
   pattern === props.node.path || pattern === `${props.node.path}/**`));
-const inherited = computed(() => checked.value && !hasDirectExclusion.value);
+type NodeState = { checked: boolean; indeterminate: boolean };
+const stateFor = (node: DirectoryNode): NodeState => {
+  if (props.patterns.some((pattern) => patternMatchesDirectory(pattern, node.path))) {
+    return { checked: true, indeterminate: false };
+  }
+  if (!node.children.length) return { checked: false, indeterminate: false };
+  const children = node.children.map(stateFor);
+  const checkedChildren = children.filter((child) => child.checked).length;
+  const hasMixedChild = children.some((child) => child.indeterminate);
+  return {
+    checked: checkedChildren === children.length && !hasMixedChild,
+    indeterminate: hasMixedChild || (checkedChildren > 0 && checkedChildren < children.length),
+  };
+};
+const state = computed(() => stateFor(props.node));
+const checked = computed(() => state.value.checked);
+const indeterminate = computed(() => state.value.indeterminate);
+const inherited = computed(() => !hasDirectExclusion.value && excludedByPattern(props.node.path));
+watchEffect(() => {
+  if (checkbox.value) checkbox.value.indeterminate = indeterminate.value;
+});
 const toggle = (event: Event) => {
   emit('toggle', { path: props.node.path, excluded: (event.target as HTMLInputElement).checked });
 };
@@ -66,8 +87,9 @@ const toggle = (event: Event) => {
       </button>
       <span v-else class="w-7 shrink-0" aria-hidden="true"></span>
       <span class="relative grid h-[18px] w-[18px] shrink-0 place-items-center" :title="inherited ? 'This folder is already excluded by a broader pattern. Remove that pattern below to change it.' : undefined">
-        <input type="checkbox" :checked="checked" :disabled="disabled || inherited" :aria-label="`Exclude folder ${node.path}`" class="peer absolute inset-0 z-10 m-0 h-[18px] w-[18px] cursor-pointer appearance-none rounded-[5px] border border-slate-600 bg-slate-950/80 transition-colors checked:border-indigo-400 checked:bg-indigo-500 hover:border-indigo-300 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-indigo-300 focus-visible:ring-offset-2 focus-visible:ring-offset-slate-900 disabled:cursor-not-allowed disabled:border-slate-700 disabled:bg-slate-900 disabled:opacity-55 forced-colors:appearance-auto" @change="toggle" />
-        <Check :size="11" :stroke-width="3" class="pointer-events-none absolute z-0 text-white opacity-0 transition-opacity duration-150 peer-checked:opacity-100" aria-hidden="true" />
+        <input ref="checkbox" type="checkbox" :checked="checked" :disabled="disabled || inherited" :aria-checked="indeterminate ? 'mixed' : checked ? 'true' : 'false'" :aria-label="`Exclude folder ${node.path}`" :class="checked || indeterminate ? 'border-indigo-400 bg-indigo-500' : 'border-slate-600 bg-slate-950/80'" class="absolute inset-0 z-10 m-0 h-[18px] w-[18px] cursor-pointer appearance-none rounded-[5px] border transition-colors hover:border-indigo-300 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-indigo-300 focus-visible:ring-offset-2 focus-visible:ring-offset-slate-900 disabled:cursor-not-allowed disabled:border-slate-700 disabled:bg-slate-900 disabled:opacity-55 forced-colors:appearance-auto" @change="toggle" />
+        <Minus v-if="indeterminate" :size="11" :stroke-width="3" class="pointer-events-none absolute z-20 text-white" aria-hidden="true" />
+        <Check v-else-if="checked" :size="11" :stroke-width="3" class="pointer-events-none absolute z-20 text-white" aria-hidden="true" />
       </span>
       <Folder :size="15" class="shrink-0 text-amber-300" aria-hidden="true" />
       <span class="truncate font-mono text-xs text-slate-300" :title="node.path">{{ node.name }}</span>
