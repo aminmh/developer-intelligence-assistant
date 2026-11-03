@@ -11,6 +11,7 @@ import { UploadedFile } from './src/types';
 import { openDocument, complete as completeDockerfile, format as formatDockerfile, closeSession as closeDockerfileSession, closeAllSessions, bridgeStatus } from './src/server/dockerfileLanguageBridge';
 import { installOidcAuth, authRoleFor, authIsBootstrapAdmin, authCanRunRuntimeSetup } from './src/server/oidcAuth';
 import { registerCodeQualityRoutes } from './src/server/codeQualityRoutes';
+import { registerSchemaDraftRoutes } from './src/server/schemaDraftRoutes';
 
 dotenv.config();
 
@@ -479,6 +480,13 @@ async function startServer() {
   });
 
   installOidcAuth(app);
+  registerSchemaDraftRoutes(app, {
+    apiUrl: PYTHON_API_URL,
+    internalSecret: INTERNAL_SECRET,
+    webOrigin: process.env.WEB_ORIGIN || 'http://localhost:3000',
+    getUser: (res) => (res.locals as any).authUser,
+    isGlobalAdmin: (user) => Boolean(user && authIsBootstrapAdmin(user)),
+  });
 
   app.post('/api/runtime/setup-authorization', (req, res) => {
     const user = (res.locals as any).authUser;
@@ -2223,7 +2231,8 @@ async function startServer() {
     });
   }
 
-  app.listen(PORT, '0.0.0.0', () => {
+  const listenHost = process.env.WEB_LISTEN_HOST || (process.env.NODE_ENV === 'development' ? '127.0.0.1' : '0.0.0.0');
+  app.listen(PORT, listenHost, () => {
     console.log(`[RAG Server] Running on http://localhost:${PORT}`);
   });
   const cleanup = () => closeAllSessions();

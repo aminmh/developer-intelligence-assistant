@@ -19,6 +19,22 @@ View your app in AI Studio: https://ai.studio/apps/06006a5e-ca6a-4122-888d-84483
 3. Run the app:
    `npm run dev`
 
+## Development authentication
+
+`npm run dev` and the `web-dev` Compose service disable sign-in and use a
+local administrator identity. The development server is intended for trusted
+local use only: host-run development listens on loopback, and Compose publishes
+the development port on loopback. Anyone able to reach it has administrator
+access. Production and other `NODE_ENV` values continue to require OIDC.
+
+To start the development container, run:
+
+```sh
+docker compose --profile dev up -d web-dev
+```
+
+Recreate an existing development container after changing the port binding.
+
 ## Local sign-in with Keycloak
 
 The Compose stack starts a local Keycloak server on `http://localhost:8180` and
@@ -43,16 +59,7 @@ OIDC_LITE_INTERNAL_ISSUER=http://keycloak:8080/realms/developer-assistant \
   docker compose --profile local-auth up -d keycloak web
 ```
 
-To start the development container directly, run:
-
-```sh
-OIDC_LITE_INTERNAL_ISSUER=http://keycloak:8080/realms/developer-assistant \
-  docker compose --profile dev --profile local-auth up -d keycloak web-dev
-```
-
-For host-run `npm run dev`, use `docker compose --profile local-auth up -d keycloak`;
-`.env` already points server requests to localhost. Sign in as
-`developer-admin`; the generated
+For local production-mode sign-in, sign in as `developer-admin`; the generated
 password is stored as `KEYCLOAK_BOOTSTRAP_PASSWORD` in `web/.env`. The separate
 Keycloak console account is `admin`, with its password in
 `KEYCLOAK_ADMIN_PASSWORD`.
@@ -103,3 +110,75 @@ Runtime request details also include a trace summary with de-overlapped MySQL/Re
 and retained Excimer hotspots when available. Remaining request time can include uninstrumented
 work; hotspot percentages are sample estimates. See the workspace's
 `api/docs/telemetry/runtime-phase5-trace-summary.md`.
+
+### Draw.io schema layout editor (experimental)
+
+The optional local editor runs on a separate browser origin. Start it with
+`docker compose --profile drawio up -d drawio`, and start the development web
+service as usual. The development web container defaults to
+`http://localhost:18081`; override `VITE_DRAWIO_ORIGIN` before starting it when
+needed. Production builds leave the editor disabled unless
+`VITE_DRAWIO_ORIGIN` is set at build time to a dedicated HTTPS origin. Rebuild
+the web image after changing that value. The bundled image digest is a candidate
+for local testing, not an approved production deployment.
+Recreate an existing editor container to mount the bundled schema plugin:
+`docker compose --profile drawio up -d --force-recreate drawio`.
+
+Create or open a schema draft, save any structured schema edits, and select
+**Open Draw.io editor**. Use **Extras → Add schema table** or **Add schema
+column**, edit table and column labels, or delete unreferenced tables and
+columns. Select a column and use **Extras → Edit column properties** to edit
+nullability, defaults and auto-increment. Use **Edit table keys and indexes**
+and **Add or edit relationship** in the same menu for constraints and
+relationships. These property editors use JSON and stable IDs. Other shapes are
+annotations. Saving in Draw.io updates the draft in the application.
+Select a table and choose **Extras → Show table runtime usage** to see its
+observed operation count for the runtime project selected in the application.
+Existing layouts are restored as saved and are not automatically regenerated
+when the schema changes. The original analysis remains unchanged.
+
+Use **Rebuild from saved schema** if the diagram is out of date. Rebuilding
+replaces the saved layout, including positions and annotations, so the app asks
+for confirmation. Save structured edits first.
+
+In Draw.io, select **Extras → Preview migration** to save the current diagram
+and review and download a candidate Laravel or Symfony/Doctrine migration for
+MySQL or PostgreSQL. Choose the target and migration timestamp, then review
+the displayed changes and generated PHP before downloading. The draft panel
+also offers migration preview. Drops require explicit confirmation. Generation
+supports a limited set of table and column additions and removals, plus some
+isolated named key, index, and relationship additions or removals. Isolated
+column renames are supported on PostgreSQL and MySQL 8.0 or newer; PostgreSQL
+also supports changes to supported column types and nullability. For a change
+to text, enter the verified target collation in the column properties in
+Draw.io; changes from text to a non-text type remain blocked. For MySQL type,
+nullability, default, or auto-increment changes, enter a `mysql_definition`
+object in the column properties, for example:
+
+```json
+{"unsigned": false, "charset": null, "collation": null, "comment": null,
+ "default_kind": "none", "other_attributes_absent": true}
+```
+
+Confirm `other_attributes_absent` only after checking the complete target
+definition against the database. Character sets, collations, expressions and
+other unsupported attributes remain blocked. `default_kind` is `none`, `null`,
+or `literal`; a literal uses the column's `default` value. PostgreSQL supports
+numeric and boolean defaults and dropping a default; string or expression
+defaults, auto-increment changes and unsupported combinations remain blocked. Review the
+baseline, migration ordering, and generated code against the target project and
+database. The application does not write or run migrations in that project.
+Preview asks the configured model to generate a migration from the structured
+diff; validation accepts only a narrow set of supported PHP operations and can
+reject otherwise valid alternatives. It does not independently validate
+arbitrary PHP. The Python service must have PHP available to check syntax.
+
+If the popup is blocked, allow popups and retry. If the editor does not connect,
+check that the service is reachable at the configured origin and that browser
+or proxy isolation headers preserve `window.opener`. Disconnect an abandoned
+editor session before trying again. Unsaved received layouts and schema edits
+are recoverable in the same browser tab when session storage is available; open
+the draft again to restore them. A revision conflict requires reviewing the
+newer draft before saving. Changes still open only in Draw.io have not yet been
+received by the app and should be saved there first. Production deployment
+requires independent review of the image, security headers, and data policy.

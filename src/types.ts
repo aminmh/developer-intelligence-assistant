@@ -748,6 +748,15 @@ export interface ErdSourceMetadata {
   [key: string]: unknown;
 }
 
+export interface MySQLColumnDefinition {
+  unsigned: boolean;
+  charset: string | null;
+  collation: string | null;
+  comment: string | null;
+  default_kind: 'none' | 'null' | 'literal';
+  other_attributes_absent: boolean;
+}
+
 export interface ErdField {
   id: string;
   name: string;
@@ -758,6 +767,8 @@ export interface ErdField {
   unique?: boolean;
   indexed?: boolean;
   autoIncrement?: boolean;
+  collation?: string | null;
+  mysqlDefinition?: MySQLColumnDefinition | null;
   foreignKey?: boolean;
   references?: { table: string; column: string } | null;
   provenance?: string | null;

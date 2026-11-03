@@ -8,6 +8,9 @@ ENV VITE_API_URL=$VITE_API_URL
 ARG VITE_TUS_THRESHOLD_BYTES
 ENV VITE_TUS_THRESHOLD_BYTES=$VITE_TUS_THRESHOLD_BYTES
 
+ARG VITE_DRAWIO_ORIGIN
+ENV VITE_DRAWIO_ORIGIN=$VITE_DRAWIO_ORIGIN
+
 COPY package.json package-lock.json* ./
 RUN if [ -f package-lock.json ]; then npm ci; else npm install; fi
 

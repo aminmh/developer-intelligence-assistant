@@ -44,6 +44,7 @@ const activeTab = ref<AppTab>(tabFromUrl());
 const uploadProjectId = ref('');
 const uploadCommitSha = ref('');
 const authChecked = ref(false);
+const developmentAuth = ref(false);
 const authUser = ref<{ sub: string; email?: string; name?: string } | null>(null);
 const authProjects = ref<Array<{ project_id: string; role: 'viewer' | 'operator' | 'admin' }>>([]);
 const memberPanelOpen = ref(false);
@@ -877,6 +878,7 @@ onMounted(async () => {
     if (authResponse.ok) {
       const identity = await authResponse.json();
       authUser.value = identity.user;
+      developmentAuth.value = identity.developmentMode === true;
       authProjects.value = identity.projects ?? [];
     }
   } catch { /* the sign-in surface below handles an unavailable API */ }
@@ -1068,7 +1070,8 @@ onUnmounted(() => window.removeEventListener('popstate', syncTabFromHistory));
         <input v-if="activeTab !== 'files'" v-model="uploadCommitSha" aria-label="Upload commit SHA (optional)" class="min-w-64 flex-1 rounded-md border border-slate-800 bg-slate-900 px-2 py-1 font-mono text-[10px] text-slate-200" placeholder="Optional Git commit SHA" />
         <button v-if="authProjects.some((project) => project.project_id === uploadProjectId && project.role === 'admin' || project.project_id === '*' && project.role === 'admin')" @click="memberPanelOpen = !memberPanelOpen; if (memberPanelOpen) loadProjectMembers()" class="rounded-md border border-slate-700 px-2 py-1 text-[10px] text-slate-300">Project access</button>
         <span class="text-[10px] text-slate-500">{{ authUser.email || authUser.name || authUser.sub }}</span>
-        <button @click="logout" class="rounded-md px-2 py-1 text-[10px] text-slate-400 hover:text-white">Sign out</button>
+        <span v-if="developmentAuth" class="text-[10px] text-amber-400">Authentication disabled in development</span>
+        <button v-else @click="logout" class="rounded-md px-2 py-1 text-[10px] text-slate-400 hover:text-white">Sign out</button>
       </div>
       <div v-if="memberPanelOpen" class="flex flex-wrap items-center gap-2 border-b border-slate-800 bg-slate-900/60 px-4 py-2">
         <span class="text-[10px] text-slate-400">Project members</span>

@@ -24,6 +24,8 @@ const bootstrapAdmin = process.env.OIDC_BOOTSTRAP_ADMIN_SUB || '';
 const sessionSecret = process.env.SESSION_SECRET || '';
 const storePath = process.env.AUTH_STORE_PATH || path.join(process.cwd(), 'data', 'auth-store.json');
 const secureCookie = process.env.SESSION_COOKIE_SECURE !== 'false';
+const developmentUser: User = { sub: 'local-development', name: 'Local development' };
+const developmentMode = () => process.env.NODE_ENV === 'development';
 
 function emptyStore(): Store { return { sessions: {}, flows: {}, memberships: [] }; }
 function readStore(): Store {
@@ -77,6 +79,7 @@ function clearCookie(res: Response, name: string): void {
   res.append('Set-Cookie', pieces.join('; '));
 }
 function sessionUser(req: Request): User | null {
+  if (developmentMode()) return developmentUser;
   const sid = parseCookies(req)[COOKIE];
   if (!sid) return null;
   const store = readStore();
@@ -89,7 +92,7 @@ function sessionUser(req: Request): User | null {
   return session.user;
 }
 function roleFor(user: User, projectId: string, store = readStore()): Role | null {
-  if (user.sub === bootstrapAdmin) return 'admin';
+  if (authIsBootstrapAdmin(user)) return 'admin';
   return store.memberships.find((row) => row.project_id === projectId && row.subject === user.sub)?.role ?? null;
 }
 
@@ -203,8 +206,8 @@ export function installOidcAuth(app: express.Express): void {
     if (!user) return res.status(401).json({ error: 'Authentication required.' });
     const store = readStore();
     const projects = store.memberships.filter((row) => row.subject === user.sub).map(({ project_id, role }) => ({ project_id, role }));
-    if (user.sub === bootstrapAdmin) projects.push({ project_id: '*', role: 'admin' });
-    res.json({ user, projects });
+    if (authIsBootstrapAdmin(user)) projects.push({ project_id: '*', role: 'admin' });
+    res.json({ user, projects, developmentMode: developmentMode() });
   });
   router.get('/projects/:projectId/members', (req, res) => {
     const user = sessionUser(req);
@@ -233,7 +236,7 @@ export function installOidcAuth(app: express.Express): void {
   app.use('/api/auth', router);
   app.use('/api', (req: Request, res: Response, next: NextFunction) => {
     if (req.method === 'OPTIONS') return next();
-    if (!configured()) return res.status(503).json({ error: 'OIDC authentication is not configured.' });
+    if (!developmentMode() && !configured()) return res.status(503).json({ error: 'OIDC authentication is not configured.' });
     const user = sessionUser(req);
     if (!user) return res.status(401).json({ error: 'Authentication required.' });
     (res.locals as any).authUser = user;
@@ -268,7 +271,9 @@ export function installOidcAuth(app: express.Express): void {
 
 export function authRoleFor(user: User, projectId: string): Role | null { return roleFor(user, projectId); }
 export function authStoreSnapshot(): Store { return readStore(); }
-export function authIsBootstrapAdmin(user: User): boolean { return Boolean(bootstrapAdmin && user.sub === bootstrapAdmin); }
+export function authIsBootstrapAdmin(user: User): boolean {
+  return Boolean((developmentMode() && user.sub === developmentUser.sub) || (bootstrapAdmin && user.sub === bootstrapAdmin));
+}
 export function authCanRunRuntimeSetup(user: User): boolean {
   if (authIsBootstrapAdmin(user)) return true;
   return readStore().memberships.some((row) => row.subject === user.sub && (row.role === 'operator' || row.role === 'admin'));
