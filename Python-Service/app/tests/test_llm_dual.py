@@ -316,3 +316,22 @@ def test_test_remote_unconfigured(monkeypatch):
 
     assert result["ok"] is False
     assert "No base URL configured" in result["detail"]
+
+
+@pytest.mark.parametrize('provider', ['local', 'remote'])
+def test_completion_retry_override_is_per_call(monkeypatch, provider):
+    _configure_remote(monkeypatch)
+    base = _FakeClient()
+    bounded = _FakeClient()
+    options = []
+    def with_options(**kwargs):
+        options.append(kwargs)
+        return bounded
+    base.with_options = with_options
+    monkeypatch.setattr(llm, '_get_remote_client', lambda: base)
+    monkeypatch.setattr(llm, '_get_openai_client', lambda: base)
+    llm.complete_with_model('hello', provider=provider, max_retries=0, timeout=60)
+    assert options == [{'max_retries': 0}]
+    assert len(bounded.calls) == 1 and bounded.calls[0]['timeout'] == 60
+    llm.complete_with_model('hello', provider=provider)
+    assert len(base.calls) == 1 and len(options) == 1

@@ -15,8 +15,12 @@ from agent.plugins.test_framework import TestFrameworkPlugin
 
 
 def register_builtins(registry: PluginRegistry) -> PluginRegistry:
+    from agent.migration.adapters import LaravelMigrationAdapter, DoctrineMigrationAdapter
     registry.register_language(PhpLanguagePlugin())
     registry.register_framework(LaravelFrameworkPlugin())
     registry.register_framework(SymfonyFrameworkPlugin())
     registry.register_framework(TestFrameworkPlugin())
+    registry.register_migration_adapter("laravel", LaravelMigrationAdapter())
+    registry.register_migration_adapter("symfony", DoctrineMigrationAdapter())
+    registry.register_migration_adapter("doctrine", DoctrineMigrationAdapter())
     return registry

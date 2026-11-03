@@ -28,6 +28,7 @@ logger = logging.getLogger(__name__)
 
 LANGUAGE_ENTRY_POINT_GROUP = "ai_agent.languages"
 FRAMEWORK_ENTRY_POINT_GROUP = "ai_agent.frameworks"
+MIGRATION_ENTRY_POINT_GROUP = "ai_agent.migration_adapters"
 
 
 def _load_entry_point_classes(
@@ -56,6 +57,7 @@ class PluginRegistry:
     def __init__(self) -> None:
         self._languages: dict[str, LanguagePlugin] = {}
         self._frameworks: dict[str, FrameworkPlugin] = {}
+        self._migration_adapters: dict[str, object] = {}
 
     # -- registration ------------------------------------------------------
 
@@ -81,6 +83,18 @@ class PluginRegistry:
         for name, cls in _load_entry_point_classes(FRAMEWORK_ENTRY_POINT_GROUP).items():
             if name not in self._frameworks:
                 self.register_framework(cls())
+        for name, cls in _load_entry_point_classes(MIGRATION_ENTRY_POINT_GROUP).items():
+            if name not in self._migration_adapters:
+                self.register_migration_adapter(name, cls())
+
+    def register_migration_adapter(self, name: str, adapter: object) -> None:
+        from agent.migration.contract import MigrationAdapter
+        if not isinstance(adapter, MigrationAdapter):
+            raise TypeError("Adapter must implement the migration adapter contract")
+        self._migration_adapters[name] = adapter
+
+    def migration_adapter(self, name: str):
+        return self._migration_adapters.get(name)
 
     # -- access ------------------------------------------------------------
 

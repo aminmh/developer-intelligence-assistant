@@ -90,6 +90,16 @@ def test_stream_complete_with_model_local_default(monkeypatch):
                           ("two", llm.settings.ollama_llm_model, "local")]
 
 
+def test_stream_complete_with_model_uses_configured_remote(monkeypatch):
+    client = _FakeClient([_Chunk('remote answer')])
+    monkeypatch.setattr(llm, 'remote_configured', lambda: True)
+    monkeypatch.setattr(llm, '_get_remote_client', lambda: client)
+    monkeypatch.setattr(llm.settings, 'llm_remote_model', 'remote-model')
+    events = list(llm.stream_complete_with_model('p', provider='remote'))
+    assert events == [('', 'remote-model', 'remote'), ('remote answer', 'remote-model', 'remote')]
+    assert client.captured['stream'] is True
+
+
 # ─── answer.generate_answer_stream ──────────────────────────────────────────
 
 

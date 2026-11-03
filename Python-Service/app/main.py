@@ -261,6 +261,7 @@ from routers.system import router as system_router  # noqa: E402 — after app e
 from routers.evaluator import router as evaluator_router  # noqa: E402 — after app exists
 from routers.embedding_jobs import router as embedding_jobs_router  # noqa: E402 — after app exists
 from code_quality.http import router as code_quality_router  # noqa: E402 — after app exists
+from analysis.schema_draft_routes import router as schema_draft_router  # noqa: E402 — after app exists
 
 app.include_router(inspection_router)
 app.include_router(developer_logs_router)
@@ -268,6 +269,7 @@ app.include_router(system_router)
 app.include_router(evaluator_router)
 app.include_router(embedding_jobs_router)
 app.include_router(code_quality_router)
+app.include_router(schema_draft_router)
 
 app.add_middleware(
     CORSMiddleware,

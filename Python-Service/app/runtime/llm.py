@@ -317,6 +317,7 @@ def complete_with_model(
     response_format: Optional[dict] = None,
     timeout: float | None = None,
     fallback_to_local: bool = True,
+    max_retries: int | None = None,
 ) -> CompletionResult:
     """Return (content, model_used, provider_used).
 
@@ -336,7 +337,8 @@ def complete_with_model(
         )
         try:
             content, usage = _run_chat(
-                _get_remote_client(),
+                (_get_remote_client().with_options(max_retries=max_retries)
+                 if max_retries is not None else _get_remote_client()),
                 model,
                 prompt,
                 system=system,
@@ -362,7 +364,8 @@ def complete_with_model(
     _cancel_local_model_unload()
     try:
         content, usage = _run_chat(
-            _get_openai_client(),
+            (_get_openai_client().with_options(max_retries=max_retries)
+             if max_retries is not None else _get_openai_client()),
             model,
             prompt,
             system=system,
