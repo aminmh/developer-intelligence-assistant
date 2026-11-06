@@ -139,14 +139,27 @@ async def lifespan(app: FastAPI):
         next_maintenance = 0.0
         next_aggregation = 0.0
         next_policy_refresh = 0.0
+        next_schema_check = 0.0
+        schema_ready = False
         while True:
             try:
                 worked = await asyncio.to_thread(service.process_one)
                 now = time.monotonic()
+                if now >= next_schema_check:
+                    # Cached per storage target, so this is a no-op once the active target is ready.
+                    # Policy and aggregation query the owned columns, so they wait for it.
+                    try:
+                        from telemetry.span_schema import ensure_active_span_schema
+                        schema_ready = await asyncio.to_thread(ensure_active_span_schema)
+                        next_schema_check = now + 30
+                    except Exception as exc:
+                        schema_ready = False
+                        logging.getLogger(__name__).warning("Runtime span schema is not ready: %s", exc)
+                        next_schema_check = now + 60
                 if now >= next_maintenance:
                     await asyncio.to_thread(service.expire_unmatched)
                     next_maintenance = now + 3600
-                if now >= next_policy_refresh:
+                if schema_ready and now >= next_policy_refresh:
                     try:
                         from telemetry.policy import refresh_sampling_policy
                         from telemetry.runtime import runtime_sampling_policy
@@ -156,7 +169,7 @@ async def lifespan(app: FastAPI):
                     except Exception as exc:
                         logging.getLogger(__name__).warning("Runtime sampling policy refresh failed: %s", exc)
                         next_policy_refresh = now + 60
-                if now >= next_aggregation:
+                if schema_ready and now >= next_aggregation:
                     try:
                         from telemetry.aggregation import aggregate_runtime
                         result = await asyncio.to_thread(aggregate_runtime)

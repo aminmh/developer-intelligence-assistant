@@ -7,6 +7,7 @@ import math
 import re
 
 from telemetry.runtime import ClickHouseRuntime, runtime_sampling_policy
+from telemetry.span_schema import SPAN_SCOPE
 from telemetry.snapshot import validate_project_id, validate_revision_id
 
 _TRACE_ID = re.compile(r"^[0-9a-f]{32}$")
@@ -265,11 +266,7 @@ def method_hook_edges(client: ClickHouseRuntime, project_id: str, revision_id: s
 
 def _scope_clause() -> str:
     return (
-        "ResourceAttributes['indexer.project_id'] = {project_id:String} "
-        "AND ResourceAttributes['indexer.revision_id'] = {revision_id:String} "
-        "AND ResourceAttributes['indexer.code_dirty'] = 'false' "
-        "AND ResourceAttributes['indexer.schema.version'] = 'indexer-telemetry-v2' "
-        "AND Timestamp >= now() - INTERVAL {window_hours:UInt32} HOUR"
+        SPAN_SCOPE + " AND Timestamp >= now() - INTERVAL {window_hours:UInt32} HOUR"
     )
 
 

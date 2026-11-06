@@ -20,13 +20,10 @@ def refresh_sampling_policy(registry=None) -> dict:
     table = f"`{clickhouse.database}`.`{clickhouse.table}`"
     hours = controls["p95_window_hours"]
     rows = clickhouse.unscoped_rows(
-        f"SELECT ResourceAttributes['indexer.project_id'] AS project_id, "
+        f"SELECT ProjectId AS project_id, "
         f"quantile(0.95)(toFloat64(Duration)) / 1000000 AS p95_ms FROM {table} "
         "WHERE SpanKind = 'Server' "
-        "AND ResourceAttributes['indexer.project_id'] != '' "
-        "AND ResourceAttributes['indexer.revision_id'] != '' "
-        "AND ResourceAttributes['indexer.code_dirty'] = 'false' "
-        "AND ResourceAttributes['indexer.schema.version'] = 'indexer-telemetry-v2' "
+        "AND ProjectId != '' AND RevisionId != '' AND Eligible "
         f"AND Timestamp >= now() - INTERVAL {hours} HOUR "
         "GROUP BY project_id"
     )

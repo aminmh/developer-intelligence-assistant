@@ -262,7 +262,7 @@ def test_runtime_request_reads_are_revision_scoped_and_privacy_shaped(monkeypatc
     for sql, project_id, revision_id, params in captured:
         assert project_id == "pizza" and revision_id == "rev_test"
         if "`telemetry`.`otel_spans_full`" in sql:
-            assert "indexer.project_id" in sql and "indexer.revision_id" in sql
+            assert "ProjectId = {project_id:String}" in sql and "RevisionId = {revision_id:String}" in sql and "Eligible" in sql
         elif "`telemetry`.`otel_profiles`" in sql:
             assert "project_id = {project_id:String}" in sql
             assert "revision_id = {revision_id:String}" in sql
@@ -295,7 +295,7 @@ def test_runtime_request_list_filters_errors_and_slow_requests_before_the_limit(
 
     slow = clickhouse.requests("pizza", "rev_test", "slow")
     threshold_sql, list_sql = captured[-2], captured[-1]
-    assert "SpanKind = 'Server'" in threshold_sql and "indexer.revision_id" in threshold_sql
+    assert "SpanKind = 'Server'" in threshold_sql and "RevisionId = {revision_id:String}" in threshold_sql
     assert "HAVING duration_ms >= 42.5 ORDER BY timestamp DESC LIMIT 50" in list_sql
     assert slow["slow_threshold_ms"] == 42.5
     assert slow["requests"][0]["trace_id"] == "b" * 32
@@ -355,7 +355,7 @@ def test_runtime_request_delete_is_bounded_parameterized_and_revision_scoped(mon
     assert profile_parameters["param_trace_id_1"] == "b" * 32
     assert sql.startswith("DELETE FROM `telemetry`.`otel_spans_full` WHERE")
     assert profile_sql.startswith("DELETE FROM ")
-    assert "indexer.project_id" in sql and "indexer.revision_id" in sql
+    assert "ProjectId = {project_id:String} AND RevisionId = {revision_id:String}" in sql
     assert "TraceId IN ({trace_id_0:String}, {trace_id_1:String})" in sql
     assert all(trace_id.lower() not in sql for trace_id in trace_ids)
     assert parameters == {

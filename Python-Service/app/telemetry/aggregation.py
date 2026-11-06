@@ -11,6 +11,7 @@ from uuid import NAMESPACE_URL, uuid5
 from telemetry.registry import default_registry
 from telemetry.runtime import ClickHouseRuntime, runtime_sampling_policy, snapshot_definitions
 from telemetry.snapshot import storage_id
+from telemetry.span_schema import SPAN_SCOPE
 
 logger = logging.getLogger(__name__)
 _SAFE_TABLE = re.compile(r"^[A-Za-z_][A-Za-z0-9_.-]{0,190}$")
@@ -140,9 +141,9 @@ def _store_exception_vectors(
             "SpanAttributes['indexer.exception.type'] AS exception_type, "
             "SpanAttributes['indexer.exception.normalized_message'] AS normalized_message, "
             "SpanAttributes['indexer.exception.top_frames'] AS top_frames, "
-            "SpanAttributes['indexer.symbol_id'] AS symbol_id "
-            f"FROM `{client.database}`.`{client.table}` WHERE "
-            "SpanAttributes['indexer.exception.normalized_message'] != '' "
+            "SymbolId AS symbol_id "
+            f"FROM `{client.database}`.`{client.table}` WHERE {SPAN_SCOPE} "
+            "AND SpanAttributes['indexer.exception.normalized_message'] != '' "
             f"AND Timestamp >= now() - INTERVAL {window_hours} HOUR "
             "ORDER BY Timestamp DESC LIMIT 10000",
             project_id, revision_id,

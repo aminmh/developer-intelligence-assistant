@@ -84,8 +84,8 @@ exporters:
     password: ${env:TELEMETRY_CLICKHOUSE_PASSWORD}
     database: ${env:TELEMETRY_CLICKHOUSE_DATABASE:-telemetry}
     traces_table_name: otel_spans_full
-    create_schema: true
-    ttl: ${env:TELEMETRY_AGGREGATION_RETENTION_HOURS:-72}h
+    # The Python service owns this table's DDL, sort key and TTL (telemetry/span_schema.py).
+    create_schema: false
     async_insert: false
     sending_queue:
       enabled: true

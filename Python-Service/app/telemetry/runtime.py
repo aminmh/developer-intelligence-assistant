@@ -11,14 +11,14 @@ from urllib.parse import urlencode, urlsplit
 from urllib.request import Request, urlopen
 
 
+from telemetry.span_schema import SPAN_SCOPE
+
 _IDENTIFIER = re.compile(r"^[A-Za-z_][A-Za-z0-9_]{0,62}$")
 _METHOD_HOOK_ID = re.compile(
     r"^(?:[A-Za-z_][A-Za-z0-9_]*\\)*[A-Za-z_][A-Za-z0-9_]*::[A-Za-z_][A-Za-z0-9_]*$"
 )
-_SCOPE = """ResourceAttributes['indexer.project_id'] = {project_id:String}
-    AND ResourceAttributes['indexer.revision_id'] = {revision_id:String}
-    AND ResourceAttributes['indexer.code_dirty'] = 'false'
-    AND ResourceAttributes['indexer.schema.version'] = 'indexer-telemetry-v2'"""
+# Materialized scope columns from the owned span schema (telemetry/span_schema.py).
+_SCOPE = SPAN_SCOPE
 REQUEST_OUTCOMES = ("all", "errors", "slow")
 
 
@@ -249,7 +249,7 @@ class ClickHouseRuntime:
             return {"available": False, "reason": "ClickHouse is not configured.", "requests": []}
         table = f"`{self.database}`.`{self.table}`"
         window = " AND Timestamp >= now() - INTERVAL " + str(self.window_hours) + " HOUR"
-        server_scope = _SCOPE + window + " AND SpanKind = 'Server' AND SpanAttributes['http.route'] != ''"
+        server_scope = _SCOPE + window + " AND SpanKind = 'Server' AND HttpRoute != ''"
         having = ""
         slow_threshold_ms = None
         try:
@@ -633,7 +633,7 @@ class ClickHouseRuntime:
         table = f"`{self.database}`.`{self.table}`"
         try:
             scope = f"{_SCOPE} AND Timestamp >= now() - INTERVAL {self.window_hours} HOUR"
-            scoped = f"SELECT TraceId, SpanId, ParentSpanId, Timestamp, Duration, StatusCode, SpanAttributes, SpanAttributes['indexer.symbol_id'] AS symbol_id FROM {table} WHERE {scope}"
+            scoped = f"SELECT TraceId, SpanId, ParentSpanId, Timestamp, Duration, StatusCode, SpanAttributes, SymbolId AS symbol_id FROM {table} WHERE {scope}"
             totals = self.rows(
                 f"SELECT count() AS spans, countIf(symbol_id != '') AS symbol_spans, "
                 f"countIf(StatusCode = 'Error') AS errors, max(Timestamp) AS last_seen "
@@ -689,7 +689,7 @@ class ClickHouseRuntime:
             )
             symbol_tables = self.rows(
                 "SELECT symbol_id, table_name, count() AS calls FROM ("
-                "SELECT SpanAttributes['indexer.symbol_id'] AS symbol_id, arrayJoin(if(length(JSONExtractArrayRaw(SpanAttributes['indexer.table_ids'])) > 0, "
+                "SELECT SymbolId AS symbol_id, arrayJoin(if(length(JSONExtractArrayRaw(SpanAttributes['indexer.table_ids'])) > 0, "
                 "arrayMap(value -> replaceAll(value, '\"', ''), JSONExtractArrayRaw(SpanAttributes['indexer.table_ids'])), "
                 "[if(SpanAttributes['indexer.db.table'] != '', SpanAttributes['indexer.db.table'], SpanAttributes['db.collection.name'])])) AS table_name "
                 f"FROM {table} WHERE {scope} AND symbol_id != '') "
