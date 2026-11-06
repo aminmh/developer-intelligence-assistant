@@ -19,8 +19,9 @@
         <level>warning</level>
         <ttl>event_date + INTERVAL 72 HOUR DELETE</ttl>
     </text_log>
-    <metric_log>
-        <collect_interval_milliseconds>10000</collect_interval_milliseconds>
-        <ttl>event_date + INTERVAL 72 HOUR DELETE</ttl>
-    </metric_log>
+    <!-- Metric logs are very wide tables written every few seconds; on the local VM their merges
+         alone exceeded max_server_memory_usage and blocked telemetry inserts and queries.
+         Nothing in Developer Assistant reads them, so they are disabled. -->
+    <metric_log remove="1"/>
+    <asynchronous_metric_log remove="1"/>
 </clickhouse>
