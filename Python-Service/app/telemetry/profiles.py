@@ -290,13 +290,14 @@ def delete_profiles(client: ClickHouseRuntime, project_id: str, revision_id: str
         if not found or int(found[0].get("tables", 0) or 0) == 0:
             return 0
         placeholders = []
-        parameters = {"mutations_sync": "1", "param_project_id": project_id, "param_revision_id": revision_id}
+        # Lightweight DELETE masks the rows before returning instead of rewriting whole parts.
+        parameters = {"lightweight_deletes_sync": "2", "param_project_id": project_id, "param_revision_id": revision_id}
         for index, trace_id in enumerate(trace_ids):
             name = f"trace_id_{index}"
             placeholders.append(f"{{{name}:String}}")
             parameters[f"param_{name}"] = trace_id
         client.execute(
-            f"ALTER TABLE {table} DELETE WHERE project_id = {{project_id:String}} "
+            f"DELETE FROM {table} WHERE project_id = {{project_id:String}} "
             "AND revision_id = {revision_id:String} "
             f"AND trace_id IN ({', '.join(placeholders)})",
             extra_parameters=parameters,

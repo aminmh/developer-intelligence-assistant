@@ -239,6 +239,16 @@ def _store_exception_vectors(
         return 0
 
 
+# Span signature (count, newest timestamp) of each revision when it was last aggregated in this process.
+# A revision whose signature is unchanged has no new or expired spans, so its facts cannot have changed.
+_aggregated_signatures: dict[tuple[str, str], tuple[int, str]] = {}
+
+
+def _clickhouse_datetime(value: datetime) -> str:
+    """UTC timestamp in the plain form ClickHouse DateTime64 columns accept on JSONEachRow input."""
+    return value.astimezone(timezone.utc).strftime("%Y-%m-%d %H:%M:%S.%f")[:-3]
+
+
 def aggregate_runtime() -> dict:
     """Refresh graph facts and searchable normalized exception signatures."""
     registry = default_registry()
@@ -250,6 +260,7 @@ def aggregate_runtime() -> dict:
     graph = InspectionGraph()
     seen: set[tuple[str, str]] = set()
     processed = 0
+    skipped = 0
     unresolved_rows: list[dict] = []
     for project in registry.runtime_projects():
         project_id = project.get("project_id")
@@ -262,6 +273,10 @@ def aggregate_runtime() -> dict:
             continue
         seen.add(pair)
         try:
+            signature = clickhouse.span_signature(project_id, revision_id)
+            if signature is not None and _aggregated_signatures.get(pair) == signature:
+                skipped += 1
+                continue
             with registry.lock(project_id, commit_sha):
                 current = registry.get_by_revision_id(project_id, revision_id)
                 if not current or current.get("state") != "ready":
@@ -275,7 +290,7 @@ def aggregate_runtime() -> dict:
                 collection = "sym_snapshot_" + storage_id(project_id, commit_sha, "")
                 facts = _graph_facts(project_id, revision_id, commit_sha, collection, definitions, telemetry)
                 graph.upsert_runtime_facts(collection, facts)
-                now = datetime.now(timezone.utc).isoformat(timespec="milliseconds")
+                now = _clickhouse_datetime(datetime.now(timezone.utc))
                 for row in telemetry.get("symbols", []):
                     symbol_id = row.get("symbol_id")
                     if symbol_id:
@@ -294,6 +309,9 @@ def aggregate_runtime() -> dict:
                 processed += 1
                 clickhouse.store_unresolved_symbols(project_unresolved)
                 unresolved_rows.extend(project_unresolved)
+                # Remembered only after every step succeeded, so a failed cycle is retried next tick.
+                if signature is not None:
+                    _aggregated_signatures[pair] = signature
         except Exception as exc:  # noqa: BLE001 — retry this scope on the next aggregation tick
             logger.warning("Runtime aggregation failed for project %s: %s", project_id, exc)
-    return {"processed": processed, "unmatched_records": len(unresolved_rows)}
+    return {"processed": processed, "skipped": skipped, "unmatched_records": len(unresolved_rows)}

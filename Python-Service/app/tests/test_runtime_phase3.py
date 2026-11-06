@@ -353,12 +353,13 @@ def test_runtime_request_delete_is_bounded_parameterized_and_revision_scoped(mon
     assert "trace_id IN ({trace_id_0:String}, {trace_id_1:String})" in profile_sql
     assert profile_parameters["param_trace_id_0"] == "a" * 32
     assert profile_parameters["param_trace_id_1"] == "b" * 32
-    assert "ALTER TABLE `telemetry`.`otel_spans_full` DELETE WHERE" in sql
+    assert sql.startswith("DELETE FROM `telemetry`.`otel_spans_full` WHERE")
+    assert profile_sql.startswith("DELETE FROM ")
     assert "indexer.project_id" in sql and "indexer.revision_id" in sql
     assert "TraceId IN ({trace_id_0:String}, {trace_id_1:String})" in sql
     assert all(trace_id.lower() not in sql for trace_id in trace_ids)
     assert parameters == {
-        "mutations_sync": "1",
+        "lightweight_deletes_sync": "2",
         "param_project_id": "pizza",
         "param_revision_id": "rev_test",
         "param_trace_id_0": "a" * 32,

@@ -58,9 +58,12 @@ processors:
         type: probabilistic
         probabilistic:
           sampling_percentage: ${env:TELEMETRY_RECORDING_PERCENT:-10}
+  # Each flush is one ClickHouse insert and one new part to merge. Larger, less frequent batches keep
+  # merge work low; new requests can take up to `timeout` longer to appear in the Runtime view.
   batch:
-    timeout: 1s
-    send_batch_size: 128
+    timeout: 5s
+    send_batch_size: 4096
+    send_batch_max_size: 8192
 
 connectors:
   spanmetrics/runtime:

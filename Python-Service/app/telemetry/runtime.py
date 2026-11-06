@@ -562,7 +562,9 @@ class ClickHouseRuntime:
             raise ValueError("Only currently listed request traces can be deleted")
 
         parameters = {
-            "mutations_sync": "1",
+            # Lightweight DELETE masks the rows before returning; merges drop them later. Unlike
+            # ALTER TABLE ... DELETE, it does not rewrite every data part the trace touches.
+            "lightweight_deletes_sync": "2",
             "param_project_id": project_id,
             "param_revision_id": revision_id,
         }
@@ -574,7 +576,7 @@ class ClickHouseRuntime:
 
         table = f"`{self.database}`.`{self.table}`"
         sql = (
-            f"ALTER TABLE {table} DELETE WHERE {_SCOPE} "
+            f"DELETE FROM {table} WHERE {_SCOPE} "
             f"AND TraceId IN ({', '.join(placeholders)})"
         )
         try:
@@ -604,6 +606,26 @@ class ClickHouseRuntime:
         self.execute(f"ALTER TABLE {table} ADD COLUMN IF NOT EXISTS revision_id String DEFAULT ''")
         body = "\n".join(json.dumps(row, separators=(",", ":")) for row in rows).encode("utf-8")
         self.execute(f"INSERT INTO {table} FORMAT JSONEachRow", body)
+
+    def span_signature(self, project_id: str, revision_id: str) -> tuple[int, str] | None:
+        """Span count and newest span time in the summary window; None when it cannot be read.
+
+        One small query that changes whenever summary() could change: new spans raise the count or
+        the newest time, and spans ageing out of the window lower the count.
+        """
+        if not self.configured:
+            return None
+        table = f"`{self.database}`.`{self.table}`"
+        try:
+            rows = self.rows(
+                "SELECT count() AS spans, toString(max(Timestamp)) AS newest FROM " + table + " WHERE " + _SCOPE +
+                f" AND Timestamp >= now() - INTERVAL {self.window_hours} HOUR",
+                project_id, revision_id,
+            )
+        except (HTTPError, URLError, TimeoutError, OSError, ValueError, KeyError):
+            return None
+        row = rows[0] if rows else {}
+        return int(row.get("spans", 0) or 0), str(row.get("newest", ""))
 
     def summary(self, project_id: str, revision_id: str, known_symbol_ids: set[str]) -> dict:
         if not self.configured:
