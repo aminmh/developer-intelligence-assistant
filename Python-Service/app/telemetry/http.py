@@ -204,15 +204,17 @@ def runtime_revision(project_id: str, revision_id: str, request: Request) -> dic
 
 
 @runtime_router.get("/projects/{project_id}/revisions/{revision_id}/requests")
-def runtime_requests(project_id: str, revision_id: str, request: Request) -> dict:
+def runtime_requests(project_id: str, revision_id: str, request: Request, outcome: str = "all") -> dict:
     authorize_internal(request)
+    from telemetry.runtime import REQUEST_OUTCOMES, ClickHouseRuntime
+    if outcome not in REQUEST_OUTCOMES:
+        raise HTTPException(422, "Request outcome filter must be all, errors, or slow")
     try:
         validate_project_id(project_id)
         validate_revision_id(revision_id)
         if get_registry().get_by_revision_id(project_id, revision_id) is None:
             raise HTTPException(404, "Indexed revision was not found")
-        from telemetry.runtime import ClickHouseRuntime
-        return ClickHouseRuntime().requests(project_id, revision_id)
+        return ClickHouseRuntime().requests(project_id, revision_id, outcome)
     except ValueError as exc:
         raise HTTPException(422, "Invalid indexed revision identity") from exc
 

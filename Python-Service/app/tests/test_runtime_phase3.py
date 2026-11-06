@@ -3,6 +3,8 @@ from __future__ import annotations
 import asyncio
 import socket
 
+import pytest
+
 from telemetry import runtime_storage
 from telemetry.aggregation import _graph_facts
 from telemetry.events import publish_runtime_update, runtime_events
@@ -265,6 +267,44 @@ def test_runtime_request_reads_are_revision_scoped_and_privacy_shaped(monkeypatc
             assert "project_id = {project_id:String}" in sql
             assert "revision_id = {revision_id:String}" in sql
     assert captured[1][3] == {"param_trace_id": "a" * 32}
+
+
+def test_runtime_request_list_filters_errors_and_slow_requests_before_the_limit(monkeypatch):
+    from telemetry.runtime import ClickHouseRuntime
+
+    captured = []
+
+    def rows(_self, sql, project_id, revision_id, extra_parameters=None):
+        captured.append(sql)
+        if "quantile(0.95)" in sql:
+            return [{"p95_ms": 42.5}]
+        return [{"trace_id": "b" * 32, "span_id": "1" * 16, "timestamp": "2026-11-06 10:00:00",
+                 "method": "GET", "route": "/api/pizzas", "status_code": 500, "duration_ms": 80.0, "span_status": "Error"}]
+
+    monkeypatch.setattr(ClickHouseRuntime, "configured", property(lambda _self: True))
+    monkeypatch.setattr(ClickHouseRuntime, "rows", rows)
+    monkeypatch.setattr(
+        "telemetry.runtime.runtime_sampling_policy",
+        lambda _registry=None: {"p95_window_hours": 24, "refresh_minutes": 5, "aggregation_retention_hours": 168},
+    )
+    clickhouse = ClickHouseRuntime()
+
+    errors = clickhouse.requests("pizza", "rev_test", "errors")
+    assert "HAVING span_status = 'Error' OR status_code >= 500 ORDER BY timestamp DESC LIMIT 50" in captured[-1]
+    assert errors["outcome"] == "errors" and errors["slow_threshold_ms"] is None
+
+    slow = clickhouse.requests("pizza", "rev_test", "slow")
+    threshold_sql, list_sql = captured[-2], captured[-1]
+    assert "SpanKind = 'Server'" in threshold_sql and "indexer.revision_id" in threshold_sql
+    assert "HAVING duration_ms >= 42.5 ORDER BY timestamp DESC LIMIT 50" in list_sql
+    assert slow["slow_threshold_ms"] == 42.5
+    assert slow["requests"][0]["trace_id"] == "b" * 32
+
+    everything = clickhouse.requests("pizza", "rev_test")
+    assert "HAVING" not in captured[-1] and everything["outcome"] == "all"
+
+    with pytest.raises(ValueError):
+        clickhouse.requests("pizza", "rev_test", "1 OR 1=1")
 
 
 def test_runtime_request_detail_rejects_malformed_trace_id(monkeypatch):

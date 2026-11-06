@@ -241,7 +241,45 @@ def write_collector_config(target: dict | None = None) -> None:
         raise RuntimeError("Collector base configuration is invalid")
     if target["mode"] == "disabled":
         config["service"]["pipelines"] = {}
+    elif target["mode"] == "local":
+        _keep_local_pipelines(config)
     _write_atomic(_STATE_DIR / "collector-runtime.yaml", yaml.safe_dump(config, sort_keys=False))
+
+
+# Local mode keeps only the full-span pipeline: nothing reads the tail-sampled traces or the span
+# metrics, and they cost local ClickHouse two extra insert streams (see the Archcore ADR
+# runtime-telemetry/local-runtime-reads-full-spans-without-tail-sampling).
+_LOCAL_DROPPED_PIPELINES = ("traces/sampled", "metrics/runtime")
+
+
+def _keep_local_pipelines(config: dict) -> None:
+    pipelines = config["service"].get("pipelines")
+    if not isinstance(pipelines, dict):
+        return
+    for name in _LOCAL_DROPPED_PIPELINES:
+        pipelines.pop(name, None)
+    connectors = set((config.get("connectors") or {}).keys())
+    # A connector must be both exported to and received from; drop the half left without its partner.
+    exported = {item for pipeline in pipelines.values() for item in pipeline.get("exporters", []) if item in connectors}
+    received = {item for pipeline in pipelines.values() for item in pipeline.get("receivers", []) if item in connectors}
+    for pipeline in pipelines.values():
+        if "exporters" in pipeline:
+            pipeline["exporters"] = [item for item in pipeline["exporters"] if item not in connectors or item in received]
+        if "receivers" in pipeline:
+            pipeline["receivers"] = [item for item in pipeline["receivers"] if item not in connectors or item in exported]
+    # Remove components no remaining pipeline references, so the Collector does not build them.
+    used = {
+        section: {item for pipeline in pipelines.values() for item in pipeline.get(section, [])}
+        for section in ("receivers", "processors", "exporters")
+    }
+    used["connectors"] = used["receivers"] | used["exporters"]
+    for section in ("processors", "exporters", "connectors"):
+        components = config.get(section)
+        if isinstance(components, dict):
+            for name in [name for name in components if name not in used[section]]:
+                del components[name]
+            if not components:
+                config.pop(section)
 
 
 def request_collector_restart() -> bool:
@@ -281,13 +319,13 @@ def initialize_runtime_storage() -> None:
     write_collector_config(target)
 
 
-def _apply_target(target: dict, previous: dict, store, *, restart_for_disabled: bool) -> bool:
+def _apply_target(target: dict, previous: dict, store, *, restart_collector: bool) -> bool:
     store.set_runtime_setting(STORAGE_KEY, _stored_fields(target))
     try:
         write_router_target(target)
         write_ssh_target(target)
         write_collector_config(target)
-        restart = restart_for_disabled and request_collector_restart()
+        restart = restart_collector and request_collector_restart()
         return restart
     except Exception:
         store.set_runtime_setting(STORAGE_KEY, _stored_fields(previous))
@@ -313,7 +351,8 @@ def save_storage_target(target: dict, registry=None) -> dict:
     store = _registry(registry)
     previous = get_storage_target(store)
     try:
-        restarted = _apply_target(target, previous, store, restart_for_disabled=False)
+        # Local generates fewer pipelines than Remote, so leaving Local needs the Collector to reload.
+        restarted = _apply_target(target, previous, store, restart_collector=previous["mode"] == "local")
         verify_router_clickhouse_connection()
     except Exception:
         store.set_runtime_setting(STORAGE_KEY, _stored_fields(previous))
@@ -336,13 +375,14 @@ def set_storage_mode(mode: str, registry=None) -> dict:
         verify_local_clickhouse_connection()
     candidate = {**previous, "mode": mode}
     store = _registry(registry)
-    restart_required = mode == "disabled" or previous["mode"] == "disabled"
+    # Each mode generates different Collector pipelines, so any mode change needs a restart.
+    restart_required = mode != previous["mode"]
     try:
         # The router and SSH forward read their targets from shared state. Apply
         # the Remote target first so the verification request traverses the
         # newly selected tunnel instead of the previously active (often
         # Disabled) target.
-        restarted = _apply_target(candidate, previous, store, restart_for_disabled=restart_required)
+        restarted = _apply_target(candidate, previous, store, restart_collector=restart_required)
         if mode == "remote":
             verify_router_clickhouse_connection()
     except Exception:

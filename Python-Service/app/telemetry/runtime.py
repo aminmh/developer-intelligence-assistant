@@ -19,6 +19,7 @@ _SCOPE = """ResourceAttributes['indexer.project_id'] = {project_id:String}
     AND ResourceAttributes['indexer.revision_id'] = {revision_id:String}
     AND ResourceAttributes['indexer.code_dirty'] = 'false'
     AND ResourceAttributes['indexer.schema.version'] = 'indexer-telemetry-v2'"""
+REQUEST_OUTCOMES = ("all", "errors", "slow")
 
 
 def _table_display_name(table_id: str) -> str:
@@ -235,12 +236,36 @@ class ClickHouseRuntime:
         with urlopen(request, timeout=5, context=self.ssl_context) as response:
             return [json.loads(line) for line in response.read().decode("utf-8").splitlines() if line]
 
-    def requests(self, project_id: str, revision_id: str) -> dict:
-        """Return bounded, privacy-shaped server request spans for one revision."""
+    def requests(self, project_id: str, revision_id: str, outcome: str = "all") -> dict:
+        """Return bounded, privacy-shaped server request spans for one revision.
+
+        ``outcome`` narrows the list: ``errors`` keeps failed or 5xx requests, ``slow`` keeps requests at or
+        above this revision's p95 server duration in the same window. Filtering happens before the
+        50-row limit, so problems are not pushed out by newer normal requests.
+        """
+        if outcome not in REQUEST_OUTCOMES:
+            raise ValueError("Unknown request outcome filter")
         if not self.configured:
             return {"available": False, "reason": "ClickHouse is not configured.", "requests": []}
         table = f"`{self.database}`.`{self.table}`"
+        window = " AND Timestamp >= now() - INTERVAL " + str(self.window_hours) + " HOUR"
+        server_scope = _SCOPE + window + " AND SpanKind = 'Server' AND SpanAttributes['http.route'] != ''"
+        having = ""
+        slow_threshold_ms = None
         try:
+            if outcome == "errors":
+                having = " HAVING span_status = 'Error' OR status_code >= 500"
+            elif outcome == "slow":
+                threshold = self.rows(
+                    "SELECT quantile(0.95)(toFloat64(Duration)) / 1000000 AS p95_ms FROM " + table + " WHERE " + server_scope,
+                    project_id, revision_id,
+                )
+                value = threshold[0].get("p95_ms") if threshold else None
+                if value is None or not isinstance(value, (int, float)) or value != value:
+                    return {"available": True, "reason": None, "window_hours": self.window_hours, "sampled": True,
+                            "outcome": outcome, "slow_threshold_ms": None, "requests": []}
+                slow_threshold_ms = round(float(value), 3)
+                having = f" HAVING duration_ms >= {float(value)!r}"
             rows = self.rows(
                 "SELECT TraceId AS trace_id, "
                 "argMin(SpanId, tuple(Timestamp, SpanId)) AS span_id, "
@@ -251,10 +276,8 @@ class ClickHouseRuntime:
                 "argMin(toFloat64(Duration) / 1000000, tuple(Timestamp, SpanId)) AS duration_ms, "
                 "argMin(toInt64OrNull(SpanAttributes['indexer.php.cpu_time_us']), tuple(Timestamp, SpanId)) AS php_cpu_time_us, "
                 "argMin(toInt64OrNull(SpanAttributes['indexer.php.peak_memory_bytes']), tuple(Timestamp, SpanId)) AS php_peak_memory_bytes, "
-                "argMin(StatusCode, tuple(Timestamp, SpanId)) AS span_status FROM " + table + " WHERE " + _SCOPE +
-                " AND Timestamp >= now() - INTERVAL " + str(self.window_hours) +
-                " HOUR AND SpanKind = 'Server' AND SpanAttributes['http.route'] != '' "
-                "GROUP BY TraceId ORDER BY timestamp DESC LIMIT 50",
+                "argMin(StatusCode, tuple(Timestamp, SpanId)) AS span_status FROM " + table + " WHERE " + server_scope +
+                " GROUP BY TraceId" + having + " ORDER BY timestamp DESC LIMIT 50",
                 project_id, revision_id,
             )
         except (HTTPError, URLError, TimeoutError, OSError, ValueError, KeyError):
@@ -276,7 +299,8 @@ class ClickHouseRuntime:
                 "php_cpu_time_us": row.get("php_cpu_time_us"),
                 "php_peak_memory_bytes": row.get("php_peak_memory_bytes"),
             })
-        return {"available": True, "reason": None, "window_hours": self.window_hours, "sampled": True, "requests": clean}
+        return {"available": True, "reason": None, "window_hours": self.window_hours, "sampled": True,
+                "outcome": outcome, "slow_threshold_ms": slow_threshold_ms, "requests": clean}
 
     def request_detail(self, project_id: str, revision_id: str, trace_id: str) -> dict:
         """Return only the request root and database spans from a scoped trace."""
