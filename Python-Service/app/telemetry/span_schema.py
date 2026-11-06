@@ -104,8 +104,22 @@ def ensure_span_schema(client, retention_hours: int) -> bool:
             f"ALTER TABLE `{database}`.`{table}` MODIFY TTL toDateTime(Timestamp) + INTERVAL {int(retention_hours)} HOUR",
             extra_parameters={"materialize_ttl_after_modify": "0"},
         )
+    _ensure_rollups(client, database, retention_hours)
     _ready.add(key)
     return True
+
+
+def _ensure_rollups(client, database: str, retention_hours: int) -> None:
+    from telemetry.rollups import ROLLUP_TABLE, rollup_ddl
+
+    current = _table_info(client, database, ROLLUP_TABLE)
+    if current is None:
+        client.execute(rollup_ddl(database, retention_hours))
+    elif f"toIntervalHour({int(retention_hours) + 1})" not in current["engine_full"]:
+        client.execute(
+            f"ALTER TABLE `{database}`.`{ROLLUP_TABLE}` MODIFY TTL hour + INTERVAL {int(retention_hours) + 1} HOUR",
+            extra_parameters={"materialize_ttl_after_modify": "0"},
+        )
 
 
 def _migrate(client, database: str, table: str, retention_hours: int) -> None:

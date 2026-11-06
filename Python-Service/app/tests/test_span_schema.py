@@ -10,8 +10,9 @@ class _ClickHouse:
     database = "telemetry"
     table = "otel_spans_full"
 
-    def __init__(self, table_info=None):
+    def __init__(self, table_info=None, rollup_info=None):
         self.table_info = table_info
+        self.rollup_info = rollup_info
         self.statements: list[str] = []
 
     def execute(self, sql, body=None, extra_parameters=None, timeout=15):
@@ -19,7 +20,8 @@ class _ClickHouse:
 
     def unscoped_rows(self, sql):
         if "system.tables" in sql:
-            return [self.table_info] if self.table_info else []
+            info = self.rollup_info if "runtime_span_rollups" in sql else self.table_info
+            return [info] if info else []
         if "max(Timestamp)" in sql:
             return [{"newest": "2026-11-06 10:00:00.000000000"}]
         return []
@@ -54,8 +56,9 @@ def test_missing_table_is_created_once_per_target():
     assert ensure_span_schema(client, 72) is True
 
     creates = [sql for sql in client.statements if sql.startswith("CREATE TABLE")]
-    assert len(creates) == 1
+    assert len(creates) == 2
     assert "`telemetry`.`otel_spans_full`" in creates[0]
+    assert "`telemetry`.`runtime_span_rollups`" in creates[1]
 
 
 def test_exporter_created_table_is_copied_and_swapped():
@@ -74,25 +77,35 @@ def test_exporter_created_table_is_copied_and_swapped():
         "EXCHANGE TABLES",
         "INSERT INTO",
         "DROP TABLE",
+        "CREATE TABLE",
     ]
     copy = client.statements[5]
     assert copy.startswith("INSERT INTO `telemetry`.`otel_spans_full_v2_staging` (Timestamp, TraceId")
     assert "WHERE Timestamp >= now() - INTERVAL 72 HOUR" in copy
     assert "ProjectId" not in copy  # materialized columns are derived, never copied
-    assert client.statements[-1] == "DROP TABLE `telemetry`.`otel_spans_full_v2_staging`"
+    assert client.statements[-2] == "DROP TABLE `telemetry`.`otel_spans_full_v2_staging`"
+    assert "`runtime_span_rollups`" in client.statements[-1]
 
 
 def test_current_table_with_a_new_retention_only_changes_the_ttl():
-    client = _ClickHouse({"comment": SCHEMA_MARKER, "engine_full": "MergeTree TTL toDateTime(Timestamp) + toIntervalHour(72)"})
+    client = _ClickHouse(
+        {"comment": SCHEMA_MARKER, "engine_full": "MergeTree TTL toDateTime(Timestamp) + toIntervalHour(72)"},
+        {"comment": "", "engine_full": "ReplacingMergeTree TTL hour + toIntervalHour(73)"},
+    )
 
     ensure_span_schema(client, 48)
 
-    assert client.statements[-1].startswith("ALTER TABLE `telemetry`.`otel_spans_full` MODIFY TTL")
-    assert "INTERVAL 48 HOUR" in client.statements[-1]
+    assert client.statements[-2].startswith("ALTER TABLE `telemetry`.`otel_spans_full` MODIFY TTL")
+    assert "INTERVAL 48 HOUR" in client.statements[-2]
+    assert client.statements[-1].startswith("ALTER TABLE `telemetry`.`runtime_span_rollups` MODIFY TTL")
+    assert "INTERVAL 49 HOUR" in client.statements[-1]
 
 
 def test_current_table_needs_no_change():
-    client = _ClickHouse({"comment": SCHEMA_MARKER, "engine_full": "MergeTree TTL toDateTime(Timestamp) + toIntervalHour(72)"})
+    client = _ClickHouse(
+        {"comment": SCHEMA_MARKER, "engine_full": "MergeTree TTL toDateTime(Timestamp) + toIntervalHour(72)"},
+        {"comment": "", "engine_full": "ReplacingMergeTree TTL hour + toIntervalHour(73)"},
+    )
 
     ensure_span_schema(client, 72)
 

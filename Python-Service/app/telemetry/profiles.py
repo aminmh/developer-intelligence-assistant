@@ -86,7 +86,7 @@ def validate_profile(profile: object, project_id: str, revision_id: str, commit_
         raise ValueError("Profile resource identity is required")
     allowed_resources = {
         "service.name", "service.version", "indexer.project_id", "indexer.revision_id",
-        "indexer.code_dirty", "indexer.schema.version", "deployment.environment.name",
+        "indexer.code_dirty", "indexer.schema.version", "indexer.sampling.ratio", "deployment.environment.name",
         "vcs.ref.head.revision", "container.id", "container.image.name",
     }
     if not set(resources).issubset(allowed_resources):

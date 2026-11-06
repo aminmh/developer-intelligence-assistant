@@ -96,6 +96,7 @@ def _patch_aggregation(monkeypatch, clickhouse):
     monkeypatch.setattr(aggregation, "_store_exception_vectors", lambda *_args: 0)
     monkeypatch.setattr(inspection.graph, "InspectionGraph", Graph)
     monkeypatch.setattr(aggregation, "_aggregated_signatures", {})
+    monkeypatch.setattr(aggregation, "roll_up_closed_hours", lambda *_args: 0)
 
 
 def test_aggregation_skips_a_revision_whose_spans_have_not_changed(monkeypatch):

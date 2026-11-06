@@ -26,7 +26,7 @@ processors:
     trace_statements:
       - context: resource
         statements:
-          - 'keep_keys(attributes, ["service.name", "service.version", "service.namespace", "deployment.environment.name", "container.id", "container.image.name", "container.image.id", "indexer.project_id", "indexer.revision_id", "vcs.ref.head.revision", "indexer.code_dirty", "indexer.schema.version"])'
+          - 'keep_keys(attributes, ["service.name", "service.version", "service.namespace", "deployment.environment.name", "container.id", "container.image.name", "container.image.id", "indexer.project_id", "indexer.revision_id", "vcs.ref.head.revision", "indexer.code_dirty", "indexer.schema.version", "indexer.sampling.ratio"])'
       - context: scope
         statements:
           - 'limit(attributes, 0, [])'
@@ -34,16 +34,25 @@ processors:
           - 'set(version, "1")'
       - context: span
         statements:
-          - 'keep_keys(attributes, ["indexer.symbol_id", "indexer.caller.symbol_id", "indexer.route_id", "indexer.table_ids", "indexer.db.table", "indexer.command.name", "indexer.exception.type", "indexer.exception.normalized_message", "indexer.exception.top_frames", "indexer.php.cpu_time_us", "indexer.php.peak_memory_bytes", "indexer.method_hook_counts", "profiler.profile_id", "profiler.top_frames", "profiler.sample_period_ms", "http.route", "http.request.method", "http.response.status_code", "db.system.name", "db.namespace", "db.operation.name", "db.collection.name", "server.address", "url.scheme", "rpc.system", "messaging.system"])'
-          - 'set(name, "runtime.span")'
+          - 'keep_keys(attributes, ["indexer.symbol_id", "indexer.caller.symbol_id", "indexer.route_id", "indexer.table_ids", "indexer.db.table", "indexer.command.name", "indexer.exception.type", "indexer.exception.normalized_message", "indexer.exception.top_frames", "indexer.php.cpu_time_us", "indexer.php.peak_memory_bytes", "indexer.method_hook_counts", "indexer.dropped.hook_calls", "profiler.profile_id", "profiler.top_frames", "profiler.sample_period_ms", "http.route", "http.request.method", "http.response.status_code", "db.system.name", "db.namespace", "db.operation.name", "db.collection.name", "server.address", "url.scheme", "rpc.system", "messaging.system", "error.type"])'
+          # error.type carries an exception class or status code; drop anything else (free text could hold data).
+          - 'delete_key(attributes, "error.type") where attributes["error.type"] != nil and not IsMatch(attributes["error.type"], "^[A-Za-z0-9_\\\\]{1,255}$")'
+          # Keep the bounded set of span names the indexr library creates; rewrite anything else,
+          # since auto-instrumentation names can contain URLs or SQL.
+          - 'set(name, "runtime.span") where not IsMatch(name, "^(http\\.server|db\\.query|messaging\\.process|cli\\.command)$")'
           - 'set(status.message, "")'
           - 'set(trace_state, "")'
   p95policy/runtime:
     policy_file: /var/lib/devassistant/runtime/sampling-policy.json
+  # Remote mode only. PHP flushes spans every 5 s and long requests or jobs can span several flushes,
+  # so the decision waits 30 s. The caches remember decisions so spans arriving later still follow them.
   tail_sampling/runtime:
-    decision_wait: 5s
+    decision_wait: 30s
     num_traces: 50000
     expected_new_traces_per_sec: 100
+    decision_cache:
+      sampled_cache_size: 100000
+      non_sampled_cache_size: 100000
     policies:
       - name: retain-errors
         type: status_code
@@ -66,6 +75,8 @@ processors:
     send_batch_max_size: 8192
 
 connectors:
+  # Privacy filtering and transforms run once in traces/ingest; this fans the result out.
+  forward/runtime: {}
   spanmetrics/runtime:
     aggregation_temporality: AGGREGATION_TEMPORALITY_CUMULATIVE
     metrics_flush_interval: 60s
@@ -130,13 +141,17 @@ service:
     metrics:
       level: none
   pipelines:
-    traces/full:
+    traces/ingest:
       receivers: [otlp]
-      processors: [memory_limiter, filter/runtime_privacy, transform/runtime_privacy, batch]
+      processors: [memory_limiter, filter/runtime_privacy, transform/runtime_privacy]
+      exporters: [forward/runtime]
+    traces/full:
+      receivers: [forward/runtime]
+      processors: [batch]
       exporters: [clickhouse/full, spanmetrics/runtime]
     traces/sampled:
-      receivers: [otlp]
-      processors: [memory_limiter, filter/runtime_privacy, transform/runtime_privacy, p95policy/runtime, tail_sampling/runtime, batch]
+      receivers: [forward/runtime]
+      processors: [p95policy/runtime, tail_sampling/runtime, batch]
       exporters: [clickhouse/sampled]
     metrics/runtime:
       receivers: [spanmetrics/runtime]

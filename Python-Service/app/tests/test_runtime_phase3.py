@@ -190,17 +190,28 @@ def test_runtime_events_publish_invalidation_without_project_data():
     assert "project_id" not in event
 
 
-def test_runtime_summary_compares_clickhouse_span_status_as_text(monkeypatch):
+def test_runtime_summary_reads_rollups_and_live_spans_in_one_query(monkeypatch):
     queries = []
 
-    def rows(_self, sql, _project_id, _revision_id):
+    def rows(_self, sql, _project_id, _revision_id, _extra=None):
         queries.append(sql)
-        if "AS spans" in sql:
-            return [{"spans": 0, "symbol_spans": 0, "errors": 0, "last_seen": None}]
-        return []
+        return [
+            {"kind": "all", "k1": "", "k2": "", "k3": "", "calls": 12, "failures": 2,
+             "last_seen": "2026-11-06 12:00:00.000000000", "p95_ms": 0},
+            {"kind": "symbol", "k1": "App\\A::run", "k2": "", "k3": "", "calls": 5, "failures": 1,
+             "last_seen": "2026-11-06 12:00:00.000000000", "p95_ms": 4.5},
+            {"kind": "route", "k1": "GET", "k2": "/a", "k3": "route:GET /a", "calls": 4, "failures": 0,
+             "last_seen": "2026-11-06 12:00:00.000000000", "p95_ms": 9.0},
+            {"kind": "parent", "k1": "App\\A::run", "k2": "App\\B::call", "k3": "", "calls": 3, "failures": 0,
+             "last_seen": "2026-11-06 12:00:00.000000000", "p95_ms": 0},
+            {"kind": "symbol_route", "k1": "App\\A::run", "k2": "route:GET /a", "k3": "", "calls": 5, "failures": 0,
+             "last_seen": "2026-11-06 12:00:00.000000000", "p95_ms": 0},
+        ]
 
     monkeypatch.setattr(ClickHouseRuntime, "configured", property(lambda _self: True))
     monkeypatch.setattr(ClickHouseRuntime, "rows", rows)
+    monkeypatch.setattr("telemetry.profiles.profile_edges", lambda *_args: {"edges": [], "samples": 0, "profiles": 0, "hot_path_share": {}})
+    monkeypatch.setattr("telemetry.profiles.method_hook_edges", lambda *_args: [])
     monkeypatch.setattr(
         "telemetry.runtime.runtime_sampling_policy",
         lambda _registry=None: {
@@ -210,14 +221,18 @@ def test_runtime_summary_compares_clickhouse_span_status_as_text(monkeypatch):
         },
     )
 
-    summary = ClickHouseRuntime().summary("pizza", "rev_test", set())
+    summary = ClickHouseRuntime().summary("pizza", "rev_test", {"App\\A::run"})
 
-    assert summary["available"] is True
-    assert summary["total_spans"] == 0
-    assert summary["reason"] == "No runtime spans have arrived for this project commit."
-    status_queries = [query for query in queries if "countIf(StatusCode" in query]
-    assert len(status_queries) == 3
-    assert all("StatusCode = 'Error'" in query for query in status_queries)
+    assert len(queries) == 1
+    assert "FROM `telemetry`.`runtime_span_rollups` FINAL" in queries[0]
+    assert "NOT IN (SELECT hour FROM" in queries[0]
+    assert "StatusCode = 'Error'" in queries[0]
+    assert (summary["total_spans"], summary["symbol_spans"], summary["error_spans"]) == (12, 5, 2)
+    assert summary["matched_spans"] == 5
+    assert summary["symbols"][0]["error_rate"] == 20.0
+    assert summary["routes"][0]["route_id"] == "route:GET /a"
+    assert summary["callers"] == [{"symbol_id": "App\\A::run", "caller_symbol_id": "App\\B::call", "calls": 3}]
+    assert summary["symbol_routes"][0]["route"] == "/a" and summary["symbol_routes"][0]["method"] == "GET"
 
 
 def test_runtime_request_reads_are_revision_scoped_and_privacy_shaped(monkeypatch):
@@ -276,10 +291,11 @@ def test_runtime_request_list_filters_errors_and_slow_requests_before_the_limit(
 
     def rows(_self, sql, project_id, revision_id, extra_parameters=None):
         captured.append(sql)
-        if "quantile(0.95)" in sql:
+        if sql.startswith("SELECT quantile(0.95)"):
             return [{"p95_ms": 42.5}]
         return [{"trace_id": "b" * 32, "span_id": "1" * 16, "timestamp": "2026-11-06 10:00:00",
-                 "method": "GET", "route": "/api/pizzas", "status_code": 500, "duration_ms": 80.0, "span_status": "Error"}]
+                 "method": "GET", "route": "/api/pizzas", "status_code": 500, "duration_ms": 80.0, "span_status": "Error",
+                 "slow_threshold_ms": 61.25}]
 
     monkeypatch.setattr(ClickHouseRuntime, "configured", property(lambda _self: True))
     monkeypatch.setattr(ClickHouseRuntime, "rows", rows)
@@ -296,9 +312,13 @@ def test_runtime_request_list_filters_errors_and_slow_requests_before_the_limit(
     slow = clickhouse.requests("pizza", "rev_test", "slow")
     threshold_sql, list_sql = captured[-2], captured[-1]
     assert "SpanKind = 'Server'" in threshold_sql and "RevisionId = {revision_id:String}" in threshold_sql
-    assert "HAVING duration_ms >= 42.5 ORDER BY timestamp DESC LIMIT 50" in list_sql
+    # Each request is compared with its route's p95; routes with few requests fall back to the revision p95.
+    assert "LEFT JOIN (SELECT SpanAttributes['http.request.method'] AS method, HttpRoute AS route" in list_sql
+    assert "if(thresholds.route_requests >= 20, thresholds.route_p95_ms, 42.5) AS slow_threshold_ms" in list_sql
+    assert "WHERE requests.duration_ms >= slow_threshold_ms ORDER BY requests.timestamp DESC LIMIT 50" in list_sql
     assert slow["slow_threshold_ms"] == 42.5
     assert slow["requests"][0]["trace_id"] == "b" * 32
+    assert slow["requests"][0]["slow_threshold_ms"] == 61.25
 
     everything = clickhouse.requests("pizza", "rev_test")
     assert "HAVING" not in captured[-1] and everything["outcome"] == "all"

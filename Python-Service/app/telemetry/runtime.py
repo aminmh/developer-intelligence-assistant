@@ -198,6 +198,46 @@ def telemetry_settings(registry=None) -> dict:
     }
 
 
+_DETAIL_SPAN_LIMIT = 500
+# Routes with fewer server requests in the window than this use the revision p95 as their slow threshold.
+SLOW_ROUTE_MIN_REQUESTS = 20
+
+
+def _ratio(value) -> float | None:
+    """Head-sampling ratio from the indexer.sampling.ratio resource attribute; None when unknown."""
+    try:
+        ratio = float(value)
+    except (TypeError, ValueError):
+        return None
+    return ratio if 0 < ratio <= 1 else None
+
+
+def _sampling(rows: list[dict]) -> dict:
+    """Sampling ratios behind the summary's spans, and an estimate of real span volume.
+
+    Spans recorded at ratio r stand for about 1/r real spans. The estimate is None when any
+    spans have an unknown ratio, since they cannot be scaled.
+    """
+    by_ratio: dict[float | None, int] = {}
+    for row in rows:
+        ratio = _ratio(row.get("k1"))
+        by_ratio[ratio] = by_ratio.get(ratio, 0) + int(row.get("calls", 0) or 0)
+    known = {ratio: spans for ratio, spans in by_ratio.items() if ratio is not None}
+    estimated = round(sum(spans / ratio for ratio, spans in known.items())) if known and None not in by_ratio else None
+    return {
+        "sampling_ratio": next(iter(by_ratio)) if len(by_ratio) == 1 else None,
+        "sampling_ratios": [
+            {"ratio": ratio, "spans": spans}
+            for ratio, spans in sorted(by_ratio.items(), key=lambda item: -item[1])
+        ],
+        "estimated_total_spans": estimated,
+    }
+
+
+def _top(rows: list[dict], count_key: str, limit: int) -> list[dict]:
+    return sorted(rows, key=lambda row: row[count_key], reverse=True)[:limit]
+
+
 class ClickHouseRuntime:
     def __init__(self) -> None:
         from telemetry.runtime_storage import clickhouse_connection
@@ -265,8 +305,7 @@ class ClickHouseRuntime:
                     return {"available": True, "reason": None, "window_hours": self.window_hours, "sampled": True,
                             "outcome": outcome, "slow_threshold_ms": None, "requests": []}
                 slow_threshold_ms = round(float(value), 3)
-                having = f" HAVING duration_ms >= {float(value)!r}"
-            rows = self.rows(
+            per_trace = (
                 "SELECT TraceId AS trace_id, "
                 "argMin(SpanId, tuple(Timestamp, SpanId)) AS span_id, "
                 "argMin(Timestamp, tuple(Timestamp, SpanId)) AS timestamp, "
@@ -276,10 +315,27 @@ class ClickHouseRuntime:
                 "argMin(toFloat64(Duration) / 1000000, tuple(Timestamp, SpanId)) AS duration_ms, "
                 "argMin(toInt64OrNull(SpanAttributes['indexer.php.cpu_time_us']), tuple(Timestamp, SpanId)) AS php_cpu_time_us, "
                 "argMin(toInt64OrNull(SpanAttributes['indexer.php.peak_memory_bytes']), tuple(Timestamp, SpanId)) AS php_peak_memory_bytes, "
+                "argMin(ResourceAttributes['indexer.sampling.ratio'], tuple(Timestamp, SpanId)) AS sampling_ratio, "
                 "argMin(StatusCode, tuple(Timestamp, SpanId)) AS span_status FROM " + table + " WHERE " + server_scope +
-                " GROUP BY TraceId" + having + " ORDER BY timestamp DESC LIMIT 50",
-                project_id, revision_id,
+                " GROUP BY TraceId" + having
             )
+            if outcome == "slow":
+                # Judge each request against its own route's p95, so a regression on a fast route is
+                # not hidden behind slow ones. Routes with too few requests use the revision p95.
+                route_p95 = (
+                    "SELECT SpanAttributes['http.request.method'] AS method, HttpRoute AS route, count() AS route_requests, "
+                    "quantile(0.95)(toFloat64(Duration)) / 1000000 AS route_p95_ms FROM " + table + " WHERE " + server_scope +
+                    " GROUP BY method, route"
+                )
+                rows = self.rows(
+                    f"SELECT requests.*, if(thresholds.route_requests >= {SLOW_ROUTE_MIN_REQUESTS}, thresholds.route_p95_ms, "
+                    f"{float(slow_threshold_ms)!r}) AS slow_threshold_ms FROM ({per_trace}) AS requests "
+                    f"LEFT JOIN ({route_p95}) AS thresholds ON requests.method = thresholds.method AND requests.route = thresholds.route "
+                    "WHERE requests.duration_ms >= slow_threshold_ms ORDER BY requests.timestamp DESC LIMIT 50",
+                    project_id, revision_id,
+                )
+            else:
+                rows = self.rows(per_trace + " ORDER BY timestamp DESC LIMIT 50", project_id, revision_id)
         except (HTTPError, URLError, TimeoutError, OSError, ValueError, KeyError):
             return {"available": False, "reason": "ClickHouse request spans could not be queried.", "requests": []}
         clean = []
@@ -298,8 +354,14 @@ class ClickHouseRuntime:
                 "span_status": str(row.get("span_status", "")),
                 "php_cpu_time_us": row.get("php_cpu_time_us"),
                 "php_peak_memory_bytes": row.get("php_peak_memory_bytes"),
+                "sampling_ratio": _ratio(row.get("sampling_ratio")),
+                **({"slow_threshold_ms": round(float(row["slow_threshold_ms"]), 3)}
+                   if isinstance(row.get("slow_threshold_ms"), (int, float)) else {}),
             })
-        return {"available": True, "reason": None, "window_hours": self.window_hours, "sampled": True,
+        ratios = {request["sampling_ratio"] for request in clean}
+        ratio = ratios.pop() if len(ratios) == 1 else None
+        return {"available": True, "reason": None, "window_hours": self.window_hours,
+                "sampled": ratio is None or ratio < 1, "sampling_ratio": ratio,
                 "outcome": outcome, "slow_threshold_ms": slow_threshold_ms, "requests": clean}
 
     def request_detail(self, project_id: str, revision_id: str, trace_id: str) -> dict:
@@ -330,9 +392,12 @@ class ClickHouseRuntime:
                 "SpanAttributes['indexer.caller.symbol_id'] AS caller_symbol_id, "
                 "toInt64OrNull(SpanAttributes['indexer.php.cpu_time_us']) AS php_cpu_time_us, "
                 "toInt64OrNull(SpanAttributes['indexer.php.peak_memory_bytes']) AS php_peak_memory_bytes, "
-                "SpanAttributes['indexer.method_hook_counts'] AS method_hook_counts "
+                "SpanAttributes['indexer.method_hook_counts'] AS method_hook_counts, "
+                "toInt64OrNull(SpanAttributes['indexer.dropped.hook_calls']) AS dropped_hook_calls, "
+                "SpanAttributes['error.type'] AS error_type, "
+                "ResourceAttributes['indexer.sampling.ratio'] AS sampling_ratio "
                 "FROM " + table + " WHERE " + _SCOPE + " AND TraceId = {trace_id:String} "
-                "AND Timestamp >= now() - INTERVAL " + str(self.window_hours) + " HOUR ORDER BY Timestamp ASC LIMIT 500",
+                "AND Timestamp >= now() - INTERVAL " + str(self.window_hours) + f" HOUR ORDER BY Timestamp ASC LIMIT {_DETAIL_SPAN_LIMIT + 1}",
                 project_id, revision_id, {"param_trace_id": trace_id.lower()},
             )
         except (HTTPError, URLError, TimeoutError, OSError, ValueError, KeyError):
@@ -353,6 +418,8 @@ class ClickHouseRuntime:
                 return []
             return [item for item in decoded if isinstance(item, str) and len(item) <= 256][:32]
 
+        truncated = len(rows) > _DETAIL_SPAN_LIMIT
+        rows = rows[:_DETAIL_SPAN_LIMIT]
         root = next((row for row in rows if row.get("span_kind") == "Server"), None)
         if root is None:
             return {
@@ -373,6 +440,7 @@ class ClickHouseRuntime:
             "span_status": str(root.get("span_status", "")),
             "php_cpu_time_us": root.get("php_cpu_time_us"),
             "php_peak_memory_bytes": root.get("php_peak_memory_bytes"),
+            "error_type": str(root.get("error_type") or "") or None,
         }
         ai_summary = self._trace_ai_summary(project_id, revision_id, trace_id, request, rows)
         calls = []
@@ -402,6 +470,11 @@ class ClickHouseRuntime:
             "method_activity": _method_activity(root.get("method_hook_counts")),
             "ai_summary": ai_summary,
             "sampled": True,
+            "sampling_ratio": _ratio(root.get("sampling_ratio")),
+            # Spans beyond the limit are not shown; the UI says the trace is incomplete.
+            "truncated": truncated,
+            "span_limit": _DETAIL_SPAN_LIMIT,
+            "dropped_hook_calls": max(0, int(root.get("dropped_hook_calls") or 0)),
         }
 
     def _trace_ai_summary(self, project_id: str, revision_id: str, trace_id: str, request: dict, rows: list[dict]) -> dict:
@@ -581,8 +654,14 @@ class ClickHouseRuntime:
         )
         try:
             from telemetry.profiles import delete_profiles
+            from telemetry.rollups import hours_of_traces, invalidate_hours
+            trace_parameters = {key: value for key, value in parameters.items() if key.startswith("param_trace_id_")}
+            hours = hours_of_traces(self, project_id, revision_id, normalized_ids, trace_parameters)
             delete_profiles(self, project_id, revision_id, normalized_ids)
             self.execute(sql, extra_parameters=parameters, timeout=120)
+            # The deleted spans are still counted in those hours' rollups; drop them so the
+            # next aggregation cycle rolls the hours up again from what remains.
+            invalidate_hours(self, project_id, revision_id, hours)
         except (HTTPError, URLError, TimeoutError, OSError, ValueError) as exc:
             raise RuntimeError("Request telemetry could not be deleted") from exc
         return {"deleted_trace_count": len(normalized_ids)}
@@ -630,72 +709,47 @@ class ClickHouseRuntime:
     def summary(self, project_id: str, revision_id: str, known_symbol_ids: set[str]) -> dict:
         if not self.configured:
             return self._empty("ClickHouse is not configured.")
-        table = f"`{self.database}`.`{self.table}`"
         try:
-            scope = f"{_SCOPE} AND Timestamp >= now() - INTERVAL {self.window_hours} HOUR"
-            scoped = f"SELECT TraceId, SpanId, ParentSpanId, Timestamp, Duration, StatusCode, SpanAttributes, SymbolId AS symbol_id FROM {table} WHERE {scope}"
-            totals = self.rows(
-                f"SELECT count() AS spans, countIf(symbol_id != '') AS symbol_spans, "
-                f"countIf(StatusCode = 'Error') AS errors, max(Timestamp) AS last_seen "
-                f"FROM ({scoped})", project_id, revision_id,
-            )
-            symbols = self.rows(
-                f"SELECT symbol_id, count() AS runs, max(Timestamp) AS last_seen, "
-                f"quantile(0.95)(toFloat64(Duration)) / 1000000 AS p95_ms, "
-                f"countIf(StatusCode = 'Error') AS failures FROM ({scoped}) "
-                "WHERE symbol_id != '' GROUP BY symbol_id ORDER BY runs DESC LIMIT 5000",
-                project_id, revision_id,
-            )
-            routes = self.rows(
-                f"SELECT SpanAttributes['http.request.method'] AS method, "
-                f"SpanAttributes['http.route'] AS route, count() AS requests, "
-                "if(SpanAttributes['indexer.route_id'] != '', SpanAttributes['indexer.route_id'], "
-                "concat('route:', upper(SpanAttributes['http.request.method']), ' ', SpanAttributes['http.route'])) AS route_id, "
-                f"quantile(0.95)(toFloat64(Duration)) / 1000000 AS p95_ms, "
-                f"countIf(StatusCode = 'Error') AS failures, max(Timestamp) AS last_seen FROM {table} WHERE {scope} "
-                "AND route != '' GROUP BY method, route, route_id ORDER BY requests DESC LIMIT 1000",
-                project_id, revision_id,
-            )
-            tables = self.rows(
-                "SELECT table_name, operation, count() AS operations, max(Timestamp) AS last_seen FROM ("
-                "SELECT arrayJoin(if(length(JSONExtractArrayRaw(SpanAttributes['indexer.table_ids'])) > 0, "
-                "arrayMap(value -> replaceAll(value, '\"', ''), JSONExtractArrayRaw(SpanAttributes['indexer.table_ids'])), "
-                "[if(SpanAttributes['indexer.db.table'] != '', SpanAttributes['indexer.db.table'], SpanAttributes['db.collection.name'])])) AS table_name, "
-                "upper(SpanAttributes['db.operation.name']) AS operation, Timestamp "
-                f"FROM {table} WHERE {scope}) WHERE table_name != '' "
-                "GROUP BY table_name, operation ORDER BY operations DESC LIMIT 1000",
-                project_id, revision_id,
-            )
-            parents = self.rows(
-                f"SELECT child.symbol_id AS symbol_id, parent.symbol_id AS caller_symbol_id, count() AS calls "
-                f"FROM ({scoped}) AS child INNER JOIN ({scoped}) AS parent "
-                "ON child.TraceId = parent.TraceId AND child.ParentSpanId = parent.SpanId "
-                "WHERE child.symbol_id != '' AND parent.symbol_id != '' "
-                "GROUP BY symbol_id, caller_symbol_id ORDER BY calls DESC LIMIT 5000",
-                project_id, revision_id,
-            )
+            # Closed hours come from hourly rollups; only hours not rolled up yet are read raw.
+            from telemetry.rollups import read_summary
+            grouped = read_summary(self, project_id, revision_id)
+            sampling = _sampling(grouped["all"])
+            totals = [{
+                "spans": sum(int(row["calls"]) for row in grouped["all"]),
+                "symbol_spans": sum(int(row["calls"]) for row in grouped["symbol"]),
+                "errors": sum(int(row["failures"]) for row in grouped["all"]),
+                "last_seen": max((row["last_seen"] for row in grouped["all"]), default=None),
+            }]
+            symbols = _top([
+                {"symbol_id": row["k1"], "runs": int(row["calls"]), "last_seen": row["last_seen"],
+                 "p95_ms": row["p95_ms"], "failures": int(row["failures"])}
+                for row in grouped["symbol"]
+            ], "runs", 5000)
+            routes = _top([
+                {"method": row["k1"], "route": row["k2"], "requests": int(row["calls"]), "route_id": row["k3"],
+                 "p95_ms": row["p95_ms"], "failures": int(row["failures"]), "last_seen": row["last_seen"]}
+                for row in grouped["route"]
+            ], "requests", 1000)
+            tables = _top([
+                {"table_name": row["k1"], "operation": row["k2"], "operations": int(row["calls"]), "last_seen": row["last_seen"]}
+                for row in grouped["table"]
+            ], "operations", 1000)
+            parents = _top([
+                {"symbol_id": row["k1"], "caller_symbol_id": row["k2"], "calls": int(row["calls"])}
+                for row in grouped["parent"]
+            ], "calls", 5000)
             from telemetry.profiles import merge_method_edges, method_hook_edges, profile_edges
             profile_data = profile_edges(self, project_id, revision_id, known_symbol_ids)
             hook_edges = method_hook_edges(self, project_id, revision_id, known_symbol_ids)
             method_calls = merge_method_edges(parents, hook_edges, profile_data)
-            symbol_routes = self.rows(
-                "WITH traces AS (SELECT TraceId, groupUniqArrayIf(if(SpanAttributes['indexer.route_id'] != '', "
-                "SpanAttributes['indexer.route_id'], concat('route:', upper(SpanAttributes['http.request.method']), ' ', SpanAttributes['http.route'])), "
-                f"SpanAttributes['http.route'] != '') AS routes FROM {table} WHERE {scope} GROUP BY TraceId) "
-                f"SELECT spans.symbol_id AS symbol_id, route AS route, count() AS calls FROM ({scoped}) AS spans "
-                "INNER JOIN traces USING (TraceId) ARRAY JOIN traces.routes AS route "
-                "WHERE spans.symbol_id != '' GROUP BY symbol_id, route ORDER BY calls DESC LIMIT 5000",
-                project_id, revision_id,
-            )
-            symbol_tables = self.rows(
-                "SELECT symbol_id, table_name, count() AS calls FROM ("
-                "SELECT SymbolId AS symbol_id, arrayJoin(if(length(JSONExtractArrayRaw(SpanAttributes['indexer.table_ids'])) > 0, "
-                "arrayMap(value -> replaceAll(value, '\"', ''), JSONExtractArrayRaw(SpanAttributes['indexer.table_ids'])), "
-                "[if(SpanAttributes['indexer.db.table'] != '', SpanAttributes['indexer.db.table'], SpanAttributes['db.collection.name'])])) AS table_name "
-                f"FROM {table} WHERE {scope} AND symbol_id != '') "
-                "WHERE table_name != '' GROUP BY symbol_id, table_name ORDER BY calls DESC LIMIT 5000",
-                project_id, revision_id,
-            )
+            symbol_routes = _top([
+                {"symbol_id": row["k1"], "route": row["k2"], "calls": int(row["calls"])}
+                for row in grouped["symbol_route"]
+            ], "calls", 5000)
+            symbol_tables = _top([
+                {"symbol_id": row["k1"], "table_name": row["k2"], "calls": int(row["calls"])}
+                for row in grouped["symbol_table"]
+            ], "calls", 5000)
         except (HTTPError, URLError, TimeoutError, OSError, ValueError, KeyError):
             return self._empty("ClickHouse could not be queried.")
 
@@ -766,6 +820,7 @@ class ClickHouseRuntime:
             "sampled_trace_retention_hours": telemetry_settings()["retention_hours"],
             "aggregation_window_hours": self.window_hours,
             "pipeline_health": pipeline_health,
+            **sampling,
         }
 
     @staticmethod
@@ -781,6 +836,7 @@ class ClickHouseRuntime:
             "unmatched_spans": 0, "unmatched_percent": 0.0,
             "aggregation_window_hours": runtime_sampling_policy()["p95_window_hours"],
             "pipeline_health": "unavailable",
+            "sampling_ratio": None, "sampling_ratios": [], "estimated_total_spans": None,
         }
 
 

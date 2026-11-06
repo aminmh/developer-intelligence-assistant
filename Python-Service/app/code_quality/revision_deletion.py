@@ -123,7 +123,9 @@ def _remove_runtime(project_id: str, revision_id: str) -> None:
     runtime = ClickHouseRuntime()
     if not runtime.configured:
         return
-    names = {runtime.table, runtime.trace_table, runtime.profile_table, "unresolved_symbols"}
+    from telemetry.rollups import ROLLUP_TABLE
+
+    names = {runtime.table, runtime.trace_table, runtime.profile_table, "unresolved_symbols", ROLLUP_TABLE}
     parameters = {"mutations_sync": "1", "param_project_id": project_id, "param_revision_id": revision_id}
     for name in names:
         if not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]{0,62}", name):

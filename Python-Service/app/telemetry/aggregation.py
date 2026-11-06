@@ -11,6 +11,7 @@ from uuid import NAMESPACE_URL, uuid5
 from telemetry.registry import default_registry
 from telemetry.runtime import ClickHouseRuntime, runtime_sampling_policy, snapshot_definitions
 from telemetry.snapshot import storage_id
+from telemetry.rollups import roll_up_closed_hours
 from telemetry.span_schema import SPAN_SCOPE
 
 logger = logging.getLogger(__name__)
@@ -285,6 +286,7 @@ def aggregate_runtime() -> dict:
                 project_unresolved = []
                 definitions = snapshot_definitions(project_id, commit_sha)
                 known = {item.get("symbol_id") for item in definitions if item.get("symbol_id")}
+                roll_up_closed_hours(clickhouse, project_id, revision_id)
                 telemetry = clickhouse.summary(project_id, revision_id, known)
                 if not telemetry.get("available"):
                     continue

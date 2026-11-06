@@ -36,3 +36,41 @@ func TestMarksServerRootSlowerThanProjectP95(t *testing.T) {
 		t.Fatalf("expected slow marker, got %v (present=%t)", value, ok)
 	}
 }
+
+func TestRouteThresholdOverridesTheProjectP95(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "policy.json")
+	policy, _ := json.Marshal(policyDocument{
+		ThresholdsMS:      map[string]float64{"orders": 250},
+		RouteThresholdsMS: map[string]map[string]float64{"orders": {"GET /health": 5}},
+	})
+	if err := os.WriteFile(path, policy, 0600); err != nil {
+		t.Fatal(err)
+	}
+
+	traces := ptrace.NewTraces()
+	resource := traces.ResourceSpans().AppendEmpty()
+	resource.Resource().Attributes().PutStr("indexer.project_id", "orders")
+	spans := resource.ScopeSpans().AppendEmpty().Spans()
+	newSpan := func(method, route string, duration time.Duration) ptrace.Span {
+		span := spans.AppendEmpty()
+		span.SetKind(ptrace.SpanKindServer)
+		span.Attributes().PutStr("http.request.method", method)
+		span.Attributes().PutStr("http.route", route)
+		span.SetStartTimestamp(pcommon.Timestamp(1))
+		span.SetEndTimestamp(pcommon.Timestamp(duration + 1))
+		return span
+	}
+	health := newSpan("get", "/health", 20*time.Millisecond)
+	orders := newSpan("GET", "/orders", 20*time.Millisecond)
+
+	processor := &policyProcessor{file: path}
+	if _, err := processor.process(context.Background(), traces); err != nil {
+		t.Fatal(err)
+	}
+	if value, _ := health.Attributes().Get("indexer.sampling.slow"); value.Str() != "true" {
+		t.Fatalf("a 20 ms health check is slow against its own 5 ms p95, got %q", value.Str())
+	}
+	if value, _ := orders.Attributes().Get("indexer.sampling.slow"); value.Str() != "false" {
+		t.Fatalf("a route without its own threshold uses the project p95, got %q", value.Str())
+	}
+}

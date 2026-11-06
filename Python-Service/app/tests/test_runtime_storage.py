@@ -21,21 +21,29 @@ def test_local_collector_keeps_only_the_full_span_pipeline(tmp_path, monkeypatch
     config = _generated_config(tmp_path, monkeypatch, "local")
 
     pipelines = config["service"]["pipelines"]
-    assert list(pipelines) == ["traces/full"]
+    assert list(pipelines) == ["traces/ingest", "traces/full"]
+    assert pipelines["traces/full"]["receivers"] == ["forward/runtime"]
     assert pipelines["traces/full"]["exporters"] == ["clickhouse/full"]
     assert "tail_sampling/runtime" not in config["processors"]
     assert "p95policy/runtime" not in config["processors"]
     assert set(config["exporters"]) == {"clickhouse/full"}
-    assert "connectors" not in config
-    # Privacy processing stays on the remaining pipeline.
-    assert {"filter/runtime_privacy", "transform/runtime_privacy"} <= set(pipelines["traces/full"]["processors"])
+    assert set(config["connectors"]) == {"forward/runtime"}
+    # Privacy processing runs in the ingest pipeline, before anything is exported.
+    assert {"filter/runtime_privacy", "transform/runtime_privacy"} <= set(pipelines["traces/ingest"]["processors"])
 
 
 def test_remote_collector_keeps_sampled_traces_and_span_metrics(tmp_path, monkeypatch):
     config = _generated_config(tmp_path, monkeypatch, "remote")
 
-    assert {"traces/full", "traces/sampled", "metrics/runtime"} <= set(config["service"]["pipelines"])
+    pipelines = config["service"]["pipelines"]
+    assert {"traces/ingest", "traces/full", "traces/sampled", "metrics/runtime"} <= set(pipelines)
     assert "spanmetrics/runtime" in config["connectors"]
+    # Privacy processing runs once and both trace pipelines receive its output.
+    privacy = {"filter/runtime_privacy", "transform/runtime_privacy"}
+    assert privacy <= set(pipelines["traces/ingest"]["processors"])
+    for name in ("traces/full", "traces/sampled"):
+        assert pipelines[name]["receivers"] == ["forward/runtime"]
+        assert not privacy & set(pipelines[name]["processors"])
 
 
 def test_disabled_collector_has_no_pipelines(tmp_path, monkeypatch):

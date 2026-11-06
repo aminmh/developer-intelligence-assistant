@@ -19,6 +19,7 @@ processors:
     path: ./p95policyprocessor
 
 connectors:
+  - gomod: go.opentelemetry.io/collector/connector/forwardconnector v0.136.0
   - gomod: github.com/open-telemetry/opentelemetry-collector-contrib/connector/spanmetricsconnector v0.136.0
 
 exporters:

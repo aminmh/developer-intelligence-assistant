@@ -314,7 +314,7 @@ services:
     build:
       context: ./telemetry-dev
       dockerfile: Dockerfile.collector-runtime
-    image: devassistant/otelcol-runtime:0.136.0-phase3
+    image: devassistant/otelcol-runtime:0.136.0-phase4
     profiles: [runtime]
     entrypoint: ["/usr/local/bin/clickhouse-router"]
     volumes:
@@ -350,7 +350,7 @@ services:
     build:
       context: ./telemetry-dev
       dockerfile: Dockerfile.collector-runtime
-    image: devassistant/otelcol-runtime:0.136.0-phase3
+    image: devassistant/otelcol-runtime:0.136.0-phase4
     profiles: [runtime]
     entrypoint: ["/bin/sh", "/usr/local/bin/start-runtime-collector.sh"]
     environment:
