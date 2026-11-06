@@ -16,6 +16,16 @@ _METHOD_ID = re.compile(r"^(?:[A-Za-z_][A-Za-z0-9_]*\\)*[A-Za-z_][A-Za-z0-9_]*::
 _SAFE_IDENTIFIER = re.compile(r"^[A-Za-z_][A-Za-z0-9_]{0,62}$")
 MAX_PROFILE_BYTES = 262_144
 MAX_PROFILES_PER_BATCH = 64
+# PHP posts each request's profile on its own, so a plain insert makes one MergeTree part per request.
+# ClickHouse buffers these server-side and flushes them as one part. The API does not wait for the flush,
+# because the PHP sender gives up after 250 ms; profiles are best effort, like the sender.
+_ASYNC_INSERT_SETTINGS = {
+    "async_insert": "1",
+    "wait_for_async_insert": "0",
+    "async_insert_use_adaptive_busy_timeout": "0",
+    "async_insert_busy_timeout_max_ms": "5000",
+}
+_ensured_tables: set[tuple[str, str]] = set()
 
 
 def _profile_table(client: ClickHouseRuntime) -> str:
@@ -125,6 +135,22 @@ def store_profiles(client: ClickHouseRuntime, project_id: str, revision_id: str,
         raise RuntimeError("ClickHouse profile storage is unavailable")
     rows = [validate_profile(profile, project_id, revision_id, commit_sha) for profile in profiles]
     table = _profile_table(client)
+    body = "\n".join(json.dumps(row, separators=(",", ":")) for row in rows).encode("utf-8")
+    ensured = (getattr(client, "url", ""), table)
+    if ensured in _ensured_tables:
+        try:
+            client.execute(f"INSERT INTO {table} FORMAT JSONEachRow", body, _ASYNC_INSERT_SETTINGS)
+            return len(rows)
+        except Exception:
+            # The table may have been dropped since it was created; recreate it and retry once.
+            _ensured_tables.discard(ensured)
+    _create_profile_table(client, table)
+    _ensured_tables.add(ensured)
+    client.execute(f"INSERT INTO {table} FORMAT JSONEachRow", body, _ASYNC_INSERT_SETTINGS)
+    return len(rows)
+
+
+def _create_profile_table(client: ClickHouseRuntime, table: str) -> None:
     retention = runtime_sampling_policy()["aggregation_retention_hours"]
     client.execute(
         f"CREATE TABLE IF NOT EXISTS {table} (profile_id String, project_id String, revision_id String, "
@@ -134,9 +160,6 @@ def store_profiles(client: ClickHouseRuntime, project_id: str, revision_id: str,
         "ENGINE = ReplacingMergeTree(received_at) ORDER BY (project_id, revision_id, profile_id) "
         f"TTL received_at + INTERVAL {retention} HOUR"
     )
-    body = "\n".join(json.dumps(row, separators=(",", ":")) for row in rows).encode("utf-8")
-    client.execute(f"INSERT INTO {table} FORMAT JSONEachRow", body)
-    return len(rows)
 
 
 def profile_edges(client: ClickHouseRuntime, project_id: str, revision_id: str, known_symbol_ids: set[str]) -> dict:
