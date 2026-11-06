@@ -256,6 +256,10 @@ export interface RuntimeRequest {
   span_status: string;
   php_cpu_time_us: number | null;
   php_peak_memory_bytes: number | null;
+  /** Head-sampling ratio the request was recorded at; null when the app did not report one. */
+  sampling_ratio?: number | null;
+  /** Exception class or status code of a failed request (request detail only). */
+  error_type?: string | null;
 }
 
 export interface RuntimeDatabaseCall {
@@ -276,6 +280,12 @@ export interface RuntimeRequestDetail {
   available: boolean;
   reason?: string | null;
   sampled?: boolean;
+  sampling_ratio?: number | null;
+  /** More spans exist than span_limit; the detail shows only the first span_limit. */
+  truncated?: boolean;
+  span_limit?: number;
+  /** Method calls the PHP library could not record for this request (edge or depth caps). */
+  dropped_hook_calls?: number;
   request: RuntimeRequest | null;
   database_calls: RuntimeDatabaseCall[];
   method_activity?: {

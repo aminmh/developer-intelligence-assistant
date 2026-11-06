@@ -22,7 +22,7 @@ const requestOutcomes: { id: RequestOutcome; label: string }[] = [
   { id: 'slow', label: 'Slow' },
 ];
 const requestOutcome = ref<RequestOutcome>('all');
-const requestList = ref<{ available: boolean; reason?: string | null; sampled?: boolean; window_hours?: number; outcome?: RequestOutcome; slow_threshold_ms?: number | null; requests: RuntimeRequest[] } | null>(null);
+const requestList = ref<{ available: boolean; reason?: string | null; sampled?: boolean; sampling_ratio?: number | null; window_hours?: number; outcome?: RequestOutcome; slow_threshold_ms?: number | null; requests: RuntimeRequest[] } | null>(null);
 const requestListLoading = ref(false);
 const requestListError = ref('');
 const requestPage = ref(1);
@@ -332,6 +332,7 @@ const previewFindingDiff = async (traceId: string) => {
 };
 
 const formatMilliseconds = (value: number | null) => value == null ? 'Unavailable' : `${Number(value).toFixed(2)} ms`;
+const formatPercent = (ratio: number) => `${Number((ratio * 100).toFixed(2))}%`;
 const formatPhpCpu = (value: number | null) => value == null ? 'Unavailable' : `${(value / 1000).toFixed(2)} ms`;
 const formatPhpMemory = (value: number | null) => value == null ? 'Unavailable' : value >= 1024 * 1024 ? `${(value / 1024 / 1024).toFixed(2)} MiB` : `${(value / 1024).toFixed(1)} KiB`;
 const displayTable = (tableId: string) => tableId.replace(/^table:/, '').split('.').slice(1).join('.') || tableId;
@@ -735,7 +736,7 @@ onUnmounted(() => stopRuntimeUpdates?.());
             </div>
             <p class="mt-2 text-[9px] leading-4 text-slate-500">82% means 82 of every 100 observed spans matched an indexed symbol in this example; it is a match rate, not a health score.</p>
           </div>
-          <p class="border-t border-slate-800 pt-3 text-[10px] leading-4 text-slate-500">The host agent reconciles containers about every 60 seconds. This view updates when the backend reports new runtime data and after you select Refresh. Aggregates use spans received before Collector tail sampling; PHP SDK head sampling may reduce what reaches the Collector. Container visibility works without spans; code matching, routes, and table activity need spans.</p>
+          <p class="border-t border-slate-800 pt-3 text-[10px] leading-4 text-slate-500">The host agent reconciles containers about every 60 seconds. This view updates when the backend reports new runtime data and after you select Refresh. Aggregates use every span that reaches the Collector. PHP SDK head sampling (10% in production by default) decides which requests are recorded; the request list says when it applies. Container visibility works without spans; code matching, routes, and table activity need spans.</p>
         </div>
       </div>
       </section>
@@ -772,7 +773,9 @@ onUnmounted(() => stopRuntimeUpdates?.());
         <p v-if="requestDeleteNotice" role="status" class="text-xs text-emerald-300">{{ requestDeleteNotice }}</p>
         <p v-if="requestListLoading && !requestList" class="text-xs text-slate-500">Loading recent sampled requests…</p>
         <div v-if="requestListError" class="flex flex-wrap items-center gap-2 text-xs text-rose-300"><span>{{ requestListError }}</span><button type="button" @click="loadRequestList()" class="underline">Retry</button></div>
-        <p v-if="requestList?.available !== false && requestOutcome === 'slow' && requestList?.slow_threshold_ms != null" class="text-[10px] text-slate-500">Showing requests at or above {{ formatMilliseconds(requestList.slow_threshold_ms) }}, the p95 server duration for this revision in this window.</p>
+        <p v-if="requestList?.available !== false && requestList?.requests.length && requestList.sampling_ratio != null && requestList.sampling_ratio < 1" class="flex items-center gap-1 text-[10px] text-amber-300"><AlertTriangle class="h-3 w-3 shrink-0" />The app records {{ formatPercent(requestList.sampling_ratio) }} of requests (head sampling), so real traffic is about {{ Math.round(1 / requestList.sampling_ratio) }}× what is listed here.</p>
+        <p v-else-if="requestList?.available !== false && requestList?.requests.length && requestList.sampling_ratio == null && requestList.requests.some((request) => request.sampling_ratio == null)" class="text-[10px] text-slate-500">The app does not report its sampling ratio, so these requests may be a sample of real traffic.</p>
+        <p v-if="requestList?.available !== false && requestOutcome === 'slow' && requestList?.slow_threshold_ms != null" class="text-[10px] text-slate-500">Showing requests at or above their route's p95 server duration in this window. Routes with fewer than 20 requests use the revision p95 of {{ formatMilliseconds(requestList.slow_threshold_ms) }}.</p>
         <p v-else-if="requestList?.available !== false && requestOutcome === 'errors'" class="text-[10px] text-slate-500">Showing failed requests and 5xx responses.</p>
         <p v-if="requestList?.available === false" class="text-xs text-amber-300">{{ requestList.reason || 'Request data is unavailable.' }}</p>
         <p v-else-if="requestList && !requestList.requests.length" class="text-xs text-slate-500">{{ requestOutcome === 'errors' ? 'No failed requests were observed in this window.' : requestOutcome === 'slow' ? 'No slow requests were observed in this window.' : 'No sampled request spans were observed in this window.' }}</p>
@@ -815,6 +818,7 @@ onUnmounted(() => stopRuntimeUpdates?.());
                   tabindex="0"
                   class="rounded-lg border border-slate-800 bg-slate-950/30 p-3 outline-none focus-visible:ring-2 focus-visible:ring-cyan-400"
                 >
+                  <p v-if="requestDetails[request.trace_id].truncated" class="mb-3 flex items-center gap-1 text-xs text-amber-300"><AlertTriangle class="h-3.5 w-3.5 shrink-0" />This trace has more than {{ requestDetails[request.trace_id].span_limit }} spans; only the first {{ requestDetails[request.trace_id].span_limit }} are shown.</p>
                   <section v-if="activeRequestDetailTab === 'overview'" class="space-y-3">
                     <div v-if="requestDetails[request.trace_id].ai_summary" class="space-y-3">
                       <div class="grid grid-cols-1 gap-3 sm:grid-cols-3">
@@ -873,6 +877,7 @@ onUnmounted(() => stopRuntimeUpdates?.());
                       </div>
                     </div>
                     <p v-else class="text-sm text-amber-200">{{ requestDetails[request.trace_id].method_activity?.reason || 'No method-hook data was captured. This does not mean no code ran.' }}</p>
+                    <p v-if="requestDetails[request.trace_id].dropped_hook_calls" class="flex items-center gap-1 text-xs text-amber-300"><AlertTriangle class="h-3.5 w-3.5 shrink-0" />{{ requestDetails[request.trace_id].dropped_hook_calls }} method call{{ requestDetails[request.trace_id].dropped_hook_calls === 1 ? ' was' : 's were' }} not recorded because the request exceeded the library's edge or call-depth limit.</p>
                   </section>
 
                   <section v-else class="space-y-3 rounded-lg border border-slate-700 bg-slate-900/50 p-3" :aria-label="`AI analysis for ${request.method} ${request.route}`">
