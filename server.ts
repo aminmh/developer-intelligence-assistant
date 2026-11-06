@@ -739,7 +739,11 @@ async function startServer() {
       if (!authIsBootstrapAdmin(user) && !authRoleFor(user, req.params.projectId)) {
         return res.status(403).json({ detail: 'Project access denied.' });
       }
-      const path = `/telemetry/runtime/projects/${encodeURIComponent(req.params.projectId)}/revisions/${encodeURIComponent(req.params.revisionId)}/requests`;
+      const outcome = typeof req.query.outcome === 'string' ? req.query.outcome : 'all';
+      if (!['all', 'errors', 'slow'].includes(outcome)) {
+        return res.status(422).json({ detail: 'Request outcome filter must be all, errors, or slow.' });
+      }
+      const path = `/telemetry/runtime/projects/${encodeURIComponent(req.params.projectId)}/revisions/${encodeURIComponent(req.params.revisionId)}/requests?outcome=${outcome}`;
       const pyRes = await fetch(`${PYTHON_API_URL}${path}`, { headers: { 'X-Internal-Secret': INTERNAL_SECRET } });
       const data = await pyRes.json().catch(() => ({ detail: 'Runtime requests are unavailable.' }));
       return res.status(pyRes.status).json(data);

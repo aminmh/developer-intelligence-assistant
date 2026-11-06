@@ -15,7 +15,14 @@ const projects = ref<RuntimeProjectRecord[]>([]);
 const selectedKey = ref('');
 const loadedDetailKey = ref('');
 const detail = ref<RuntimeSnapshotData | null>(null);
-const requestList = ref<{ available: boolean; reason?: string | null; sampled?: boolean; window_hours?: number; requests: RuntimeRequest[] } | null>(null);
+type RequestOutcome = 'all' | 'errors' | 'slow';
+const requestOutcomes: { id: RequestOutcome; label: string }[] = [
+  { id: 'all', label: 'All' },
+  { id: 'errors', label: 'Errors' },
+  { id: 'slow', label: 'Slow' },
+];
+const requestOutcome = ref<RequestOutcome>('all');
+const requestList = ref<{ available: boolean; reason?: string | null; sampled?: boolean; window_hours?: number; outcome?: RequestOutcome; slow_threshold_ms?: number | null; requests: RuntimeRequest[] } | null>(null);
 const requestListLoading = ref(false);
 const requestListError = ref('');
 const requestPage = ref(1);
@@ -214,10 +221,13 @@ const loadRequestList = async (projectId = selected.value?.project_id, revisionI
   requestListLoading.value = true;
   requestListError.value = '';
   try {
-    const path = `/api/runtime/projects/${encodeURIComponent(projectId)}/revisions/${encodeURIComponent(revisionId)}/requests`;
+    const outcome = requestOutcome.value;
+    const path = `/api/runtime/projects/${encodeURIComponent(projectId)}/revisions/${encodeURIComponent(revisionId)}/requests${outcome === 'all' ? '' : `?outcome=${outcome}`}`;
     const response = await makeRequest(path);
     const data = await response.json();
     if (!response.ok) throw new Error(data.detail || 'Could not load recent requests.');
+    // A slower response for a filter the user has since changed must not overwrite the newer list.
+    if (outcome !== requestOutcome.value) return;
     if (selected.value?.key === expectedKey) {
       requestList.value = data;
       const currentTraceIds = new Set((data.requests || []).map((request: RuntimeRequest) => request.trace_id));
@@ -605,6 +615,10 @@ watch(selectedKey, () => {
 watch(requestPageCount, (pageCount) => {
   if (requestPage.value > pageCount) requestPage.value = pageCount;
 });
+watch(requestOutcome, () => {
+  requestPage.value = 1;
+  void loadRequestList();
+});
 watch(autoRefresh, updateRuntimeSubscription);
 onMounted(async () => {
   await Promise.all([refresh(), loadSavedSetup()]);
@@ -746,6 +760,9 @@ onUnmounted(() => stopRuntimeUpdates?.());
         <div v-if="detail.revision_id" class="flex flex-wrap items-center justify-between gap-2">
           <div><h4 class="text-xs font-semibold uppercase tracking-wide text-slate-300">Recent sampled requests</h4><p class="mt-1 text-[10px] text-slate-500">10 requests per page, up to 50 from the last {{ requestList?.window_hours || detail.telemetry.aggregation_window_hours }} hours. PHP CPU and memory are worker-level estimates.</p></div>
           <div class="flex flex-wrap items-center gap-2">
+            <div role="radiogroup" aria-label="Filter requests by outcome" class="inline-flex overflow-hidden rounded-lg border border-slate-700">
+              <button v-for="option in requestOutcomes" :key="option.id" type="button" role="radio" :aria-checked="requestOutcome === option.id" @click="requestOutcome = option.id" :disabled="requestListLoading" :class="requestOutcome === option.id ? 'bg-slate-700 text-slate-100' : 'text-slate-400 hover:bg-slate-800'" class="px-2 py-1.5 text-[10px] disabled:opacity-50">{{ option.label }}</button>
+            </div>
             <button type="button" @click="clearRequestRows" :disabled="!visibleRequests.length" class="rounded-lg border border-slate-700 px-2 py-1.5 text-[10px] text-slate-300 hover:bg-slate-800 disabled:opacity-50">Clear</button>
             <button v-if="selected?.can_delete_telemetry && requestList?.requests.length" type="button" @click="confirmDeleteRequestRows" class="rounded-lg border border-rose-500/40 px-2 py-1.5 text-[10px] text-rose-300 hover:bg-rose-500/10"><Trash2 class="mr-1 inline h-3 w-3" />Delete stored traces ({{ requestList.requests.length }})</button>
             <button type="button" @click="loadRequestList()" :disabled="requestListLoading" class="rounded-lg border border-slate-700 px-2 py-1.5 text-[10px] text-slate-300 hover:bg-slate-800 disabled:opacity-50"><RefreshCw class="mr-1 inline h-3 w-3" :class="requestListLoading ? 'animate-spin' : ''" />Refresh requests</button>
@@ -755,8 +772,10 @@ onUnmounted(() => stopRuntimeUpdates?.());
         <p v-if="requestDeleteNotice" role="status" class="text-xs text-emerald-300">{{ requestDeleteNotice }}</p>
         <p v-if="requestListLoading && !requestList" class="text-xs text-slate-500">Loading recent sampled requests…</p>
         <div v-if="requestListError" class="flex flex-wrap items-center gap-2 text-xs text-rose-300"><span>{{ requestListError }}</span><button type="button" @click="loadRequestList()" class="underline">Retry</button></div>
+        <p v-if="requestList?.available !== false && requestOutcome === 'slow' && requestList?.slow_threshold_ms != null" class="text-[10px] text-slate-500">Showing requests at or above {{ formatMilliseconds(requestList.slow_threshold_ms) }}, the p95 server duration for this revision in this window.</p>
+        <p v-else-if="requestList?.available !== false && requestOutcome === 'errors'" class="text-[10px] text-slate-500">Showing failed requests and 5xx responses.</p>
         <p v-if="requestList?.available === false" class="text-xs text-amber-300">{{ requestList.reason || 'Request data is unavailable.' }}</p>
-        <p v-else-if="requestList && !requestList.requests.length" class="text-xs text-slate-500">No sampled request spans were observed in this window.</p>
+        <p v-else-if="requestList && !requestList.requests.length" class="text-xs text-slate-500">{{ requestOutcome === 'errors' ? 'No failed requests were observed in this window.' : requestOutcome === 'slow' ? 'No slow requests were observed in this window.' : 'No sampled request spans were observed in this window.' }}</p>
         <div v-else-if="requestList && !visibleRequests.length" class="flex flex-wrap items-center gap-2 text-xs text-slate-500"><span>All loaded request rows are hidden in this view.</span><button type="button" @click="restoreHiddenRequestRows" class="underline">Show hidden requests ({{ requestList.requests.length }})</button></div>
         <div v-else-if="visibleRequests.length" class="space-y-2">
           <article v-for="request in pagedRequests" :key="request.trace_id" class="overflow-hidden rounded-xl border border-slate-800 bg-slate-950/30">
