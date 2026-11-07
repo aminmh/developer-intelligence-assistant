@@ -5,6 +5,7 @@ optional remote vLLM (OpenAI-compatible) provider for heavy answers.
 from __future__ import annotations
 
 import json
+import logging
 import re
 import threading
 import time
@@ -16,6 +17,8 @@ import instructor
 from openai import OpenAI
 
 from infra.settings import settings
+
+logger = logging.getLogger(__name__)
 
 _openai_client: Optional[Tuple[str, OpenAI]] = None
 _extract_client_state: Optional[Tuple[str, OpenAI]] = None
@@ -352,9 +355,12 @@ def complete_with_model(
             if content:
                 return CompletionResult(content, model, "remote", usage)
             # Empty/falsy content is a remote failure — fall through to local.
-        except Exception:
+        except Exception as exc:
             if not fallback_to_local:
                 raise
+            # Keep the reason visible: the caller only sees the local fallback's result or error.
+            logger.warning("Remote model call failed, falling back to local (host=%s): %s: %s",
+                           remote_host, type(exc).__name__, str(exc)[:300])
         if not fallback_to_local:
             raise RuntimeError("The configured remote model returned an empty completion.")
     elif provider == "remote" and not fallback_to_local:

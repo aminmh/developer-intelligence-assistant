@@ -80,3 +80,26 @@ def test_request_detail_returns_the_database_summary(monkeypatch):
     assert summary["query_count"] == 4
     assert summary["request_share"] == pytest.approx(0.2)
     assert summary["groups"][0]["repeated"] is True
+
+
+def test_framework_queries_are_labelled_and_split_from_app_queries():
+    calls = [
+        _call(1, "INSERT", "table:mysql.telescope_entries", 3.0),
+        _call(2, "UPDATE", "table:mysql.sessions", 1.0),
+        # App code reading a framework table is still app work.
+        _call(3, "SELECT", "table:mysql.cache", 0.5, SETTING),
+        _call(4, "SELECT", "table:mysql.pizzas", 0.5, CONTROLLER),
+        # Unattributed but on an app table: not labelled framework.
+        _call(5, "SELECT", "table:mysql.pizzas", 0.5),
+    ]
+
+    summary = _database_summary(calls, 20.0)
+
+    labels = {(group["table_ids"][0], group["symbol_id"]): group["framework"] for group in summary["groups"]}
+    assert labels[("table:mysql.telescope_entries", None)] is True
+    assert labels[("table:mysql.sessions", None)] is True
+    assert labels[("table:mysql.cache", SETTING)] is False
+    assert labels[("table:mysql.pizzas", None)] is False
+    assert (summary["framework_query_count"], summary["framework_total_ms"]) == (2, pytest.approx(4.0))
+    assert (summary["app_query_count"], summary["app_total_ms"]) == (3, pytest.approx(1.5))
+    assert summary["slowest"]["framework"] is True

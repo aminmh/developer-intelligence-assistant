@@ -55,6 +55,10 @@ def test_database_summary_reaches_the_model_without_sql():
     first = database["groups"][0]
     assert (first["symbol_id"], first["count"], first["repeated"], first["caller_symbol_ids"]) == (SETTING, 11, True, [GET_BY_KEY])
     assert "span_ids" not in first
+    assert first["framework"] is False
+    sessions = next(group for group in database["groups"] if group["table_ids"] == ["table:mysql.sessions"])
+    assert sessions["framework"] is True
+    assert (database["framework_query_count"], database["app_query_count"]) == (1, 11)
     assert "select * from cache" not in json.dumps(prompt)
     assert "repeated_min" in prompt["task"]
     # The method behind the repeated query has its source supplied.
@@ -84,3 +88,23 @@ def test_no_database_summary_sends_null():
     analyze_request("pizza", REVISION, detail, "local", definitions_loader=_definitions, archive_loader=lambda _key: _archive(),
                     model_call=lambda prompt, **_k: (prompts.append(prompt), (json.dumps({"findings": []}), "m", "local"))[1])
     assert json.loads(prompts[0])["evidence"]["database_summary"] is None
+
+
+def test_model_failure_is_logged_without_the_prompt(caplog):
+    import pytest as _pytest
+    from telemetry.analysis import AnalysisError
+
+    def failing(_prompt, **_kwargs):
+        try:
+            raise ConnectionRefusedError("connection refused on host.docker.internal:1234")
+        except ConnectionRefusedError as cause:
+            raise RuntimeError("Connection error.") from cause
+
+    with caplog.at_level("WARNING"), _pytest.raises(AnalysisError):
+        analyze_request("pizza", REVISION, _detail(), "local", definitions_loader=_definitions,
+                        archive_loader=lambda _key: _archive(), model_call=failing)
+
+    logged = caplog.text
+    assert "connection refused on host.docker.internal:1234" in logged
+    assert "provider=local" in logged
+    assert "Setting" not in logged and "evidence" not in logged

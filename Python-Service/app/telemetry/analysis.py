@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import difflib
 import json
+import logging
 import re
 import zipfile
 from io import BytesIO
@@ -22,6 +23,18 @@ _CREDENTIAL_ASSIGNMENT = re.compile(
 )
 _CREDENTIAL_BEARER = re.compile(r"(?i)\bBearer\s+[A-Za-z0-9._~+/=-]{12,}")
 _PRIVATE_KEY_BLOCK = re.compile(r"-----BEGIN [A-Z ]*PRIVATE KEY-----.*?-----END [A-Z ]*PRIVATE KEY-----", re.S)
+
+
+logger = logging.getLogger(__name__)
+
+
+def _log_model_failure(stage: str, provider: str, exc: Exception) -> None:
+    """Record why the model call failed (status, host, connection error), never the prompt."""
+    causes, current = [], exc
+    while current is not None and len(causes) < 4:
+        causes.append(f"{type(current).__name__}: {str(current)[:300]}")
+        current = current.__cause__ or current.__context__
+    logger.warning("Runtime %s model call failed (provider=%s): %s", stage, provider, " <- ".join(causes))
 
 
 class AnalysisError(ValueError):
@@ -117,15 +130,19 @@ def _database_evidence(detail: dict) -> dict | None:
     for group in summary.get("groups", [])[:MAX_DATABASE_GROUPS]:
         if isinstance(group, dict):
             groups.append({key: group.get(key) for key in (
-                "operation", "table_ids", "symbol_id", "caller_symbol_ids", "count", "total_ms", "max_ms", "repeated",
+                "operation", "table_ids", "symbol_id", "caller_symbol_ids", "count", "total_ms", "max_ms", "repeated", "framework",
             ) if group.get(key) is not None})
     return {
         "query_count": summary.get("query_count"),
         "total_ms": summary.get("total_ms"),
+        "app_query_count": summary.get("app_query_count"),
+        "app_total_ms": summary.get("app_total_ms"),
+        "framework_query_count": summary.get("framework_query_count"),
+        "framework_total_ms": summary.get("framework_total_ms"),
         "request_share": summary.get("request_share"),
         "repeated_min": summary.get("repeated_min"),
         "repeated_groups": summary.get("repeated_groups"),
-        "slowest": {key: slowest.get(key) for key in ("operation", "table_ids", "symbol_id", "duration_ms")
+        "slowest": {key: slowest.get(key) for key in ("operation", "table_ids", "symbol_id", "duration_ms", "framework")
                     if slowest.get(key) is not None} if slowest else None,
         "groups": groups,
     }
@@ -237,7 +254,10 @@ ANALYSIS_TASK = (
     "that names the issuing method, states the likely cause (a lookup inside a loop or N+1 relation loading, a value "
     "read again instead of kept for the request, or framework work such as sessions, cache or debugging tools) as an "
     "inference, and recommends a concrete change in that method when its source is supplied. Groups with no symbol_id "
-    "come from the framework, not application code; say so rather than suggesting an application change."
+    "come from the framework, not application code; say so rather than suggesting an application change. Groups marked "
+    "framework are the framework's own work on its tables (sessions, cache, queues, debugging tools such as Telescope); "
+    "mention them only as configuration (for example a debugging tool left on, or the session or cache driver), never as "
+    "an application code change."
 )
 
 
@@ -295,6 +315,7 @@ def analyze_request(
             temperature=0.1, max_tokens=1800, provider=provider,
         )
     except Exception as exc:
+        _log_model_failure("analysis", provider, exc)
         raise AnalysisError("The configured model could not complete analysis. Retry the request.") from exc
     validated = _validate_findings(_parse_model_json(content), assembled, gaps)
     return {**validated, "provider": used_provider, "requested_provider": provider, "model": model,
@@ -352,6 +373,7 @@ def preview_diff(
     try:
         content, model, used_provider = model_call(prompt, system="Generate a review-only PHP patch proposal. Return only JSON.", temperature=0.1, max_tokens=3000, provider=provider)
     except Exception as exc:
+        _log_model_failure("diff preview", provider, exc)
         raise AnalysisError("The configured model could not generate a diff preview. Retry the request.") from exc
     proposal = _parse_model_json(content)
     path, old_text, new_text = proposal.get("file_path"), proposal.get("old_text"), proposal.get("new_text")

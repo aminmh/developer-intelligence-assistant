@@ -201,6 +201,23 @@ def telemetry_settings(registry=None) -> dict:
 _DETAIL_SPAN_LIMIT = 500
 # The same query (operation, tables, issuing method) this many times in one request is flagged as repeated.
 REPEATED_QUERY_MIN = 3
+# Tables the framework and its packages own: sessions, cache, queues, migrations and debugging tools.
+FRAMEWORK_TABLES = frozenset({
+    "sessions", "cache", "cache_locks", "jobs", "job_batches", "failed_jobs", "migrations",
+    "password_reset_tokens", "password_resets", "personal_access_tokens", "notifications",
+    "messenger_messages", "doctrine_migration_versions", "sessions_symfony",
+})
+FRAMEWORK_TABLE_PREFIXES = ("telescope_", "pulse_", "horizon_")
+
+
+def _is_framework_table(table_id: str) -> bool:
+    name = str(table_id).rsplit(".", 1)[-1].rsplit(":", 1)[-1].lower()
+    return name in FRAMEWORK_TABLES or name.startswith(FRAMEWORK_TABLE_PREFIXES)
+
+
+def _is_framework_query(table_ids, symbol_id) -> bool:
+    """Framework work: only framework tables, and no application method issued it."""
+    return not symbol_id and bool(table_ids) and all(_is_framework_table(table) for table in table_ids)
 
 
 def _database_summary(calls: list[dict], request_duration_ms) -> dict:
@@ -252,7 +269,15 @@ def _database_summary(calls: list[dict], request_duration_ms) -> dict:
         group["total_ms"] = round(group["total_ms"], 3)
         group["max_ms"] = round(group["max_ms"], 3)
         group["repeated"] = group["count"] >= REPEATED_QUERY_MIN
+        group["framework"] = _is_framework_query(group["table_ids"], group["symbol_id"])
+    framework = [group for group in ordered if group["framework"]]
+    framework_ms = sum(group["total_ms"] for group in framework)
+    framework_count = sum(group["count"] for group in framework)
     return {
+        "app_query_count": len(calls) - framework_count,
+        "app_total_ms": round(max(0.0, total_ms - framework_ms), 3),
+        "framework_query_count": framework_count,
+        "framework_total_ms": round(framework_ms, 3),
         "query_count": len(calls),
         "total_ms": round(total_ms, 3),
         # Queries in a PHP request run one after another, so their sum is a fair share of the request time.
@@ -263,6 +288,7 @@ def _database_summary(calls: list[dict], request_duration_ms) -> dict:
             "operation": slowest.get("operation"),
             "table_ids": slowest.get("table_ids") or [],
             "symbol_id": slowest.get("symbol_id"),
+            "framework": _is_framework_query(slowest.get("table_ids") or [], slowest.get("symbol_id")),
         },
         "groups": ordered,
         "repeated_groups": sum(1 for group in ordered if group["repeated"]),
