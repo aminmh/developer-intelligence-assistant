@@ -911,3 +911,16 @@ export interface EvaluatorRecommendation {
   auto_apply: boolean;
   notes?: string[];
 }
+
+/** A business rule from the project's synced Outline collection that grounded a chat answer. */
+export interface ChatBusinessRuleSource {
+  doc_id: string;
+  title: string;
+  heading: string;
+  url: string;
+  instance_url: string | null;
+  synced_at: string;
+  symbol_ids: string[];
+  match: 'vector' | 'keyword';
+  label: string;
+}

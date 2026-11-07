@@ -15,7 +15,8 @@ import {
   ShieldCheck,
   X,
 } from 'lucide-vue-next';
-import { SearchMatch, UploadedFile, LLMUsage, ContextUsage } from '../types';
+import { SearchMatch, UploadedFile, LLMUsage, ContextUsage, type ChatBusinessRuleSource } from '../types';
+import { outlineHref, syncedAgo, symbolLabel } from './code-quality/ruleKnowledge';
 import PipelineProgress from './PipelineProgress.vue';
 import ChatLoading from './ChatLoading.vue';
 import EvaluationModal from './EvaluationModal.vue';
@@ -30,6 +31,7 @@ interface Message {
   content: string;
   timestamp: string;
   matches?: SearchMatch[];
+  businessRules?: ChatBusinessRuleSource[];
   llmUsed?: string;
   durationMs?: number;
   usage?: LLMUsage | null;
@@ -353,6 +355,19 @@ const chatLocked = computed(() => props.loading || !!props.gatePreview);
             v-if="msg.role === 'assistant' && msg.queryId"
             :queryId="msg.queryId"
           />
+
+          <!-- Business rules that grounded this answer -->
+          <div v-if="msg.role === 'assistant' && msg.businessRules?.length" class="mt-2 max-w-3xl w-full rounded-xl border border-indigo-500/20 bg-indigo-500/5 p-2.5 text-left" aria-label="Business rules used for this answer">
+            <p class="text-[10px] font-semibold uppercase tracking-wide text-indigo-300">Business rules</p>
+            <ul class="mt-1.5 space-y-1">
+              <li v-for="rule in msg.businessRules" :key="rule.doc_id" class="text-[11px] text-slate-300">
+                <span class="font-mono text-indigo-300">[{{ rule.label }}]</span>
+                <a :href="outlineHref(rule.instance_url, rule.url)" target="_blank" rel="noopener noreferrer" class="ml-1 text-indigo-200 hover:underline">{{ rule.title }}<template v-if="rule.heading"> · {{ rule.heading }}</template></a>
+                <span class="ml-1 text-slate-500">{{ syncedAgo(rule.synced_at) }}</span>
+                <span v-if="rule.symbol_ids.length" class="ml-1 text-slate-500">· implemented by <code class="text-slate-400">{{ rule.symbol_ids.slice(0, 3).map(symbolLabel).join(', ') }}</code><template v-if="rule.symbol_ids.length > 3"> +{{ rule.symbol_ids.length - 3 }}</template></span>
+              </li>
+            </ul>
+          </div>
 
           <!-- Expand matches toggle -->
           <button 

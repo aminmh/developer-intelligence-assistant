@@ -7,6 +7,9 @@ import ToggleCard from './ToggleCard.vue';
 import { makeRequest } from '../ui/makeRequest';
 import { subscribeRuntimeUpdates } from '../ui/runtimeEvents';
 import { useUrlTab } from '../composables/useUrlTab';
+import RuleLinksPanel from './code-quality/RuleLinksPanel.vue';
+import RuleImpactResults from './code-quality/RuleImpactResults.vue';
+import { ruleKnowledgePath, ruleRequest, type ImpactResult } from './code-quality/ruleKnowledge';
 import type { RuntimeAnalysisFinding, RuntimeDatabaseCall, RuntimeDatabaseGroup, RuntimeDatabaseSummary, RuntimeDiffPreview, RuntimeProjectRecord, RuntimeRequest, RuntimeRequestAnalysis, RuntimeRequestDetail, RuntimeSnapshotData } from '../types';
 
 const props = defineProps<{ useRemote: boolean }>();
@@ -329,6 +332,35 @@ const previewFindingDiff = async (traceId: string) => {
   } finally {
     if (selected.value?.key === current.key) diffLoading.value = { ...diffLoading.value, [key]: false };
   }
+};
+
+// Canonical ids of the code a request touched, for the business rules linked to it.
+const requestSymbolIds = (detail: RuntimeRequestDetail) => {
+  const ids = new Set<string>();
+  if (detail.request?.route && detail.request.route !== '(unmatched)') ids.add(`route:${detail.request.method.toUpperCase()} ${detail.request.route}`);
+  for (const edge of detail.method_activity?.edges || []) { ids.add(edge.caller_symbol_id); ids.add(edge.symbol_id); }
+  for (const call of detail.database_calls || []) {
+    for (const value of [call.caller_symbol_id, call.symbol_id, ...(call.table_ids || [])]) if (value) ids.add(value);
+  }
+  return [...ids].filter(Boolean).slice(0, 200);
+};
+const ruleImpacts = ref<Record<string, ImpactResult | undefined>>({});
+const ruleImpactLoading = ref<Record<string, boolean>>({});
+const ruleImpactErrors = ref<Record<string, string>>({});
+const checkDiffAgainstRules = async (traceId: string) => {
+  const current = selected.value;
+  const key = requestAnalysisKey(traceId);
+  const preview = diffPreviews.value[key];
+  if (!current?.revision_id || !preview || ruleImpactLoading.value[key]) return;
+  ruleImpactLoading.value = { ...ruleImpactLoading.value, [key]: true };
+  ruleImpactErrors.value = { ...ruleImpactErrors.value, [key]: '' };
+  try {
+    const result = await ruleRequest<ImpactResult>(ruleKnowledgePath(current.project_id, '/impact'),
+      { method: 'POST', json: { revision_id: current.revision_id, diff: preview.diff } });
+    if (selected.value?.key === current.key) ruleImpacts.value = { ...ruleImpacts.value, [key]: result };
+  } catch (cause: any) {
+    if (selected.value?.key === current.key) ruleImpactErrors.value = { ...ruleImpactErrors.value, [key]: cause?.message || 'The diff could not be checked against business rules.' };
+  } finally { ruleImpactLoading.value = { ...ruleImpactLoading.value, [key]: false }; }
 };
 
 const formatMilliseconds = (value: number | null) => value == null ? 'Unavailable' : `${Number(value).toFixed(2)} ms`;
@@ -973,6 +1005,7 @@ onUnmounted(() => stopRuntimeUpdates?.());
                     </div>
                     <p v-else class="text-sm text-amber-200">{{ requestDetails[request.trace_id].method_activity?.reason || 'No method-hook data was captured. This does not mean no code ran.' }}</p>
                     <p v-if="requestDetails[request.trace_id].dropped_hook_calls" class="flex items-center gap-1 text-xs text-amber-300"><AlertTriangle class="h-3.5 w-3.5 shrink-0" />{{ requestDetails[request.trace_id].dropped_hook_calls }} method call{{ requestDetails[request.trace_id].dropped_hook_calls === 1 ? ' was' : 's were' }} not recorded because the request exceeded the library's edge or call-depth limit.</p>
+                    <RuleLinksPanel v-if="selected?.revision_id" :project-id="selected.project_id" :revision-id="selected.revision_id" :symbol-ids="requestSymbolIds(requestDetails[request.trace_id])" />
                   </section>
 
                   <section v-else class="space-y-3 rounded-lg border border-slate-700 bg-slate-900/50 p-3" :aria-label="`AI analysis for ${request.method} ${request.route}`">
@@ -997,6 +1030,9 @@ onUnmounted(() => stopRuntimeUpdates?.());
                         <div v-if="diffPreviews[requestAnalysisKey(request.trace_id)]" class="rounded-lg border border-cyan-500/20 bg-slate-950 p-3">
                           <p class="break-words text-xs leading-5 text-cyan-200">Read-only preview · {{ diffPreviews[requestAnalysisKey(request.trace_id)].file_path }} · revision {{ diffPreviews[requestAnalysisKey(request.trace_id)].revision_id }} · {{ diffPreviews[requestAnalysisKey(request.trace_id)].provider }} / {{ diffPreviews[requestAnalysisKey(request.trace_id)].model }}</p>
                           <pre tabindex="0" class="mt-2 max-h-80 overflow-auto whitespace-pre-wrap break-words font-mono text-xs text-slate-300">{{ diffPreviews[requestAnalysisKey(request.trace_id)].diff }}</pre>
+                          <button type="button" class="mt-2 rounded-lg border border-slate-600 px-3 py-1.5 text-xs text-slate-200 hover:bg-slate-800 disabled:opacity-60" :disabled="ruleImpactLoading[requestAnalysisKey(request.trace_id)]" @click="checkDiffAgainstRules(request.trace_id)">{{ ruleImpactLoading[requestAnalysisKey(request.trace_id)] ? 'Checking business rules…' : 'Check against business rules' }}</button>
+                          <p v-if="ruleImpactErrors[requestAnalysisKey(request.trace_id)]" role="alert" class="mt-2 text-xs text-rose-300">{{ ruleImpactErrors[requestAnalysisKey(request.trace_id)] }}</p>
+                          <RuleImpactResults v-if="ruleImpacts[requestAnalysisKey(request.trace_id)]" class="mt-2" :result="ruleImpacts[requestAnalysisKey(request.trace_id)]!" :instance-url="null" />
                         </div>
                       </div>
                     </div>

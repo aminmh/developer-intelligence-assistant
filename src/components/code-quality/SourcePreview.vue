@@ -2,6 +2,7 @@
 import { computed, ref, watch } from 'vue';
 import { AlertCircle, ChevronLeft, ChevronRight, LoaderCircle, X } from 'lucide-vue-next';
 import { makeRequest } from '../../ui/makeRequest';
+import RuleLinksPanel from './RuleLinksPanel.vue';
 
 type SourceLine = { number: number; text: string };
 type SourceWindow = {
@@ -90,5 +91,6 @@ watch(() => [props.projectId, props.revisionId, props.filePath, props.line], () 
         <button type="button" class="inline-flex items-center gap-1 rounded px-2 py-1 hover:bg-slate-800 disabled:cursor-not-allowed disabled:opacity-40" :disabled="!source.has_next || loading" @click="loadWindow(source.start_line + 100)">Next<ChevronRight :size="14" /></button>
       </div>
     </div>
+    <RuleLinksPanel class="mt-3" compact :project-id="projectId" :revision-id="revisionId" :file="filePath" />
   </section>
 </template>

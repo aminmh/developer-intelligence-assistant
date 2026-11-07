@@ -13,6 +13,8 @@ type RouteDependencies = {
   isGlobalAdmin: (user: AuthUser) => boolean;
   helperUrl: string;
   webOrigin: string;
+  /** How often to re-sync Outline business rules for every connected project; 0 disables it. */
+  ruleSyncIntervalMs?: number;
 };
 
 export function registerCodeQualityRoutes(app: Express, dependencies: RouteDependencies) {
@@ -592,6 +594,83 @@ export function registerCodeQualityRoutes(app: Express, dependencies: RouteDepen
       return await reply(res, documents, 'Outline documents could not be loaded.');
     } catch { return res.status(502).json({ detail: 'Outline documents could not be loaded.' }); }
   });
+
+  // ----- Business rule knowledge: synced Outline index, links and developer aids -----
+  // Only this server can read the Outline token (from the desktop credential helper), so it starts every sync.
+  const syncOutlineRules = async (projectId: string, credentialId: string, user: AuthUser) => {
+    const credential = await callOutlineCredentialHelper(projectId, credentialId, 'code-quality-outline-fetch', 'POST', {});
+    if (!credential.response.ok || typeof credential.data.token !== 'string') {
+      return { status: credential.response.status || 503,
+        data: { detail: credential.data.detail || 'The saved Outline token could not be read from the OS credential store.' } };
+    }
+    const upstream = await forward(`/code-quality/projects/${encodeURIComponent(projectId)}/outline/sync`, user,
+      { method: 'POST', body: JSON.stringify({ token: credential.data.token }) });
+    return { status: upstream.status, data: await upstream.json().catch(() => ({ detail: 'Business rules could not be synced.' })) };
+  };
+  const ruleSyncUser = { sub: 'system:business-rule-sync' };
+  const runScheduledRuleSync = async () => {
+    try {
+      const listed = await forward('/code-quality/outline/connections', ruleSyncUser);
+      if (!listed.ok) return;
+      const { connections = [] } = await listed.json().catch(() => ({})) as { connections?: { project_id: string; credential_id: string }[] };
+      for (const connection of connections) {
+        // A stopped desktop helper or unreachable Outline only skips this round; the last synced copy stays.
+        await syncOutlineRules(connection.project_id, connection.credential_id, ruleSyncUser).catch(() => undefined);
+      }
+    } catch { /* API unavailable: try again next round */ }
+  };
+  const ruleSyncInterval = dependencies.ruleSyncIntervalMs ?? 10 * 60_000;
+  if (ruleSyncInterval > 0) {
+    setTimeout(() => void runScheduledRuleSync(), 30_000).unref?.();
+    setInterval(() => void runScheduledRuleSync(), ruleSyncInterval).unref?.();
+  }
+
+  app.post('/api/code-quality/projects/:projectId/outline/sync', async (req, res) => {
+    try {
+      const user = allowed(res, req.params.projectId); if (!user) return;
+      const configResponse = await forward(`/code-quality/projects/${encodeURIComponent(req.params.projectId)}/outline`, user);
+      const config = await configResponse.json().catch(() => ({})) as any;
+      if (!configResponse.ok || !config.connection) {
+        return res.status(configResponse.ok ? 404 : configResponse.status).json({ detail: config.detail || 'Connect an Outline collection before syncing business rules.' });
+      }
+      if (typeof config.connection.credential_id !== 'string') return res.status(503).json({ detail: 'The saved Outline credential is unavailable.' });
+      const result = await syncOutlineRules(req.params.projectId, config.connection.credential_id, user);
+      return res.status(result.status).json(result.data);
+    } catch { return res.status(502).json({ detail: 'Business rules could not be synced.' }); }
+  });
+
+  const ruleKnowledgePath = (projectId: string, suffix = '') =>
+    `/code-quality/projects/${encodeURIComponent(projectId)}/rule-knowledge${suffix}`;
+  const queryString = (query: Record<string, unknown>, keys: string[]) => {
+    const params = new URLSearchParams();
+    for (const key of keys) {
+      const value = query[key];
+      for (const item of Array.isArray(value) ? value : value === undefined ? [] : [value]) {
+        if (typeof item === 'string') params.append(key, item);
+      }
+    }
+    const text = params.toString();
+    return text ? `?${text}` : '';
+  };
+  const ruleKnowledgeRoute = (method: 'get' | 'post' | 'put', suffix: string, upstreamSuffix: (req: any) => string,
+    fallback: string) => {
+    app[method](`/api/code-quality/projects/:projectId/rule-knowledge${suffix}`, async (req, res) => {
+      try {
+        const user = allowed(res, req.params.projectId); if (!user) return;
+        const init: RequestInit = method === 'get' ? {} : { method: method.toUpperCase(), body: JSON.stringify(req.body ?? {}) };
+        return await reply(res, await forward(ruleKnowledgePath(req.params.projectId, upstreamSuffix(req)), user, init), fallback);
+      } catch { return res.status(502).json({ detail: fallback }); }
+    });
+  };
+  ruleKnowledgeRoute('get', '', () => '', 'Business rules are unavailable.');
+  ruleKnowledgeRoute('put', '/settings', () => '/settings', 'Business rule settings could not be saved.');
+  ruleKnowledgeRoute('get', '/links', (req) => '/links' + queryString(req.query, ['doc_id', 'symbol_id', 'file']), 'Business rule links are unavailable.');
+  ruleKnowledgeRoute('post', '/links/suggest', () => '/links/suggest', 'Code links could not be suggested.');
+  ruleKnowledgeRoute('put', '/links', () => '/links', 'The business rule link could not be saved.');
+  ruleKnowledgeRoute('get', '/coverage', (req) => '/coverage' + queryString(req.query, ['revision_id']), 'Business rule coverage is unavailable.');
+  ruleKnowledgeRoute('post', '/impact', () => '/impact', 'The diff could not be checked against business rules.');
+  ruleKnowledgeRoute('get', '/runtime', (req) => '/runtime' + queryString(req.query, ['revision_id']), 'Business rule runtime data is unavailable.');
+  ruleKnowledgeRoute('post', '/:docId/tests', (req) => `/${encodeURIComponent(req.params.docId)}/tests`, 'Test skeletons could not be generated.');
 
   app.post('/api/code-quality/projects/:projectId/outline/credential', async (req, res) => {
     try {

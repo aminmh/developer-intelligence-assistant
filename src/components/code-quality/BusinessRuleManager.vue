@@ -2,6 +2,7 @@
 import { computed, ref, watch } from 'vue';
 import { AlertCircle, CheckCircle2, Download, ExternalLink, LoaderCircle, RefreshCw, Unplug } from 'lucide-vue-next';
 import { makeRequest } from '../../ui/makeRequest';
+import RuleKnowledgePanel from './RuleKnowledgePanel.vue';
 
 type Collection = { id: string; name: string };
 type Connection = { instance_url: string; collection_id: string; credential_id: string; updated_at: string } | null;
@@ -279,5 +280,6 @@ watch(() => props.projectId, () => { documentsRequest += 1; documentsLoading.val
       <div v-if="error" role="alert" class="mt-4 flex items-start gap-2 rounded-lg border border-rose-500/30 bg-rose-500/10 p-3 text-sm text-rose-200"><AlertCircle :size="16" class="mt-0.5 shrink-0" /><span>{{ error }}</span></div>
       <div v-if="notice" role="status" class="mt-4 flex items-start gap-2 rounded-lg border border-emerald-500/20 bg-emerald-500/5 p-3 text-sm text-emerald-200"><CheckCircle2 :size="16" class="mt-0.5 shrink-0" /><span>{{ notice }}</span></div>
     </div>
+    <RuleKnowledgePanel v-if="hasProject && connected && !loading" :project-id="props.projectId" :credential-saved="credentialSaved" />
   </section>
 </template>

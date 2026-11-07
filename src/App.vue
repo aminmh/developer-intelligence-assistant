@@ -16,7 +16,7 @@ import {
   PanelLeftOpen,
   ShieldCheck
 } from 'lucide-vue-next';
-import type { RAGConfig, SearchMatch, LLMUsage, ContextUsage } from './types';
+import type { RAGConfig, SearchMatch, LLMUsage, ContextUsage, ChatBusinessRuleSource } from './types';
 import { makeRequest } from './ui/makeRequest';
 import { useProjectFiles } from './composables/useProjectFiles';
 import { validateUploadIdentity } from './services/uploadIdentity';
@@ -164,6 +164,7 @@ interface Message {
   content: string;
   timestamp: string;
   matches?: SearchMatch[];
+  businessRules?: ChatBusinessRuleSource[];
   llmUsed?: string;
   durationMs?: number;
   usage?: LLMUsage | null;
@@ -373,6 +374,7 @@ const streamAnswer = async (text: string, domainRequest?: DomainContextRequest) 
         } else if (evt.type === 'done') {
           m.content = evt.answer || m.content;
           m.matches = evt.matches || m.matches;
+          m.businessRules = Array.isArray(evt.business_rules) ? evt.business_rules : [];
           m.llmUsed = llmUsed;
           m.durationMs = evt.duration_ms;
           m.usage = evt.usage || null;

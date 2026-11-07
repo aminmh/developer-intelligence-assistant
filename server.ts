@@ -119,6 +119,12 @@ async function findStoredUpload(filename: string, uploadSessionId: string): Prom
     && file.upload_session_id === uploadSessionId) ?? null;
 }
 
+// Business rules ride along with chat only for a project the signed-in user can access.
+function businessRulesAllowed(res: express.Response, projectId: unknown): boolean {
+  const user = (res.locals as any).authUser;
+  return typeof projectId === 'string' && !!projectId && Boolean(user && (authIsBootstrapAdmin(user) || authRoleFor(user, projectId)));
+}
+
 async function authorizeAttachedUpload(
   res: express.Response,
   filename: unknown,
@@ -1825,6 +1831,7 @@ async function startServer() {
             query,
             use_remote: !!use_remote,
             route: classification.route,
+            business_rules: businessRulesAllowed(res, project_id),
           }),
         });
         if (aRes.ok) {
@@ -1909,6 +1916,7 @@ async function startServer() {
           ...(runtimeExtraContext ? { extra_context: [req.body.extra_context, runtimeExtraContext].filter((value) => typeof value === 'string' && value.trim()).join('\n\n'), runtime_symbol_metrics: runtimeSymbolMetrics } : {}),
           query,
           use_remote: !!use_remote,
+          business_rules: businessRulesAllowed(res, project_id),
           route: routeName,
         }),
       });
