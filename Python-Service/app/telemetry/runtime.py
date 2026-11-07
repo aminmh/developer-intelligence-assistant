@@ -199,6 +199,75 @@ def telemetry_settings(registry=None) -> dict:
 
 
 _DETAIL_SPAN_LIMIT = 500
+# The same query (operation, tables, issuing method) this many times in one request is flagged as repeated.
+REPEATED_QUERY_MIN = 3
+
+
+def _database_summary(calls: list[dict], request_duration_ms) -> dict:
+    """Totals and same-shape groups for one request's database calls.
+
+    A group is the operation, the tables, and the application method that issued the query (the
+    innermost app frame). Without the SQL text two queries in a group may differ in their columns or
+    conditions, so a repeated group is a strong hint (often N+1 or a per-call cache read), not proof.
+    """
+    def ms(value) -> float:
+        try:
+            return max(0.0, float(value or 0))
+        except (TypeError, ValueError):
+            return 0.0
+
+    total_ms = sum(ms(call.get("duration_ms")) for call in calls)
+    try:
+        request_ms = float(request_duration_ms) if request_duration_ms is not None else None
+    except (TypeError, ValueError):
+        request_ms = None
+    slowest = max(calls, key=lambda call: ms(call.get("duration_ms")), default=None)
+
+    groups: dict[tuple, dict] = {}
+    for call in calls:
+        key = (call.get("operation") or None, tuple(call.get("table_ids") or ()), call.get("symbol_id") or None)
+        group = groups.get(key)
+        if group is None:
+            group = groups[key] = {
+                "operation": key[0],
+                "table_ids": list(key[1]),
+                "symbol_id": key[2],
+                "caller_symbol_ids": [],
+                "count": 0,
+                "total_ms": 0.0,
+                "max_ms": 0.0,
+                "span_ids": [],
+            }
+        duration = ms(call.get("duration_ms"))
+        group["count"] += 1
+        group["total_ms"] += duration
+        group["max_ms"] = max(group["max_ms"], duration)
+        group["span_ids"].append(call.get("span_id"))
+        caller = call.get("caller_symbol_id")
+        if caller and caller not in group["caller_symbol_ids"] and len(group["caller_symbol_ids"]) < 5:
+            group["caller_symbol_ids"].append(caller)
+
+    ordered = sorted(groups.values(), key=lambda group: (-group["count"], -group["total_ms"]))
+    for group in ordered:
+        group["total_ms"] = round(group["total_ms"], 3)
+        group["max_ms"] = round(group["max_ms"], 3)
+        group["repeated"] = group["count"] >= REPEATED_QUERY_MIN
+    return {
+        "query_count": len(calls),
+        "total_ms": round(total_ms, 3),
+        # Queries in a PHP request run one after another, so their sum is a fair share of the request time.
+        "request_share": round(min(1.0, total_ms / request_ms), 4) if request_ms and request_ms > 0 else None,
+        "slowest": None if slowest is None else {
+            "span_id": slowest.get("span_id"),
+            "duration_ms": round(ms(slowest.get("duration_ms")), 3),
+            "operation": slowest.get("operation"),
+            "table_ids": slowest.get("table_ids") or [],
+            "symbol_id": slowest.get("symbol_id"),
+        },
+        "groups": ordered,
+        "repeated_groups": sum(1 for group in ordered if group["repeated"]),
+        "repeated_min": REPEATED_QUERY_MIN,
+    }
 # Routes with fewer server requests in the window than this use the revision p95 as their slow threshold.
 SLOW_ROUTE_MIN_REQUESTS = 20
 
@@ -467,6 +536,7 @@ class ClickHouseRuntime:
             "reason": None,
             "request": request,
             "database_calls": calls,
+            "database_summary": _database_summary(calls, request.get("duration_ms")),
             "method_activity": _method_activity(root.get("method_hook_counts")),
             "ai_summary": ai_summary,
             "sampled": True,
