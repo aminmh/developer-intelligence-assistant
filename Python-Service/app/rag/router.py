@@ -182,11 +182,8 @@ def _feedback_override(query_vec: List[float]) -> Optional[str]:
         if not collection or collection not in collections:
             return None
 
-        hits = qdrant.search(
-            collection_name=collection,
-            query_vector=query_vec,
-            limit=1,
-        )
+        from index.llamaindex_layer import qdrant_vector_search
+        hits = qdrant_vector_search(qdrant, collection, query_vec, 1)
         if not hits:
             return None
         if hits[0].score <= FEEDBACK_OVERRIDE_THRESHOLD:

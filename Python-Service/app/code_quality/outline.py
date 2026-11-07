@@ -104,6 +104,11 @@ class OutlineConnectionStore:
                        (project_id, instance_url, collection_id.strip(), credential_id, now))
         return self.get(project_id)
 
+    def list(self) -> list[dict[str, Any]]:
+        with self._connect() as db:
+            rows = db.execute("SELECT * FROM code_quality_outline_connections ORDER BY project_id").fetchall()
+        return [{"project_id": row["project_id"], **self._serialize(row)} for row in rows]
+
     def delete(self, project_id: str) -> dict[str, Any] | None:
         current = self.get(project_id)
         with self._connect() as db:
@@ -209,10 +214,12 @@ def fetch_business_rules(connection: dict[str, Any], token: str) -> tuple[list[d
         digest = sha256((title + "\n\n" + text).encode("utf-8")).hexdigest()
         revision = document.get("revision")
         version = revision if type(revision) is int and revision > 0 else 1
+        url_id = document.get("urlId")
         rules.append({"rule_id": document_id, "version": version, "title": title,
                       "statement": text, "category": "business_rule", "enabled": True,
                       "collection_id": collection_id, "updated_at": updated_at,
-                      "content_hash": digest})
+                      "content_hash": digest,
+                      "url_id": url_id[:64] if isinstance(url_id, str) and url_id else document_id})
     summary = {"status": "synchronized", "collection_id": collection_id,
                "document_count": len(documents), "imported_count": len(rules),
                "omitted_count": max(0, len(documents) - len(rules)),

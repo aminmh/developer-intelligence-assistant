@@ -254,6 +254,9 @@ def retrieve_revision_context(
                     "category": category,
                     "rule": RETRIEVER_VERSION if rule_id else "revision-context-2",
                     **({"business_rule_id": rule_id} if rule_id else {}),
+                    # The canonical symbol id lets rule evidence become a suggested rule <-> code link.
+                    **({"symbol_id": payload["symbol_id"][:512]}
+                       if isinstance(payload.get("symbol_id"), str) and payload["symbol_id"] else {}),
                     "file": file,
                     "line": line,
                     "message": f"Revision-matched {source_kind}" + (f" for {symbol}." if symbol else "."),

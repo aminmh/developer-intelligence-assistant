@@ -1890,6 +1890,31 @@ def _resolve_preview_mode(body: dict) -> str:
     return mode
 
 
+def _maybe_business_rule_context(body: dict, query: str) -> tuple[str | None, list[dict]]:
+    """Ground project questions in the synced Outline business rules.
+
+    Rule text reaches a remote chat model only when the project allows it.
+    """
+    project_id = body.get("project_id")
+    # The web server sets business_rules=true only after checking the user's project access.
+    if not isinstance(project_id, str) or not project_id or body.get("business_rules") is not True:
+        return None, []
+    from telemetry.snapshot import validate_project_id
+    try:
+        validate_project_id(project_id)
+    except ValueError:
+        return None, []
+    from code_quality.rule_index import RuleIndex
+    from code_quality.rule_search import chat_context
+    from runtime.llm import remote_configured
+    index = RuleIndex()
+    remote_chat = body.get("use_remote", True) is True and remote_configured()
+    if remote_chat and not index.allow_remote(project_id):
+        return None, []
+    context, sources = chat_context(project_id, query, index=index)
+    return (context or None), sources
+
+
 def _answer_service() -> AnswerService:
     return AnswerService(
         answer_context=_answer_context,
@@ -1900,6 +1925,7 @@ def _answer_service() -> AnswerService:
         report_stream_error=lambda exc: get_exception_logger().error(
             "SSE answer failed: %s", exc
         ),
+        rule_context=_maybe_business_rule_context,
     )
 
 

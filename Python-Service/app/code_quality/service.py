@@ -863,6 +863,27 @@ def preview_custom_rule(project_id: str, revision_id: str, snapshot: dict, archi
             "truncated": len(preview_findings) > 100}
 
 
+def _suggest_rule_links_from_evidence(project_id: str, revision_id: str, evidence: list[dict[str, Any]]) -> None:
+    """Turn rule evidence that names a canonical symbol into suggested rule <-> code links."""
+    by_rule: dict[str, list[dict[str, Any]]] = {}
+    for item in evidence:
+        if isinstance(item.get("business_rule_id"), str) and isinstance(item.get("symbol_id"), str):
+            by_rule.setdefault(item["business_rule_id"], []).append({
+                "symbol_id": item["symbol_id"], "file": item.get("file"), "line": item.get("line"),
+                "revision_id": revision_id, "score": None,
+            })
+    if not by_rule:
+        return
+    try:
+        from code_quality.rule_index import RuleIndex
+        index = RuleIndex()
+        for doc_id, items in by_rule.items():
+            index.add_suggestions(project_id, doc_id, items)
+    except Exception as exc:
+        logger.warning("code_quality_rule_link_suggestion_failed project=%s error_type=%s",
+                       project_id, type(exc).__name__)
+
+
 def assess_revision(project_id: str, revision_id: str, snapshot: dict, archive_data: bytes, user_id: str,
                     store: ReportStore | None = None, outline_token: str | None = None,
                     outline_credential_error: str | None = None,
@@ -884,6 +905,17 @@ def assess_revision(project_id: str, revision_id: str, snapshot: dict, archive_d
                           else "The saved Outline credential is unavailable. Save it in the OS credential store and retry.")
                 raise OutlineError(reason)
             enabled_business_rules, outline_sync = fetch_business_rules(outline_connection, outline_token)
+            try:
+                # The live fetch also refreshes the read-only rule index used outside assessments.
+                from code_quality.rule_index import RuleIndex
+                synced = RuleIndex().sync(project_id, enabled_business_rules, outline_sync,
+                                          outline_connection.get("instance_url"))
+                if synced["events"]:
+                    from code_quality.rule_search import refresh_rule_vectors
+                    refresh_rule_vectors(project_id, [event["doc_id"] for event in synced["events"]])
+            except Exception as exc:
+                logger.warning("code_quality_rule_index_sync_failed project=%s error_type=%s",
+                               project_id, type(exc).__name__)
         except OutlineError as exc:
             outline_sync = {"status": "unavailable", "reason": str(exc)}
             logger.warning("code_quality_outline_sync_failed project=%s error_type=%s",
@@ -1002,6 +1034,7 @@ def assess_revision(project_id: str, revision_id: str, snapshot: dict, archive_d
         semantic_summary, semantic_evidence = retrieve_revision_context(
             project_id, revision_id, snapshot, files, enabled_business_rules,
         )
+    _suggest_rule_links_from_evidence(project_id, revision_id, semantic_evidence)
     from code_quality.flow_tracing import retrieve_revision_call_traces
     if design_mode:
         flow_summary, flow_evidence = retrieve_revision_call_traces(

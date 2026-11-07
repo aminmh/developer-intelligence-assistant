@@ -458,6 +458,241 @@ def delete_business_rule(project_id: str, rule_id: str, request: Request) -> dic
     return {"deleted": True}
 
 
+# ----- Business rule knowledge: synced Outline index, rule <-> code links and developer aids -----
+
+MAX_RULE_KNOWLEDGE_REQUEST_BYTES = 8_000
+MAX_RULE_IMPACT_REQUEST_BYTES = 220_000
+
+
+async def _read_json(request: Request, limit: int) -> dict:
+    raw = await request.body()
+    if not raw:
+        return {}
+    if len(raw) > limit:
+        raise HTTPException(413, "The request exceeds the size limit.")
+    try:
+        payload = json.loads(raw)
+    except (ValueError, TypeError) as exc:
+        raise HTTPException(422, "The request must be valid JSON.") from exc
+    if not isinstance(payload, dict):
+        raise HTTPException(422, "The request body must be an object.")
+    return payload
+
+
+def _rule_revision(project_id: str, revision_id) -> "object":
+    from code_quality.rule_code import load_revision
+    validate_revision_id(revision_id)
+    return load_revision(project_id, revision_id)
+
+
+def _rule_error(exc: Exception, action: str, project_id: str) -> HTTPException:
+    from code_quality.rule_code import RevisionUnavailable
+    from code_quality.rule_index import RuleIndexError
+    if isinstance(exc, HTTPException):
+        return exc
+    from code_quality.rule_assist import RuleModelUnavailable
+    if isinstance(exc, RevisionUnavailable):
+        return HTTPException(409, str(exc))
+    if isinstance(exc, RuleModelUnavailable):
+        return HTTPException(503, str(exc))
+    if isinstance(exc, (RuleIndexError, OutlineError)):
+        return HTTPException(422, str(exc))
+    if isinstance(exc, ValueError):
+        return HTTPException(422, "Invalid project or revision identity.")
+    logger.warning("business_rule_%s_failed project=%s error_type=%s", action, project_id, type(exc).__name__)
+    return HTTPException(503, f"Business rule {action.replace('_', ' ')} failed. Check the API logs and retry.")
+
+
+@router.get("/outline/connections")
+def list_outline_connections(request: Request) -> dict:
+    """Projects with an Outline collection, for the Node scheduler that keeps the rule index fresh."""
+    _authorize(request)
+    return {"connections": [{"project_id": item["project_id"], "credential_id": item["credential_id"]}
+                            for item in OutlineConnectionStore().list()]}
+
+
+@router.post("/projects/{project_id}/outline/sync")
+async def sync_outline_rules(project_id: str, request: Request) -> dict:
+    _authorize(request)
+    from code_quality.outline import fetch_business_rules
+    from code_quality.rule_index import RuleIndex
+    try:
+        validate_project_id(project_id)
+        payload = await _read_outline_payload(request)
+        connection = OutlineConnectionStore().get(project_id)
+        if not connection:
+            raise HTTPException(404, "Connect an Outline collection before syncing business rules.")
+        index = RuleIndex()
+        try:
+            rules, summary = await run_in_threadpool(fetch_business_rules, connection, payload.get("token"))
+        except OutlineError as exc:
+            index.record_failure(project_id, str(exc))
+            raise
+        result = await run_in_threadpool(index.sync, project_id, rules, summary, connection.get("instance_url"))
+        changed = [event["doc_id"] for event in result["events"]]
+        if changed:
+            from code_quality.rule_search import refresh_rule_vectors
+            await run_in_threadpool(refresh_rule_vectors, project_id, changed)
+        return {"sync": index.status(project_id), "events": result["events"]}
+    except Exception as exc:
+        raise _rule_error(exc, "sync", project_id) from exc
+
+
+@router.get("/projects/{project_id}/rule-knowledge")
+def get_rule_knowledge(project_id: str, request: Request) -> dict:
+    _authorize(request)
+    from code_quality.rule_index import RuleIndex
+    try:
+        validate_project_id(project_id)
+        index = RuleIndex()
+        return {"sync": index.status(project_id), "documents": index.documents(project_id),
+                "instance_url": index.instance_url(project_id),
+                "settings": {"allow_remote": index.allow_remote(project_id)}}
+    except Exception as exc:
+        raise _rule_error(exc, "index", project_id) from exc
+
+
+@router.put("/projects/{project_id}/rule-knowledge/settings")
+async def put_rule_knowledge_settings(project_id: str, request: Request) -> dict:
+    _authorize(request)
+    from code_quality.rule_index import RuleIndex
+    try:
+        validate_project_id(project_id)
+        payload = await _read_json(request, MAX_RULE_KNOWLEDGE_REQUEST_BYTES)
+        return {"settings": {"allow_remote": RuleIndex().set_allow_remote(project_id, payload.get("allow_remote"))}}
+    except Exception as exc:
+        raise _rule_error(exc, "settings", project_id) from exc
+
+
+@router.get("/projects/{project_id}/rule-knowledge/links")
+def get_rule_links(project_id: str, request: Request, doc_id: list[str] | None = Query(None),
+                   symbol_id: list[str] | None = Query(None), file: str | None = Query(None, max_length=300)) -> dict:
+    _authorize(request)
+    from code_quality.rule_index import RuleIndex, validate_doc_id, validate_symbol_id
+    try:
+        validate_project_id(project_id)
+        doc_ids = [validate_doc_id(value) for value in doc_id[:100]] if doc_id else None
+        symbol_ids = [validate_symbol_id(value) for value in symbol_id[:200]] if symbol_id else None
+        index = RuleIndex()
+        links = index.links(project_id, doc_ids=doc_ids, symbol_ids=symbol_ids, files=[file] if file else None)
+        documents = {item["doc_id"]: item for item in index.documents(project_id)}
+        return {"links": [{**link, "title": documents[link["doc_id"]]["title"], "url": documents[link["doc_id"]]["url"],
+                           "synced_at": documents[link["doc_id"]]["synced_at"]} for link in links
+                          if link["doc_id"] in documents],
+                "instance_url": index.instance_url(project_id)}
+    except Exception as exc:
+        raise _rule_error(exc, "links", project_id) from exc
+
+
+@router.post("/projects/{project_id}/rule-knowledge/links/suggest")
+async def suggest_rule_links(project_id: str, request: Request) -> dict:
+    _authorize(request)
+    from code_quality.rule_code import suggest_links
+    from code_quality.rule_index import validate_doc_id
+    try:
+        validate_project_id(project_id)
+        payload = await _read_json(request, MAX_RULE_KNOWLEDGE_REQUEST_BYTES)
+        doc_ids = payload.get("doc_ids")
+        if doc_ids is not None:
+            if not isinstance(doc_ids, list):
+                raise HTTPException(422, "doc_ids must be a list.")
+            doc_ids = [validate_doc_id(value) for value in doc_ids[:50]]
+        revision = await run_in_threadpool(_rule_revision, project_id, payload.get("revision_id"))
+        return await run_in_threadpool(suggest_links, project_id, revision, doc_ids)
+    except Exception as exc:
+        raise _rule_error(exc, "link_suggestion", project_id) from exc
+
+
+@router.put("/projects/{project_id}/rule-knowledge/links")
+async def put_rule_link(project_id: str, request: Request) -> dict:
+    user_id = _authorize(request)
+    from code_quality.rule_code import symbol_hashes
+    from code_quality.rule_index import RuleIndex
+    try:
+        validate_project_id(project_id)
+        payload = await _read_json(request, MAX_RULE_KNOWLEDGE_REQUEST_BYTES)
+        code_hash = file = line = revision_id = None
+        if payload.get("revision_id") is not None and payload.get("state") in {"confirmed", "manual"}:
+            revision = await run_in_threadpool(_rule_revision, project_id, payload["revision_id"])
+            definition = revision.definitions.get(payload.get("symbol_id"))
+            if definition:
+                hashes = await run_in_threadpool(symbol_hashes, revision.archive_loader(), revision.definitions,
+                                                 [payload["symbol_id"]])
+                code_hash, file, line = hashes.get(payload["symbol_id"]), definition["file"], definition["line"]
+            revision_id = revision.revision_id
+        link = RuleIndex().set_link_state(project_id, payload.get("doc_id"), payload.get("symbol_id"),
+                                          payload.get("state"), user_id, code_hash=code_hash, file=file,
+                                          line=line, revision_id=revision_id)
+        return {"link": link}
+    except Exception as exc:
+        raise _rule_error(exc, "link_update", project_id) from exc
+
+
+@router.get("/projects/{project_id}/rule-knowledge/coverage")
+async def get_rule_coverage(project_id: str, request: Request, revision_id: str = Query(...)) -> dict:
+    """Refresh code-drift hashes for reviewed links and report which rules have tagged tests."""
+    _authorize(request)
+    from code_quality.rule_assist import has_rule_tests
+    from code_quality.rule_code import refresh_code_hashes
+    from code_quality.rule_index import RuleIndex
+    try:
+        validate_project_id(project_id)
+        index = RuleIndex()
+        revision = await run_in_threadpool(_rule_revision, project_id, revision_id)
+        refreshed = await run_in_threadpool(refresh_code_hashes, project_id, revision, index)
+        archive = await run_in_threadpool(revision.archive_loader)
+        tested = await run_in_threadpool(has_rule_tests, archive, [item["doc_id"] for item in index.documents(project_id)])
+        return {"revision_id": revision_id, "tested": tested, "links_refreshed": refreshed}
+    except Exception as exc:
+        raise _rule_error(exc, "coverage", project_id) from exc
+
+
+@router.post("/projects/{project_id}/rule-knowledge/impact")
+async def check_rule_impact(project_id: str, request: Request) -> dict:
+    _authorize(request)
+    from code_quality.rule_assist import check_impact
+    try:
+        validate_project_id(project_id)
+        payload = await _read_json(request, MAX_RULE_IMPACT_REQUEST_BYTES)
+        revision = await run_in_threadpool(_rule_revision, project_id, payload.get("revision_id"))
+        return await run_in_threadpool(check_impact, project_id, revision, payload.get("diff"))
+    except Exception as exc:
+        raise _rule_error(exc, "impact_check", project_id) from exc
+
+
+@router.get("/projects/{project_id}/rule-knowledge/runtime")
+async def get_rule_runtime(project_id: str, request: Request, revision_id: str = Query(...)) -> dict:
+    _authorize(request)
+    from code_quality.rule_assist import runtime_health
+    try:
+        validate_project_id(project_id)
+        validate_revision_id(revision_id)
+        from telemetry.registry import default_registry
+        from telemetry.runtime import project_runtime_by_revision
+        try:
+            runtime = await run_in_threadpool(project_runtime_by_revision, project_id, revision_id, default_registry())
+        except KeyError as exc:
+            raise HTTPException(404, "The selected revision is not indexed.") from exc
+        return {"revision_id": revision_id, **runtime_health(project_id, runtime.get("telemetry") or runtime)}
+    except Exception as exc:
+        raise _rule_error(exc, "runtime", project_id) from exc
+
+
+@router.post("/projects/{project_id}/rule-knowledge/{doc_id}/tests")
+async def generate_rule_tests(project_id: str, doc_id: str, request: Request) -> dict:
+    _authorize(request)
+    from code_quality.rule_assist import generate_tests
+    from code_quality.rule_index import validate_doc_id
+    try:
+        validate_project_id(project_id)
+        validate_doc_id(doc_id)
+        payload = await _read_json(request, MAX_RULE_KNOWLEDGE_REQUEST_BYTES)
+        revision = await run_in_threadpool(_rule_revision, project_id, payload.get("revision_id"))
+        return await run_in_threadpool(generate_tests, project_id, revision, doc_id)
+    except Exception as exc:
+        raise _rule_error(exc, "test_generation", project_id) from exc
+
+
 @router.get("/rules")
 def list_custom_rules(request: Request) -> dict:
     user_id = _authorize(request)

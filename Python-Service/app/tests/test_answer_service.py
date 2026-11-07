@@ -58,3 +58,51 @@ def test_answer_service_frames_stream_events(monkeypatch):
     assert payload["type"] == "done"
     assert payload["answer"] == "ok"
     assert payload["matches"][0]["chunk"]["fileName"] == "App\\User::find"
+
+
+def test_business_rule_context_is_added_and_returned_as_sources(monkeypatch):
+    captured = {}
+    module = types.ModuleType("rag.answer")
+
+    def generate_answer(*args, **kwargs):
+        captured["extra_context"] = kwargs["extra_context"]
+        return {"answer": "done", "provider": "local", "model": "test", "duration_ms": 1}
+    module.generate_answer = generate_answer
+    module.generate_answer_stream = lambda *args, **kwargs: iter([{"type": "done", "answer": "ok"}])
+    monkeypatch.setitem(sys.modules, "rag.answer", module)
+    source = {"doc_id": "d1", "title": "Refunds", "url": "/doc/d1", "synced_at": "2026-11-07T10:00:00+00:00"}
+    service = AnswerService(
+        answer_context=lambda body, query, trace: ([], [], "base context"),
+        resolve_profile=lambda body, query: None,
+        inspect_context=lambda results, body: None,
+        domain_context=lambda results, body: None,
+        resolve_preview_mode=lambda body: "off",
+        report_stream_error=lambda exc: None,
+        rule_context=lambda body, query: ("[R1] Refunds", [source]),
+    )
+
+    result = service.answer({"query": "refund rule?"})
+    assert captured["extra_context"] == "base context\n\n[R1] Refunds"
+    assert result["business_rules"] == [source]
+    done = json.loads(list(service.stream({"query": "refund rule?"}))[0][len("data: "):])
+    assert done["business_rules"] == [source]
+
+
+def test_business_rule_failure_does_not_break_the_answer(monkeypatch):
+    module = types.ModuleType("rag.answer")
+    module.generate_answer = lambda *args, **kwargs: {"answer": "done", "provider": "local", "model": "t", "duration_ms": 1}
+    monkeypatch.setitem(sys.modules, "rag.answer", module)
+    errors = []
+
+    def broken(body, query):
+        raise RuntimeError("index offline")
+    service = AnswerService(
+        answer_context=lambda body, query, trace: ([], [], None),
+        resolve_profile=lambda body, query: None,
+        inspect_context=lambda results, body: None,
+        domain_context=lambda results, body: None,
+        resolve_preview_mode=lambda body: "off",
+        report_stream_error=errors.append,
+        rule_context=broken,
+    )
+    assert service.answer({"query": "x"})["business_rules"] == [] and len(errors) == 1

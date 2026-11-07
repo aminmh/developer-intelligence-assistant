@@ -26,6 +26,7 @@ class AnswerService:
         domain_context: Callable[[list, dict], str | None],
         resolve_preview_mode: Callable[[dict], str],
         report_stream_error: Callable[[Exception], None],
+        rule_context: Callable[[dict, str], tuple[str | None, list[dict]]] | None = None,
     ) -> None:
         self._answer_context = answer_context
         self._resolve_profile = resolve_profile
@@ -33,11 +34,12 @@ class AnswerService:
         self._domain_context = domain_context
         self._resolve_preview_mode = resolve_preview_mode
         self._report_stream_error = report_stream_error
+        self._rule_context = rule_context
 
     def answer(self, body: dict, trace_id: str | None = None) -> dict:
         query = self._query(body)
         doc_chunks = self._doc_chunks(body)
-        results, contexts, extra_context = self._ground(body, query, trace_id)
+        results, contexts, extra_context, rule_sources = self._ground(body, query, trace_id)
         preview_mode = self._resolve_preview_mode(body)
         preview_only = preview_mode == "gate" and body.get("preview") is True
 
@@ -57,12 +59,14 @@ class AnswerService:
             preview_only=preview_only,
             preview_mode=preview_mode,
         )
-        return self._response(results, generated, preview_mode, body.get("runtime_symbol_metrics"))
+        response = self._response(results, generated, preview_mode, body.get("runtime_symbol_metrics"))
+        response["business_rules"] = rule_sources
+        return response
 
     def stream(self, body: dict, trace_id: str | None = None) -> Iterator[str]:
         query = self._query(body)
         doc_chunks = self._doc_chunks(body)
-        results, contexts, extra_context = self._ground(body, query, trace_id)
+        results, contexts, extra_context, rule_sources = self._ground(body, query, trace_id)
         preview_mode = self._resolve_preview_mode(body)
         preview_only = preview_mode == "gate" and body.get("preview") is True
         profile = self._resolve_profile(body, query)
@@ -86,6 +90,7 @@ class AnswerService:
             ):
                 if event.get("type") == "done":
                     event["matches"] = self._matches(results, body.get("runtime_symbol_metrics"))
+                    event["business_rules"] = rule_sources
                 yield f"data: {json.dumps(event)}\n\n"
         except Exception as exc:  # noqa: BLE001 — preserve SSE error contract
             self._report_stream_error(exc)
@@ -104,16 +109,22 @@ class AnswerService:
             return None
         return [value for value in values if isinstance(value, str) and value.strip()]
 
-    def _ground(self, body: dict, query: str, trace_id: str | None) -> tuple[list, list, Any]:
+    def _ground(self, body: dict, query: str, trace_id: str | None) -> tuple[list, list, Any, list[dict]]:
         results, contexts, extra_context = self._answer_context(body, query, trace_id)
-        for enrichment in (self._inspect_context(results, body), self._domain_context(results, body)):
+        rule_text, rule_sources = None, []
+        if self._rule_context is not None:
+            try:
+                rule_text, rule_sources = self._rule_context(body, query)
+            except Exception as exc:  # noqa: BLE001 — business rules are optional grounding
+                self._report_stream_error(exc)
+        for enrichment in (self._inspect_context(results, body), self._domain_context(results, body), rule_text):
             if enrichment:
                 extra_context = (
                     f"{extra_context}\n\n{enrichment}"
                     if isinstance(extra_context, str) and extra_context.strip()
                     else enrichment
                 )
-        return results, contexts, extra_context
+        return results, contexts, extra_context, rule_sources
 
     @staticmethod
     def _response(results: list, generated: dict, preview_mode: str, runtime_metrics: Any = None) -> dict:

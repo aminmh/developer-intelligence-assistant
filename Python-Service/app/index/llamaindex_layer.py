@@ -356,6 +356,19 @@ def _sym_candidates_from_hits(hit_payloads: List[Dict[str, Any]]) -> List[str]:
 _LOGGER = logging.getLogger(__name__)
 
 
+def qdrant_vector_search(client: Any, collection_name: str, vector: List[float], limit: int,
+                         query_filter: Optional[Filter] = None) -> list:
+    """Nearest-neighbour search across qdrant-client versions.
+
+    qdrant-client 1.16 removed ``search()``; ``query_points()`` returns the same scored points.
+    """
+    extra = {"query_filter": query_filter} if query_filter is not None else {}
+    if hasattr(client, "query_points"):
+        return client.query_points(collection_name=collection_name, query=vector, limit=limit,
+                                   with_payload=True, **extra).points
+    return client.search(collection_name=collection_name, query_vector=vector, limit=limit, **extra)
+
+
 def list_qdrant_collections() -> list[str]:
     """All Qdrant collection names (stateless, guarded: [] on any failure).
 
@@ -1176,12 +1189,7 @@ class CodePropertyGraph:
         query_filter: Optional[Filter],
     ) -> tuple[list, bool]:
         try:
-            return qdrant.search(
-                collection_name=col_name,
-                query_vector=query_vec,
-                limit=max(1, limit),
-                query_filter=query_filter,
-            ), False
+            return qdrant_vector_search(qdrant, col_name, query_vec, max(1, limit), query_filter), False
         except Exception as exc:
             get_exception_logger().warning(
                 "Qdrant search failed for collection=%s error_type=%s",
