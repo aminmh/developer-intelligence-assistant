@@ -584,9 +584,11 @@ async def report_deployments(request: Request) -> dict:
             raise HTTPException(422, "Invalid event ID")
         if registry.has_event(host_id, event_id):
             return {"accepted": True, "duplicate": True}
-    pairs = registry.report_deployments(host_id, clean, inventory=inventory)
-    from telemetry.events import publish_runtime_update
-    publish_runtime_update()
+    pairs, changed = registry.report_deployment_changes(host_id, clean, inventory=inventory)
+    if changed:
+        # Agents report the same inventory every few seconds; only a real change should refresh open views.
+        from telemetry.events import publish_runtime_update
+        publish_runtime_update()
     queued = sum(registry.queue_if_deployable(project, commit) for project, commit in pairs)
     if event_id is not None:
         registry.mark_event(host_id, event_id)

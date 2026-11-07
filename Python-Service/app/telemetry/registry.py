@@ -233,14 +233,26 @@ class SnapshotRegistry:
 
     def report_deployments(self, host_id: str, containers: list[dict], *, inventory: bool = False) -> list[tuple[str, str]]:
         """Idempotently upsert allow-listed records; inventory also closes missing host mappings."""
+        return self.report_deployment_changes(host_id, containers, inventory=inventory)[0]
+
+    def report_deployment_changes(
+        self, host_id: str, containers: list[dict], *, inventory: bool = False,
+    ) -> tuple[list[tuple[str, str]], bool]:
+        """Like report_deployments, and also says whether any deployment record actually changed."""
         now = datetime.now(timezone.utc).isoformat()
+        fields = ("project_id", "environment", "service", "commit_sha", "image_id", "state")
         with self._connect() as db:
             db.execute("BEGIN IMMEDIATE")
             seen = {item["container_id"] for item in containers}
+            existing = {row["container_id"]: tuple(row[name] for name in fields) for row in db.execute(
+                "SELECT container_id, project_id, environment, service, commit_sha, image_id, state FROM deployments WHERE host_id=?",
+                (host_id,)).fetchall()}
+            changed = any(existing.get(item["container_id"]) != tuple(item[name] for name in fields) for item in containers)
             if inventory:
                 rows = db.execute("SELECT container_id, project_id, commit_sha FROM deployments WHERE host_id=? AND state='running'", (host_id,)).fetchall()
                 for row in rows:
                     if row["container_id"] not in seen:
+                        changed = True
                         db.execute("UPDATE deployments SET state='stopped', stopped_at=?, updated_at=CURRENT_TIMESTAMP WHERE host_id=? AND container_id=? AND state='running'",
                                    (now, host_id, row["container_id"]))
             for item in containers:
@@ -254,7 +266,7 @@ class SnapshotRegistry:
                             item["commit_sha"], item["image_id"], item["state"],
                             now if item["state"] == "running" else None,
                             now if item["state"] == "stopped" else None))
-            return list(dict.fromkeys((item["project_id"], item["commit_sha"]) for item in containers))
+            return list(dict.fromkeys((item["project_id"], item["commit_sha"]) for item in containers)), changed
 
     def mark_event(self, host_id: str, event_id: str) -> bool:
         with self._connect() as db:
