@@ -7,7 +7,7 @@ import ToggleCard from './ToggleCard.vue';
 import { makeRequest } from '../ui/makeRequest';
 import { subscribeRuntimeUpdates } from '../ui/runtimeEvents';
 import { useUrlTab } from '../composables/useUrlTab';
-import type { RuntimeAnalysisFinding, RuntimeDatabaseCall, RuntimeDiffPreview, RuntimeProjectRecord, RuntimeRequest, RuntimeRequestAnalysis, RuntimeRequestDetail, RuntimeSnapshotData } from '../types';
+import type { RuntimeAnalysisFinding, RuntimeDatabaseCall, RuntimeDatabaseGroup, RuntimeDatabaseSummary, RuntimeDiffPreview, RuntimeProjectRecord, RuntimeRequest, RuntimeRequestAnalysis, RuntimeRequestDetail, RuntimeSnapshotData } from '../types';
 
 const props = defineProps<{ useRemote: boolean }>();
 
@@ -337,6 +337,11 @@ const formatPhpCpu = (value: number | null) => value == null ? 'Unavailable' : `
 const formatPhpMemory = (value: number | null) => value == null ? 'Unavailable' : value >= 1024 * 1024 ? `${(value / 1024 / 1024).toFixed(2)} MiB` : `${(value / 1024).toFixed(1)} KiB`;
 const displayTable = (tableId: string) => tableId.replace(/^table:/, '').split('.').slice(1).join('.') || tableId;
 const displaySymbol = (symbolId: string | null) => symbolId || 'Unavailable';
+const databaseShape = (item: { operation: string | null; table_ids: string[] }) =>
+  `${item.operation || 'Query'} ${item.table_ids.length ? item.table_ids.map(displayTable).join(', ') : '(table unavailable)'}`;
+const databaseGroupKey = (group: RuntimeDatabaseGroup) => `${group.operation}|${group.table_ids.join(',')}|${group.symbol_id}`;
+const databaseShareLabel = (summary: RuntimeDatabaseSummary) =>
+  summary.request_share == null ? 'Share of request time unavailable' : `${(summary.request_share * 100).toFixed(0)}% of the request time`;
 const goToRequestPage = (page: number) => {
   requestPage.value = Math.max(1, Math.min(page, requestPageCount.value));
 };
@@ -850,17 +855,76 @@ onUnmounted(() => stopRuntimeUpdates?.());
                     <p v-else class="text-sm text-slate-400">Trace summary is unavailable for this request.</p>
                   </section>
 
-                  <section v-else-if="activeRequestDetailTab === 'database'" class="space-y-3">
-                    <h5 class="text-sm font-semibold text-slate-200">Database calls</h5>
+                  <section v-else-if="activeRequestDetailTab === 'database'" class="space-y-4">
                     <p v-if="!requestDetails[request.trace_id].database_calls.length" class="text-sm text-slate-400">No database calls were captured for this request.</p>
-                    <div v-else class="space-y-3">
-                      <article v-for="call in requestDetails[request.trace_id].database_calls" :key="call.span_id" class="grid grid-cols-1 gap-3 rounded-lg bg-slate-900/70 p-3 text-sm sm:grid-cols-3">
-                        <div><p class="text-xs font-medium text-slate-500">Database</p><p class="mt-1 break-words text-slate-200">{{ call.db_system || 'Database unavailable' }}<span v-if="call.db_namespace"> · {{ call.db_namespace }}</span></p></div>
-                        <div><p class="text-xs font-medium text-slate-500">Operation</p><p class="mt-1 break-words text-indigo-200">{{ call.operation || 'Unavailable' }}</p></div>
-                        <div><p class="text-xs font-medium text-slate-500">Duration</p><p class="mt-1 text-slate-200">{{ formatMilliseconds(call.duration_ms) }}</p></div>
-                        <div class="sm:col-span-3"><p class="text-xs font-medium text-slate-500">Table · attributed method</p><p class="mt-1 break-words font-mono text-cyan-200">{{ call.table_ids.length ? call.table_ids.map(displayTable).join(', ') : 'Table unavailable' }}</p><p class="mt-1 break-words text-slate-400">{{ requestMethod(call) }}</p></div>
-                      </article>
-                    </div>
+                    <template v-else>
+                      <div v-if="requestDetails[request.trace_id].database_summary" class="grid grid-cols-1 gap-3 sm:grid-cols-3">
+                        <div class="rounded-lg bg-slate-900/70 p-3">
+                          <p class="text-xs font-medium text-slate-500">Queries</p>
+                          <p class="mt-1 text-lg font-semibold text-slate-100">{{ requestDetails[request.trace_id].database_summary!.query_count }}</p>
+                          <p class="text-xs text-slate-400">{{ requestDetails[request.trace_id].database_summary!.groups.length }} distinct {{ requestDetails[request.trace_id].database_summary!.groups.length === 1 ? 'shape' : 'shapes' }}</p>
+                        </div>
+                        <div class="rounded-lg bg-slate-900/70 p-3">
+                          <p class="text-xs font-medium text-slate-500">Database time</p>
+                          <p class="mt-1 text-lg font-semibold text-slate-100">{{ formatMilliseconds(requestDetails[request.trace_id].database_summary!.total_ms) }}</p>
+                          <p class="text-xs text-slate-400">{{ databaseShareLabel(requestDetails[request.trace_id].database_summary!) }}</p>
+                        </div>
+                        <div class="rounded-lg bg-slate-900/70 p-3">
+                          <p class="text-xs font-medium text-slate-500">Slowest query</p>
+                          <template v-if="requestDetails[request.trace_id].database_summary!.slowest">
+                            <p class="mt-1 text-lg font-semibold text-slate-100">{{ formatMilliseconds(requestDetails[request.trace_id].database_summary!.slowest!.duration_ms) }}</p>
+                            <p class="break-words text-xs text-slate-400">{{ databaseShape(requestDetails[request.trace_id].database_summary!.slowest!) }}</p>
+                          </template>
+                          <p v-else class="mt-1 text-sm text-slate-400">Unavailable</p>
+                        </div>
+                      </div>
+
+                      <section v-if="requestDetails[request.trace_id].database_summary?.repeated_groups" class="space-y-2 rounded-lg border border-amber-500/30 bg-amber-500/5 p-3">
+                        <h5 class="text-sm font-semibold text-amber-200">Repeated queries</h5>
+                        <p class="text-xs leading-5 text-slate-400">The same operation on the same tables from the same method ran {{ requestDetails[request.trace_id].database_summary!.repeated_min }} or more times. This is often an N+1 query or a cache read per call. SQL text is not stored, so the queries may still differ in columns or conditions.</p>
+                        <div v-for="group in requestDetails[request.trace_id].database_summary!.groups.filter((item) => item.repeated)" :key="databaseGroupKey(group)" class="rounded bg-slate-900/70 px-3 py-2 text-sm">
+                          <p class="text-amber-100"><span class="font-semibold">{{ group.count }}×</span> {{ databaseShape(group) }} · {{ formatMilliseconds(group.total_ms) }} total</p>
+                          <p class="mt-1 break-words font-mono text-xs text-slate-300">{{ group.symbol_id || 'Not attributed to application code (framework or package)' }}</p>
+                          <p v-if="group.caller_symbol_ids.length" class="mt-1 break-words text-xs text-slate-500">called from {{ group.caller_symbol_ids.join(', ') }}</p>
+                        </div>
+                      </section>
+
+                      <section v-if="requestDetails[request.trace_id].database_summary?.groups.length" class="space-y-2">
+                        <h5 class="text-sm font-semibold text-slate-200">Queries by shape</h5>
+                        <div class="overflow-x-auto rounded-lg bg-slate-900/70">
+                          <table class="w-full text-left text-sm">
+                            <thead class="text-xs text-slate-500">
+                              <tr><th class="px-3 py-2 font-medium">Count</th><th class="px-3 py-2 font-medium">Operation · tables · method</th><th class="px-3 py-2 text-right font-medium">Time</th></tr>
+                            </thead>
+                            <tbody>
+                              <tr v-for="group in requestDetails[request.trace_id].database_summary!.groups" :key="databaseGroupKey(group)" class="border-t border-slate-800 align-top">
+                                <td class="whitespace-nowrap px-3 py-2" :class="group.repeated ? 'font-semibold text-amber-200' : 'text-slate-200'">{{ group.count }}×</td>
+                                <td class="min-w-0 px-3 py-2">
+                                  <p class="break-words text-indigo-200">{{ databaseShape(group) }}</p>
+                                  <p class="mt-0.5 break-all font-mono text-xs" :class="group.symbol_id ? 'text-slate-300' : 'text-slate-500'">{{ group.symbol_id || 'framework or package' }}</p>
+                                </td>
+                                <td class="whitespace-nowrap px-3 py-2 text-right">
+                                  <p class="text-slate-200">{{ formatMilliseconds(group.total_ms) }}</p>
+                                  <p v-if="group.count > 1" class="text-xs text-slate-500">max {{ formatMilliseconds(group.max_ms) }}</p>
+                                </td>
+                              </tr>
+                            </tbody>
+                          </table>
+                        </div>
+                      </section>
+
+                      <details class="group space-y-3" :open="!requestDetails[request.trace_id].database_summary">
+                        <summary class="cursor-pointer text-sm font-semibold text-slate-200">All {{ requestDetails[request.trace_id].database_calls.length }} database calls in order</summary>
+                        <div class="mt-3 space-y-3">
+                          <article v-for="call in requestDetails[request.trace_id].database_calls" :key="call.span_id" class="grid grid-cols-1 gap-3 rounded-lg bg-slate-900/70 p-3 text-sm sm:grid-cols-3" :class="call.span_id === requestDetails[request.trace_id].database_summary?.slowest?.span_id ? 'ring-1 ring-amber-500/40' : ''">
+                            <div><p class="text-xs font-medium text-slate-500">Database</p><p class="mt-1 break-words text-slate-200">{{ call.db_system || 'Database unavailable' }}<span v-if="call.db_namespace"> · {{ call.db_namespace }}</span></p></div>
+                            <div><p class="text-xs font-medium text-slate-500">Operation</p><p class="mt-1 break-words text-indigo-200">{{ call.operation || 'Unavailable' }}</p></div>
+                            <div><p class="text-xs font-medium text-slate-500">Duration</p><p class="mt-1 text-slate-200">{{ formatMilliseconds(call.duration_ms) }}</p></div>
+                            <div class="sm:col-span-3"><p class="text-xs font-medium text-slate-500">Table · attributed method</p><p class="mt-1 break-words font-mono text-cyan-200">{{ call.table_ids.length ? call.table_ids.map(displayTable).join(', ') : 'Table unavailable' }}</p><p class="mt-1 break-words text-slate-400">{{ requestMethod(call) }}</p></div>
+                          </article>
+                        </div>
+                      </details>
+                    </template>
                   </section>
 
                   <section v-else-if="activeRequestDetailTab === 'methods'" class="space-y-3">

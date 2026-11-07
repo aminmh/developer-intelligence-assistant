@@ -276,6 +276,31 @@ export interface RuntimeDatabaseCall {
   span_status: string;
 }
 
+export interface RuntimeDatabaseGroup {
+  operation: string | null;
+  table_ids: string[];
+  /** Application method that issued the queries (innermost app frame); null when only framework code ran them. */
+  symbol_id: string | null;
+  caller_symbol_ids: string[];
+  count: number;
+  total_ms: number;
+  max_ms: number;
+  span_ids: string[];
+  /** count >= repeated_min: likely N+1 or a per-call cache read. */
+  repeated: boolean;
+}
+
+export interface RuntimeDatabaseSummary {
+  query_count: number;
+  total_ms: number;
+  /** Database time as a fraction of the request duration; null when the duration is unknown. */
+  request_share: number | null;
+  slowest: { span_id: string; duration_ms: number; operation: string | null; table_ids: string[]; symbol_id: string | null } | null;
+  groups: RuntimeDatabaseGroup[];
+  repeated_groups: number;
+  repeated_min: number;
+}
+
 export interface RuntimeRequestDetail {
   available: boolean;
   reason?: string | null;
@@ -288,6 +313,7 @@ export interface RuntimeRequestDetail {
   dropped_hook_calls?: number;
   request: RuntimeRequest | null;
   database_calls: RuntimeDatabaseCall[];
+  database_summary?: RuntimeDatabaseSummary;
   method_activity?: {
     available: boolean;
     reason?: string | null;
