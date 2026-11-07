@@ -15,6 +15,8 @@ MAX_SOURCE_FILE_BYTES = 64 * 1024
 MAX_SOURCE_CONTEXT_CHARS = 24_000
 MAX_MODEL_RESPONSE_CHARS = 80_000
 MAX_DIFF_CHARS = 40_000
+MAX_DATABASE_GROUPS = 15
+FINDING_CATEGORIES = {"database", "methods", "profile", "general"}
 _CREDENTIAL_ASSIGNMENT = re.compile(
     r"(?i)(\b(?:password|passwd|secret|token|api[_-]?key|client[_-]?secret|private[_-]?key)\b\s*[:=]\s*)(?:['\"][^'\"]{3,}['\"]|[^\s,;]{8,})"
 )
@@ -105,6 +107,43 @@ def _source_context(archive: bytes, definitions: dict[str, dict], symbol_ids: li
     return output
 
 
+def _database_evidence(detail: dict) -> dict | None:
+    """The grouped database picture: counts, time share, the slowest query and the same query repeated. No SQL."""
+    summary = detail.get("database_summary")
+    if not isinstance(summary, dict) or not summary.get("query_count"):
+        return None
+    slowest = summary.get("slowest") if isinstance(summary.get("slowest"), dict) else None
+    groups = []
+    for group in summary.get("groups", [])[:MAX_DATABASE_GROUPS]:
+        if isinstance(group, dict):
+            groups.append({key: group.get(key) for key in (
+                "operation", "table_ids", "symbol_id", "caller_symbol_ids", "count", "total_ms", "max_ms", "repeated",
+            ) if group.get(key) is not None})
+    return {
+        "query_count": summary.get("query_count"),
+        "total_ms": summary.get("total_ms"),
+        "request_share": summary.get("request_share"),
+        "repeated_min": summary.get("repeated_min"),
+        "repeated_groups": summary.get("repeated_groups"),
+        "slowest": {key: slowest.get(key) for key in ("operation", "table_ids", "symbol_id", "duration_ms")
+                    if slowest.get(key) is not None} if slowest else None,
+        "groups": groups,
+    }
+
+
+def _database_symbols(detail: dict) -> list[str]:
+    """Methods behind repeated queries come first, so their source fits the context budget."""
+    summary = detail.get("database_summary") if isinstance(detail.get("database_summary"), dict) else {}
+    groups = [group for group in summary.get("groups", []) if isinstance(group, dict)]
+    ordered = [group for group in groups if group.get("repeated")] + [group for group in groups if not group.get("repeated")]
+    symbols: list[str] = []
+    for group in ordered:
+        for value in [group.get("symbol_id"), *(group.get("caller_symbol_ids") or [])]:
+            if isinstance(value, str) and value not in symbols:
+                symbols.append(value)
+    return symbols
+
+
 def _evidence(detail: dict, source: dict[str, dict]) -> tuple[dict, list[str]]:
     request = detail.get("request") or {}
     database_calls = []
@@ -132,6 +171,7 @@ def _evidence(detail: dict, source: dict[str, dict]) -> tuple[dict, list[str]]:
         gaps.append("Exact-revision source mapping is unavailable; code-change findings cannot be diffed.")
     payload = {
         "request": {key: request.get(key) for key in ("method", "route", "status_code", "duration_ms", "php_cpu_time_us", "php_peak_memory_bytes") if request.get(key) is not None},
+        "database_summary": _database_evidence(detail),
         "database_calls": database_calls,
         "method_activity": method_edges,
         "excimer_samples": profile,
@@ -147,6 +187,10 @@ def _validate_findings(result: dict, evidence: dict, gaps: list[str]) -> dict:
     refs |= {call.get("symbol_id") for call in evidence["database_calls"]}
     refs |= {call.get("caller_symbol_id") for call in evidence["database_calls"]}
     refs |= {item.get("symbol_id") for item in evidence["excimer_samples"]}
+    for group in (evidence.get("database_summary") or {}).get("groups", []):
+        refs.add(group.get("symbol_id"))
+        refs |= set(group.get("caller_symbol_ids") or [])
+    refs.discard(None)
     source_ids = {item["symbol_id"] for item in evidence["source"]}
     raw = result.get("findings")
     if not isinstance(raw, list) or len(raw) > 12:
@@ -172,12 +216,29 @@ def _validate_findings(result: dict, evidence: dict, gaps: list[str]) -> dict:
             "source_refs": source_refs[:8],
             "severity": item.get("severity") if isinstance(item.get("severity"), str)
             and item.get("severity") in {"low", "medium", "high"} else "informational",
+            "category": item.get("category") if item.get("category") in FINDING_CATEGORIES else "general",
         })
     coverage = result.get("coverage_gaps")
     if coverage is not None and not isinstance(coverage, list):
         raise AnalysisError("The configured model returned invalid coverage gaps. Retry the analysis.")
     model_gaps = [value[:400] for value in coverage if isinstance(value, str)] if isinstance(coverage, list) else []
     return {"findings": findings, "coverage_gaps": list(dict.fromkeys(gaps + model_gaps))}
+
+
+ANALYSIS_TASK = (
+    "Analyze this sampled PHP request. Return JSON with findings[], each with title, summary, recommendations[], "
+    "severity, category (database, methods, profile or general), evidence_refs[] (symbol IDs from supplied evidence), "
+    "source_refs[] (source symbol IDs); and coverage_gaps[]. Be specific, cite only supplied evidence, distinguish "
+    "observations, estimates, samples, and inferences. Do not invent facts. "
+    "Database: database_summary groups queries by operation, tables and the issuing method (symbol_id; caller_symbol_ids "
+    "are the methods that called it). A group marked repeated ran at least repeated_min times in this one request. "
+    "Queries in one group can still differ in their WHERE values, because SQL text is not collected. For each repeated "
+    "group from application code, and for a slow query or a high request_share, give a finding with category database "
+    "that names the issuing method, states the likely cause (a lookup inside a loop or N+1 relation loading, a value "
+    "read again instead of kept for the request, or framework work such as sessions, cache or debugging tools) as an "
+    "inference, and recommends a concrete change in that method when its source is supplied. Groups with no symbol_id "
+    "come from the framework, not application code; say so rather than suggesting an application change."
+)
 
 
 def analyze_request(
@@ -201,7 +262,7 @@ def analyze_request(
         definitions = _definition_map(definitions_loader(project_id, commit_sha))
     except Exception:
         definitions = {}
-    symbol_ids = []
+    symbol_ids = [value for value in _database_symbols(detail) if value in definitions]
     for edge in (detail.get("method_activity") or {}).get("edges", []):
         for key in ("caller_symbol_id", "symbol_id"):
             value = edge.get(key)
@@ -227,7 +288,7 @@ def analyze_request(
     if model_call is None:
         from runtime.llm import complete_with_model
         model_call = complete_with_model
-    prompt = json.dumps({"task": "Analyze this sampled PHP request. Return JSON with findings[], each with title, summary, recommendations[], severity, evidence_refs[] (symbol IDs from supplied evidence), source_refs[] (source symbol IDs); and coverage_gaps[]. Be specific, cite only supplied evidence, distinguish observations, estimates, samples, and inferences. Do not invent facts.", "evidence": assembled}, ensure_ascii=False)
+    prompt = json.dumps({"task": ANALYSIS_TASK, "evidence": assembled}, ensure_ascii=False)
     try:
         content, model, used_provider = model_call(
             prompt, system="You analyze privacy-filtered runtime evidence. Return only valid JSON.",
