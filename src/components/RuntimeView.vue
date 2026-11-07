@@ -871,17 +871,19 @@ onUnmounted(() => stopRuntimeUpdates?.());
                           <p class="text-xs font-medium text-slate-500">Queries</p>
                           <p class="mt-1 text-lg font-semibold text-slate-100">{{ requestDetails[request.trace_id].database_summary!.query_count }}</p>
                           <p class="text-xs text-slate-400">{{ requestDetails[request.trace_id].database_summary!.groups.length }} distinct {{ requestDetails[request.trace_id].database_summary!.groups.length === 1 ? 'shape' : 'shapes' }}</p>
+                          <p v-if="requestDetails[request.trace_id].database_summary!.framework_query_count" class="text-xs text-slate-500">{{ requestDetails[request.trace_id].database_summary!.app_query_count }} app · {{ requestDetails[request.trace_id].database_summary!.framework_query_count }} framework</p>
                         </div>
                         <div class="rounded-lg bg-slate-900/70 p-3">
                           <p class="text-xs font-medium text-slate-500">Database time</p>
                           <p class="mt-1 text-lg font-semibold text-slate-100">{{ formatMilliseconds(requestDetails[request.trace_id].database_summary!.total_ms) }}</p>
                           <p class="text-xs text-slate-400">{{ databaseShareLabel(requestDetails[request.trace_id].database_summary!) }}</p>
+                          <p v-if="requestDetails[request.trace_id].database_summary!.framework_query_count" class="text-xs text-slate-500">{{ formatMilliseconds(requestDetails[request.trace_id].database_summary!.app_total_ms ?? 0) }} app · {{ formatMilliseconds(requestDetails[request.trace_id].database_summary!.framework_total_ms ?? 0) }} framework</p>
                         </div>
                         <div class="rounded-lg bg-slate-900/70 p-3">
                           <p class="text-xs font-medium text-slate-500">Slowest query</p>
                           <template v-if="requestDetails[request.trace_id].database_summary!.slowest">
                             <p class="mt-1 text-lg font-semibold text-slate-100">{{ formatMilliseconds(requestDetails[request.trace_id].database_summary!.slowest!.duration_ms) }}</p>
-                            <p class="break-words text-xs text-slate-400">{{ databaseShape(requestDetails[request.trace_id].database_summary!.slowest!) }}</p>
+                            <p class="break-words text-xs text-slate-400">{{ databaseShape(requestDetails[request.trace_id].database_summary!.slowest!) }}<span v-if="requestDetails[request.trace_id].database_summary!.slowest!.framework" class="ml-1 text-slate-500">· framework</span></p>
                           </template>
                           <p v-else class="mt-1 text-sm text-slate-400">Unavailable</p>
                         </div>
@@ -929,8 +931,8 @@ onUnmounted(() => stopRuntimeUpdates?.());
                               <tr v-for="group in requestDetails[request.trace_id].database_summary!.groups" :key="databaseGroupKey(group)" class="border-t border-slate-800 align-top">
                                 <td class="whitespace-nowrap px-3 py-2" :class="group.repeated ? 'font-semibold text-amber-200' : 'text-slate-200'">{{ group.count }}×</td>
                                 <td class="min-w-0 px-3 py-2">
-                                  <p class="break-words text-indigo-200">{{ databaseShape(group) }}<span v-if="groupHasFinding(request.trace_id, group)" class="ml-2 rounded bg-violet-500/15 px-1.5 py-0.5 text-xs text-violet-200">AI finding</span></p>
-                                  <p class="mt-0.5 break-all font-mono text-xs" :class="group.symbol_id ? 'text-slate-300' : 'text-slate-500'">{{ group.symbol_id || 'framework or package' }}</p>
+                                  <p class="break-words text-indigo-200">{{ databaseShape(group) }}<span v-if="group.framework" class="ml-2 rounded bg-slate-700/60 px-1.5 py-0.5 text-xs text-slate-300" title="The framework's own work on its tables (sessions, cache, queues, debugging tools); no application method issued it.">Framework</span><span v-if="groupHasFinding(request.trace_id, group)" class="ml-2 rounded bg-violet-500/15 px-1.5 py-0.5 text-xs text-violet-200">AI finding</span></p>
+                                  <p class="mt-0.5 break-all font-mono text-xs" :class="group.symbol_id ? 'text-slate-300' : 'text-slate-500'">{{ group.symbol_id || (group.framework ? 'framework tables, not application code' : 'framework or package') }}</p>
                                 </td>
                                 <td class="whitespace-nowrap px-3 py-2 text-right">
                                   <p class="text-slate-200">{{ formatMilliseconds(group.total_ms) }}</p>

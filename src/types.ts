@@ -288,6 +288,8 @@ export interface RuntimeDatabaseGroup {
   span_ids: string[];
   /** count >= repeated_min: likely N+1 or a per-call cache read. */
   repeated: boolean;
+  /** Only framework tables (sessions, cache, queues, Telescope...) and no application method issued it. */
+  framework?: boolean;
 }
 
 export interface RuntimeDatabaseSummary {
@@ -295,7 +297,11 @@ export interface RuntimeDatabaseSummary {
   total_ms: number;
   /** Database time as a fraction of the request duration; null when the duration is unknown. */
   request_share: number | null;
-  slowest: { span_id: string; duration_ms: number; operation: string | null; table_ids: string[]; symbol_id: string | null } | null;
+  slowest: { span_id: string; duration_ms: number; operation: string | null; table_ids: string[]; symbol_id: string | null; framework?: boolean } | null;
+  app_query_count?: number;
+  app_total_ms?: number;
+  framework_query_count?: number;
+  framework_total_ms?: number;
   groups: RuntimeDatabaseGroup[];
   repeated_groups: number;
   repeated_min: number;
