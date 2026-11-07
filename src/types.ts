@@ -338,6 +338,7 @@ export interface RuntimeAnalysisFinding {
   evidence_refs: string[];
   source_refs: string[];
   severity: 'low' | 'medium' | 'high' | 'informational';
+  category?: 'database' | 'methods' | 'profile' | 'general';
 }
 
 export interface RuntimeRequestAnalysis {

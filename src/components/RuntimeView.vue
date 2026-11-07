@@ -339,6 +339,14 @@ const displayTable = (tableId: string) => tableId.replace(/^table:/, '').split('
 const displaySymbol = (symbolId: string | null) => symbolId || 'Unavailable';
 const databaseShape = (item: { operation: string | null; table_ids: string[] }) =>
   `${item.operation || 'Query'} ${item.table_ids.length ? item.table_ids.map(displayTable).join(', ') : '(table unavailable)'}`;
+const databaseFindings = (traceId: string) =>
+  (requestAnalyses.value[requestAnalysisKey(traceId)]?.findings || []).filter((finding) => finding.category === 'database');
+const groupHasFinding = (traceId: string, group: RuntimeDatabaseGroup) => Boolean(group.symbol_id)
+  && databaseFindings(traceId).some((finding) => [...finding.evidence_refs, ...finding.source_refs].includes(group.symbol_id!));
+const openFindingInAnalysis = (traceId: string, finding: RuntimeAnalysisFinding) => {
+  selectFinding(traceId, finding);
+  activeRequestDetailTab.value = 'analysis';
+};
 const databaseGroupKey = (group: RuntimeDatabaseGroup) => `${group.operation}|${group.table_ids.join(',')}|${group.symbol_id}`;
 const databaseShareLabel = (summary: RuntimeDatabaseSummary) =>
   summary.request_share == null ? 'Share of request time unavailable' : `${(summary.request_share * 100).toFixed(0)}% of the request time`;
@@ -879,6 +887,27 @@ onUnmounted(() => stopRuntimeUpdates?.());
                         </div>
                       </div>
 
+                      <section class="space-y-2 rounded-lg border border-violet-400/30 bg-violet-500/5 p-3" :aria-label="`AI explanation of database activity for ${request.method} ${request.route}`">
+                        <div class="flex flex-wrap items-center justify-between gap-2">
+                          <h5 class="text-sm font-semibold text-violet-200">AI explanation</h5>
+                          <button type="button" class="rounded-lg border border-violet-400/40 px-3 py-1.5 text-xs font-medium text-violet-100 hover:bg-violet-500/10 disabled:cursor-wait disabled:opacity-60" :disabled="analysisLoading[requestAnalysisKey(request.trace_id)]" @click="analyzeRequest(request.trace_id, Boolean(requestAnalyses[requestAnalysisKey(request.trace_id)]))">
+                            {{ analysisLoading[requestAnalysisKey(request.trace_id)] ? 'Analyzing…' : requestAnalyses[requestAnalysisKey(request.trace_id)] ? 'Analyze again' : 'Explain with AI' }}
+                          </button>
+                        </div>
+                        <p v-if="!requestAnalyses[requestAnalysisKey(request.trace_id)]" class="text-xs leading-5 text-slate-400">Sends query counts, operations, tables, timings, method IDs and matching source excerpts to the {{ props.useRemote ? 'remote' : 'local' }} chat provider. SQL text, bindings and request data are not sent. The same analysis appears in the AI analysis tab.</p>
+                        <p v-if="analysisErrors[requestAnalysisKey(request.trace_id)]" role="alert" class="text-sm text-rose-300">{{ analysisErrors[requestAnalysisKey(request.trace_id)] }}</p>
+                        <template v-if="requestAnalyses[requestAnalysisKey(request.trace_id)]">
+                          <p v-if="!databaseFindings(request.trace_id).length" class="text-sm text-slate-400">The analysis found nothing to report about database activity. Other findings are in the AI analysis tab.</p>
+                          <article v-for="finding in databaseFindings(request.trace_id)" :key="finding.id" class="rounded bg-slate-900/70 px-3 py-2">
+                            <p class="text-sm font-medium text-slate-100">{{ finding.title }} <span class="ml-1 text-xs font-normal uppercase text-slate-400">{{ finding.severity }} · AI inference</span></p>
+                            <p class="mt-1 text-sm leading-6 text-slate-300">{{ finding.summary }}</p>
+                            <ul v-if="finding.recommendations.length" class="ml-4 mt-1 list-disc space-y-1 text-sm text-slate-300"><li v-for="recommendation in finding.recommendations" :key="recommendation">{{ recommendation }}</li></ul>
+                            <p v-if="finding.evidence_refs.length" class="mt-1 break-words text-xs text-cyan-200">Evidence: {{ finding.evidence_refs.map(displaySymbol).join(', ') }}</p>
+                            <button v-if="finding.source_refs.length" type="button" class="mt-2 text-xs text-cyan-200 underline hover:text-cyan-100" @click="openFindingInAnalysis(request.trace_id, finding)">Preview a code change</button>
+                          </article>
+                        </template>
+                      </section>
+
                       <section v-if="requestDetails[request.trace_id].database_summary?.repeated_groups" class="space-y-2 rounded-lg border border-amber-500/30 bg-amber-500/5 p-3">
                         <h5 class="text-sm font-semibold text-amber-200">Repeated queries</h5>
                         <p class="text-xs leading-5 text-slate-400">The same operation on the same tables from the same method ran {{ requestDetails[request.trace_id].database_summary!.repeated_min }} or more times. This is often an N+1 query or a cache read per call. SQL text is not stored, so the queries may still differ in columns or conditions.</p>
@@ -900,7 +929,7 @@ onUnmounted(() => stopRuntimeUpdates?.());
                               <tr v-for="group in requestDetails[request.trace_id].database_summary!.groups" :key="databaseGroupKey(group)" class="border-t border-slate-800 align-top">
                                 <td class="whitespace-nowrap px-3 py-2" :class="group.repeated ? 'font-semibold text-amber-200' : 'text-slate-200'">{{ group.count }}×</td>
                                 <td class="min-w-0 px-3 py-2">
-                                  <p class="break-words text-indigo-200">{{ databaseShape(group) }}</p>
+                                  <p class="break-words text-indigo-200">{{ databaseShape(group) }}<span v-if="groupHasFinding(request.trace_id, group)" class="ml-2 rounded bg-violet-500/15 px-1.5 py-0.5 text-xs text-violet-200">AI finding</span></p>
                                   <p class="mt-0.5 break-all font-mono text-xs" :class="group.symbol_id ? 'text-slate-300' : 'text-slate-500'">{{ group.symbol_id || 'framework or package' }}</p>
                                 </td>
                                 <td class="whitespace-nowrap px-3 py-2 text-right">
