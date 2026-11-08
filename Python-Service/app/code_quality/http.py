@@ -17,7 +17,18 @@ from code_quality.service import (
     assess_revision,
     model_failure_diagnostic,
 )
-from code_quality.performance import PerformanceError, PerformanceStore, compare_runs, run_benchmark
+from code_quality.performance import (
+    PerformanceBusy,
+    PerformanceError,
+    PerformanceStore,
+    benchmark_traces,
+    cancel_job,
+    compare_runs,
+    export_script,
+    live_progress,
+    start_run,
+)
+from uuid import UUID
 from code_quality.rules import CustomRuleStore, MAX_RULE_BYTES
 from code_quality.analyzers import validate_semgrep_yaml
 from code_quality.service import preview_custom_rule
@@ -877,51 +888,75 @@ def delete_report(project_id: str, report_id: str, request: Request) -> dict:
     return {"deleted": True}
 
 
-@router.get("/performance/targets")
-def list_performance_targets(request: Request) -> dict:
-    user_id = _authorize(request)
-    return {"targets": PerformanceStore().targets(user_id)}
-
-
-@router.post("/performance/targets")
-async def save_performance_target(request: Request) -> dict:
-    user_id = _authorize(request)
+def _performance_uuid(value, label: str) -> str:
     try:
-        payload = await request.json()
-        return {"target": PerformanceStore().save_target(user_id, payload)}
+        return str(UUID(str(value)))
+    except (ValueError, TypeError, AttributeError) as exc:
+        raise HTTPException(422, f"Invalid performance {label} identity.") from exc
+
+
+async def _performance_payload(request: Request) -> dict:
+    raw = await request.body()
+    if len(raw) > MAX_PERFORMANCE_REQUEST_BYTES:
+        raise HTTPException(413, "Performance request exceeds the size limit.")
+    try:
+        payload = json.loads(raw or b"{}")
+    except (ValueError, TypeError) as exc:
+        raise HTTPException(422, "Performance request must be valid JSON.") from exc
+    if not isinstance(payload, dict):
+        raise HTTPException(422, "Performance request settings are invalid.")
+    return payload
+
+
+def _performance_project(project_id: str) -> None:
+    try:
+        validate_project_id(project_id)
+    except ValueError as exc:
+        raise HTTPException(422, "Invalid project identity.") from exc
+
+
+@router.get("/projects/{project_id}/performance/targets")
+def list_performance_targets(project_id: str, request: Request) -> dict:
+    user_id = _authorize(request)
+    _performance_project(project_id)
+    return {"targets": PerformanceStore().targets(user_id, project_id)}
+
+
+@router.post("/projects/{project_id}/performance/targets")
+async def save_performance_target(project_id: str, request: Request) -> dict:
+    user_id = _authorize(request)
+    _performance_project(project_id)
+    payload = await _performance_payload(request)
+    if payload.get("target_id") is not None:
+        payload["target_id"] = _performance_uuid(payload["target_id"], "target")
+    try:
+        return {"target": PerformanceStore().save_target(user_id, project_id, payload)}
     except PerformanceError as exc:
         raise HTTPException(422, str(exc)) from exc
-    except (ValueError, TypeError) as exc:
-        raise HTTPException(422, "Performance target settings are invalid.") from exc
 
 
-@router.get("/performance/targets/{target_id}")
-def get_performance_target(target_id: str, request: Request) -> dict:
+@router.get("/projects/{project_id}/performance/targets/{target_id}")
+def get_performance_target(project_id: str, target_id: str, request: Request) -> dict:
     user_id = _authorize(request)
-    try:
-        target_id = str(__import__("uuid").UUID(target_id))
-    except (ValueError, AttributeError) as exc:
-        raise HTTPException(422, "Invalid performance target identity.") from exc
-    target = PerformanceStore().get_target(user_id, target_id)
+    _performance_project(project_id)
+    target = PerformanceStore().get_target(user_id, project_id, _performance_uuid(target_id, "target"))
     if target is None:
         raise HTTPException(404, "Performance target was not found.")
     return {"target": target}
 
 
-@router.delete("/performance/targets/{target_id}")
-def delete_performance_target(target_id: str, request: Request) -> dict:
+@router.delete("/projects/{project_id}/performance/targets/{target_id}")
+def delete_performance_target(project_id: str, target_id: str, request: Request) -> dict:
     user_id = _authorize(request)
-    try:
-        target_id = str(__import__("uuid").UUID(target_id))
-    except (ValueError, AttributeError) as exc:
-        raise HTTPException(422, "Invalid performance target identity.") from exc
-    if not PerformanceStore().delete_target(user_id, target_id):
+    _performance_project(project_id)
+    if not PerformanceStore().delete_target(user_id, project_id, _performance_uuid(target_id, "target")):
         raise HTTPException(404, "Performance target was not found.")
     return {"deleted": True}
 
 
 @router.get("/projects/{project_id}/revisions/{revision_id}/performance/routes")
 def performance_routes(project_id: str, revision_id: str, request: Request) -> dict:
+    """GET routes seen for this revision in the Runtime window, with production volume and latency."""
     _authorize(request)
     try:
         validate_project_id(project_id)
@@ -929,99 +964,143 @@ def performance_routes(project_id: str, revision_id: str, request: Request) -> d
         from telemetry.registry import default_registry
         if default_registry().get_by_revision_id(project_id, revision_id) is None:
             raise HTTPException(404, "Indexed revision was not found.")
+        from code_quality.performance import route_parameters
         from telemetry.runtime import ClickHouseRuntime
-        sampled = ClickHouseRuntime().requests(project_id, revision_id)
-        routes: dict[str, dict] = {}
-        for item in sampled.get("requests", []):
-            if item.get("method", "").upper() != "GET":
-                continue
+        summary = ClickHouseRuntime().summary(project_id, revision_id, set())
+        routes = []
+        for item in summary.get("routes", []):
             route = item.get("route")
+            if str(item.get("method", "")).upper() not in {"GET", "HEAD"}:
+                continue
             if not isinstance(route, str) or not route.startswith("/") or route.startswith("//") or "?" in route:
                 continue
-            routes.setdefault(route, {"method": "GET", "route": route, "samples": 0})["samples"] += 1
-        return {"available": bool(sampled.get("available")), "reason": sampled.get("reason"),
-                "sampled": True, "routes": sorted(routes.values(), key=lambda item: (-item["samples"], item["route"]))}
+            routes.append({"method": "GET", "route": route, "parameters": route_parameters(route),
+                           "requests": int(item.get("requests") or 0), "failures": int(item.get("failures") or 0),
+                           "error_rate": item.get("error_rate"), "p95_ms": item.get("p95_ms"),
+                           "last_seen": item.get("last_seen")})
+        merged: dict[str, dict] = {}
+        for item in routes:  # GET and HEAD of one route are one benchmark choice
+            current = merged.get(item["route"])
+            if current is None or item["requests"] > current["requests"]:
+                merged[item["route"]] = item
+        return {"available": bool(summary.get("available")), "reason": summary.get("reason"),
+                "window_hours": summary.get("aggregation_window_hours"),
+                "routes": sorted(merged.values(), key=lambda item: (-item["requests"], item["route"]))}
     except HTTPException:
         raise
     except ValueError as exc:
         raise HTTPException(422, "Invalid project revision identity.") from exc
     except Exception as exc:
+        logger.warning("code_quality_performance_routes_failed project=%s error_type=%s", project_id, type(exc).__name__)
         raise HTTPException(503, "Sampled Runtime routes are unavailable.") from exc
 
 
-@router.post("/projects/{project_id}/performance/runs")
-async def create_performance_run(project_id: str, request: Request) -> dict:
+@router.post("/projects/{project_id}/performance/runs", status_code=202)
+async def create_performance_run(project_id: str, request: Request):
+    """Start a background benchmark; poll GET .../runs/{run_id} for progress and the result."""
     user_id = _authorize(request)
+    _performance_project(project_id)
+    payload = await _performance_payload(request)
+    store = PerformanceStore()
+    target = store.get_target(user_id, project_id, _performance_uuid(payload.get("target_id"), "target"))
+    if target is None:
+        raise HTTPException(404, "Performance target was not found.")
+    if target.get("unassigned"):
+        raise HTTPException(409, "Save this target under the current project before running it.")
+    revision = None
+    if payload.get("revision_id"):
+        try:
+            validate_revision_id(payload["revision_id"])
+        except ValueError as exc:
+            raise HTTPException(422, "Invalid project revision identity.") from exc
+        from telemetry.registry import default_registry
+        revision = default_registry().get_by_revision_id(project_id, payload["revision_id"])
+        if revision is None:
+            raise HTTPException(404, "Indexed revision was not found.")
     try:
-        validate_project_id(project_id)
-        raw = await request.body()
-        if len(raw) > MAX_PERFORMANCE_REQUEST_BYTES:
-            raise HTTPException(413, "Performance benchmark request exceeds the size limit.")
-        payload = json.loads(raw)
-        if not isinstance(payload, dict):
-            raise PerformanceError("Performance benchmark settings are invalid.")
-        target_id = str(__import__("uuid").UUID(payload.get("target_id", "")))
-        store = PerformanceStore()
-        target = store.get_target(user_id, target_id)
-        if target is None:
-            raise HTTPException(404, "Performance target was not found.")
-        bearer_token = payload.get("bearer_token")
-        credentials = payload.get("login_credentials")
-        report = await run_in_threadpool(run_benchmark, target, payload.get("routes"), bearer_token, credentials)
-        return store.save_run(user_id, project_id, target, report)
-    except HTTPException:
-        raise
+        job = await run_in_threadpool(start_run, store, user_id, project_id, target, payload.get("routes"), revision,
+                                      payload.get("bearer_token"), payload.get("login_credentials"))
+    except PerformanceBusy as exc:
+        from fastapi.responses import JSONResponse
+        return JSONResponse(status_code=409, content={"detail": str(exc), "active_run_id": exc.active_run_id})
     except PerformanceError as exc:
         raise HTTPException(422, str(exc)) from exc
-    except (ValueError, TypeError, json.JSONDecodeError) as exc:
-        raise HTTPException(422, "Performance benchmark request is invalid.") from exc
-    except Exception as exc:
-        logger.error("code_quality_performance_failed project=%s error_type=%s", project_id, type(exc).__name__)
-        raise HTTPException(503, "Performance benchmark could not be completed. Check Docker, the target, and authentication, then retry.") from exc
+    return {**job, "progress": live_progress(job)}
 
 
 @router.get("/projects/{project_id}/performance/runs")
 def list_performance_runs(project_id: str, request: Request) -> dict:
     user_id = _authorize(request)
-    try:
-        validate_project_id(project_id)
-    except ValueError as exc:
-        raise HTTPException(422, "Invalid project identity.") from exc
-    return {"runs": PerformanceStore().history(user_id, project_id)}
+    _performance_project(project_id)
+    store = PerformanceStore()
+    jobs = store.jobs(user_id, project_id)
+    return {"runs": store.history(user_id, project_id),
+            "active": [{**job, "progress": live_progress(job)} for job in jobs if job["state"] == "running"],
+            "failed": [job for job in jobs if job["state"] == "failed"][:5]}
 
 
 @router.get("/projects/{project_id}/performance/runs/{run_id}")
 def get_performance_run(project_id: str, run_id: str, request: Request) -> dict:
     user_id = _authorize(request)
-    try:
-        validate_project_id(project_id)
-        run_id = str(__import__("uuid").UUID(run_id))
-    except (ValueError, AttributeError) as exc:
-        raise HTTPException(422, "Invalid performance run identity.") from exc
-    result = PerformanceStore().get_run(user_id, project_id, run_id)
+    _performance_project(project_id)
+    run_id = _performance_uuid(run_id, "run")
+    store = PerformanceStore()
+    result = store.get_run(user_id, project_id, run_id)
+    if result is not None:
+        return result
+    job = store.job(user_id, project_id, run_id)
+    if job is None:
+        raise HTTPException(404, "Performance run was not found.")
+    return {**job, "progress": live_progress(job)}
+
+
+@router.delete("/projects/{project_id}/performance/runs/{run_id}")
+def delete_or_cancel_performance_run(project_id: str, run_id: str, request: Request) -> dict:
+    """Cancel a running benchmark (its partial result is saved) or delete a saved run."""
+    user_id = _authorize(request)
+    _performance_project(project_id)
+    run_id = _performance_uuid(run_id, "run")
+    store = PerformanceStore()
+    job = store.job(user_id, project_id, run_id)
+    if job is not None and job["state"] == "running":
+        return {"cancelling": cancel_job(job)}
+    if not store.delete_run(user_id, project_id, run_id) and job is None:
+        raise HTTPException(404, "Performance run was not found.")
+    return {"deleted": True}
+
+
+@router.get("/projects/{project_id}/performance/runs/{run_id}/script")
+def export_performance_script(project_id: str, run_id: str, request: Request):
+    user_id = _authorize(request)
+    _performance_project(project_id)
+    result = PerformanceStore().get_run(user_id, project_id, _performance_uuid(run_id, "run"))
     if result is None:
         raise HTTPException(404, "Performance run was not found.")
-    return result
+    from fastapi.responses import PlainTextResponse
+    return PlainTextResponse(export_script(result), media_type="text/javascript")
+
+
+@router.get("/projects/{project_id}/performance/runs/{run_id}/traces")
+async def performance_run_traces(project_id: str, run_id: str, request: Request) -> dict:
+    user_id = _authorize(request)
+    _performance_project(project_id)
+    result = PerformanceStore().get_run(user_id, project_id, _performance_uuid(run_id, "run"))
+    if result is None:
+        raise HTTPException(404, "Performance run was not found.")
+    return await run_in_threadpool(benchmark_traces, project_id, result.get("revision_id"), result["run_id"])
 
 
 @router.post("/projects/{project_id}/performance/compare")
 async def compare_performance_runs(project_id: str, request: Request) -> dict:
     user_id = _authorize(request)
-    try:
-        validate_project_id(project_id)
-        payload = await request.json()
-        if not isinstance(payload, dict):
-            raise ValueError
-        store = PerformanceStore()
-        left = store.get_run(user_id, project_id, str(__import__("uuid").UUID(payload.get("left_run_id", ""))))
-        right = store.get_run(user_id, project_id, str(__import__("uuid").UUID(payload.get("right_run_id", ""))))
-        if not left or not right:
-            raise HTTPException(404, "One or both performance runs were not found.")
-        return {"comparison": compare_runs(left, right), "runs": [left, right]}
-    except HTTPException:
-        raise
-    except (ValueError, TypeError, AttributeError) as exc:
-        raise HTTPException(422, "Select two valid performance runs.") from exc
+    _performance_project(project_id)
+    payload = await _performance_payload(request)
+    store = PerformanceStore()
+    left = store.get_run(user_id, project_id, _performance_uuid(payload.get("left_run_id"), "run"))
+    right = store.get_run(user_id, project_id, _performance_uuid(payload.get("right_run_id"), "run"))
+    if not left or not right:
+        raise HTTPException(404, "One or both performance runs were not found.")
+    return {"comparison": compare_runs(left, right), "runs": [left, right]}
 
 
 @router.get("/projects/{project_id}/revisions/{revision_id}/precheck")

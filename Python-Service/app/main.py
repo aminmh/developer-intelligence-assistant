@@ -186,6 +186,13 @@ async def lifespan(app: FastAPI):
             except Exception:
                 await asyncio.sleep(5)
 
+    try:
+        # Benchmarks run in API threads: none survive a restart, and their k6 scripts may hold secrets.
+        from code_quality.performance import PerformanceStore, cleanup_stale_scripts
+        cleanup_stale_scripts()
+        PerformanceStore().recover_interrupted()
+    except Exception as exc:  # noqa: BLE001 — never block API startup on benchmark housekeeping
+        logging.getLogger(__name__).warning("performance_startup_cleanup_failed error_type=%s", type(exc).__name__)
     telemetry_task = asyncio.create_task(telemetry_jobs())
     try:
         if Path(settings.report_path).is_file():
