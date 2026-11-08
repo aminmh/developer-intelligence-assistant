@@ -10,6 +10,8 @@ type RouteDependencies = {
   getUser: (response: Response) => AuthUser;
   canAccessProject: (user: AuthUser, projectId: string) => boolean;
   canManageProject?: (user: AuthUser, projectId: string) => boolean;
+  /** Operator or admin of the project: may change settings and start work such as benchmarks. */
+  canOperateProject?: (user: AuthUser, projectId: string) => boolean;
   isGlobalAdmin: (user: AuthUser) => boolean;
   helperUrl: string;
   webOrigin: string;
@@ -259,72 +261,76 @@ export function registerCodeQualityRoutes(app: Express, dependencies: RouteDepen
     } catch { return res.status(503).json({ detail: 'Verified webhook synchronization failed.' }); }
   });
 
-  app.get('/api/code-quality/performance/targets', async (_req, res) => {
+  // ----- Setup Performance: project-scoped targets and background benchmarks -----
+  // Starting load or changing targets is an operator action; viewers may only read results.
+  const operator = (res: Response, projectId: string) => {
+    const user = allowed(res, projectId);
+    if (!user) return null;
+    if (dependencies.canOperateProject && !dependencies.canOperateProject(user, projectId)) {
+      res.status(403).json({ detail: 'Operator access is required to configure or run benchmarks.' });
+      return null;
+    }
+    return user;
+  };
+  const perfPath = (projectId: string, suffix = '') => `/code-quality/projects/${encodeURIComponent(projectId)}/performance${suffix}`;
+  const ownedTarget = async (projectId: string, targetId: string, user: AuthUser) => {
+    const upstream = await forward(perfPath(projectId, `/targets/${encodeURIComponent(targetId)}`), user);
+    const data = await upstream.json().catch(() => ({})) as any;
+    return { upstream, target: upstream.ok ? data.target : null, data };
+  };
+
+  app.get('/api/code-quality/projects/:projectId/performance/targets', async (req, res) => {
     try {
-      const user = authenticated(res); if (!user) return;
-      return await reply(res, await forward('/code-quality/performance/targets', user), 'Performance targets are unavailable.');
+      const user = allowed(res, req.params.projectId); if (!user) return;
+      return await reply(res, await forward(perfPath(req.params.projectId, '/targets'), user), 'Performance targets are unavailable.');
     } catch { return res.status(502).json({ detail: 'Performance targets are unavailable.' }); }
   });
 
-  app.post('/api/code-quality/performance/targets', async (req, res) => {
+  app.post('/api/code-quality/projects/:projectId/performance/targets', async (req, res) => {
     try {
-      const user = authenticated(res); if (!user) return;
-      return await reply(res, await forward('/code-quality/performance/targets', user, { method: 'POST', body: JSON.stringify(req.body) }), 'Performance target could not be saved.');
+      const user = operator(res, req.params.projectId); if (!user) return;
+      const previous = typeof req.body?.target_id === 'string' ? await ownedTarget(req.params.projectId, req.body.target_id, user) : null;
+      const saved = await forward(perfPath(req.params.projectId, '/targets'), user, { method: 'POST', body: JSON.stringify(req.body ?? {}) });
+      const data = await saved.json().catch(() => ({ detail: 'Performance target could not be saved.' })) as any;
+      // A target that no longer uses a Bearer token must not keep one in the OS credential store.
+      if (saved.ok && previous?.target?.auth_mode === 'bearer' && data.target?.auth_mode !== 'bearer') {
+        await callCredentialHelper(data.target.target_id, 'code-quality-bearer-manage', 'DELETE', {}).catch(() => undefined);
+      }
+      return res.status(saved.status).json(data);
     } catch { return res.status(502).json({ detail: 'Performance target could not be saved.' }); }
   });
 
-  app.get('/api/code-quality/performance/targets/:targetId', async (req, res) => {
+  app.delete('/api/code-quality/projects/:projectId/performance/targets/:targetId', async (req, res) => {
     try {
-      const user = authenticated(res); if (!user) return;
-      return await reply(res, await forward(`/code-quality/performance/targets/${encodeURIComponent(req.params.targetId)}`, user), 'Performance target is unavailable.');
-    } catch { return res.status(502).json({ detail: 'Performance target is unavailable.' }); }
-  });
-
-  app.delete('/api/code-quality/performance/targets/:targetId', async (req, res) => {
-    try {
-      const user = authenticated(res); if (!user) return;
-      const target = await forward(`/code-quality/performance/targets/${encodeURIComponent(req.params.targetId)}`, user);
-      if (!target.ok) return await reply(res, target, 'Performance target could not be removed.');
-      const targetBody = await target.json() as any;
-      if (targetBody.target?.auth_mode === 'bearer') {
+      const user = operator(res, req.params.projectId); if (!user) return;
+      const owned = await ownedTarget(req.params.projectId, req.params.targetId, user);
+      if (!owned.upstream.ok) return res.status(owned.upstream.status).json(owned.data);
+      if (owned.target?.auth_mode === 'bearer') {
         const credential = await callCredentialHelper(req.params.targetId, 'code-quality-bearer-manage', 'DELETE', {});
         if (!credential.response.ok) return res.status(credential.response.status).json(credential.data);
       }
-      const result = await forward(`/code-quality/performance/targets/${encodeURIComponent(req.params.targetId)}`, user, { method: 'DELETE' });
-      return await reply(res, result, 'Performance target could not be removed.');
+      return await reply(res, await forward(perfPath(req.params.projectId, `/targets/${encodeURIComponent(req.params.targetId)}`), user,
+        { method: 'DELETE' }), 'Performance target could not be removed.');
     } catch { return res.status(502).json({ detail: 'Performance target could not be removed.' }); }
   });
 
-  app.get('/api/code-quality/performance/targets/:targetId/credential', async (req, res) => {
-    try {
-      const user = authenticated(res); if (!user) return;
-      const target = await forward(`/code-quality/performance/targets/${encodeURIComponent(req.params.targetId)}`, user);
-      if (!target.ok) return await reply(res, target, 'Performance target is unavailable.');
-      const credential = await callCredentialHelper(req.params.targetId, 'code-quality-bearer-manage', 'POST', { action: 'status' });
-      return res.status(credential.response.status).json(credential.data);
-    } catch { return res.status(503).json({ detail: 'The desktop OS credential helper is unavailable. Start or restart Developer Assistant and retry.' }); }
-  });
-
-  app.post('/api/code-quality/performance/targets/:targetId/credential', async (req, res) => {
-    try {
-      const user = authenticated(res); if (!user) return;
-      const target = await forward(`/code-quality/performance/targets/${encodeURIComponent(req.params.targetId)}`, user);
-      if (!target.ok) return await reply(res, target, 'Performance target is unavailable.');
-      const token = req.body?.token;
-      const credential = await callCredentialHelper(req.params.targetId, 'code-quality-bearer-manage', 'POST', { action: 'save', token });
-      return res.status(credential.response.status).json(credential.data);
-    } catch { return res.status(503).json({ detail: 'The Bearer token could not be saved to the OS credential store.' }); }
-  });
-
-  app.delete('/api/code-quality/performance/targets/:targetId/credential', async (req, res) => {
-    try {
-      const user = authenticated(res); if (!user) return;
-      const target = await forward(`/code-quality/performance/targets/${encodeURIComponent(req.params.targetId)}`, user);
-      if (!target.ok) return await reply(res, target, 'Performance target is unavailable.');
-      const credential = await callCredentialHelper(req.params.targetId, 'code-quality-bearer-manage', 'DELETE', {});
-      return res.status(credential.response.status).json(credential.data);
-    } catch { return res.status(503).json({ detail: 'The Bearer token could not be removed from the OS credential store.' }); }
-  });
+  const credentialRoute = (method: 'get' | 'post' | 'delete', action: (targetId: string, body: any) => Promise<{ response: globalThis.Response; data: any }>, fallback: string) => {
+    app[method]('/api/code-quality/projects/:projectId/performance/targets/:targetId/credential', async (req, res) => {
+      try {
+        const user = method === 'get' ? allowed(res, req.params.projectId) : operator(res, req.params.projectId); if (!user) return;
+        const owned = await ownedTarget(req.params.projectId, req.params.targetId, user);
+        if (!owned.upstream.ok) return res.status(owned.upstream.status).json(owned.data);
+        const credential = await action(req.params.targetId, req.body);
+        return res.status(credential.response.status).json(credential.data);
+      } catch { return res.status(503).json({ detail: fallback }); }
+    });
+  };
+  credentialRoute('get', (id) => callCredentialHelper(id, 'code-quality-bearer-manage', 'POST', { action: 'status' }),
+    'The desktop OS credential helper is unavailable. Start or restart Developer Assistant and retry.');
+  credentialRoute('post', (id, body) => callCredentialHelper(id, 'code-quality-bearer-manage', 'POST', { action: 'save', token: body?.token }),
+    'The Bearer token could not be saved to the OS credential store.');
+  credentialRoute('delete', (id) => callCredentialHelper(id, 'code-quality-bearer-manage', 'DELETE', {}),
+    'The Bearer token could not be removed from the OS credential store.');
 
   app.get('/api/code-quality/projects/:projectId/revisions/:revisionId/performance/routes', async (req, res) => {
     try {
@@ -336,47 +342,73 @@ export function registerCodeQualityRoutes(app: Express, dependencies: RouteDepen
 
   app.post('/api/code-quality/projects/:projectId/performance/runs', async (req, res) => {
     try {
-      const user = allowed(res, req.params.projectId); if (!user) return;
+      const user = operator(res, req.params.projectId); if (!user) return;
       const targetId = String(req.body?.target_id || '');
-      const targetResponse = await forward(`/code-quality/performance/targets/${encodeURIComponent(targetId)}`, user);
-      if (!targetResponse.ok) return await reply(res, targetResponse, 'Performance target is unavailable.');
-      const { target } = await targetResponse.json() as any;
-      const body: Record<string, unknown> = { target_id: targetId, routes: req.body?.routes };
-      if (target.auth_mode === 'bearer') {
+      const owned = await ownedTarget(req.params.projectId, targetId, user);
+      if (!owned.upstream.ok) return res.status(owned.upstream.status).json(owned.data);
+      const body: Record<string, unknown> = { target_id: targetId, routes: req.body?.routes, revision_id: req.body?.revision_id };
+      if (owned.target.auth_mode === 'bearer') {
         const credential = await callCredentialHelper(targetId, 'code-quality-benchmark-use', 'POST', {});
         if (!credential.response.ok || typeof credential.data.token !== 'string') {
-          return res.status(credential.response.status).json(credential.data);
+          return res.status(credential.response.status === 200 ? 503 : credential.response.status).json(credential.data);
         }
         body.bearer_token = credential.data.token;
-      } else if (target.auth_mode === 'http_login') {
+      } else if (owned.target.auth_mode === 'http_login') {
         body.login_credentials = req.body?.login_credentials;
       }
-      const result = await forward(`/code-quality/projects/${encodeURIComponent(req.params.projectId)}/performance/runs`, user,
-        { method: 'POST', body: JSON.stringify(body) });
-      return await reply(res, result, 'Performance benchmark could not be completed.');
-    } catch { return res.status(502).json({ detail: 'Performance benchmark could not be completed. Check the target and authentication, then retry.' }); }
+      // Returns at once (202): the benchmark runs in the background and the browser polls it.
+      return await reply(res, await forward(perfPath(req.params.projectId, '/runs'), user, { method: 'POST', body: JSON.stringify(body) }),
+        'Performance benchmark could not be started.');
+    } catch { return res.status(502).json({ detail: 'Performance benchmark could not be started. Check the target and authentication, then retry.' }); }
   });
 
   app.get('/api/code-quality/projects/:projectId/performance/runs', async (req, res) => {
     try {
       const user = allowed(res, req.params.projectId); if (!user) return;
-      return await reply(res, await forward(`/code-quality/projects/${encodeURIComponent(req.params.projectId)}/performance/runs`, user), 'Performance history is unavailable.');
+      return await reply(res, await forward(perfPath(req.params.projectId, '/runs'), user), 'Performance history is unavailable.');
     } catch { return res.status(502).json({ detail: 'Performance history is unavailable.' }); }
   });
 
   app.get('/api/code-quality/projects/:projectId/performance/runs/:runId', async (req, res) => {
     try {
       const user = allowed(res, req.params.projectId); if (!user) return;
-      const path = `/code-quality/projects/${encodeURIComponent(req.params.projectId)}/performance/runs/${encodeURIComponent(req.params.runId)}`;
-      return await reply(res, await forward(path, user), 'Performance run is unavailable.');
+      return await reply(res, await forward(perfPath(req.params.projectId, `/runs/${encodeURIComponent(req.params.runId)}`), user),
+        'Performance run is unavailable.');
     } catch { return res.status(502).json({ detail: 'Performance run is unavailable.' }); }
+  });
+
+  app.delete('/api/code-quality/projects/:projectId/performance/runs/:runId', async (req, res) => {
+    try {
+      const user = operator(res, req.params.projectId); if (!user) return;
+      return await reply(res, await forward(perfPath(req.params.projectId, `/runs/${encodeURIComponent(req.params.runId)}`), user,
+        { method: 'DELETE' }), 'The benchmark run could not be cancelled or deleted.');
+    } catch { return res.status(502).json({ detail: 'The benchmark run could not be cancelled or deleted.' }); }
+  });
+
+  app.get('/api/code-quality/projects/:projectId/performance/runs/:runId/traces', async (req, res) => {
+    try {
+      const user = allowed(res, req.params.projectId); if (!user) return;
+      return await reply(res, await forward(perfPath(req.params.projectId, `/runs/${encodeURIComponent(req.params.runId)}/traces`), user),
+        'Traced benchmark requests are unavailable.');
+    } catch { return res.status(502).json({ detail: 'Traced benchmark requests are unavailable.' }); }
+  });
+
+  app.get('/api/code-quality/projects/:projectId/performance/runs/:runId/script', async (req, res) => {
+    try {
+      const user = allowed(res, req.params.projectId); if (!user) return;
+      const upstream = await forward(perfPath(req.params.projectId, `/runs/${encodeURIComponent(req.params.runId)}/script`), user);
+      if (!upstream.ok) return await reply(res, upstream, 'The k6 script could not be exported.');
+      res.setHeader('Content-Type', 'text/javascript; charset=utf-8');
+      res.setHeader('Content-Disposition', `attachment; filename="benchmark-${String(req.params.runId).replace(/[^a-f0-9-]/gi, '').slice(0, 36)}.js"`);
+      return res.status(200).send(await upstream.text());
+    } catch { return res.status(502).json({ detail: 'The k6 script could not be exported.' }); }
   });
 
   app.post('/api/code-quality/projects/:projectId/performance/compare', async (req, res) => {
     try {
       const user = allowed(res, req.params.projectId); if (!user) return;
-      return await reply(res, await forward(`/code-quality/projects/${encodeURIComponent(req.params.projectId)}/performance/compare`, user,
-        { method: 'POST', body: JSON.stringify(req.body) }), 'Performance runs could not be compared.');
+      return await reply(res, await forward(perfPath(req.params.projectId, '/compare'), user,
+        { method: 'POST', body: JSON.stringify(req.body ?? {}) }), 'Performance runs could not be compared.');
     } catch { return res.status(502).json({ detail: 'Performance runs could not be compared.' }); }
   });
 

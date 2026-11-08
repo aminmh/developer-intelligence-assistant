@@ -240,7 +240,10 @@ export function installOidcAuth(app: express.Express): void {
     const user = sessionUser(req);
     if (!user) return res.status(401).json({ error: 'Authentication required.' });
     (res.locals as any).authUser = user;
-    const projectId = String(req.params.projectId || req.body?.project_id || req.query.project_id || '').trim();
+    // app.use() never fills route params, so the project in the URL path is read here directly.
+    const scope = requestProjectScope(req.path, req.body?.project_id, req.query.project_id);
+    if ('error' in scope) return res.status(400).json({ error: scope.error });
+    const projectId = scope.projectId;
     const readOnlyPost = ['/query', '/query/stream', '/query/result', '/answer'].includes(req.path)
       || /^\/query\/[^/]+\/evaluate$/.test(req.path);
     if (req.method === 'POST' && req.path === '/runtime/setup-authorization') {
@@ -267,6 +270,23 @@ export function installOidcAuth(app: express.Express): void {
     }
     next();
   });
+}
+
+/**
+ * The project a request acts on. The URL path wins; a different project_id in the body or query is
+ * refused, so a role in one project cannot authorize a write to another.
+ */
+export function requestProjectScope(requestPath: string, bodyProject: unknown, queryProject: unknown): { projectId: string } | { error: string } {
+  let pathProject = '';
+  const match = /\/projects\/([^/]+)/.exec(requestPath);
+  if (match) {
+    try { pathProject = decodeURIComponent(match[1]).trim(); } catch { return { error: 'Invalid project identity.' }; }
+  }
+  const others = [bodyProject, queryProject]
+    .filter((value) => value !== undefined && value !== null && value !== '')
+    .map((value) => String(value).trim());
+  if (pathProject && others.some((value) => value !== pathProject)) return { error: 'The request names two different projects.' };
+  return { projectId: pathProject || others[0] || '' };
 }
 
 export function authRoleFor(user: User, projectId: string): Role | null { return roleFor(user, projectId); }

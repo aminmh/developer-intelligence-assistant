@@ -16,7 +16,7 @@ test('benchmark proxy keeps OS credential retrieval purpose- and target-scoped',
   globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
     const url = String(input);
     calls.push({ url, init });
-    if (url.endsWith('/code-quality/performance/targets/target-1')) {
+    if (url.endsWith('/code-quality/projects/pizza/performance/targets/target-1')) {
       return new Response(JSON.stringify({ target: { target_id: 'target-1', auth_mode: 'bearer' } }), { status: 200 });
     }
     if (url.endsWith('/code-quality-bearer-use')) {
@@ -24,7 +24,8 @@ test('benchmark proxy keeps OS credential retrieval purpose- and target-scoped',
     }
     if (url.endsWith('/performance/runs')) {
       assert.equal(JSON.parse(String(init?.body)).bearer_token, 'transient-secret');
-      return new Response(JSON.stringify({ run_id: 'run-1', complete: true }), { status: 200 });
+      assert.equal(JSON.parse(String(init?.body)).revision_id, 'rev_1');
+      return new Response(JSON.stringify({ run_id: 'run-1', state: 'running' }), { status: 202 });
     }
     throw new Error(`Unexpected upstream call: ${url}`);
   }) as typeof fetch;
@@ -42,9 +43,9 @@ test('benchmark proxy keeps OS credential retrieval purpose- and target-scoped',
     };
     const handler = handlers.get('POST /api/code-quality/projects/:projectId/performance/runs');
     assert.ok(handler);
-    await handler({ params: { projectId: 'pizza' }, body: { target_id: 'target-1', routes: ['/api/items'] } }, response);
+    await handler({ params: { projectId: 'pizza' }, body: { target_id: 'target-1', routes: ['/api/items'], revision_id: 'rev_1' } }, response);
 
-    assert.equal(response.statusCode, 200);
+    assert.equal(response.statusCode, 202);
     assert.equal(JSON.stringify(response.body).includes('transient-secret'), false);
     const helperCall = calls.find((item) => item.url.endsWith('/code-quality-bearer-use'));
     assert.ok(helperCall);
@@ -222,4 +223,37 @@ test('project exclusion proxy authenticates project access and forwards saved pa
   } finally {
     globalThis.fetch = originalFetch;
   }
+});
+
+test('viewers can read benchmark results but cannot configure targets or start runs', async () => {
+  const handlers = new Map<string, (...args: any[]) => Promise<unknown>>();
+  const app = Object.fromEntries(['get', 'post', 'put', 'delete', 'patch'].map((method) => [method,
+    (path: string, handler: (...args: any[]) => Promise<unknown>) => handlers.set(`${method.toUpperCase()} ${path}`, handler)]));
+  const originalFetch = globalThis.fetch;
+  const upstream: string[] = [];
+  globalThis.fetch = (async (input: RequestInfo | URL) => { upstream.push(String(input)); return new Response(JSON.stringify({ runs: [] })); }) as typeof fetch;
+  try {
+    registerCodeQualityRoutes(app as any, {
+      apiUrl: 'http://python-api', internalSecret: 'x'.repeat(40), helperUrl: 'http://127.0.0.1:47831',
+      webOrigin: 'http://localhost:3000', getUser: () => ({ sub: 'viewer' }), canAccessProject: () => true,
+      canOperateProject: () => false, isGlobalAdmin: () => false, ruleSyncIntervalMs: 0,
+    });
+    const response = () => ({ statusCode: 200, body: undefined as any,
+      status(code: number) { this.statusCode = code; return this; }, json(body: unknown) { this.body = body; return this; } });
+    for (const key of ['POST /api/code-quality/projects/:projectId/performance/runs',
+      'POST /api/code-quality/projects/:projectId/performance/targets',
+      'DELETE /api/code-quality/projects/:projectId/performance/targets/:targetId',
+      'POST /api/code-quality/projects/:projectId/performance/targets/:targetId/credential',
+      'DELETE /api/code-quality/projects/:projectId/performance/runs/:runId']) {
+      const handler = handlers.get(key);
+      assert.ok(handler, key);
+      const res = response();
+      await handler({ params: { projectId: 'pizza', targetId: 't', runId: 'r' }, body: { target_id: 't' } }, res);
+      assert.equal(res.statusCode, 403, key);
+    }
+    assert.deepEqual(upstream, []);
+    const read = response();
+    await handlers.get('GET /api/code-quality/projects/:projectId/performance/runs')!({ params: { projectId: 'pizza' } }, read);
+    assert.equal(read.statusCode, 200);
+  } finally { globalThis.fetch = originalFetch; }
 });

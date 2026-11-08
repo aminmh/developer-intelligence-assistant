@@ -683,6 +683,7 @@ async function startServer() {
     getUser: (res) => (res.locals as any).authUser,
     canAccessProject: (user, projectId) => Boolean(user && (authIsBootstrapAdmin(user) || authRoleFor(user, projectId))),
     canManageProject: (user, projectId) => Boolean(user && (authIsBootstrapAdmin(user) || authRoleFor(user, projectId) === 'admin')),
+    canOperateProject: (user, projectId) => Boolean(user && (authIsBootstrapAdmin(user) || ['operator', 'admin'].includes(authRoleFor(user, projectId) || ''))),
     isGlobalAdmin: (user) => Boolean(user && authIsBootstrapAdmin(user)),
   });
 
