@@ -3,6 +3,7 @@ import { Activity, AlertTriangle, BookOpen, CheckCircle2, RefreshCw, Server, Tra
 import { computed, onMounted, onUnmounted, ref, watch } from 'vue';
 import ConfirmModal from './ConfirmModal.vue';
 import RemoteHostMonitor from './RemoteHostMonitor.vue';
+import RuntimeSetupWizard from './runtime/RuntimeSetupWizard.vue';
 import ToggleCard from './ToggleCard.vue';
 import { makeRequest } from '../ui/makeRequest';
 import { subscribeRuntimeUpdates } from '../ui/runtimeEvents';
@@ -61,6 +62,7 @@ const setupState = ref<'idle' | 'starting' | 'running' | 'complete' | 'cancelled
 const setupMessage = ref('');
 const activeOperation = ref<'setup' | 'cleanup' | 'remove' | ''>('');
 const savedSetup = ref<any>(null);
+const showSetupWizard = ref(false);
 const showGuide = ref(false);
 const autoRefresh = ref(false);
 const ciTokenSnippet = 'TELEMETRY_CI_PROJECT_TOKENS={"billing":"replace-with-a-32-plus-character-random-token"}';
@@ -134,6 +136,7 @@ const loadProjects = async () => {
     const response = await makeRequest('/api/runtime/projects');
     const data = await response.json();
     if (!response.ok) throw new Error(data.detail || 'Could not load runtime project inventory.');
+    error.value = '';
     projects.value = data.projects || [];
     if (!selectedKey.value || !options.value.some((item) => item.key === selectedKey.value)) {
       selectedKey.value = options.value[0]?.key || '';
@@ -401,6 +404,31 @@ const handleRequestDetailTabKeydown = (event: KeyboardEvent, index: number) => {
 };
 
 const refresh = async () => { await loadProjects(); await loadDetail(); };
+// Setup restarts python-api, and the host agent's first report arrives some seconds later.
+// Keep reloading the inventory until that project reports running containers, then select it.
+const FIRST_REPORT_TIMEOUT_MS = 120_000;
+const waitingForFirstReport = ref('');
+const waitForFirstReport = async (projectId: string) => {
+  waitingForFirstReport.value = projectId;
+  try {
+    const deadline = Date.now() + FIRST_REPORT_TIMEOUT_MS;
+    while (Date.now() < deadline) {
+      await loadProjects();
+      const reported = options.value.find((item) => item.project_id === projectId && (item.running_project_containers || 0) > 0);
+      if (!error.value && reported) {
+        if (selectedKey.value === reported.key) await loadDetail();
+        else selectedKey.value = reported.key; // the selectedKey watcher loads its containers
+        return true;
+      }
+      await new Promise((resolve) => setTimeout(resolve, 3000));
+    }
+    await refresh();
+    return false;
+  } finally {
+    waitingForFirstReport.value = '';
+  }
+};
+const knownProjectIds = computed(() => [...new Set(projects.value.map((item) => item.project_id).filter(Boolean))].sort());
 const updateRuntimeSubscription = (enabled: boolean) => {
   if (!enabled) {
     stopRuntimeUpdates?.();
@@ -518,6 +546,13 @@ const startRuntimeSetup = async () => {
       : `Runtime recovery is in phase '${phase}'. Run just runtime-status, then Clean up Runtime before starting another setup.`;
     return;
   }
+  setupState.value = 'idle';
+  setupMessage.value = '';
+  showSetupWizard.value = true;
+};
+// Apply a preview made in the setup wizard; the helper asks for approval in a dialog on this computer.
+const applySetupPlan = async (planId: string) => {
+  showSetupWizard.value = false;
   activeOperation.value = 'setup';
   setupState.value = 'starting';
   setupMessage.value = 'Authorizing local Runtime setup…';
@@ -526,8 +561,13 @@ const startRuntimeSetup = async () => {
     const helperUrl = 'http://127.0.0.1:47831';
     let authorizationAt = Date.now();
     const headers = () => ({ Authorization: `Bearer ${token}` });
-    const startResponse = await fetch(`${helperUrl}/setup`, { method: 'POST', headers: headers(), cache: 'no-store' });
+    const startResponse = await fetch(`${helperUrl}/setup/apply`, {
+      method: 'POST', cache: 'no-store',
+      headers: { ...headers(), 'Content-Type': 'application/json' },
+      body: JSON.stringify({ plan_id: planId }),
+    });
     const started = await startResponse.json().catch(() => ({}));
+    if (startResponse.status === 404) throw new Error('The local Runtime helper is out of date. Run just up to restart it, then reload this page.');
     if (!startResponse.ok) throw new Error(started.detail || 'Could not start the local Runtime setup helper. Run just up and try again.');
     setupState.value = 'running';
     while (true) {
@@ -539,7 +579,22 @@ const startRuntimeSetup = async () => {
       const status = await statusResponse.json().catch(() => ({}));
       if (!statusResponse.ok) throw new Error(status.detail || 'Could not read Runtime setup progress.');
       setupMessage.value = status.message || 'Runtime setup is running…';
-      if (status.status === 'complete') { setupState.value = 'complete'; await loadSavedSetup(); await refresh(); break; }
+      if (status.status === 'complete') {
+        await loadSavedSetup(false);
+        const projectId = savedSetup.value?.project_id;
+        if (projectId) {
+          setupMessage.value = `Setup applied. Waiting for the host agent's first report for ${projectId}…`;
+          const reported = await waitForFirstReport(projectId);
+          setupMessage.value = reported
+            ? `${status.message || 'Runtime setup is complete.'} Containers for ${projectId} are reporting.`
+            : `${status.message || 'Runtime setup is complete.'} No containers have reported for ${projectId} yet; select Refresh in a minute, or check docker logs devassistant-telemetry-agent-agent-1.`;
+        } else {
+          setupMessage.value = status.message || 'Runtime setup is complete.';
+          await refresh();
+        }
+        setupState.value = 'complete';
+        break;
+      }
       if (status.status === 'cancelled') { setupState.value = 'cancelled'; break; }
       if (status.status === 'error') { setupState.value = 'error'; break; }
       await new Promise((resolve) => setTimeout(resolve, 1200));
@@ -681,8 +736,8 @@ onUnmounted(() => stopRuntimeUpdates?.());
         <p class="mt-1 text-xs text-slate-500">Opt-in local Docker deployments, sampled requests, and request-level runtime details.</p>
       </div>
       <div class="flex flex-wrap items-center gap-2">
-        <button type="button" @click="startRuntimeSetup" :disabled="!!savedSetup || setupState === 'starting' || setupState === 'running'" class="inline-flex h-10 items-center justify-center rounded-xl border border-emerald-500/30 px-3 text-xs text-emerald-200 hover:bg-emerald-500/10 disabled:opacity-50"><Activity class="mr-1 inline h-3.5 w-3.5" :class="(setupState === 'starting' || setupState === 'running') && activeOperation === 'setup' ? 'animate-pulse' : ''" />{{ (setupState === 'starting' || setupState === 'running') && activeOperation === 'setup' ? 'Setting up…' : 'Set up Runtime' }}</button>
-        <button type="button" @click="cleanupRuntime" :disabled="setupState === 'starting' || setupState === 'running'" title="Checkbox acknowledgements are optional; Continue approves all applicable cleanup actions. Cancel preserves recovery state." class="inline-flex h-10 items-center justify-center rounded-xl border border-rose-500/30 px-3 text-xs text-rose-200 hover:bg-rose-500/10 disabled:opacity-50"><Activity class="mr-1 inline h-3.5 w-3.5" :class="(setupState === 'starting' || setupState === 'running') && activeOperation === 'cleanup' ? 'animate-pulse' : ''" />{{ (setupState === 'starting' || setupState === 'running') && activeOperation === 'cleanup' ? 'Cleaning up…' : 'Clean up Runtime' }}</button>
+        <button type="button" @click="startRuntimeSetup" :disabled="!!savedSetup || showSetupWizard || setupState === 'starting' || setupState === 'running'" class="inline-flex h-10 items-center justify-center rounded-xl border border-emerald-500/30 px-3 text-xs text-emerald-200 hover:bg-emerald-500/10 disabled:opacity-50"><Activity class="mr-1 inline h-3.5 w-3.5" :class="(setupState === 'starting' || setupState === 'running') && activeOperation === 'setup' ? 'animate-pulse' : ''" />{{ (setupState === 'starting' || setupState === 'running') && activeOperation === 'setup' ? 'Setting up…' : 'Set up Runtime' }}</button>
+        <button type="button" @click="cleanupRuntime" :disabled="setupState === 'starting' || setupState === 'running'" title="Restores your Compose files and stops the local agent after you allow it in a dialog on this computer. Cancel keeps the recovery record." class="inline-flex h-10 items-center justify-center rounded-xl border border-rose-500/30 px-3 text-xs text-rose-200 hover:bg-rose-500/10 disabled:opacity-50"><Activity class="mr-1 inline h-3.5 w-3.5" :class="(setupState === 'starting' || setupState === 'running') && activeOperation === 'cleanup' ? 'animate-pulse' : ''" />{{ (setupState === 'starting' || setupState === 'running') && activeOperation === 'cleanup' ? 'Cleaning up…' : 'Clean up Runtime' }}</button>
         <button type="button" @click="showGuide = !showGuide" class="inline-flex h-10 items-center justify-center rounded-xl border border-cyan-500/30 px-3 text-xs text-cyan-200 hover:bg-cyan-500/10"><BookOpen class="mr-1 inline h-3.5 w-3.5" />{{ showGuide ? 'Hide guide' : 'Get Started' }}</button>
         <select v-model="selectedKey" :disabled="setupState === 'starting' || setupState === 'running'" class="h-10 max-w-[24rem] rounded-xl border border-slate-800 bg-[#11162d] px-3 text-xs text-slate-200 disabled:opacity-50">
           <option value="">Select project / indexed revision</option>
@@ -696,6 +751,8 @@ onUnmounted(() => stopRuntimeUpdates?.());
 
     <RemoteHostMonitor />
 
+    <RuntimeSetupWizard v-if="showSetupWizard" :authorize="getRuntimeHelperAuth" :known-project-ids="knownProjectIds" @close="showSetupWizard = false" @apply="applySetupPlan" />
+
     <div v-if="setupState !== 'idle'" class="rounded-xl border p-3 text-xs" :class="setupState === 'error' ? 'border-rose-500/25 bg-rose-950/20 text-rose-300' : setupState === 'complete' ? 'border-emerald-500/25 bg-emerald-950/20 text-emerald-300' : setupState === 'cancelled' ? 'border-amber-500/25 bg-amber-950/20 text-amber-300' : 'border-cyan-500/25 bg-cyan-950/20 text-cyan-200'">
       <span class="font-semibold">{{ setupState === 'complete' ? (activeOperation === 'cleanup' ? 'Cleanup complete' : activeOperation === 'remove' ? 'Local container removal complete' : savedSetup ? 'Existing setup record' : 'Setup complete') : setupState === 'cancelled' ? (activeOperation === 'cleanup' ? 'Cleanup cancelled' : activeOperation === 'remove' ? 'Local container removal cancelled' : 'Setup cancelled') : setupState === 'error' ? (activeOperation === 'cleanup' ? 'Cleanup needs attention' : activeOperation === 'remove' ? 'Local container removal needs attention' : 'Setup failed') : activeOperation === 'cleanup' ? 'Runtime cleanup' : activeOperation === 'remove' ? 'Local container removal' : 'Runtime setup' }}</span>
       <span class="ml-2">{{ setupMessage }}</span>
@@ -703,7 +760,7 @@ onUnmounted(() => stopRuntimeUpdates?.());
     </div>
 
     <div v-if="error" class="rounded-xl border border-rose-500/25 bg-rose-950/20 p-4 text-xs text-rose-300">{{ error }}</div>
-    <div v-else-if="!options.length" class="rounded-2xl border border-dashed border-slate-700 p-10 text-center">
+    <div v-else-if="!options.length && !loadingProjects && !waitingForFirstReport" class="rounded-2xl border border-dashed border-slate-700 p-10 text-center">
       <Server class="mx-auto h-7 w-7 text-slate-600" />
       <p class="mt-3 text-sm text-slate-300">No Docker containers are reporting yet.</p>
       <p class="mt-1 text-xs text-slate-500">Start the local host agent and opt in your Compose services. Open Get Started for setup steps; a source snapshot is optional for container visibility.</p>
@@ -721,12 +778,12 @@ onUnmounted(() => stopRuntimeUpdates?.());
           <ol class="space-y-3">
             <li class="rounded-xl border border-slate-800 bg-slate-950/40 p-4">
               <p class="text-xs font-semibold text-cyan-200">1. Listen to your local Docker project</p>
-              <p class="mt-2 text-[11px] leading-5 text-slate-400">Use Set up Runtime above or run the setup command below from a terminal opened at this repository checkout. The native dialogs discover local Compose projects, ask which services to track, show a compact Compose summary, and request one grouped approval before changing files or recreating services. Only opted-in containers are reported.</p>
+              <p class="mt-2 text-[11px] leading-5 text-slate-400">Use Set up Runtime above: choose a local Compose project and its services, review the exact label lines that will be added, then apply. A dialog on this computer asks you to allow the changes before any file is edited or service recreated. The terminal commands below do the same without a browser. Only opted-in containers are reported.</p>
               <details open class="mt-3 rounded-lg border border-slate-800 bg-black/20 p-3">
                 <summary class="cursor-pointer text-[11px] font-medium text-slate-300">Local setup commands and access</summary>
                 <div class="mt-3 space-y-2 text-[10px] leading-4 text-slate-400">
                   <pre class="overflow-x-auto rounded-lg bg-black/30 p-2 text-slate-300"><code>{{ runtimeSetupCommands }}</code></pre>
-                  <p>The browser never reads your Docker daemon or local project files. The helper keeps Docker project discovery separate, then shows a compact Compose summary and one grouped checklist covering the setup actions. Recovery state is written before mutations. It stores a private recovery record in your local state directory.</p>
+                  <p>The browser never talks to Docker directly: the Developer Assistant helper on this computer lists Compose projects and previews the change, and shows only the label lines it adds. Approval happens in a desktop dialog (or the helper terminal when no desktop is available), so a web page alone cannot apply it. Recovery state is written before any change, in a private record in your local state directory.</p>
                   <p>After setup, choose the project and indexed revision here. No source snapshot is needed to list containers. The agent reconciles about every 60 seconds; use Refresh to reload sooner. Snapshots and spans are optional additions for code matching and route/database activity. For remote hosts, use managed certificates and follow <code>api/telemetry-agent/README.md</code>.</p>
                 </div>
               </details>
@@ -787,6 +844,13 @@ onUnmounted(() => stopRuntimeUpdates?.());
       </section>
     </Transition>
 
+    <section v-if="!error && !detail && (loadingProjects || loadingDetail || waitingForFirstReport)" class="rounded-2xl border border-slate-800 bg-slate-900/30 p-4" aria-busy="true" aria-live="polite">
+      <div class="rounded-xl border border-slate-800 bg-slate-950/30 p-3 space-y-2">
+        <div class="flex items-center gap-2"><RefreshCw class="h-3 w-3 animate-spin text-cyan-300" /><h5 class="text-[10px] font-semibold uppercase tracking-wide text-slate-300">Containers</h5><span class="text-[10px] text-slate-500">{{ waitingForFirstReport ? `Waiting for the host agent's first report for ${waitingForFirstReport}…` : 'Loading containers…' }}</span></div>
+        <div v-for="row in 2" :key="row" class="flex animate-pulse items-center gap-2 rounded-lg border border-slate-800 p-2"><span class="h-3.5 w-3.5 rounded-full bg-slate-700" /><span class="h-2.5 w-16 rounded bg-slate-700" /><span class="h-2.5 w-20 rounded bg-slate-800" /><span class="ml-auto h-2.5 w-24 rounded bg-slate-800" /></div>
+      </div>
+    </section>
+
     <template v-if="options.length && detail && !error">
       <div v-if="detail.snapshot.state !== 'awaiting_source' && detail.telemetry.reason" class="rounded-xl border border-amber-500/20 bg-amber-500/5 p-4 text-xs text-amber-200">{{ detail.telemetry.reason }} Start the local runtime telemetry profile and instrument the PHP application with the Phase 1 identity attributes. The synthetic Phase 0 collector does not accept application spans.</div>
       <div v-if="detail.snapshot.state !== 'awaiting_source' && detail.symbol_index_available === false" class="rounded-xl border border-amber-500/20 bg-amber-500/5 p-4 text-xs text-amber-200">{{ detail.symbol_index_reason || 'The symbol index is unavailable.' }} Runtime spans may still be present, but source-linked request details and code analysis require the indexed snapshot.</div>
@@ -795,7 +859,8 @@ onUnmounted(() => stopRuntimeUpdates?.());
         <div class="rounded-xl border border-slate-800 bg-slate-950/30 p-3 space-y-2">
           <div class="flex flex-wrap items-center justify-between gap-2"><h5 class="text-[10px] font-semibold uppercase tracking-wide text-slate-300">Containers</h5><span class="text-[10px] text-slate-500">Deployment reports refresh every 60 seconds at the host agent</span></div>
           <p v-if="detail.deployment_mismatch" class="flex items-center gap-1 text-[10px] text-amber-300"><AlertTriangle class="h-3 w-3 shrink-0" />Running containers use another revision or unindexed code.</p>
-          <div v-if="!detail.deployments.length" class="text-xs text-slate-500">No running containers have reported for this project.</div>
+          <div v-if="!detail.deployments.length && waitingForFirstReport" class="flex items-center gap-2 text-xs text-cyan-200" aria-live="polite"><RefreshCw class="h-3 w-3 animate-spin" />Waiting for the host agent's first report for {{ waitingForFirstReport }}…</div>
+          <div v-else-if="!detail.deployments.length" class="text-xs text-slate-500">No running containers have reported for this project.</div>
           <div v-for="container in detail.deployments" :key="container.container_id" class="flex flex-wrap items-center gap-2 rounded-lg border border-slate-800 p-2 text-[10px]">
             <CheckCircle2 class="h-3.5 w-3.5 text-emerald-400" /><span class="font-semibold text-slate-200">{{ container.service }}</span><span class="text-slate-500">{{ container.environment }}</span><span class="font-mono text-slate-500">{{ container.container_id.slice(0, 12) }}</span><span class="ml-auto max-w-full font-mono text-slate-500">{{ container.revision_id ? `Revision ${container.revision_id.slice(4, 12)}` : 'Unindexed code' }}</span><XCircle v-if="container.commit_sha !== detail.commit_sha" class="h-3.5 w-3.5 text-amber-400" />
           </div>
