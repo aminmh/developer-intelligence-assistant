@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
 import os
 import re
 import ssl
@@ -21,6 +22,16 @@ LABELS = {
 }
 SHA = re.compile(r"^(?:[0-9a-f]{40}|[0-9a-f]{64})$")
 SLUG = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$")
+PROXY = "http://docker-api-proxy:2375"
+# Every field the agent reads exists unchanged from API 1.41 on; prefer a version every
+# current engine accepts and fall back to the engine's own range when it does not.
+PREFERRED_API = (1, 44)
+RECONCILE_INTERVAL = 60
+DEBOUNCE_SECONDS = 1.5
+# Docker's event stream is silent while nothing changes; reconnect rather than hang forever.
+EVENT_READ_TIMEOUT = 300
+
+log = logging.getLogger("telemetry-agent")
 
 
 def selected(container: dict) -> dict | None:
@@ -41,21 +52,50 @@ def selected(container: dict) -> dict | None:
             "service": service, "commit_sha": commit, "image_id": image_id, "state": "running"}
 
 
+def _version(value) -> tuple[int, int] | None:
+    match = re.fullmatch(r"(\d{1,3})\.(\d{1,3})", value) if isinstance(value, str) else None
+    return (int(match[1]), int(match[2])) if match else None
+
+
+def negotiate_api_version(info: dict) -> str:
+    """Pick PREFERRED_API clamped to the engine's [MinAPIVersion, ApiVersion] range."""
+    chosen = PREFERRED_API
+    newest, oldest = _version(info.get("ApiVersion")), _version(info.get("MinAPIVersion"))
+    if newest and chosen > newest:
+        chosen = newest
+    if oldest and chosen < oldest:
+        chosen = oldest
+    return f"v{chosen[0]}.{chosen[1]}"
+
+
+def event_identity(event: dict) -> str:
+    return hashlib.sha256((str(event.get("timeNano")) + str(event.get("id", "")) + str(event.get("Action", ""))).encode()).hexdigest()
+
+
 class Reporter:
     def __init__(self):
         context = ssl.create_default_context(cafile=os.environ["BACKEND_CA"])
         context.load_cert_chain(os.environ["HOST_CERT"], os.environ["HOST_KEY"])
         self.opener = build_opener(HTTPSHandler(context=context))
         self.backend = os.environ["BACKEND_URL"].rstrip("/") + "/telemetry/host/deployments"
+        self.api_version: str | None = None
+        self.dirty = threading.Event()
+        self.lock = threading.Lock()
+        self.pending_event_id: str | None = None
 
-    def docker_get(self, path):
-        with self.opener.open("http://docker-api-proxy:2375" + path, timeout=90) as response:
+    def docker_get(self, path, timeout=30):
+        with self.opener.open(PROXY + path, timeout=timeout) as response:
             return response.read()
 
+    def api(self) -> str:
+        if self.api_version is None:
+            self.api_version = negotiate_api_version(json.loads(self.docker_get("/version")))
+            log.info("docker_api_version_selected version=%s", self.api_version)
+        return self.api_version
+
     def inventory(self):
-        filters = json.dumps({"label": [LABELS["enabled"] + "=true"]}, separators=(",", ":"))
-        path = "/v1.41/containers/json?" + urlencode({"filters": filters})
-        raw = json.loads(self.docker_get(path))
+        # The proxy applies the opt-in label filter itself and returns only telemetry labels.
+        raw = json.loads(self.docker_get(f"/{self.api()}/containers/json"))
         return [record for record in (selected(item) for item in raw) if record]
 
     def report(self, containers, inventory=True, event_id=None):
@@ -67,35 +107,68 @@ class Reporter:
     def reconcile(self, event_id=None):
         self.report(self.inventory(), inventory=True, event_id=event_id)
 
+    def mark_dirty(self, event_id: str | None = None):
+        with self.lock:
+            if event_id:
+                self.pending_event_id = event_id
+        self.dirty.set()
+
     def watch_events(self):
         cursor = int(time.time())
         while True:
             try:
-                query = urlencode({"since": cursor, "filters": json.dumps({"type": ["container"]})})
-                with self.opener.open("http://docker-api-proxy:2375/v1.41/events?" + query) as response:
+                query = urlencode({"since": cursor})
+                with self.opener.open(f"{PROXY}/{self.api()}/events?{query}", timeout=EVENT_READ_TIMEOUT) as response:
                     for line in response:
                         if not line.strip():
                             continue
                         event = json.loads(line)
-                        cursor = max(cursor, int(event.get("time", cursor)))
-                        attrs = event.get("Actor", {}).get("Attributes", {})
-                        # Ignore non-opted-in events; inventory reconciles stops and starts.
-                        if attrs.get(LABELS["enabled"]) == "true":
-                            identity = hashlib.sha256((str(event.get("timeNano")) + event.get("id", "") + event.get("Action", "")).encode()).hexdigest()
-                            self.reconcile(identity)
-            except (URLError, OSError, ValueError, KeyError):
+                        stamp = event.get("time")
+                        if isinstance(stamp, int):
+                            cursor = max(cursor, stamp)
+                        # The proxy forwards only lifecycle events of opted-in containers.
+                        self.mark_dirty(event_identity(event))
+            except TimeoutError:
+                continue  # idle stream; `since` replays anything missed while reconnecting
+            except Exception as exc:  # noqa: BLE001 — the watcher must never die silently
+                log.warning("event_stream_failed error_type=%s", type(exc).__name__)
+                self.api_version = None
+                # Events may have been missed while the stream was down.
+                self.mark_dirty()
                 time.sleep(3)
+
+    def run_reconciler(self):
+        failing, backoff = False, 3
+        while True:
+            self.dirty.wait(RECONCILE_INTERVAL)
+            if self.dirty.is_set():
+                time.sleep(DEBOUNCE_SECONDS)  # coalesce bursts such as `docker compose up`
+            with self.lock:
+                self.dirty.clear()
+                event_id, self.pending_event_id = self.pending_event_id, None
+            try:
+                self.reconcile(event_id)
+                if failing:
+                    log.info("reconcile_recovered")
+                failing, backoff = False, 3
+            except Exception as exc:  # noqa: BLE001 — keep reporting; log without request data
+                if not failing:
+                    log.warning("reconcile_failed error_type=%s", type(exc).__name__)
+                failing = True
+                if isinstance(exc, URLError) and not hasattr(exc, "code"):
+                    self.api_version = None
+                # Retry with backoff instead of waiting for the next periodic reconcile.
+                self.mark_dirty(event_id)
+                time.sleep(backoff)
+                backoff = min(backoff * 2, RECONCILE_INTERVAL)
 
 
 def main():
+    logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s %(message)s")
     reporter = Reporter()
+    reporter.dirty.set()  # reconcile at startup
     threading.Thread(target=reporter.watch_events, daemon=True).start()
-    while True:
-        try:
-            reporter.reconcile()
-        except (URLError, OSError, ValueError):
-            pass
-        time.sleep(60)
+    reporter.run_reconciler()
 
 
 if __name__ == "__main__":

@@ -1,5 +1,5 @@
-from agent import LABELS, selected
-from docker_api_proxy import allowed
+# The Docker proxy is Go; its tests are in proxy/main_test.go.
+from agent import LABELS, negotiate_api_version, selected
 
 
 def test_opt_in_labels_are_required_and_validated():
@@ -13,15 +13,8 @@ def test_opt_in_labels_are_required_and_validated():
     assert selected({**container, "Labels": {**labels, LABELS["commit"]: "short"}}) is None
 
 
-def test_proxy_allows_only_read_inventory_events_and_health():
-    assert allowed("GET", "/v1.41/containers/json?all=0")
-    assert allowed("GET", "/v1.41/events?since=10")
-    assert allowed("GET", "/_ping")
-    assert allowed("GET", "/version")
-    for method, path in [("POST", "/v1.41/containers/create"),
-                         ("GET", "/v1.41/containers/abc/json"),
-                         ("GET", "/v1.41/containers/abc/logs"),
-                         ("GET", "/v1.41/containers/abc/archive"),
-                         ("GET", "/v1.41/containers/abc/exec"),
-                         ("GET", "/v1.41/images/json")]:
-        assert not allowed(method, path)
+def test_api_version_is_negotiated_within_the_engine_range():
+    assert negotiate_api_version({"ApiVersion": "1.52", "MinAPIVersion": "1.44"}) == "v1.44"
+    assert negotiate_api_version({"ApiVersion": "1.43", "MinAPIVersion": "1.24"}) == "v1.43"
+    assert negotiate_api_version({"ApiVersion": "1.60", "MinAPIVersion": "1.50"}) == "v1.50"
+    assert negotiate_api_version({}) == "v1.44"

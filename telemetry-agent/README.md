@@ -59,14 +59,36 @@ export DOCKER_SOCK_GID="$(stat -c '%g' /var/run/docker.sock)"
 docker compose -f docker-compose.yml up -d --build
 ```
 
-The proxy is built from the Python 3.13.7 slim base and runs as an unprivileged
-user. It mounts the Docker socket read-only and forwards only GET requests to
-`/_ping`, `/version`, versioned `/containers/json`, and versioned `/events`.
-All other methods and paths, including inspect, logs, exec, archive, image,
-network, volume and mutation APIs, are denied. The proxy has no route to the
-backend; only the agent has backend egress. Reconciliation runs at startup and
-every 60 seconds; Docker events trigger prompt reconciliation. The backend
-retains stopped mappings for seven days.
+The proxy (`proxy/`) is a static Go binary that uses only the standard library.
+Its image is built from `scratch`: it has no shell, interpreter or package
+manager, and the build runs `go vet` and the tests before producing it. It runs
+as an unprivileged user in the Docker socket's group, with a read-only
+filesystem, no capabilities, `no-new-privileges`, 64 processes and 64 MiB of
+memory. The Compose health check runs `/docker-api-proxy -healthcheck`. A `:ro`
+mount does not stop API calls over a socket, and socket access is equivalent to
+root on the host, so the proxy is the only barrier and is kept deliberately
+small:
+
+- It answers only GET `/_ping`, `/version`, `/v1.N/containers/json` and
+  `/v1.N/events`. All other methods and paths, including inspect, logs, exec,
+  archive, image, network, volume and mutation APIs, are refused.
+- It never forwards the client's query string. It rebuilds each Docker request,
+  always adds the `com.devassistant.telemetry.enabled=true` label filter, keeps
+  only numeric `since` and `until` on events, and asks only for container
+  `start`, `die`, `destroy`, `rename`, `pause` and `unpause` events. Health-check
+  and exec events, which can carry command lines, never reach the agent.
+- It returns only the container ID, image ID, state and `com.devassistant.telemetry.*`
+  labels; other containers, commands, mounts, addresses and labels stay in the
+  proxy. `/version` returns only the engine and API versions.
+- It allows eight concurrent requests, times out Docker calls other than the
+  event stream, and logs refusals and failures without request paths.
+
+The proxy has no route to the backend; only the agent has backend egress. The
+agent picks a Docker API version from the engine's supported range. It
+reconciles at startup, every 60 seconds and about 1.5 seconds after a burst of
+lifecycle events, retries failed reports with backoff, and reconnects the event
+stream after errors or five idle minutes. The backend retains stopped mappings
+for seven days.
 
 Runtime project removal does not add mutation access to this proxy. It can
 remove only matching opt-in containers from the local host where the user
