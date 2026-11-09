@@ -1687,17 +1687,81 @@ def stop_host_services() -> None:
     run(compose["args"] + ["down"], cwd=command["cwd"], env=command["env"])
 
 
-def restore_compose(state: dict) -> bool:
-    safe = True
+def setup_proposed_text(state: dict, raw_path: str, original: str) -> str | None:
+    """Rebuild the text setup wrote to a Compose file; None unless it matches the hash recorded then."""
+    try:
+        services = yaml_services(original)
+        proposed = original
+        for service, values in (state.get("label_values") or {}).items():
+            if service in services:
+                proposed = add_service_labels(proposed, service, values)
+    except RuntimeError:
+        return None
+    expected = (state.get("compose_hashes") or {}).get(raw_path)
+    return proposed if expected and digest(proposed) == expected else None
+
+
+def revert_setup_edits(current: str, original: str, proposed: str) -> str | None:
+    """Undo only setup's own edits, keeping anything changed in the file since then.
+
+    Each block setup inserted or rewrote must appear exactly once in the current text. When none
+    of them is present the edits were already removed; any other case returns None (unsafe).
+    """
+    if current == proposed:
+        return original
+    old, new, now = original.splitlines(True), proposed.splitlines(True), current.splitlines(True)
+    edits, missing = [], 0
+    for tag, i1, i2, j1, j2 in difflib.SequenceMatcher(None, old, new, autojunk=False).get_opcodes():
+        if tag == "equal":
+            continue
+        block = new[j1:j2]
+        if not block:
+            return None  # setup only deleted lines here; there is nothing to locate them by
+        positions = [k for k in range(len(now) - len(block) + 1) if now[k:k + len(block)] == block]
+        if not positions:
+            missing += 1
+            continue
+        if len(positions) > 1:
+            return None
+        edits.append((positions[0], len(block), old[i1:i2]))
+    if not edits:
+        # Already reverted only if no telemetry labels beyond the original's remain (none edited by hand).
+        return current if missing and current.count(LABEL_PREFIX) <= original.count(LABEL_PREFIX) else None
+    if missing:
+        return None
+    edits.sort(reverse=True)
+    for (start, length, _), (next_start, _, _) in zip(edits[1:], edits):
+        if start + length > next_start:
+            return None
+    for start, length, replacement in edits:
+        now[start:start + length] = replacement
+    return "".join(now)
+
+
+def restore_compose(state: dict) -> list[str]:
+    """Remove setup's labels from each Compose file; return the files that could not be restored safely.
+
+    Writing back the whole saved copy would also erase anything added to the file after setup
+    (for example volume mounts or environment variables), so only setup's own edits are reverted.
+    """
+    problems = []
     for raw_path, original in state.get("compose_originals", {}).items():
         path = Path(raw_path)
         if not path.exists():
-            print(f"Compose file is missing; recovery copy remains in state: {path}")
-            safe = False
+            problems.append(f"{path} is missing (its recovery copy remains in the setup record)")
             continue
-        write_text_atomic(path, original)
-    return safe
-
+        current = path.read_text()
+        if current == original:
+            continue
+        proposed = setup_proposed_text(state, raw_path, original)
+        reverted = revert_setup_edits(current, original, proposed) if proposed is not None else None
+        if reverted is None:
+            problems.append(f"{path} changed after setup and its Runtime labels could not be removed safely; "
+                            "remove the com.devassistant.telemetry.* labels by hand")
+            continue
+        if reverted != current:
+            write_text_atomic(path, reverted)
+    return problems
 
 def cleanup(approve=None) -> dict:
     if approve is None:
@@ -1725,9 +1789,9 @@ def cleanup(approve=None) -> dict:
         services = [item for item in state.get("services", []) if isinstance(item, str) and SLUG.fullmatch(item)]
         if not project or not services:
             raise RuntimeError("Saved Runtime project metadata is incomplete; selected services could not be recreated safely")
-        compose_ok = restore_compose(state)
-        if not compose_ok:
-            raise RuntimeError("One or more saved Compose files could not be restored")
+        problems = restore_compose(state)
+        if problems:
+            raise RuntimeError("; ".join(problems))
         run(compose_args(project) + ["up", "-d", "--no-deps", *services], cwd=Path(project["directory"]))
         env = os.environ.copy()
         env.update({"HOST_IDENTITY_DIR": str(CERT_DIR / "agent"), "BACKEND_URL": "https://telemetry-caddy:9443"})

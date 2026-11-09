@@ -87,8 +87,13 @@ class RuntimeSetupFlowTests(unittest.TestCase):
         stack.enter_context(patch.object(runtime_setup, "compose_args", return_value=["docker", "compose", "-f", str(self.compose_file)]))
         stack.enter_context(patch.object(runtime_setup, "verify_agent_report", return_value=None))
 
+    LABEL_VALUES = {"php": {runtime_setup.LABELS["enabled"]: "true", runtime_setup.LABELS["project"]: "dash-fixture",
+                            runtime_setup.LABELS["environment"]: "development",
+                            runtime_setup.LABELS["commit"]: "a" * 40, runtime_setup.LABELS["service"]: "php"}}
+
     def initial_cleanup_state(self):
-        changed_compose = "services:\n  php:\n    image: php:8\n    labels:\n      com.devassistant.telemetry.enabled: 'true'\n  database:\n    image: postgres:16\n"
+        # What setup records: the original, the label values, and the hash of the text it wrote.
+        changed_compose = runtime_setup.add_service_labels(self.compose_original, "php", self.LABEL_VALUES["php"])
         self.compose_file.write_text(changed_compose)
         self.cert_dir.mkdir()
         (self.cert_dir / "generated.pem").write_text("fixture")
@@ -102,11 +107,60 @@ class RuntimeSetupFlowTests(unittest.TestCase):
             "environment": "development",
             "project": self.project,
             "services": ["php"],
+            "label_values": self.LABEL_VALUES,
             "compose_originals": {str(self.compose_file): self.compose_original},
+            "compose_hashes": {str(self.compose_file): runtime_setup.digest(changed_compose)},
             "fingerprint": "fingerprint",
             "scope_original": True,
             "certificates_created": True,
         }
+
+    def test_cleanup_keeps_lines_added_to_the_compose_file_after_setup(self):
+        state = self.initial_cleanup_state()
+        later = self.compose_file.read_text().replace(
+            "    image: php:8\n", "    image: php:8\n    volumes:\n      - ../library:/library:ro\n", 1)
+        later += "networks:\n  shared:\n    external: true\n"
+        self.compose_file.write_text(later)
+        with ExitStack() as stack:
+            self.path_patches(stack)
+            runtime_setup.write_state(state)
+            stack.enter_context(patch.object(runtime_setup, "required_approval"))
+            stack.enter_context(patch.object(runtime_setup, "run", return_value=runtime_setup.subprocess.CompletedProcess([], 0, stdout="", stderr="")))
+            result = runtime_setup.cleanup()
+        restored = self.compose_file.read_text()
+        self.assertEqual(result["status"], "complete")
+        self.assertNotIn("com.devassistant.telemetry", restored)
+        self.assertIn("../library:/library:ro", restored)
+        self.assertIn("external: true", restored)
+
+    def test_revert_refuses_unsafe_cases_and_accepts_already_reverted_files(self):
+        proposed = runtime_setup.add_service_labels(self.compose_original, "php", self.LABEL_VALUES["php"])
+        revert = runtime_setup.revert_setup_edits
+        self.assertEqual(revert(proposed, self.compose_original, proposed), self.compose_original)
+        edited_by_hand = self.compose_original + "  cache:\n    image: redis:7\n"
+        self.assertEqual(revert(edited_by_hand, self.compose_original, proposed), edited_by_hand)
+        label_block = proposed[len("services:\n  php:\n    image: php:8\n"):proposed.index("  database:")]
+        duplicated = proposed + "  other:\n    image: x\n" + label_block
+        self.assertIsNone(revert(duplicated, self.compose_original, proposed))
+        half = proposed.replace('"com.devassistant.telemetry.service": "php"', '"com.devassistant.telemetry.service": "web"')
+        self.assertIsNone(revert(half, self.compose_original, proposed))
+
+    def test_cleanup_stops_without_writing_when_labels_cannot_be_removed_safely(self):
+        state = self.initial_cleanup_state()
+        state["compose_hashes"] = {str(self.compose_file): "does-not-match"}
+        before = self.compose_file.read_text() + "# edited later\n"
+        self.compose_file.write_text(before)
+        with ExitStack() as stack:
+            self.path_patches(stack)
+            runtime_setup.write_state(state)
+            stack.enter_context(patch.object(runtime_setup, "required_approval"))
+            stack.enter_context(patch.object(runtime_setup, "run", return_value=runtime_setup.subprocess.CompletedProcess([], 0, stdout="", stderr="")))
+            result = runtime_setup.cleanup()
+            saved = runtime_setup.read_state()
+        self.assertEqual(result["status"], "error")
+        self.assertIn("could not be removed safely", result["message"])
+        self.assertEqual(self.compose_file.read_text(), before)
+        self.assertEqual(saved["phase"], "cleanup-incomplete")
 
     def test_setup_uses_one_grouped_approval_and_records_recovery_before_mutations(self):
         run_calls = []
