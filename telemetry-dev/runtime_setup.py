@@ -2,10 +2,12 @@
 """Interactive local Docker Runtime setup using Gum in a terminal."""
 from __future__ import annotations
 
+import difflib
 import hashlib
 import json
 import os
 import re
+import secrets
 import shutil
 import signal
 import subprocess
@@ -42,6 +44,12 @@ LOCAL_DOCKER_COMMAND_TIMEOUT_SECONDS = 120
 HELPER_STATE: dict = {"status": "idle", "message": "Ready", "updated": time.time()}
 HELPER_LOCK = threading.Lock()
 HELPER_USED_TOKENS: set[str] = set()
+# Bumped whenever helper endpoints change; the root justfile restarts an older helper.
+HELPER_API_VERSION = 28
+APPROVAL_TIMEOUT_SECONDS = 300
+SETUP_PLAN_TTL_SECONDS = 600
+# Previews created by the browser wizard, keyed by a single-use plan ID (only the latest is kept).
+SETUP_PLANS: dict[str, dict] = {}
 
 
 class ApprovalCancelled(RuntimeError):
@@ -50,6 +58,14 @@ class ApprovalCancelled(RuntimeError):
 
 class GumError(RuntimeError):
     """A Gum prompt or its terminal could not be run."""
+
+
+class ApprovalUnavailable(RuntimeError):
+    """No desktop dialog can be shown on this computer."""
+
+
+class SetupInputError(ValueError):
+    """A setup choice from the browser or terminal is invalid."""
 
 
 def state_path() -> Path:
@@ -204,6 +220,58 @@ def serve_helper() -> None:
                     return False
                 HELPER_USED_TOKENS.add(token_id)
             return True
+
+        def _read_json(self, limit: int) -> dict | None:
+            length = self.headers.get("Content-Length", "0")
+            if not length.isdigit() or int(length) > limit:
+                return None
+            try:
+                body = json.loads(self.rfile.read(int(length)) or b"{}")
+            except (ValueError, json.JSONDecodeError):
+                return None
+            return body if isinstance(body, dict) else None
+
+        def _setup_wizard_step(self) -> None:
+            """Read-only steps of the browser setup wizard. Nothing here changes files or containers."""
+            if not self._authorized(unscoped=True):
+                return self._json(403, {"detail": "Runtime setup authorization is invalid or expired."})
+            body = self._read_json(8192)
+            if body is None:
+                return self._json(400, {"detail": "Invalid Runtime setup request."})
+            with HELPER_LOCK:
+                if HELPER_STATE["status"] in {"starting", "running"}:
+                    return self._json(409, {"detail": "A Runtime operation is already running. Wait for it to finish."})
+            try:
+                blocker, _ = setup_blocker()
+                if blocker:
+                    return self._json(409, {"detail": blocker})
+                yaml_module()
+                if self.path == "/compose-projects":
+                    return self._json(200, {"projects": [
+                        {key: item[key] for key in ("name", "status", "directory", "files")}
+                        for item in discover_projects() if isinstance(item.get("name"), str) and SLUG.fullmatch(item["name"])]})
+                project = find_compose_project(body.get("project_name"))
+                details = compose_project_details(project)
+                if self.path == "/compose-project":
+                    return self._json(200, {"name": project["name"], "directory": project["directory"],
+                                            "files": project["files"], **details})
+                commit = body.get("commit") or details["commit"]
+                plan = build_setup_plan(project, details["services"], body.get("services"),
+                                        body.get("project_id"), body.get("environment"), commit)
+            except SetupInputError as exc:
+                return self._json(400, {"detail": str(exc)})
+            except (RuntimeError, OSError) as exc:
+                return self._json(422, {"detail": str(exc)})
+            plan_id = secrets.token_urlsafe(24)
+            with HELPER_LOCK:
+                SETUP_PLANS.clear()
+                SETUP_PLANS[plan_id] = {"plan": plan, "expires": time.time() + SETUP_PLAN_TTL_SECONDS}
+            return self._json(200, {
+                "plan_id": plan_id, "expires_in": SETUP_PLAN_TTL_SECONDS,
+                "compose_project": plan["project"]["name"], "services": plan["services"],
+                "project_id": plan["project_id"], "environment": plan["environment"], "commit": plan["commit"],
+                "certificates": plan["certificates"], "changes": plan["changes"],
+                "approval_items": plan["approval_items"]})
 
         def do_OPTIONS(self) -> None:
             origin = self.headers.get("Origin", "")
@@ -401,53 +469,53 @@ def serve_helper() -> None:
                     return self._json(status, {"detail": str(exc)})
                 except Exception:
                     return self._json(503, {"detail": "The SSH credential could not be saved. Unlock the OS keyring and retry."})
-            if self.path not in {"/setup", "/cleanup", "/remove-project-containers"}:
+            if self.path in {"/compose-projects", "/compose-project", "/setup/plan"}:
+                return self._setup_wizard_step()
+            if self.path not in {"/setup/apply", "/cleanup", "/remove-project-containers"}:
                 return self._json(404, {"detail": "Not found."})
             if not self._authorized(): return self._json(403, {"detail": "Runtime setup authorization is invalid or expired."})
-            if self.path in {"/setup", "/cleanup"} and not self._authorized(unscoped=True):
+            if self.path in {"/setup/apply", "/cleanup"} and not self._authorized(unscoped=True):
                 return self._json(403, {"detail": "This authorization is not valid for Runtime setup or cleanup."})
-            project_name = None
             project_id = None
-            if self.path in {"/setup", "/remove-project-containers"}:
-                length = self.headers.get("Content-Length", "0")
-                if not length.isdigit() or int(length) > 4096:
-                    return self._json(400, {"detail": "Invalid setup request."})
-                try:
-                    body = json.loads(self.rfile.read(int(length)) or b"{}")
-                except (ValueError, json.JSONDecodeError):
-                    return self._json(400, {"detail": "Invalid setup request."})
-                if not isinstance(body, dict):
+            plan_id = None
+            if self.path in {"/setup/apply", "/remove-project-containers"}:
+                body = self._read_json(4096)
+                if body is None:
                     return self._json(400, {"detail": "Invalid Runtime operation request."})
-                if self.path == "/setup":
-                    if (body.get("project_name") is not None and
-                            (not isinstance(body["project_name"], str) or
-                             not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,127}", body["project_name"]))):
-                        return self._json(400, {"detail": "Invalid Compose project selection."})
-                    project_name = body.get("project_name")
+                if self.path == "/setup/apply":
+                    plan_id = body.get("plan_id")
+                    if not isinstance(plan_id, str) or not re.fullmatch(r"[A-Za-z0-9_-]{16,64}", plan_id):
+                        return self._json(400, {"detail": "Invalid setup preview."})
                 else:
                     project_id = body.get("project_id")
                     if not isinstance(project_id, str) or not SLUG.fullmatch(project_id):
                         return self._json(400, {"detail": "Invalid Runtime project ID."})
                     if not self._authorized(operation="runtime-local-container-removal", project_id=project_id):
                         return self._json(403, {"detail": "Runtime removal authorization is not scoped to this project."})
+            plan = None
             token_id = hashlib.sha256(self.headers.get("Authorization", "").encode()).hexdigest()
             with HELPER_LOCK:
                 if token_id in HELPER_USED_TOKENS:
                     return self._json(403, {"detail": "This Runtime setup authorization has already been used."})
                 if HELPER_STATE["status"] in {"starting", "running"}:
                     return self._json(409, {"detail": "A Runtime operation is already running. Wait for it to finish before starting another."})
+                if plan_id is not None:
+                    entry = SETUP_PLANS.pop(plan_id, None)
+                    if entry is None or entry["expires"] < time.time():
+                        return self._json(410, {"detail": "This setup preview expired or was already used. Review the changes again."})
+                    plan = entry["plan"]
                 HELPER_USED_TOKENS.add(token_id)
                 action = ("cleanup" if self.path == "/cleanup" else
                           "remove local containers" if self.path == "/remove-project-containers" else "setup")
-                HELPER_STATE.update(status="starting", message=f"Starting Runtime {action} in Gum", updated=time.time())
-                for key in ("project_id", "removed_count", "target_count", "already_absent", "failed_containers"):
+                HELPER_STATE.update(status="starting", message=f"Starting Runtime {action}", updated=time.time())
+                for key in ("project_id", "removed_count", "target_count", "already_absent", "failed_containers", "awaiting_approval"):
                     HELPER_STATE.pop(key, None)
                 if project_id is not None:
                     HELPER_STATE["project_id"] = project_id
             def execute() -> None:
                 with HELPER_LOCK: HELPER_STATE.update(status="running", message=f"Runtime {action} is running", updated=time.time())
                 try:
-                    result = run_helper_operation(action, project_name=project_name, project_id=project_id)
+                    result = run_helper_operation(action, project_id=project_id, plan=plan)
                     outcome = result.get("status", "complete") if isinstance(result, dict) else "complete"
                     message = result.get("message", f"Runtime {action} completed") if isinstance(result, dict) else f"Runtime {action} completed"
                     with HELPER_LOCK:
@@ -466,7 +534,7 @@ def serve_helper() -> None:
 
         def do_GET(self) -> None:
             if self.path == "/health": return self._json(200, {
-                "ok": True, "api_version": 27, "helper_bind": HELPER_HOST,
+                "ok": True, "api_version": HELPER_API_VERSION, "helper_bind": HELPER_HOST,
             })
             if self.path == "/runtime-ssh-credentials":
                 if not self._authorized(unscoped=True):
@@ -832,9 +900,10 @@ def discover_local_runtime_containers(docker: list[str], project_id: str) -> lis
     return containers
 
 
-def remove_project_containers(project_id: str) -> dict:
+def remove_project_containers(project_id: str, approve=None) -> dict:
     """Stop and remove only this project's opted-in containers on the local daemon."""
-    require_terminal()
+    if approve is None:
+        require_terminal()
     docker = local_docker_command_prefix()
     targets = discover_local_runtime_containers(docker, project_id)
     if not targets:
@@ -849,7 +918,7 @@ def remove_project_containers(project_id: str) -> dict:
     summary = (f"Project: {project_id}\nLocal Docker endpoint: verified socket or named pipe\n"
                f"Matching containers: {len(targets)}\n"
                "Only exact Runtime-enabled and project labels are in scope. Images, volumes, Runtime history, and remote hosts remain.")
-    required_approval("Remove local Runtime containers", [approval_item], summary=summary)
+    (approve or required_approval)("Remove local Runtime containers", [approval_item], summary=summary)
 
     approved_ids = {item["container_id"] for item in targets}
     current = discover_local_runtime_containers(docker, project_id)
@@ -1223,71 +1292,59 @@ def start_ingress_and_agent() -> tuple[dict, str]:
 CURRENT_SETUP: dict = {}
 
 
-def setup(project_name: str | None = None) -> dict | None:
-    require_terminal()
+def setup_blocker() -> tuple[str | None, bool]:
+    """Why a new setup cannot start, and whether that is because setup is already active.
+
+    The recovery record is never overwritten: it holds the Compose originals cleanup restores.
+    """
     saved = read_state()
-    if saved:
-        phase = saved.get("phase", "incomplete")
-        project = saved.get("project") if isinstance(saved.get("project"), dict) else {}
-        if phase == "active":
-            message = (
-                f"Runtime is already active for {saved.get('project_id')} · {saved.get('environment')} "
+    if not saved:
+        return None, False
+    phase = saved.get("phase", "incomplete")
+    project = saved.get("project") if isinstance(saved.get("project"), dict) else {}
+    if phase == "active":
+        return (f"Runtime is already active for {saved.get('project_id')} · {saved.get('environment')} "
                 f"(Compose project {project.get('name', 'unknown')}). No changes were made. "
-                "Run just runtime-cleanup before setting up a different project."
-            )
-            print(message)
-            return {"status": "complete", "message": message}
-        raise RuntimeError(
-            f"A local Runtime recovery record is in phase '{phase}' at {state_path()}. "
-            "Run just runtime-status, then just runtime-cleanup before starting a new setup; "
-            "the recovery record was preserved."
-        )
-    yaml_module()
-    print("Runtime setup runs in this terminal. The browser cannot access your Docker daemon or project files.")
-    print("The command requests permission before reading Docker metadata and the selected project files.")
-    if not confirm("Allow this command to query Docker for local Compose project metadata?"):
-        raise RuntimeError("Setup cancelled before Docker metadata was read.")
-    projects = discover_projects()
-    if project_name is None:
-        project = choose_project(projects)
-    else:
-        project = next((item for item in projects if item["name"] == project_name), None)
-        if project is None:
-            raise RuntimeError("The selected Compose project is no longer available. Reload the project list and try again.")
-    print(f"Selected project directory: {project['directory']}")
-    base = compose_args(project)
-    result = run(base + ["config", "--services"], cwd=Path(project["directory"]), capture=True)
+                "Clean up Runtime (or run just runtime-cleanup) before setting up a different project."), True
+    return (f"A local Runtime recovery record is in phase '{phase}' at {state_path()}. "
+            "Clean up Runtime (or run just runtime-status, then just runtime-cleanup) before starting a new setup; "
+            "the recovery record was preserved."), False
+
+
+def find_compose_project(name) -> dict:
+    if not isinstance(name, str) or not SLUG.fullmatch(name):
+        raise SetupInputError("Choose a Compose project from the list.")
+    project = next((item for item in discover_projects() if item["name"] == name), None)
+    if project is None:
+        raise SetupInputError("The selected Compose project is no longer available. Reload the project list and try again.")
+    return project
+
+
+def compose_project_details(project: dict) -> dict:
+    """Services of a Compose project and the commit checked out in its directory."""
+    result = run(compose_args(project) + ["config", "--services"], cwd=Path(project["directory"]), capture=True)
     services = [line.strip() for line in (result.stdout or "").splitlines() if line.strip()]
     if not services:
         raise RuntimeError("The selected Compose project has no services")
-    while True:
-        picked = gum_choose(
-            services,
-            title="Choose Runtime services · x toggles; select at least one, then press Enter",
-            multi=True,
-        )
-        selected_set = set(picked)
-        selected = [service for service in services if service in selected_set]
-        if selected:
-            break
-    while True:
-        project_id = prompt("Runtime project ID (letters, numbers, dot, dash, underscore)")
-        if SLUG.fullmatch(project_id): break
-        print("Project ID must be 1–128 letters, numbers, dots, dashes, or underscores.")
-    while True:
-        environment = prompt("Environment", "development")
-        if SLUG.fullmatch(environment): break
-        print("Environment must be 1–128 letters, numbers, dots, dashes, or underscores.")
     commit_result = run(["git", "rev-parse", "HEAD"], cwd=Path(project["directory"]), capture=True, check=False)
-    proposed = commit_result.stdout.strip().lower() if commit_result.returncode == 0 else ""
-    print(f"Detected Git commit: {proposed or 'not available'}")
-    if proposed and COMMIT.fullmatch(proposed):
-        commit = proposed
-    else:
-        while True:
-            commit = prompt("Enter the full lowercase Git commit SHA-1 or SHA-256")
-            if COMMIT.fullmatch(commit): break
-            print("Commit must be a full lowercase 40-character SHA-1 or 64-character SHA-256.")
+    detected = commit_result.stdout.strip().lower() if commit_result.returncode == 0 else ""
+    return {"services": services, "commit": detected if COMMIT.fullmatch(detected) else None}
+
+
+def build_setup_plan(project: dict, services: list[str], selected, project_id, environment, commit) -> dict:
+    """Compute every change setup would make, without making any of them."""
+    if not isinstance(selected, list) or not selected or not all(isinstance(item, str) for item in selected):
+        raise SetupInputError("Choose at least one service.")
+    unknown = [item for item in selected if item not in services]
+    if unknown:
+        raise SetupInputError(f"These services are not in the Compose project: {', '.join(unknown)}.")
+    selected = [service for service in services if service in set(selected)]
+    if not isinstance(project_id, str) or not SLUG.fullmatch(project_id):
+        raise SetupInputError("Project ID must be 1–128 letters, numbers, dots, dashes, or underscores.")
+    if not isinstance(environment, str) or not SLUG.fullmatch(environment):
+        raise SetupInputError("Environment must be 1–128 letters, numbers, dots, dashes, or underscores.")
+    if not isinstance(commit, str) or not COMMIT.fullmatch(commit):
+        raise SetupInputError("Commit must be a full lowercase 40-character SHA-1 or 64-character SHA-256.")
 
     files = [Path(path) for path in project["files"]]
     for path in files:
@@ -1307,9 +1364,6 @@ def setup(project_name: str | None = None) -> dict | None:
                 owners[service] = path
     if set(owners) != set(selected):
         raise RuntimeError("Could not locate all selected service definitions in the Compose files")
-    CURRENT_SETUP.update({"version": 1, "project_id": project_id, "environment": environment,
-                          "commit": commit, "project": project, "services": selected,
-                          "compose_originals": {}, "compose_hashes": {}, "phase": "starting"})
     labels = {}
     proposed_texts = dict(contents)
     for service in selected:
@@ -1325,47 +1379,242 @@ def setup(project_name: str | None = None) -> dict | None:
     if not changed:
         raise RuntimeError("Selected services already have the requested telemetry labels")
     changed_paths = ", ".join(str(path) for path in changed)
-    print(f"\nRuntime setup summary: Compose project {project['name']}; services {', '.join(selected)}; files {changed_paths}; selected services will be recreated.")
-    required_approval("Approve Runtime setup", [
+    creates_certificates = cert_directory_is_empty_scaffold()
+    items = [
         f"Read the selected Compose files and Git commit ({', '.join(str(path) for path in files)})",
-        f"Create local certificates under {CERT_DIR}" if cert_directory_is_empty_scaffold() else "Reuse the existing local certificates",
+        f"Create local certificates under {CERT_DIR}" if creates_certificates else "Reuse the existing local certificates",
         "Update API host authorization scope",
         f"Apply telemetry labels to selected services: {', '.join(selected)}",
         f"Recreate selected services in Compose project {project['name']}",
         "Start or refresh the local API ingress and telemetry agent",
-    ], summary=f"Compose project: {project['name']}\nServices: {', '.join(selected)}\nAffected files: {changed_paths}")
-    CURRENT_SETUP["label_values"] = labels
+    ]
+    # Only added lines are previewed (no context), so other settings in the files stay on this computer.
+    changes = [{"file": str(path), "added": [line[1:] for line in difflib.unified_diff(
+                    contents[path].splitlines(), proposed_texts[path].splitlines(), lineterm="", n=0)
+                if line.startswith("+") and not line.startswith("+++")]} for path in changed]
+    return {"project": project, "services": selected, "project_id": project_id, "environment": environment,
+            "commit": commit, "labels": labels, "certificates": "create" if creates_certificates else "reuse",
+            "originals": {str(path): contents[path] for path in files},
+            "proposed": {str(path): proposed_texts[path] for path in changed},
+            "approval_items": items, "changes": changes,
+            "summary": f"Compose project: {project['name']}\nServices: {', '.join(selected)}\nAffected files: {changed_paths}"}
+
+
+def apply_setup_plan(plan: dict, approve=None) -> dict:
+    """Ask for approval, then label the Compose files, start the agent and recreate services."""
+    blocker, _ = setup_blocker()
+    if blocker:
+        raise RuntimeError(blocker)
+    originals = {Path(path): text for path, text in plan["originals"].items()}
+
+    def unchanged_since_preview() -> None:
+        for path, text in originals.items():
+            if not path.is_file() or digest(path.read_text()) != digest(text):
+                raise RuntimeError(f"Compose file changed since the preview: {path}; no edits were applied. Review the changes again.")
+
+    unchanged_since_preview()
+    (approve or required_approval)("Approve Runtime setup", plan["approval_items"], summary=plan["summary"])
+    project = plan["project"]
+    CURRENT_SETUP.clear()
+    CURRENT_SETUP.update({"version": 1, "project_id": plan["project_id"], "environment": plan["environment"],
+                          "commit": plan["commit"], "project": project, "services": plan["services"],
+                          "label_values": plan["labels"], "compose_originals": {}, "compose_hashes": {},
+                          "phase": "starting"})
+    changed = [Path(path) for path in plan["proposed"]]
     for path in changed:
-        CURRENT_SETUP["compose_originals"][str(path)] = contents[path]
-        CURRENT_SETUP["compose_hashes"][str(path)] = digest(proposed_texts[path])
+        CURRENT_SETUP["compose_originals"][str(path)] = originals[path]
+        CURRENT_SETUP["compose_hashes"][str(path)] = digest(plan["proposed"][str(path)])
     write_state(CURRENT_SETUP)
-    try:
-        for path in changed:
-            if digest(path.read_text()) != digest(contents[path]):
-                raise RuntimeError(f"Compose file changed after approval: {path}; no further edits were applied")
-            write_text_atomic(path, proposed_texts[path])
-    except Exception:
-        print(f"\nSetup stopped. Recovery copies are recorded at {state_path()}.")
-        raise
+    unchanged_since_preview()
+    for path in changed:
+        write_text_atomic(path, plan["proposed"][str(path)])
     CURRENT_SETUP["phase"] = "compose-labeled"
     write_state(CURRENT_SETUP)
-    try:
-        _, fingerprint = start_ingress_and_agent()
-    except Exception:
-        print(f"\nSetup stopped. Recovery copies and progress are recorded at {state_path()}.")
-        print("Run just runtime-status for the current setup state.")
-        raise
-
-    recreate = base + ["up", "-d", "--no-deps", *selected]
-    run(recreate, cwd=Path(project["directory"]))
+    start_ingress_and_agent()
+    run(compose_args(project) + ["up", "-d", "--no-deps", *plan["services"]], cwd=Path(project["directory"]))
     CURRENT_SETUP["phase"] = "active"
     write_state(CURRENT_SETUP)
+    message = (f"Runtime is active for {plan['project_id']} · {plan['environment']} · {plan['commit'][:12]}. "
+               f"Recreated {', '.join(plan['services'])} with telemetry labels.")
+    problem = verify_agent_report()
+    if problem:
+        message += (f" However, the host agent cannot report to the API yet ({problem}); containers will not appear "
+                    "until it can. See docker logs devassistant-telemetry-agent-agent-1.")
+    return {"status": "complete", "message": message, "agent_reporting": problem is None}
+
+
+def verify_agent_report(attempts: int = 6, delay: float = 5) -> str | None:
+    """Make one real report from the host agent; return a reason when it cannot report.
+
+    python-api restarts during setup when the host scope changes, so early failures are retried.
+    """
+    command, compose = managed_agent_environment()
+    if command is None:
+        return "the host agent is not configured"
+    script = ("import agent\n"
+              "try:\n    agent.Reporter().reconcile(); print('ok')\n"
+              "except Exception as exc:\n    print(agent.failure_reason(exc))")
+    reason = "the host agent did not answer"
+    for attempt in range(attempts):
+        result = run(compose["args"] + ["exec", "-T", "agent", "python", "-c", script], cwd=command["cwd"],
+                     env=command["env"], capture=True, check=False, timeout=60)
+        lines = (result.stdout or "").strip().splitlines()
+        if lines and lines[-1] == "ok":
+            return None
+        if lines and re.fullmatch(r"[A-Za-z0-9_:.-]{1,120}", lines[-1]):
+            reason = lines[-1]
+        if attempt + 1 < attempts:
+            time.sleep(delay)
+    return reason
+
+
+def setup(project_name: str | None = None) -> dict | None:
+    """Terminal setup with Gum prompts; the browser wizard uses the same plan and apply steps."""
+    require_terminal()
+    blocker, active = setup_blocker()
+    if blocker:
+        if active:
+            print(blocker)
+            return {"status": "complete", "message": blocker}
+        raise RuntimeError(blocker)
+    yaml_module()
+    print("Runtime setup runs in this terminal. The browser cannot access your Docker daemon or project files.")
+    print("The command requests permission before reading Docker metadata and the selected project files.")
+    if not confirm("Allow this command to query Docker for local Compose project metadata?"):
+        raise RuntimeError("Setup cancelled before Docker metadata was read.")
+    projects = discover_projects()
+    if project_name is None:
+        project = choose_project(projects)
+    else:
+        project = next((item for item in projects if item["name"] == project_name), None)
+        if project is None:
+            raise RuntimeError("The selected Compose project is no longer available. Reload the project list and try again.")
+    print(f"Selected project directory: {project['directory']}")
+    details = compose_project_details(project)
+    services = details["services"]
+    while True:
+        picked = gum_choose(
+            services,
+            title="Choose Runtime services · x toggles; select at least one, then press Enter",
+            multi=True,
+        )
+        selected = [service for service in services if service in set(picked)]
+        if selected:
+            break
+    while True:
+        project_id = prompt("Runtime project ID (letters, numbers, dot, dash, underscore)")
+        if SLUG.fullmatch(project_id): break
+        print("Project ID must be 1–128 letters, numbers, dots, dashes, or underscores.")
+    while True:
+        environment = prompt("Environment", "development")
+        if SLUG.fullmatch(environment): break
+        print("Environment must be 1–128 letters, numbers, dots, dashes, or underscores.")
+    print(f"Detected Git commit: {details['commit'] or 'not available'}")
+    commit = details["commit"]
+    while not commit:
+        entered = prompt("Enter the full lowercase Git commit SHA-1 or SHA-256")
+        if COMMIT.fullmatch(entered):
+            commit = entered
+        else:
+            print("Commit must be a full lowercase 40-character SHA-1 or 64-character SHA-256.")
+    plan = build_setup_plan(project, services, selected, project_id, environment, commit)
+    print(f"\nRuntime setup summary: Compose project {project['name']}; services {', '.join(selected)}; "
+          f"files {', '.join(plan['proposed'])}; selected services will be recreated.")
+    try:
+        result = apply_setup_plan(plan)
+    except Exception:
+        if read_state():
+            print(f"\nSetup stopped. Recovery copies and progress are recorded at {state_path()}.")
+            print("Run just runtime-status for the current setup state.")
+        raise
     print("\nSetup complete.")
+    if not result.get("agent_reporting", True):
+        print(result["message"])
     print(f"Runtime project: {project_id} · {environment} · {commit}")
     print("Open Runtime and select the project/commit. Container reporting needs no source snapshot.")
     print("Optional: add source snapshots for code matching, and spans for routes and database activity.")
     print("Check setup: just runtime-status")
     print("Remove setup: just runtime-cleanup")
+    return result
+
+
+def approval_text(items: list[str], summary: str = "") -> str:
+    text = (summary + "\n\n" if summary else "") + "\n".join(f"• {item}" for item in items)
+    return text if len(text) <= 1800 else text[:1797] + "…"
+
+
+def native_approval(title: str, items: list[str], summary: str = "") -> None:
+    """Ask on this computer's desktop, outside the browser, so a web page alone cannot approve changes."""
+    text = approval_text(items, summary)
+    expected = None
+    if sys.platform == "darwin" and shutil.which("osascript"):
+        script = ("on run argv\n"
+                  "activate\n"
+                  "set answer to display dialog (item 2 of argv) with title (item 1 of argv) "
+                  "buttons {\"Cancel\", \"Allow\"} default button \"Cancel\" cancel button \"Cancel\" "
+                  f"with icon caution giving up after {APPROVAL_TIMEOUT_SECONDS}\n"
+                  "if gave up of answer then return \"timeout\"\n"
+                  "return button returned of answer\n"
+                  "end run")
+        command = ["osascript", "-e", script, f"Developer Assistant: {title}", text]
+        expected = "Allow"
+    elif os.environ.get("DISPLAY") or os.environ.get("WAYLAND_DISPLAY"):
+        if shutil.which("zenity"):
+            command = ["zenity", "--question", "--no-markup", "--title", f"Developer Assistant: {title}",
+                       "--text", text, "--ok-label", "Allow", "--cancel-label", "Cancel", "--default-cancel",
+                       f"--timeout={APPROVAL_TIMEOUT_SECONDS}"]
+        elif shutil.which("kdialog"):
+            command = ["kdialog", "--title", f"Developer Assistant: {title}", "--warningcontinuecancel", text,
+                       "--continue-label", "Allow"]
+        else:
+            raise ApprovalUnavailable("Install zenity or kdialog to approve Runtime changes in a desktop dialog.")
+    else:
+        raise ApprovalUnavailable("No desktop session is available for an approval dialog.")
+    try:
+        result = subprocess.run(command, capture_output=True, text=True, timeout=APPROVAL_TIMEOUT_SECONDS + 15)
+    except subprocess.TimeoutExpired as exc:
+        raise ApprovalCancelled(f"{title}: the approval dialog timed out; nothing was changed.") from exc
+    except OSError as exc:
+        raise ApprovalUnavailable(f"The approval dialog could not be shown: {exc}") from exc
+    answer = result.stdout.strip()
+    if answer == "timeout" or (result.returncode == 5 and "zenity" in command[0]):
+        raise ApprovalCancelled(f"{title}: the approval dialog timed out; nothing was changed.")
+    if result.returncode != 0 or (expected is not None and answer != expected):
+        raise ApprovalCancelled(f"{title} was not approved on this computer; nothing was changed.")
+
+
+def helper_approval(title: str, items: list[str], summary: str = "") -> None:
+    """Approval for operations started from the browser: a desktop dialog, else Gum in the helper's terminal."""
+    with HELPER_LOCK:
+        HELPER_STATE.update(message="Waiting for your approval in the dialog on this computer…",
+                            awaiting_approval=True, updated=time.time())
+    try:
+        try:
+            native_approval(title, items, summary)
+        except ApprovalUnavailable as unavailable:
+            try:
+                require_terminal()
+            except GumError as exc:
+                raise RuntimeError(f"{unavailable} No terminal is attached to the helper either; "
+                                   "run the matching just runtime-… command from a terminal instead.") from exc
+            with HELPER_LOCK:
+                HELPER_STATE.update(message="Approve in the terminal where you ran just up…", updated=time.time())
+            required_approval(title, items, summary)
+    finally:
+        with HELPER_LOCK:
+            HELPER_STATE.pop("awaiting_approval", None)
+            HELPER_STATE.update(message="Applying the approved changes…", updated=time.time())
+
+
+def run_helper_operation(action: str, *, project_id: str | None = None, plan: dict | None = None) -> dict:
+    """Run a browser-started operation in the helper; every change waits for helper_approval."""
+    if action == "setup" and plan is not None:
+        return apply_setup_plan(plan, approve=helper_approval)
+    if action == "cleanup":
+        return cleanup(approve=helper_approval)
+    if action == "remove local containers" and project_id is not None:
+        return remove_project_containers(project_id, approve=helper_approval)
+    raise RuntimeError(f"Unknown Runtime helper operation: {action}")
 
 
 def status() -> None:
@@ -1450,8 +1699,9 @@ def restore_compose(state: dict) -> bool:
     return safe
 
 
-def cleanup() -> dict:
-    require_terminal()
+def cleanup(approve=None) -> dict:
+    if approve is None:
+        require_terminal()
     state = read_state()
     if not state:
         print("No local Runtime tracking setup is recorded.")
@@ -1468,7 +1718,7 @@ def cleanup() -> dict:
     if certs_applicable:
         actions.append(f"Permanently remove generated development certificates under {CERT_DIR}")
     print(f"\nRuntime cleanup summary: files {', '.join(compose_files) or 'none'}; project {state.get('project_id')}; services {', '.join(state.get('services', [])) or 'none'}.")
-    required_approval("Approve Runtime cleanup", actions,
+    (approve or required_approval)("Approve Runtime cleanup", actions,
                       summary=f"Project: {state.get('project_id')} · {state.get('environment')}\nAffected files: {', '.join(compose_files) or 'none'}")
     try:
         project = state.get("project") if isinstance(state.get("project"), dict) else None

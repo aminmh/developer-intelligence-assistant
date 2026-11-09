@@ -14,12 +14,15 @@ work_dir="$(mktemp -d)"
 trap 'rm -rf "$work_dir"' EXIT HUP INT TERM
 cd "$work_dir"
 
+# Key identifiers are required: Python 3.13+ clients (the host agent) verify with
+# VERIFY_X509_STRICT and reject certificates without an Authority Key Identifier.
 openssl genrsa -out ca.key 4096
 openssl req -x509 -new -nodes -key ca.key -sha256 -days 3650 \
   -subj "/CN=DevAssistant Telemetry Development CA" \
   -addext "basicConstraints=critical,CA:TRUE" \
   -addext "keyUsage=critical,keyCertSign,cRLSign" \
-  -addext "subjectKeyIdentifier=hash" -out ca.pem
+  -addext "subjectKeyIdentifier=hash" \
+  -addext "authorityKeyIdentifier=keyid:always" -out ca.pem
 
 openssl genrsa -out server.key 2048
 openssl req -new -key server.key -subj "/CN=caddy" -out server.csr
@@ -28,6 +31,8 @@ basicConstraints=CA:FALSE
 keyUsage=digitalSignature,keyEncipherment
 extendedKeyUsage=serverAuth
 subjectAltName=DNS:telemetry-caddy,DNS:caddy,DNS:localhost,IP:127.0.0.1
+subjectKeyIdentifier=hash
+authorityKeyIdentifier=keyid:always
 EXT
 openssl x509 -req -in server.csr -CA ca.pem -CAkey ca.key -CAcreateserial \
   -out server.crt -days 825 -sha256 -extfile server.ext
@@ -38,6 +43,8 @@ cat > host.ext <<'EXT'
 basicConstraints=CA:FALSE
 keyUsage=digitalSignature,keyEncipherment
 extendedKeyUsage=clientAuth
+subjectKeyIdentifier=hash
+authorityKeyIdentifier=keyid:always
 EXT
 openssl x509 -req -in host.csr -CA ca.pem -CAkey ca.key -CAcreateserial \
   -out host.crt -days 825 -sha256 -extfile host.ext

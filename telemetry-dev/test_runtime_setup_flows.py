@@ -9,6 +9,7 @@ import tempfile
 import unittest
 from contextlib import ExitStack
 from pathlib import Path
+import unittest.mock
 from unittest.mock import patch
 
 
@@ -84,6 +85,7 @@ class RuntimeSetupFlowTests(unittest.TestCase):
         stack.enter_context(patch.object(runtime_setup, "ENV_FILE", self.env_file))
         stack.enter_context(patch.object(runtime_setup, "require_terminal"))
         stack.enter_context(patch.object(runtime_setup, "compose_args", return_value=["docker", "compose", "-f", str(self.compose_file)]))
+        stack.enter_context(patch.object(runtime_setup, "verify_agent_report", return_value=None))
 
     def initial_cleanup_state(self):
         changed_compose = "services:\n  php:\n    image: php:8\n    labels:\n      com.devassistant.telemetry.enabled: 'true'\n  database:\n    image: postgres:16\n"
@@ -255,6 +257,131 @@ class RuntimeSetupFlowTests(unittest.TestCase):
         self.assertIn("recovery state was retained", result["message"])
         self.assertEqual(saved["phase"], "cleanup-incomplete")
         self.assertIn("fixture Compose failure", saved["cleanup_error"])
+
+
+    def fixture_plan(self):
+        with patch.object(runtime_setup, "CERT_DIR", self.cert_dir):
+            return runtime_setup.build_setup_plan(self.project, ["php", "database"], ["php"],
+                                                  "dash-fixture", "development", "a" * 40)
+
+    def test_setup_plan_previews_only_added_label_lines_and_changes_nothing(self):
+        plan = self.fixture_plan()
+        self.assertEqual(plan["services"], ["php"])
+        self.assertEqual([change["file"] for change in plan["changes"]], [str(self.compose_file)])
+        added = plan["changes"][0]["added"]
+        self.assertTrue(any("com.devassistant.telemetry.project" in line for line in added))
+        self.assertFalse(any("postgres" in line or "php:8" in line for line in added), "no context lines are previewed")
+        self.assertEqual(len(plan["approval_items"]), 6)
+        self.assertEqual(self.compose_file.read_text(), self.compose_original)
+
+    def test_setup_plan_rejects_invalid_choices(self):
+        cases = [([], "dash-fixture", "development", "a" * 40, "at least one service"),
+                 (["cache"], "dash-fixture", "development", "a" * 40, "not in the Compose project"),
+                 (["php"], "bad id!", "development", "a" * 40, "Project ID"),
+                 (["php"], "dash-fixture", "", "a" * 40, "Environment"),
+                 (["php"], "dash-fixture", "development", "abc", "Commit")]
+        for selected, project_id, environment, commit, message in cases:
+            with self.subTest(message=message), self.assertRaisesRegex(runtime_setup.SetupInputError, message):
+                runtime_setup.build_setup_plan(self.project, ["php", "database"], selected, project_id, environment, commit)
+
+    def test_apply_refuses_when_compose_file_changed_since_preview(self):
+        plan = self.fixture_plan()
+        self.compose_file.write_text(self.compose_original + "  cache:\n    image: redis:7\n")
+        approve = unittest.mock.Mock()
+        with ExitStack() as stack:
+            self.path_patches(stack)
+            with self.assertRaisesRegex(RuntimeError, "changed since the preview"):
+                runtime_setup.apply_setup_plan(plan, approve=approve)
+        approve.assert_not_called()
+        self.assertFalse(self.state_file.exists())
+
+    def test_declined_approval_leaves_files_and_recovery_state_untouched(self):
+        plan = self.fixture_plan()
+
+        def decline(title, items, summary=""):
+            raise runtime_setup.ApprovalCancelled("Approve Runtime setup was not approved on this computer")
+
+        with ExitStack() as stack:
+            self.path_patches(stack)
+            run_command = stack.enter_context(patch.object(runtime_setup, "run"))
+            with self.assertRaises(runtime_setup.ApprovalCancelled):
+                runtime_setup.apply_setup_plan(plan, approve=decline)
+        run_command.assert_not_called()
+        self.assertFalse(self.state_file.exists())
+        self.assertEqual(self.compose_file.read_text(), self.compose_original)
+
+    def test_apply_uses_the_given_approver_then_labels_and_recreates(self):
+        plan = self.fixture_plan()
+        approvals, run_calls = [], []
+        with ExitStack() as stack:
+            self.path_patches(stack)
+            stack.enter_context(patch.object(runtime_setup, "run", side_effect=lambda args, **kwargs: run_calls.append(args)))
+            stack.enter_context(patch.object(runtime_setup, "start_ingress_and_agent", return_value=(runtime_setup.CURRENT_SETUP, "fingerprint")))
+            gum = stack.enter_context(patch.object(runtime_setup, "required_approval"))
+            result = runtime_setup.apply_setup_plan(plan, approve=lambda title, items, summary="": approvals.append(title))
+            saved = runtime_setup.read_state()
+        gum.assert_not_called()
+        self.assertEqual(approvals, ["Approve Runtime setup"])
+        self.assertEqual(result["status"], "complete")
+        self.assertEqual(saved["phase"], "active")
+        self.assertIn("com.devassistant.telemetry.enabled", self.compose_file.read_text())
+        self.assertTrue(any("--no-deps" in command and "php" in command for command in run_calls))
+
+    def test_agent_report_check_retries_then_names_the_reason(self):
+        outputs = iter(["tls_verify:Missing_Authority_Key_Identifier\n"] * 2 + ["ok\n"])
+        command = ({"cwd": self.api_dir, "env": {}}, {"args": ["docker", "compose"]})
+        completed = lambda *args, **kwargs: runtime_setup.subprocess.CompletedProcess([], 0, stdout=next(outputs), stderr="")
+        with patch.object(runtime_setup, "managed_agent_environment", return_value=command), \
+                patch.object(runtime_setup, "run", side_effect=completed):
+            self.assertIsNone(runtime_setup.verify_agent_report(attempts=3, delay=0))
+        outputs = iter(["tls_verify:Missing_Authority_Key_Identifier\n"] * 2)
+        with patch.object(runtime_setup, "managed_agent_environment", return_value=command), \
+                patch.object(runtime_setup, "run", side_effect=completed):
+            self.assertEqual(runtime_setup.verify_agent_report(attempts=2, delay=0),
+                             "tls_verify:Missing_Authority_Key_Identifier")
+
+    def test_helper_operations_are_dispatched_with_desktop_approval(self):
+        with patch.object(runtime_setup, "cleanup", return_value={"status": "complete"}) as cleanup, \
+                patch.object(runtime_setup, "remove_project_containers", return_value={"status": "complete"}) as remove, \
+                patch.object(runtime_setup, "apply_setup_plan", return_value={"status": "complete"}) as apply:
+            runtime_setup.run_helper_operation("cleanup")
+            runtime_setup.run_helper_operation("remove local containers", project_id="pizza")
+            runtime_setup.run_helper_operation("setup", plan={"fixture": True})
+        cleanup.assert_called_once_with(approve=runtime_setup.helper_approval)
+        remove.assert_called_once_with("pizza", approve=runtime_setup.helper_approval)
+        apply.assert_called_once_with({"fixture": True}, approve=runtime_setup.helper_approval)
+        with self.assertRaises(RuntimeError):
+            runtime_setup.run_helper_operation("setup")
+
+    def test_native_approval_requires_an_explicit_allow(self):
+        completed = lambda code, out: runtime_setup.subprocess.CompletedProcess([], code, stdout=out, stderr="")
+        with patch.object(runtime_setup.sys, "platform", "darwin"), \
+                patch.object(runtime_setup.shutil, "which", return_value="/usr/bin/osascript"):
+            with patch.object(runtime_setup.subprocess, "run", return_value=completed(0, "Allow\n")) as dialog:
+                runtime_setup.native_approval("Approve Runtime setup", ["Recreate php"], "Compose project: x")
+            command = dialog.call_args.args[0]
+            self.assertEqual(command[0], "osascript")
+            self.assertIn("Recreate php", command[-1])
+            self.assertNotIn("Recreate php", command[2], "text is passed as an argument, never into the script")
+            for result in (completed(1, ""), completed(0, "timeout\n")):
+                with patch.object(runtime_setup.subprocess, "run", return_value=result), \
+                        self.assertRaises(runtime_setup.ApprovalCancelled):
+                    runtime_setup.native_approval("Approve Runtime setup", ["Recreate php"])
+        with patch.object(runtime_setup.sys, "platform", "linux"), patch.dict(runtime_setup.os.environ, {}, clear=True), \
+                self.assertRaises(runtime_setup.ApprovalUnavailable):
+            runtime_setup.native_approval("Approve Runtime setup", ["Recreate php"])
+
+    def test_helper_approval_falls_back_to_the_terminal_or_explains(self):
+        with patch.object(runtime_setup, "native_approval", side_effect=runtime_setup.ApprovalUnavailable("No desktop.")), \
+                patch.object(runtime_setup, "require_terminal"), \
+                patch.object(runtime_setup, "required_approval") as gum:
+            runtime_setup.helper_approval("Approve Runtime cleanup", ["Restore files"])
+        gum.assert_called_once()
+        with patch.object(runtime_setup, "native_approval", side_effect=runtime_setup.ApprovalUnavailable("No desktop.")), \
+                patch.object(runtime_setup, "require_terminal", side_effect=runtime_setup.GumError("no tty")), \
+                self.assertRaisesRegex(RuntimeError, "No terminal"):
+            runtime_setup.helper_approval("Approve Runtime cleanup", ["Restore files"])
+        self.assertNotIn("awaiting_approval", runtime_setup.HELPER_STATE)
 
 
 if __name__ == "__main__":

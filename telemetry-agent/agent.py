@@ -9,7 +9,7 @@ import re
 import ssl
 import threading
 import time
-from urllib.error import URLError
+from urllib.error import HTTPError, URLError
 from urllib.parse import urlencode
 from urllib.request import HTTPSHandler, Request, build_opener
 
@@ -30,6 +30,7 @@ RECONCILE_INTERVAL = 60
 DEBOUNCE_SECONDS = 1.5
 # Docker's event stream is silent while nothing changes; reconnect rather than hang forever.
 EVENT_READ_TIMEOUT = 300
+FAILURE_LOG_INTERVAL = 300
 
 log = logging.getLogger("telemetry-agent")
 
@@ -66,6 +67,18 @@ def negotiate_api_version(info: dict) -> str:
     if oldest and chosen < oldest:
         chosen = oldest
     return f"v{chosen[0]}.{chosen[1]}"
+
+
+def failure_reason(exc: Exception) -> str:
+    """A diagnosable reason that carries no request data: HTTP status, TLS verification error, or type."""
+    if isinstance(exc, HTTPError):
+        return f"http_{exc.code}"
+    cause = exc.reason if isinstance(exc, URLError) else exc
+    if isinstance(cause, ssl.SSLCertVerificationError):
+        return "tls_verify:" + re.sub(r"[^A-Za-z0-9 _.-]", "", str(cause.verify_message))[:80].replace(" ", "_")
+    if isinstance(cause, ssl.SSLError):
+        return "tls:" + re.sub(r"[^A-Za-z0-9_]", "", str(cause.reason))[:60]
+    return type(cause).__name__
 
 
 def event_identity(event: dict) -> str:
@@ -105,7 +118,12 @@ class Reporter:
             response.read()
 
     def reconcile(self, event_id=None):
-        self.report(self.inventory(), inventory=True, event_id=event_id)
+        try:
+            containers = self.inventory()
+        except Exception:
+            self.api_version = None  # renegotiate in case the engine or proxy changed
+            raise
+        self.report(containers, inventory=True, event_id=event_id)
 
     def mark_dirty(self, event_id: str | None = None):
         with self.lock:
@@ -138,7 +156,7 @@ class Reporter:
                 time.sleep(3)
 
     def run_reconciler(self):
-        failing, backoff = False, 3
+        failures, last_logged, backoff = 0, 0.0, 3
         while True:
             self.dirty.wait(RECONCILE_INTERVAL)
             if self.dirty.is_set():
@@ -148,20 +166,19 @@ class Reporter:
                 event_id, self.pending_event_id = self.pending_event_id, None
             try:
                 self.reconcile(event_id)
-                if failing:
-                    log.info("reconcile_recovered")
-                failing, backoff = False, 3
+                if failures:
+                    log.info("reconcile_recovered after_failures=%d", failures)
+                failures, backoff = 0, 3
             except Exception as exc:  # noqa: BLE001 — keep reporting; log without request data
-                if not failing:
-                    log.warning("reconcile_failed error_type=%s", type(exc).__name__)
-                failing = True
-                if isinstance(exc, URLError) and not hasattr(exc, "code"):
-                    self.api_version = None
+                failures += 1
+                # Log the first failure, then at least every few minutes while it persists.
+                if failures == 1 or time.monotonic() - last_logged >= FAILURE_LOG_INTERVAL:
+                    log.warning("reconcile_failed failures=%d reason=%s", failures, failure_reason(exc))
+                    last_logged = time.monotonic()
                 # Retry with backoff instead of waiting for the next periodic reconcile.
                 self.mark_dirty(event_id)
                 time.sleep(backoff)
                 backoff = min(backoff * 2, RECONCILE_INTERVAL)
-
 
 def main():
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s %(message)s")
