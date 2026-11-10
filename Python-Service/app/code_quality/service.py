@@ -888,6 +888,16 @@ def assess_revision(project_id: str, revision_id: str, snapshot: dict, archive_d
                     store: ReportStore | None = None, outline_token: str | None = None,
                     outline_credential_error: str | None = None,
                     sonarqube_token: str | None = None) -> dict:
+    # Scoring, overflow summaries, and the design judge all send source to the
+    # remote model when one is configured; the project must allow that first.
+    from infra.remote_consent import RemoteSourceNotAllowed, require_remote_source_allowed
+    from runtime.llm import remote_configured
+
+    if remote_configured():
+        try:
+            require_remote_source_allowed(project_id)
+        except RemoteSourceNotAllowed as exc:
+            raise AssessmentError(str(exc)) from exc
     try:
         store = store or ReportStore()
         weights = store.weights(user_id)

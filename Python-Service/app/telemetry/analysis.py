@@ -28,6 +28,18 @@ _PRIVATE_KEY_BLOCK = re.compile(r"-----BEGIN [A-Z ]*PRIVATE KEY-----.*?-----END 
 logger = logging.getLogger(__name__)
 
 
+def _require_remote_consent(project_id: Any, provider: str) -> None:
+    """Request evidence and source excerpts go to the remote model only with project consent."""
+    if provider != "remote":
+        return
+    from infra.remote_consent import RemoteSourceNotAllowed, require_remote_source_allowed
+
+    try:
+        require_remote_source_allowed(project_id)
+    except RemoteSourceNotAllowed as exc:
+        raise AnalysisError(str(exc)) from exc
+
+
 def _log_model_failure(stage: str, provider: str, exc: Exception) -> None:
     """Record why the model call failed (status, host, connection error), never the prompt."""
     causes, current = [], exc
@@ -273,6 +285,7 @@ def analyze_request(
 ) -> dict:
     if provider not in {"local", "remote"}:
         raise AnalysisError("Choose a valid configured chat provider and retry.")
+    _require_remote_consent(project_id, provider)
     if not detail.get("available") or not detail.get("request"):
         raise AnalysisError("Request telemetry is unavailable for analysis.")
     commit_sha = revision.get("commit_sha")
@@ -369,6 +382,7 @@ def preview_diff(
         from runtime.llm import complete_with_model
         model_call = complete_with_model
     provider = analysis.get("requested_provider", analysis.get("provider", "local"))
+    _require_remote_consent(revision.get("project_id"), provider)
     prompt = json.dumps({"task": "Propose a minimal source edit for the selected finding. Return JSON with exactly file_path, old_text, and new_text. old_text must be one exact contiguous code fragment from the supplied excerpt; new_text replaces only that fragment. Do not include markdown or alter unrelated code.", "finding": known, "source": list(source.values())}, ensure_ascii=False)
     try:
         content, model, used_provider = model_call(prompt, system="Generate a review-only PHP patch proposal. Return only JSON.", temperature=0.1, max_tokens=3000, provider=provider)

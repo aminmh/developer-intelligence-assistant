@@ -40,6 +40,14 @@ def _call_model(project_id: str, prompt: dict, system: str, max_tokens: int,
         from runtime.llm import complete_with_model
         model_call = complete_with_model
     provider = model_provider(project_id, index)
+    if provider == "remote":
+        # The prompt carries rule text and code excerpts; both settings must allow it.
+        from infra.remote_consent import RemoteSourceNotAllowed, require_remote_source_allowed
+
+        try:
+            require_remote_source_allowed(project_id)
+        except RemoteSourceNotAllowed as exc:
+            raise RuleAssistError(str(exc)) from exc
     try:
         content, model, used = model_call(json.dumps(prompt, ensure_ascii=False), system=system,
                                           temperature=0.1, max_tokens=max_tokens, provider=provider,

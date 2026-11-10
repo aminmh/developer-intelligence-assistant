@@ -10,6 +10,14 @@ from code_quality.rule_assist import RuleAssistError, check_impact, generate_tes
 from code_quality.rule_code import Revision, changed_symbols, suggest_links, symbol_hashes
 from code_quality.rule_index import RuleIndex
 
+
+@pytest.fixture(autouse=True)
+def _remote_source_allowed(monkeypatch):
+    """Rule text may go remote only when both settings allow it; this grants the project-level one."""
+    import infra.remote_consent as consent
+
+    monkeypatch.setattr(consent, "remote_source_allowed", lambda project_id, **kwargs: True)
+
 PROJECT = "pizza"
 DOC = "0b5c3a10-1111-4c1e-9d55-aaaaaaaaaaaa"
 OTHER = "0b5c3a10-2222-4c1e-9d55-bbbbbbbbbbbb"

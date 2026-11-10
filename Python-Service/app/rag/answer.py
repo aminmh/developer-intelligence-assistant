@@ -12,6 +12,7 @@ This module stays generic — it knows neither frameworks nor language adapters.
 
 from __future__ import annotations
 
+import itertools
 import time
 from pathlib import Path
 from typing import Any, Dict, List, Optional
@@ -171,6 +172,99 @@ def _log_prompt(question: str, prompt: str) -> None:
         pass  # Log file is best-effort
 
 
+def _start_agent(prompt: str, tool_context: Any, temperature: float, top_p: float,
+                 run_meta: Optional[Dict[str, Any]] = None):
+    """Start the tool-calling agent; return ``(first_event, events)`` or None.
+
+    None means the agent could not start and the caller keeps the existing
+    single-call generation (LangChain plan task 18).
+    """
+    if tool_context is None:
+        return None
+    from agent_tools.runtime import AgentUnavailable, stream_agent_answer
+
+    events = stream_agent_answer(prompt, SYSTEM_PROMPT, tool_context, temperature=temperature, top_p=top_p,
+                                 run_meta=run_meta)
+    try:
+        return next(events), events
+    except AgentUnavailable as exc:
+        get_exception_logger().warning("Agent unavailable, answering without tools: %s", exc)
+    except StopIteration:
+        pass
+    return None
+
+
+def _agent_done(event: Dict[str, Any], question: str, prompt: str, route: str, started: float) -> Dict[str, Any]:
+    answer, validation = validate_answer(event.get("answer") or "", question, route)
+    usage, context_usage = _usage_metadata(prompt, answer, event.get("usage"))
+    return {
+        "answer": answer,
+        "model": event.get("model"),
+        "provider": event.get("provider", "remote"),
+        "duration_ms": int((time.time() - started) * 1000),
+        "truncated": bool(event.get("truncated")),
+        "code_validation": validation,
+        "usage": usage,
+        "context_usage": context_usage,
+        "tool_calls": event.get("tool_calls") or [],
+    }
+
+
+def _agent_paused(event: Dict[str, Any], approval: Dict[str, Any] | None, started: float) -> Dict[str, Any]:
+    """A ``done`` payload for a run waiting on the user's approval of a tool call."""
+    return {
+        "answer": event.get("answer") or "",
+        "model": event.get("model"),
+        "provider": event.get("provider", "remote"),
+        "duration_ms": int((time.time() - started) * 1000),
+        "truncated": False,
+        "code_validation": [],
+        "usage": event.get("usage"),
+        "context_usage": None,
+        "tool_calls": event.get("tool_calls") or [],
+        "paused": True,
+        "approval": approval,
+    }
+
+
+def _run_meta(question: str, prompt: str, route: str, run_meta: Optional[Dict[str, Any]]) -> Dict[str, Any]:
+    return {**(run_meta or {}), "question": question, "prompt": prompt, "route": route}
+
+
+def resume_answer_stream(approval: Any) -> Any:
+    """Continue a paused answer after its approval was decided; yields answer events.
+
+    The decision was already consumed (``ApprovalStore.decide``), so this runs
+    at most once per approval. The final ``done`` carries the extras the
+    original request attached (matches, business rules, tool status).
+    """
+    from agent_tools.runtime import resume_agent_answer
+
+    run = approval.run
+    started = time.time()
+    extras = run.get("extras") or {}
+    yield {"type": "start", "model": run.get("model"), "provider": "remote"}
+    approval_event: Dict[str, Any] | None = None
+    try:
+        for event in resume_agent_answer(approval):
+            if event.get("type") == "approval_required":
+                approval_event = event
+                yield event
+            elif event.get("type") == "agent_paused":
+                yield {"type": "done", **_agent_paused(event, approval_event, started), **extras}
+                return
+            elif event.get("type") == "agent_done":
+                done = _agent_done(event, run.get("question", ""), run.get("prompt", ""), run.get("route", "chat"), started)
+                yield {"type": "validation", "code_validation": done["code_validation"]}
+                yield {"type": "done", **done, **extras}
+                return
+            else:
+                yield event
+    except Exception as exc:  # noqa: BLE001 — the decision is consumed; report, never retry silently
+        get_exception_logger().error("Resuming agent run failed: %s", exc)
+        yield {"type": "error", "detail": "The approved run could not continue. Ask the question again."}
+
+
 def generate_answer(
     question: str,
     contexts: Optional[List[Dict[str, Any]]] = None,
@@ -186,6 +280,8 @@ def generate_answer(
     preview_only: bool = False,
     *,
     preview_mode: str = "off",
+    tool_context: Any = None,
+    run_meta: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
     """Generate an answer from retrieved code context + entities.
 
@@ -223,6 +319,17 @@ def generate_answer(
     _log_prompt(question, prompt)
 
     started = time.time()
+    agent = _start_agent(prompt, tool_context, temp, topp, _run_meta(question, prompt, route, run_meta))
+    if agent is not None:
+        first, events = agent
+        approval_event: Dict[str, Any] | None = None
+        for event in itertools.chain([first], events):
+            if event.get("type") == "approval_required":
+                approval_event = event
+            elif event.get("type") == "agent_paused":
+                return {**_agent_paused(event, approval_event, started), "context_preview": window}
+            elif event.get("type") == "agent_done":
+                return {**_agent_done(event, question, prompt, route, started), "context_preview": window}
     try:
         completion = complete_with_model(
             prompt,
@@ -275,6 +382,8 @@ def generate_answer_stream(
     preview_only: bool = False,
     *,
     preview_mode: str = "off",
+    tool_context: Any = None,
+    run_meta: Optional[Dict[str, Any]] = None,
 ) -> Any:
     """Generator yielding answer events for SSE streaming.
 
@@ -318,6 +427,27 @@ def generate_answer_stream(
         yield {"type": "context", "preview": window}
 
     started = time.time()
+    agent = _start_agent(prompt, tool_context, temp, topp, _run_meta(question, prompt, route, run_meta))
+    if agent is not None:
+        first, events = agent
+        from runtime.llm import remote_endpoint
+
+        yield {"type": "start", "model": remote_endpoint()[2], "provider": "remote"}
+        approval_event: Dict[str, Any] | None = None
+        for event in itertools.chain([first], events):
+            if event.get("type") == "approval_required":
+                approval_event = event
+            if event.get("type") == "agent_paused":
+                yield {"type": "done", **_agent_paused(event, approval_event, started)}
+                return
+            if event.get("type") == "agent_done":
+                done = _agent_done(event, question, prompt, route, started)
+                yield {"type": "validation", "code_validation": done["code_validation"]}
+                yield {"type": "done", **done}
+                return
+            yield event
+        return
+
     buffer: List[str] = []
     provider_usage = None
     model_used = settings.ollama_llm_model

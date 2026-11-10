@@ -4,6 +4,16 @@ defaults:
   max_tool_timeout_seconds: 300
   status_poll_interval_ms: 1000
 
+# Limits for model-initiated tool calls (agent_tools/limits.py). Values above
+# the hard ceilings in that module are capped.
+agent_tools:
+  timeout_seconds: 30
+  max_output_bytes: 65536
+  max_calls_per_run: 12
+  # Largest single model request the remote provider accepts, in tokens; 0 = no
+  # limit. Groq's free tier allows 8,000 tokens per minute (use about 6500 there).
+  max_request_tokens: 0
+
 tools:
   chunk_code:
     args:

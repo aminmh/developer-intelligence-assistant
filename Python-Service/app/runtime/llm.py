@@ -241,6 +241,19 @@ def _get_remote_client() -> OpenAI:
     return _remote_client_state[2]
 
 
+def remote_endpoint() -> tuple[str, str, str]:
+    """Return ``(base_url ending in /v1, api_key, model)`` for the remote provider.
+
+    Same normalization as :func:`_get_remote_client`, for clients (such as the
+    LangChain agent model) that cannot reuse the raw OpenAI client.
+    """
+    base_url = settings.llm_remote_base_url.rstrip("/")
+    if base_url.endswith("/v1"):
+        base_url = base_url[: -len("/v1")]
+    return (f"{base_url}/v1", settings.llm_remote_api_key or "EMPTY",
+            settings.llm_remote_model or settings.ollama_llm_model)
+
+
 def remote_configured() -> bool:
     """Return True when a remote OpenAI-compatible base URL is configured."""
     return bool((settings.llm_remote_base_url or "").strip())
@@ -249,11 +262,15 @@ def remote_configured() -> bool:
 def test_remote(timeout: float = 30.0) -> dict:
     """Probe the configured remote OpenAI-compatible endpoint.
 
-    Returns ``{"ok": bool, "latency_ms": float, "detail": str, "model": str}``.
+    Returns ``{"ok": bool, "latency_ms": float, "detail": str, "model": str,
+    "tool_calling": {"supported": bool, "detail": str, "checked_at": str} | None}``.
+    ``tool_calling`` is None when the connection itself failed; otherwise the
+    tool-call round trip runs and its result is stored for this URL and model.
     Raises nothing — connection/auth/model errors are folded into ``ok``.
     """
     if not remote_configured():
-        return {"ok": False, "latency_ms": 0.0, "detail": "No base URL configured", "model": ""}
+        return {"ok": False, "latency_ms": 0.0, "detail": "No base URL configured", "model": "",
+                "tool_calling": None}
     model = settings.llm_remote_model or settings.ollama_llm_model
     started = time.monotonic()
     try:
@@ -264,11 +281,32 @@ def test_remote(timeout: float = 30.0) -> dict:
             max_tokens=1,
         )
         latency_ms = (time.monotonic() - started) * 1000.0
-        return {"ok": True, "latency_ms": round(latency_ms, 1), "detail": "connected", "model": model}
     except Exception as exc:  # noqa: BLE001 — report any failure shape to the UI
         latency_ms = (time.monotonic() - started) * 1000.0
         detail = str(exc).strip() or exc.__class__.__name__
-        return {"ok": False, "latency_ms": round(latency_ms, 1), "detail": detail, "model": model}
+        return {"ok": False, "latency_ms": round(latency_ms, 1), "detail": detail, "model": model,
+                "tool_calling": None}
+
+    from runtime.tool_calling_probe import probe_tool_calling, record_probe
+
+    probe = probe_tool_calling(_get_remote_client(), model, timeout=timeout)
+    tool_calling = record_probe(settings.llm_remote_base_url, model, probe)
+    return {"ok": True, "latency_ms": round(latency_ms, 1), "detail": "connected", "model": model,
+            "tool_calling": tool_calling}
+
+
+def remote_tool_calling_status() -> Optional[dict]:
+    """Stored tool-calling probe for the current remote URL and model, or None.
+
+    None means the current remote model has not been tested; callers treat it
+    as unsupported until a connection test records a result.
+    """
+    if not remote_configured():
+        return None
+    from runtime.tool_calling_probe import lookup_probe
+
+    model = settings.llm_remote_model or settings.ollama_llm_model
+    return lookup_probe(settings.llm_remote_base_url, model)
 
 
 def _run_chat(

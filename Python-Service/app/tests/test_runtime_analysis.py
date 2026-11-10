@@ -9,6 +9,14 @@ from fastapi.testclient import TestClient
 from telemetry.analysis import AnalysisError, analyze_request, preview_diff
 
 
+@pytest.fixture(autouse=True)
+def _remote_source_allowed(monkeypatch):
+    """These tests use the remote provider for a project that allows it (see test_remote_consent.py)."""
+    import infra.remote_consent as consent
+
+    monkeypatch.setattr(consent, "remote_source_allowed", lambda project_id, **kwargs: True)
+
+
 def _archive(path="src/OrderService.php", contents="<?php\nclass OrderService {\n    public function run() { return 1; }\n}\n"):
     buffer = BytesIO()
     with zipfile.ZipFile(buffer, "w") as archive:

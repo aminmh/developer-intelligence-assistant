@@ -290,6 +290,12 @@ app.include_router(evaluator_router)
 app.include_router(embedding_jobs_router)
 app.include_router(code_quality_router)
 app.include_router(schema_draft_router)
+from routers.code_tools import router as code_tools_router  # noqa: E402 — after app exists
+from routers.remote_consent import router as remote_consent_router  # noqa: E402 — after app exists
+from routers.tool_approvals import router as tool_approvals_router  # noqa: E402 — after app exists
+app.include_router(code_tools_router)
+app.include_router(remote_consent_router)
+app.include_router(tool_approvals_router)
 
 app.add_middleware(
     CORSMiddleware,
@@ -1936,6 +1942,13 @@ def _answer_service() -> AnswerService:
     )
 
 
+def _request_owner(secret: str | None, user_id: str | None) -> str | None:
+    """The authenticated user the web server vouches for, used to own paused agent runs."""
+    if user_id and settings.internal_secret and secret == settings.internal_secret:
+        return user_id[:256]
+    return None
+
+
 @app.post(
     "/answer",
     tags=["LLM"],
@@ -1955,9 +1968,11 @@ def _answer_service() -> AnswerService:
 def answer_prompt(
     body: dict,
     x_rag_trace_id: Annotated[str | None, Header(alias="X-RAG-Trace-Id")] = None,
+    x_internal_secret: Annotated[str | None, Header(alias="X-Internal-Secret")] = None,
+    x_user_id: Annotated[str | None, Header(alias="X-User-Id")] = None,
 ):
     try:
-        return _answer_service().answer(body, x_rag_trace_id)
+        return _answer_service().answer(body, x_rag_trace_id, owner=_request_owner(x_internal_secret, x_user_id))
     except InvalidAnswerRequest as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
@@ -1979,11 +1994,13 @@ def answer_prompt(
 def answer_stream(
     body: dict,
     x_rag_trace_id: Annotated[str | None, Header(alias="X-RAG-Trace-Id")] = None,
+    x_internal_secret: Annotated[str | None, Header(alias="X-Internal-Secret")] = None,
+    x_user_id: Annotated[str | None, Header(alias="X-User-Id")] = None,
 ):
     if not isinstance(body.get("query"), str) or not body.get("query"):
         raise HTTPException(status_code=400, detail="Missing or invalid query")
     try:
-        stream = _answer_service().stream(body, x_rag_trace_id)
+        stream = _answer_service().stream(body, x_rag_trace_id, owner=_request_owner(x_internal_secret, x_user_id))
     except InvalidAnswerRequest as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     return StreamingResponse(
@@ -2136,19 +2153,22 @@ def update_settings(body: dict):
 
 
 def _tool_view(tool: dict[str, Any]) -> dict[str, Any]:
+    from agent_tools.catalog import agent_status
+
     out = dict(tool)
     cfg = dict(out.get("config") or {})
     for key in ("apiKey", "token", "password", "secret"):
         if key in cfg and cfg[key]: cfg[key] = ""
     out["config"] = cfg
+    out["agent"] = agent_status(tool)
     return out
 
 
 @app.get("/tools", tags=["LLM Tools"], summary="List LLM tools")
 def list_tools(include_deleted: bool = False):
-    builtins = []
-    for name, cfg in (orchestrator.config.get("tools") or {}).items():
-        builtins.append({"id": f"builtin:{name}", "type": "shell", "name": name, "description": cfg.get("description", name), "config": {"builtin": True}, "enabled": True, "builtin": True})
+    from agent_tools.catalog import builtin_entries, pipeline_entries
+
+    builtins = builtin_entries() + pipeline_entries(orchestrator.config.get("tools") or {})
     return {"success": True, "tools": builtins + [_tool_view(t) for t in tool_store.list(include_deleted)]}
 
 
@@ -2160,7 +2180,7 @@ def create_tool(body: dict):
 
 @app.put("/tools/{tool_id}", tags=["LLM Tools"], summary="Update an LLM tool")
 def update_tool(tool_id: str, body: dict):
-    if tool_id.startswith("builtin:"): raise HTTPException(status_code=400, detail="Built-in tools cannot be edited")
+    if tool_id.startswith(("builtin:", "pipeline:")): raise HTTPException(status_code=400, detail="Built-in tools cannot be edited")
     if not tool_store.get(tool_id): raise HTTPException(status_code=404, detail="Tool not found")
     try: return {"success": True, "tool": _tool_view(tool_store.save(body, tool_id))}
     except ValueError as exc: raise HTTPException(status_code=400, detail=str(exc))
@@ -2182,7 +2202,7 @@ def disable_tool(tool_id: str):
 
 @app.delete("/tools/{tool_id}", tags=["LLM Tools"])
 def delete_tool(tool_id: str):
-    if tool_id.startswith("builtin:"): raise HTTPException(status_code=400, detail="Built-in tools cannot be deleted")
+    if tool_id.startswith(("builtin:", "pipeline:")): raise HTTPException(status_code=400, detail="Built-in tools cannot be deleted")
     tool = tool_store.soft_delete(tool_id)
     if not tool: raise HTTPException(status_code=404, detail="Tool not found")
     return {"success": True, "tool": _tool_view(tool)}

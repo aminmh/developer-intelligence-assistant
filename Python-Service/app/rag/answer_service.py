@@ -36,8 +36,14 @@ class AnswerService:
         self._report_stream_error = report_stream_error
         self._rule_context = rule_context
 
-    def answer(self, body: dict, trace_id: str | None = None) -> dict:
+    def answer(self, body: dict, trace_id: str | None = None, owner: str | None = None) -> dict:
         query = self._query(body)
+        blocked = self._consent_block(body)
+        if blocked is not None:
+            response = self._response([], blocked, "off")
+            response.update(llmUsed=None, business_rules=[], tool_calls=[], tools=blocked["tools"],
+                            remote_source_blocked=True)
+            return response
         doc_chunks = self._doc_chunks(body)
         results, contexts, extra_context, rule_sources = self._ground(body, query, trace_id)
         preview_mode = self._resolve_preview_mode(body)
@@ -45,8 +51,10 @@ class AnswerService:
 
         from rag.answer import generate_answer
 
+        tool_context, tools = self._tools(body)
         generated = generate_answer(
             query,
+            tool_context=tool_context,
             contexts=contexts,
             entities=body.get("entities") or {},
             temperature=body.get("temperature"),
@@ -58,13 +66,23 @@ class AnswerService:
             route=body.get("route", "chat"),
             preview_only=preview_only,
             preview_mode=preview_mode,
+            run_meta=self._run_meta(body, results, rule_sources, tools, owner),
         )
         response = self._response(results, generated, preview_mode, body.get("runtime_symbol_metrics"))
+        if generated.get("paused"):
+            response["paused"] = True
+            response["approval"] = generated.get("approval")
         response["business_rules"] = rule_sources
+        response["tool_calls"] = generated.get("tool_calls") or []
+        response["tools"] = tools
         return response
 
-    def stream(self, body: dict, trace_id: str | None = None) -> Iterator[str]:
+    def stream(self, body: dict, trace_id: str | None = None, owner: str | None = None) -> Iterator[str]:
         query = self._query(body)
+        blocked = self._consent_block(body)
+        if blocked is not None:
+            yield f"data: {json.dumps({'type': 'done', **blocked, 'matches': [], 'business_rules': [], 'remote_source_blocked': True})}\n\n"
+            return
         doc_chunks = self._doc_chunks(body)
         results, contexts, extra_context, rule_sources = self._ground(body, query, trace_id)
         preview_mode = self._resolve_preview_mode(body)
@@ -73,9 +91,11 @@ class AnswerService:
 
         from rag.answer import generate_answer_stream
 
+        tool_context, tools = self._tools(body)
         try:
             for event in generate_answer_stream(
                 query,
+                tool_context=tool_context,
                 contexts=contexts,
                 entities=body.get("entities") or {},
                 temperature=body.get("temperature"),
@@ -87,14 +107,72 @@ class AnswerService:
                 route=body.get("route", "chat"),
                 preview_only=preview_only,
                 preview_mode=preview_mode,
+                run_meta=self._run_meta(body, results, rule_sources, tools, owner),
             ):
                 if event.get("type") == "done":
                     event["matches"] = self._matches(results, body.get("runtime_symbol_metrics"))
                     event["business_rules"] = rule_sources
+                    event["tools"] = tools
                 yield f"data: {json.dumps(event)}\n\n"
         except Exception as exc:  # noqa: BLE001 — preserve SSE error contract
             self._report_stream_error(exc)
             yield f"data: {json.dumps({'type': 'error', 'detail': str(exc)})}\n\n"
+
+    def _run_meta(self, body: dict, results: list, rule_sources: list, tools: dict, owner: str | None) -> dict:
+        """What a paused run needs to finish its answer after the user decides."""
+        return {"owner": owner, "extras": {
+            "matches": self._matches(results, body.get("runtime_symbol_metrics")),
+            "business_rules": rule_sources, "tools": tools}}
+
+    def _consent_block(self, body: dict) -> dict | None:
+        """A finished, model-free answer when the project forbids external-model use, else None.
+
+        Checked before retrieval so nothing about the project is assembled for
+        the external model. Gate previews never call a model and stay allowed.
+        """
+        if body.get("use_remote", True) is not True or body.get("preview") is True:
+            return None
+        from infra.remote_consent import NOT_ALLOWED_REASON, remote_source_allowed
+
+        try:
+            allowed = remote_source_allowed(body.get("project_id"))
+        except Exception as exc:  # noqa: BLE001 — fail closed: an unreadable consent store blocks
+            self._report_stream_error(exc)
+            allowed = False
+        if allowed:
+            return None
+        return {
+            "answer": f"⚠️ {NOT_ALLOWED_REASON}",
+            "model": None,
+            "provider": None,
+            "duration_ms": 0,
+            "truncated": False,
+            "code_validation": [],
+            "usage": None,
+            "context_usage": None,
+            "tool_calls": [],
+            "tools": {"available": False, "code": "consent", "reason": NOT_ALLOWED_REASON},
+        }
+
+    def _tools(self, body: dict) -> tuple[Any, dict]:
+        """Return ``(tool context or None, tool status for the client)``."""
+        try:
+            from agent_tools.runtime import tool_context, tool_status
+
+            route = str(body.get("route") or "chat")
+            status = tool_status(route, body.get("use_remote", True) is True)
+            if not status["available"]:
+                return None, status
+            context = tool_context(body, route)
+            has_revision = bool(context.project_id and (context.revision_id or context.commit_sha))
+            if not has_revision and not context.workspace_path:
+                # Every tool reads project source; without one, answer without tools.
+                return None, {"available": False, "code": "no_source",
+                              "reason": "Attach a project so the model can read its code."}
+            return context, status
+        except Exception as exc:  # noqa: BLE001 — tools are optional; answer without them
+            self._report_stream_error(exc)
+            return None, {"available": False, "code": "error", "reason": "Code tools could not start."}
 
     def _query(self, body: dict) -> str:
         query = body.get("query", "")

@@ -17,10 +17,18 @@ instructor==1.10.0
 openai==1.109.1
 tiktoken==0.14.0
 symspellpy==6.7.8
-langchain==0.3.30
-langchain-core==0.3.86
+# Agent runtime (LangChain 1.x). langchain-openai stays on 1.1.9, the last
+# release that accepts openai 1.x: semantic-router 0.0.20 requires openai<2.
+# langchain-community stays on 0.3.31: ragas imports modules removed in 0.4.
+langchain==1.4.9
+langchain-core==1.7.7
 langchain-community==0.3.31
-langchain-openai==0.3.35
+langchain-openai==1.1.9
+langgraph==1.2.20
+langgraph-checkpoint-sqlite==3.1.3
+langchain-mcp-adapters==0.3.2
+# Tool argument validation (agent_tools/validation.py); also required by mcp.
+jsonschema==4.26.0
 datasets==5.0.1
 ragas==0.2.15
 sentence-transformers==5.1.2

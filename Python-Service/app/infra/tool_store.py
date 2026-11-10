@@ -15,6 +15,39 @@ def _now() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
+def _validate_agent_fields(config: dict[str, Any]) -> dict[str, Any]:
+    """Validate the optional fields that make a tool callable by the model.
+
+    ``inputSchema`` (JSON Schema for the arguments), ``effect`` (``read_only`` or
+    ``side_effecting``), ``workflows`` (allowlist), and ``allowedHosts``. They
+    are optional here so existing orchestrator tools keep saving; the agent
+    registry refuses to expose a REST or shell tool without ``inputSchema``.
+    """
+    from agent_tools.types import EFFECTS, ToolDefinitionError
+    from agent_tools.validation import validate_input_schema, validate_workflows
+
+    out = dict(config)
+    try:
+        if "inputSchema" in out and out["inputSchema"] not in (None, ""):
+            out["inputSchema"] = validate_input_schema(out["inputSchema"])
+        else:
+            out.pop("inputSchema", None)
+        if "workflows" in out and out["workflows"] is not None:
+            out["workflows"] = sorted(validate_workflows(out["workflows"]))
+    except ToolDefinitionError as exc:
+        raise ValueError(str(exc)) from exc
+    if "effect" in out and out["effect"] not in EFFECTS:
+        raise ValueError("effect must be read_only or side_effecting")
+    hosts = out.get("allowedHosts")
+    if isinstance(hosts, str):
+        out["allowedHosts"] = [h.strip().lower() for h in hosts.split(",") if h.strip()]
+    elif isinstance(hosts, list):
+        out["allowedHosts"] = [str(h).strip().lower() for h in hosts if str(h).strip()]
+    elif hosts is not None:
+        raise ValueError("allowedHosts must be a list of host names")
+    return out
+
+
 class ToolStore:
     def __init__(self, db_path: str | None = None) -> None:
         self.db_path = db_path or settings_store._db_path
@@ -61,6 +94,7 @@ class ToolStore:
             raise ValueError("name is required and must be at most 100 characters")
         description = str(payload.get("description") or "").strip()
         config = payload.get("config") if isinstance(payload.get("config"), dict) else {}
+        config = _validate_agent_fields(config)
         now = _now(); ident = tool_id or str(uuid.uuid4())
         with self._lock:
             conn = self._connect()
