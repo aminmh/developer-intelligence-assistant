@@ -244,7 +244,7 @@ export function installOidcAuth(app: express.Express): void {
     const scope = requestProjectScope(req.path, req.body?.project_id, req.query.project_id);
     if ('error' in scope) return res.status(400).json({ error: scope.error });
     const projectId = scope.projectId;
-    const readOnlyPost = ['/query', '/query/stream', '/query/result', '/answer'].includes(req.path)
+    const readOnlyPost = ['/query', '/query/stream', '/query/result', '/answer', '/code/read'].includes(req.path)
       || /^\/query\/[^/]+\/evaluate$/.test(req.path);
     if (req.method === 'POST' && req.path === '/runtime/setup-authorization') {
       if (!authCanRunRuntimeSetup(user)) return res.status(403).json({ error: 'Operator or administrator access is required to set up Runtime.' });

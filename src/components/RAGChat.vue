@@ -15,7 +15,10 @@ import {
   ShieldCheck,
   X,
 } from 'lucide-vue-next';
-import { SearchMatch, UploadedFile, LLMUsage, ContextUsage, type ChatBusinessRuleSource } from '../types';
+import { SearchMatch, UploadedFile, LLMUsage, ContextUsage, type ChatBusinessRuleSource, type ToolCallView, type ToolAvailability, type ApprovalView } from '../types';
+import { linkCitations } from '../utils/agentTools';
+import ToolActivity from './ToolActivity.vue';
+import ToolApprovalCard from './ToolApprovalCard.vue';
 import { outlineHref, syncedAgo, symbolLabel } from './code-quality/ruleKnowledge';
 import PipelineProgress from './PipelineProgress.vue';
 import ChatLoading from './ChatLoading.vue';
@@ -43,6 +46,9 @@ interface Message {
   streaming?: boolean;
   code_validation?: any[];
   contextPreview?: string;
+  toolCalls?: ToolCallView[];
+  tools?: ToolAvailability | null;
+  approval?: ApprovalView | null;
 }
 
 const props = defineProps<{
@@ -71,6 +77,8 @@ const emit = defineEmits<{
   (e: 'update:useRemote', value: boolean): void;
   (e: 'confirmSend'): void;
   (e: 'cancelSend'): void;
+  (e: 'openCitation', path: string, line: number): void;
+  (e: 'decideApproval', messageId: string, decision: 'approve' | 'deny'): void;
 }>();
 
 const ROUTES = ['code_explain', 'code_refactor', 'debug', 'search', 'knowledge', 'chat'];
@@ -85,7 +93,16 @@ const md = new MarkdownIt({
   breaks: true,
 });
 
-const renderMarkdown = (content: string): string => md.render(content || '');
+// `path:line` code spans become citation links that open the cited source.
+const renderMarkdown = (content: string): string => linkCitations(md.render(content || ''));
+
+const onAnswerClick = (event: MouseEvent) => {
+  const link = (event.target as HTMLElement | null)?.closest<HTMLElement>('[data-cite-path]');
+  if (!link) return;
+  event.preventDefault();
+  const line = Number(link.dataset.citeLine);
+  if (link.dataset.citePath && Number.isFinite(line)) emit('openCitation', link.dataset.citePath, line);
+};
 
 // Feedback UI state: which message's route picker is open / already submitted
 const feedbackOpenId = ref<string | null>(null);
@@ -226,12 +243,23 @@ const chatLocked = computed(() => props.loading || !!props.gatePreview);
               ? 'bg-indigo-600/10 border border-indigo-500/20 text-slate-100 rounded-br-none'
               : 'bg-slate-900/60 border border-slate-800 text-slate-300 rounded-tl-none'"
           >
-            <div class="prose prose-invert prose-sm max-w-none text-left" v-if="msg.role === 'assistant'" v-html="renderMarkdown(msg.content)"></div>
+            <ToolActivity
+              v-if="msg.role === 'assistant'"
+              :calls="msg.toolCalls"
+              :tools="msg.tools"
+              :streaming="msg.streaming"
+            />
+            <ToolApprovalCard
+              v-if="msg.role === 'assistant' && msg.approval"
+              :approval="msg.approval"
+              @decide="(decision) => emit('decideApproval', msg.id, decision)"
+            />
+            <div class="prose prose-invert prose-sm max-w-none text-left" v-if="msg.role === 'assistant'" v-html="renderMarkdown(msg.content)" @click="onAnswerClick"></div>
             <span v-if="msg.role === 'assistant' && msg.streaming" class="inline-block w-2 h-4 bg-indigo-400 animate-pulse ml-0.5 align-text-bottom"></span>
-            <div class="text-sm text-left font-mono leading-relaxed text-slate-100 whitespace-pre-wrap break-words" v-else>{{ msg.content }}</div>
+            <div class="text-sm text-left font-mono leading-relaxed text-slate-100 whitespace-pre-wrap break-words" v-if="msg.role !== 'assistant'">{{ msg.content }}</div>
             
             <!-- Assistant message metadata -->
-            <div v-if="msg.role === 'assistant'" class="mt-3 pt-3 border-t border-slate-800 flex items-center justify-between text-[10px] text-slate-500 font-mono">
+            <div v-if="msg.role === 'assistant'" class="mt-3 pt-3 border-t border-slate-800 flex flex-wrap items-center justify-between gap-x-3 gap-y-1 text-[10px] text-slate-500 font-mono">
               <span>{{ msg.timestamp }}</span>
               <span v-if="msg.llmUsed" class="flex items-center gap-1">
                 <Cpu class="w-3 h-3" />

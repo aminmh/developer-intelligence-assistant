@@ -707,3 +707,18 @@ select:not([multiple]) {
     transition: none;
   }
 }
+
+/* `path:line` citations in chat answers (utils/agentTools.ts linkCitations). */
+.code-citation {
+  text-decoration: none;
+}
+.code-citation code {
+  color: rgb(103 232 249);
+  border-bottom: 1px dashed rgb(103 232 249 / 0.45);
+  cursor: pointer;
+}
+.code-citation:hover code,
+.code-citation:focus-visible code {
+  border-bottom-style: solid;
+  color: rgb(165 243 252);
+}

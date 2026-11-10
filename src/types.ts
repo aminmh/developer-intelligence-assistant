@@ -438,6 +438,44 @@ export interface ContextUsage {
   estimated: boolean;
 }
 
+/** One model tool call in an answer (from `tool_started` / `tool_completed` events). */
+export interface ToolCallView {
+  id: string;
+  name: string;
+  arguments?: Record<string, unknown>;
+  status: 'running' | 'success' | 'error';
+  durationMs?: number | null;
+  error?: string | null;
+  truncated?: boolean;
+}
+
+/** Whether the model could call code tools for an answer, and why not. */
+export interface ToolAvailability {
+  available: boolean;
+  code: string;
+  reason: string | null;
+}
+
+/** A paused answer waiting for the user to approve or deny side-effecting tool calls. */
+export interface ApprovalView {
+  id: string;
+  calls: Array<{ id: string; name: string; arguments: Record<string, unknown>; invalid: string | null }>;
+  expiresAt: string | null;
+  state: 'pending' | 'deciding' | 'approved' | 'denied' | 'error';
+  error?: string;
+}
+
+/** Lines around a cited `path:line`, from /api/code/read. */
+export interface CitationPreview {
+  path: string;
+  line: number;
+  startLine?: number;
+  content?: string;
+  totalLines?: number;
+  loading: boolean;
+  error?: string;
+}
+
 export type DeveloperLogType = 'llm_prompt' | 'exception' | 'router_fallback';
 export interface DeveloperLogEvent {
   id: string;

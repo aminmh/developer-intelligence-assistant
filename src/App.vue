@@ -16,13 +16,15 @@ import {
   PanelLeftOpen,
   ShieldCheck
 } from 'lucide-vue-next';
-import type { RAGConfig, SearchMatch, LLMUsage, ContextUsage, ChatBusinessRuleSource } from './types';
+import type { RAGConfig, SearchMatch, LLMUsage, ContextUsage, ChatBusinessRuleSource, ToolCallView, ToolAvailability, CitationPreview, ApprovalView } from './types';
+import { mergeToolCalls } from './utils/agentTools';
 import { makeRequest } from './ui/makeRequest';
 import { useProjectFiles } from './composables/useProjectFiles';
 import { validateUploadIdentity } from './services/uploadIdentity';
 import { useAppearancePreferences } from './composables/useAppearancePreferences';
 
 import RAGChat from './components/RAGChat.vue';
+import CodeCitationModal from './components/CodeCitationModal.vue';
 import type { DomainConcept, AnalysisSession } from './types';
 import type { PipelineStep } from './components/PipelineProgress.vue';
 
@@ -51,6 +53,9 @@ const memberPanelOpen = ref(false);
 const memberSubject = ref('');
 const memberRole = ref<'viewer' | 'operator' | 'admin'>('viewer');
 const members = ref<Array<{ subject: string; role: 'viewer' | 'operator' | 'admin' }>>([]);
+// Per-project consent for sending source to the external model; null = not loaded.
+const remoteSourceAllowed = ref<boolean | null>(null);
+const remoteSourceSaving = ref(false);
 const sidebarCollapsed = ref(false);
 const appearance = useAppearancePreferences();
 let handlingHistoryNavigation = false;
@@ -78,6 +83,29 @@ const loadProjectMembers = async () => {
   if (!uploadProjectId.value.trim()) return;
   const response = await makeRequest(`/api/auth/projects/${encodeURIComponent(uploadProjectId.value.trim())}/members`);
   if (response.ok) members.value = (await response.json()).members ?? [];
+  await loadRemoteSource();
+};
+const loadRemoteSource = async () => {
+  const projectId = uploadProjectId.value.trim();
+  remoteSourceAllowed.value = null;
+  if (!projectId) return;
+  const response = await makeRequest(`/api/auth/projects/${encodeURIComponent(projectId)}/remote-source`);
+  if (response.ok && uploadProjectId.value.trim() === projectId) remoteSourceAllowed.value = (await response.json()).allowed === true;
+};
+const toggleRemoteSource = async () => {
+  const projectId = uploadProjectId.value.trim();
+  if (!projectId || remoteSourceAllowed.value === null || remoteSourceSaving.value) return;
+  remoteSourceSaving.value = true;
+  try {
+    const response = await makeRequest(`/api/auth/projects/${encodeURIComponent(projectId)}/remote-source`, {
+      method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ allowed: !remoteSourceAllowed.value }),
+    });
+    const data = await response.json().catch(() => ({}));
+    if (response.ok) remoteSourceAllowed.value = data.allowed === true;
+    else triggerToast(data.detail || 'The setting could not be saved.', false);
+  } finally {
+    remoteSourceSaving.value = false;
+  }
 };
 const saveProjectMember = async () => {
   if (!memberSubject.value.trim() || !uploadProjectId.value.trim()) return;
@@ -176,6 +204,9 @@ interface Message {
   streaming?: boolean;
   code_validation?: any[];
   contextPreview?: string;
+  toolCalls?: ToolCallView[];
+  tools?: ToolAvailability | null;
+  approval?: ApprovalView | null;
 }
 
 const ROUTES = ['code_explain', 'code_refactor', 'debug', 'search', 'knowledge', 'chat'];
@@ -313,6 +344,82 @@ const domainRequestFields = (request?: DomainContextRequest) => request
 // Stream an answer via SSE (no orchestration job, no polling). The leading
 // `context` event (emitted whenever preview mode != off) is captured so the
 // answer message can carry the collapsible context window disclosure.
+// Read an answer SSE stream into one assistant message. Used for the first
+// answer and for the continuation after a tool approval decision.
+const consumeAnswerStream = async (res: Response, msgId: string) => {
+  if (!res.body) throw new Error('Stream unavailable');
+  let llmUsed = messages.value.find((x) => x.id === msgId)?.llmUsed || '';
+  let deltas = 0;
+  const reader = res.body.getReader();
+  const decoder = new TextDecoder();
+  let buf = '';
+  for (;;) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    buf += decoder.decode(value, { stream: true });
+    let idx: number;
+    while ((idx = buf.indexOf('\n\n')) >= 0) {
+      const raw = buf.slice(0, idx);
+      buf = buf.slice(idx + 2);
+      const line = raw.split('\n').find((l) => l.startsWith('data: '));
+      if (!line) continue;
+      let evt: any;
+      try {
+        evt = JSON.parse(line.slice(6));
+      } catch {
+        continue;
+      }
+      const m = messages.value.find((x) => x.id === msgId);
+      if (!m) return;
+      if (evt.type === 'start') {
+        llmUsed = evt.provider === 'remote'
+          ? `Remote GPU LLM (${evt.model})`
+          : `Local LLM (${evt.model})`;
+      } else if (evt.type === 'tool_started') {
+        m.toolCalls = [...(m.toolCalls ?? []), {
+          id: String(evt.id ?? `${evt.name}-${m.toolCalls?.length ?? 0}`),
+          name: String(evt.name ?? 'tool'),
+          arguments: evt.arguments && typeof evt.arguments === 'object' ? evt.arguments : {},
+          status: 'running',
+        }];
+        scrollToBottom();
+      } else if (evt.type === 'tool_completed') {
+        m.toolCalls = mergeToolCalls(m.toolCalls, [evt]);
+      } else if (evt.type === 'approval_required') {
+        m.approval = toApprovalView(evt);
+        scrollToBottom();
+      } else if (evt.type === 'approval_decided') {
+        if (m.approval?.id === evt.approval_id) m.approval = { ...m.approval, state: evt.decision === 'approved' ? 'approved' : 'denied' };
+      } else if (evt.type === 'context') {
+        if (typeof evt.preview === 'string') m.contextPreview = evt.preview;
+      } else if (evt.type === 'delta') {
+        m.content += evt.text;
+        if (++deltas % 8 === 0) scrollToBottom();
+      } else if (evt.type === 'validation') {
+        m.code_validation = evt.code_validation || [];
+      } else if (evt.type === 'error') {
+        if (!m.content) m.content = `❌ **Error:** ${evt.detail}`;
+        else m.content += `\n\n❌ **Error:** ${evt.detail}`;
+      } else if (evt.type === 'done') {
+        m.content = evt.answer || m.content;
+        if (Array.isArray(evt.matches)) m.matches = evt.matches;
+        if (Array.isArray(evt.business_rules)) m.businessRules = evt.business_rules;
+        m.llmUsed = llmUsed;
+        m.durationMs = evt.duration_ms;
+        m.usage = evt.usage || null;
+        m.context_usage = evt.context_usage || null;
+        m.toolCalls = mergeToolCalls(m.toolCalls, evt.tool_calls);
+        if (evt.tools && typeof evt.tools === 'object') m.tools = evt.tools;
+        if (evt.paused && evt.approval) m.approval = toApprovalView(evt.approval);
+        m.streaming = false;
+      }
+    }
+  }
+};
+
+// Stream an answer via SSE (no orchestration job, no polling). The leading
+// `context` event (emitted whenever preview mode != off) is captured so the
+// answer message can carry the collapsible context window disclosure.
 const streamAnswer = async (text: string, domainRequest?: DomainContextRequest) => {
   const msgId = `assistant_${Date.now()}`;
   messages.value.push({
@@ -325,8 +432,6 @@ const streamAnswer = async (text: string, domainRequest?: DomainContextRequest) 
   });
   scrollToBottom();
 
-  let llmUsed = '';
-  let deltas = 0;
   try {
     const res = await makeRequest('/api/query/stream', {
       method: 'POST',
@@ -336,57 +441,11 @@ const streamAnswer = async (text: string, domainRequest?: DomainContextRequest) 
     if (!res.ok || !res.body) {
       throw new Error(`Stream unavailable (${res.status})`);
     }
-
-    const reader = res.body.getReader();
-    const decoder = new TextDecoder();
-    let buf = '';
-    for (;;) {
-      const { done, value } = await reader.read();
-      if (done) break;
-      buf += decoder.decode(value, { stream: true });
-      let idx: number;
-      while ((idx = buf.indexOf('\n\n')) >= 0) {
-        const raw = buf.slice(0, idx);
-        buf = buf.slice(idx + 2);
-        const line = raw.split('\n').find((l) => l.startsWith('data: '));
-        if (!line) continue;
-        let evt: any;
-        try {
-          evt = JSON.parse(line.slice(6));
-        } catch {
-          continue;
-        }
-        const m = messages.value.find((x) => x.id === msgId);
-        if (!m) return;
-        if (evt.type === 'start') {
-          llmUsed = evt.provider === 'remote'
-            ? `Remote GPU LLM (${evt.model})`
-            : `Local LLM (${evt.model})`;
-        } else if (evt.type === 'context') {
-          if (typeof evt.preview === 'string') m.contextPreview = evt.preview;
-        } else if (evt.type === 'delta') {
-          m.content += evt.text;
-          if (++deltas % 8 === 0) scrollToBottom();
-        } else if (evt.type === 'validation') {
-          m.code_validation = evt.code_validation || [];
-        } else if (evt.type === 'error') {
-          if (!m.content) m.content = `❌ **Error:** ${evt.detail}`;
-        } else if (evt.type === 'done') {
-          m.content = evt.answer || m.content;
-          m.matches = evt.matches || m.matches;
-          m.businessRules = Array.isArray(evt.business_rules) ? evt.business_rules : [];
-          m.llmUsed = llmUsed;
-          m.durationMs = evt.duration_ms;
-          m.usage = evt.usage || null;
-          m.context_usage = evt.context_usage || null;
-          m.streaming = false;
-        }
-      }
-    }
+    await consumeAnswerStream(res, msgId);
     const m = messages.value.find((x) => x.id === msgId);
     if (m) {
       m.streaming = false;
-      if (!m.content) m.content = '_(empty response)_';
+      if (!m.content && !m.approval) m.content = '_(empty response)_';
     }
   } catch (err: any) {
     const m = messages.value.find((x) => x.id === msgId);
@@ -394,6 +453,45 @@ const streamAnswer = async (text: string, domainRequest?: DomainContextRequest) 
       m.content = m.content || `❌ **Stream error:** ${err.message}`;
       m.streaming = false;
     }
+  }
+};
+
+// A paused answer waits for the user to approve or deny a side-effecting tool
+// call; the decision response is the rest of the answer, streamed into the
+// same message.
+const toApprovalView = (evt: any): ApprovalView => ({
+  id: String(evt.approval_id),
+  calls: Array.isArray(evt.calls) ? evt.calls.map((c: any) => ({
+    id: String(c.id), name: String(c.name), arguments: c.arguments && typeof c.arguments === 'object' ? c.arguments : {},
+    invalid: typeof c.invalid === 'string' ? c.invalid : null,
+  })) : [],
+  expiresAt: typeof evt.expires_at === 'string' ? evt.expires_at : null,
+  state: 'pending',
+});
+
+const decideApproval = async (msgId: string, decision: 'approve' | 'deny') => {
+  const m = messages.value.find((x) => x.id === msgId);
+  if (!m?.approval || m.approval.state !== 'pending') return;
+  const approvalId = m.approval.id;
+  m.approval = { ...m.approval, state: 'deciding' };
+  m.streaming = true;
+  try {
+    const res = await makeRequest(`/api/tool-approvals/${approvalId}`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ decision }),
+    });
+    if (!res.ok || !res.body) {
+      const data = await res.json().catch(() => ({}));
+      throw new Error(data.error || `Approval failed (${res.status})`);
+    }
+    await consumeAnswerStream(res, msgId);
+  } catch (err: any) {
+    const current = messages.value.find((x) => x.id === msgId);
+    if (current?.approval?.id === approvalId) current.approval = { ...current.approval, state: 'error', error: err.message };
+  } finally {
+    const current = messages.value.find((x) => x.id === msgId);
+    if (current) current.streaming = false;
   }
 };
 
@@ -414,7 +512,31 @@ const pushJobAnswer = (rData: any, queryId: string | undefined, text: string) =>
     query: text,
     queryId,
     routeName: rData.route_name || null,
+    toolCalls: mergeToolCalls([], rData.tool_calls),
+    tools: rData.tools || null,
+    approval: rData.paused && rData.approval ? toApprovalView(rData.approval) : null,
   });
+};
+
+// `path:line` citation preview: the chat asks for the lines around a cited
+// location of the attached project.
+const citationPreview = ref<CitationPreview | null>(null);
+const openCitation = async (path: string, line: number) => {
+  citationPreview.value = { path, line, loading: true };
+  try {
+    const res = await makeRequest('/api/code/read', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ filename: activeFileName.value, ...activeSourceFields(), path, line }),
+    });
+    const data = await res.json().catch(() => ({}));
+    if (citationPreview.value?.path !== path || citationPreview.value.line !== line) return;
+    citationPreview.value = res.ok
+      ? { path: data.path || path, line, startLine: data.start_line, content: data.content, totalLines: data.total_lines, loading: false }
+      : { path, line, loading: false, error: data.error || `Source unavailable (${res.status})` };
+  } catch (err: any) {
+    citationPreview.value = { path, line, loading: false, error: err?.message || 'Source unavailable.' };
+  }
 };
 
 // GATE, no project attached: POST the question with preview:true to the
@@ -1081,6 +1203,21 @@ onUnmounted(() => window.removeEventListener('popstate', syncTabFromHistory));
         <select v-model="memberRole" class="rounded-md border border-slate-800 bg-slate-950 px-2 py-1 text-xs text-slate-200"><option value="viewer">viewer</option><option value="operator">operator</option><option value="admin">admin</option></select>
         <button @click="saveProjectMember" class="rounded-md bg-indigo-600 px-2 py-1 text-[10px] text-white">Add / update</button>
         <span v-for="member in members" :key="member.subject" class="flex items-center gap-1 rounded border border-slate-800 px-2 py-1 text-[10px] text-slate-300">{{ member.subject }} · {{ member.role }}<button @click="deleteProjectMember(member.subject)" class="ml-1 text-rose-400">×</button></span>
+        <label
+          class="ml-auto flex items-center gap-2 rounded border border-slate-800 px-2 py-1 text-[10px] text-slate-300"
+          :title="'Retrieved code and code-tool results for ' + (uploadProjectId || 'this project') + ' are sent to the external model only when this is on.'"
+        >
+          <input
+            type="checkbox"
+            class="h-3.5 w-3.5 accent-indigo-400"
+            :checked="remoteSourceAllowed === true"
+            :disabled="remoteSourceAllowed === null || remoteSourceSaving"
+            @change="toggleRemoteSource"
+          />
+          Allow source to go to the external model
+          <span v-if="remoteSourceAllowed === null" class="text-slate-500">· loading</span>
+          <span v-else-if="!remoteSourceAllowed" class="text-amber-300/80">· chat is blocked for this project</span>
+        </label>
       </div>
       <header class="app-header h-16 px-6 flex items-center justify-between select-none backdrop-blur">
         <div class="flex items-center gap-2">
@@ -1134,6 +1271,13 @@ onUnmounted(() => window.removeEventListener('popstate', syncTabFromHistory));
         :gatePreview="gatePreview"
         @confirmSend="confirmGateSend"
         @cancelSend="cancelGateSend"
+        @openCitation="openCitation"
+        @decideApproval="decideApproval"
+      />
+      <CodeCitationModal
+        v-if="activeTab === 'chat' && citationPreview"
+        :preview="citationPreview"
+        @close="citationPreview = null"
       />
 
       <KnowledgeBaseView

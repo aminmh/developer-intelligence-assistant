@@ -125,6 +125,13 @@ function businessRulesAllowed(res: express.Response, projectId: unknown): boolea
   return typeof projectId === 'string' && !!projectId && Boolean(user && (authIsBootstrapAdmin(user) || authRoleFor(user, projectId)));
 }
 
+// Python trusts X-User-Id only with the internal secret; it makes the signed-in
+// user the owner of any agent run that pauses for a tool approval.
+function answerOwnerHeaders(res: express.Response): Record<string, string> {
+  const user = (res.locals as any).authUser;
+  return user?.sub ? { 'X-Internal-Secret': INTERNAL_SECRET, 'X-User-Id': String(user.sub) } : {};
+}
+
 async function authorizeAttachedUpload(
   res: express.Response,
   filename: unknown,
@@ -594,7 +601,9 @@ async function startServer() {
   });
   const proxyToolMutation = (method: string, suffix: string) => async (req: any, res: any) => {
     try {
-      const pyRes = await fetch(`${PYTHON_API_URL}/tools/${encodeURIComponent(req.params.id)}${suffix}`, { method, headers: { 'Content-Type': 'application/json', 'X-Internal-Secret': INTERNAL_SECRET }, body: method === 'GET' ? undefined : JSON.stringify(req.body || {}) });
+      // POST /api/tools (create) has no id; every other mutation targets /tools/{id}.
+      const target = req.params.id === undefined ? '/tools' : `/tools/${encodeURIComponent(req.params.id)}${suffix}`;
+      const pyRes = await fetch(`${PYTHON_API_URL}${target}`, { method, headers: { 'Content-Type': 'application/json', 'X-Internal-Secret': INTERNAL_SECRET }, body: method === 'GET' ? undefined : JSON.stringify(req.body || {}) });
       const data = await pyRes.json().catch(() => ({ success: false, error: 'Tool request failed.' }));
       return res.status(pyRes.status).json(data);
     } catch (error: any) { return res.status(500).json({ success: false, error: error.message }); }
@@ -1824,6 +1833,7 @@ async function startServer() {
           headers: {
             'Content-Type': 'application/json',
             'X-RAG-Trace-Id': queryId,
+            ...answerOwnerHeaders(res),
           },
           // Forward the client body verbatim (so preview/preview_mode ride
           // along) while pinning the computed query/route/use_remote fields.
@@ -1851,6 +1861,119 @@ async function startServer() {
     } catch (error: any) {
       console.error('Query execution error:', error);
       res.status(500).json({ success: false, error: error.message });
+    }
+  });
+
+  // Per-project consent for sending project source to the external model
+  // (ADR remote-model-source-access-requires-project-consent). Project members
+  // can read it; only project administrators can change it.
+  const remoteSourcePath = (projectId: string) =>
+    `${PYTHON_API_URL}/projects/${encodeURIComponent(projectId)}/remote-source`;
+
+  app.get('/api/auth/projects/:projectId/remote-source', async (req, res) => {
+    try {
+      const user = (res.locals as any).authUser;
+      if (!authIsBootstrapAdmin(user) && !authRoleFor(user, req.params.projectId)) {
+        return res.status(403).json({ detail: 'Project access denied.' });
+      }
+      const pyRes = await fetch(remoteSourcePath(req.params.projectId), { headers: { 'X-Internal-Secret': INTERNAL_SECRET } });
+      const data = await pyRes.json().catch(() => ({ detail: 'The setting is unavailable.' }));
+      return res.status(pyRes.status).json(data);
+    } catch {
+      return res.status(502).json({ detail: 'The setting is unavailable.' });
+    }
+  });
+
+  app.put('/api/auth/projects/:projectId/remote-source', async (req, res) => {
+    try {
+      const user = (res.locals as any).authUser;
+      if (!authIsBootstrapAdmin(user) && authRoleFor(user, req.params.projectId) !== 'admin') {
+        return res.status(403).json({ detail: 'Project administrator access is required to change this setting.' });
+      }
+      if (typeof req.body?.allowed !== 'boolean') {
+        return res.status(400).json({ detail: 'allowed must be true or false.' });
+      }
+      const pyRes = await fetch(remoteSourcePath(req.params.projectId), {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json', 'X-Internal-Secret': INTERNAL_SECRET },
+        body: JSON.stringify({ allowed: req.body.allowed }),
+      });
+      const data = await pyRes.json().catch(() => ({ detail: 'The setting could not be saved.' }));
+      return res.status(pyRes.status).json(data);
+    } catch {
+      return res.status(502).json({ detail: 'The setting could not be saved.' });
+    }
+  });
+
+  // Approve or deny a paused agent tool call (ADR paused-agent-runs-resume-from-
+  // checkpoint-on-new-stream). The response is the continued answer as SSE.
+  // Only the user who started the chat may decide (enforced in Python), and on a
+  // project only operators and administrators may approve side effects.
+  app.post('/api/tool-approvals/:approvalId', async (req, res) => {
+    try {
+      const user = (res.locals as any).authUser;
+      const approvalId = req.params.approvalId;
+      if (!/^[0-9a-f]{32}$/.test(approvalId)) return res.status(400).json({ success: false, error: 'Invalid approval.' });
+      const decision = req.body?.decision;
+      if (decision !== 'approve' && decision !== 'deny') {
+        return res.status(400).json({ success: false, error: 'decision must be approve or deny.' });
+      }
+      const infoRes = await fetch(`${PYTHON_API_URL}/tool-approvals/${approvalId}`, { headers: { 'X-Internal-Secret': INTERNAL_SECRET } });
+      const info = await infoRes.json().catch(() => ({}));
+      if (!infoRes.ok) return res.status(infoRes.status).json({ success: false, error: info.detail || 'Approval unavailable.' });
+      if (decision === 'approve' && info.project_id && !authIsBootstrapAdmin(user)
+        && !['operator', 'admin'].includes(authRoleFor(user, info.project_id) || '')) {
+        return res.status(403).json({ success: false, error: 'Operator or administrator access is required to approve tool calls.' });
+      }
+      const pyRes = await fetch(`${PYTHON_API_URL}/tool-approvals/${approvalId}`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', ...answerOwnerHeaders(res) },
+        body: JSON.stringify({ decision }),
+      });
+      if (!pyRes.ok || !pyRes.body) {
+        const err = await pyRes.json().catch(() => ({}));
+        return res.status(pyRes.status).json({ success: false, error: (err as any).detail || 'Approval failed.' });
+      }
+      res.writeHead(200, { 'Content-Type': 'text/event-stream', 'Cache-Control': 'no-cache', 'Connection': 'keep-alive', 'X-Accel-Buffering': 'no' });
+      const reader = (pyRes.body as any).getReader();
+      req.on('close', () => { reader.cancel().catch(() => {}); });
+      try {
+        for (;;) {
+          const { done, value } = await reader.read();
+          if (done) break;
+          res.write(Buffer.from(value));
+        }
+      } catch {
+        // Client disconnected or upstream died — close quietly.
+      }
+      res.end();
+    } catch (error: any) {
+      if (!res.headersSent) res.status(502).json({ success: false, error: error.message || 'Approval failed.' });
+      else res.end();
+    }
+  });
+
+  // Source preview for `path:line` citations in chat answers. Same upload
+  // authorization as the chat request; Python applies the code_read checks
+  // (project-relative paths, no dependency/build paths, no credential files).
+  app.post('/api/code/read', async (req, res) => {
+    try {
+      const { filename, upload_session_id, project_id, commit_sha, path, line } = req.body ?? {};
+      if (typeof filename !== 'string' || !filename) {
+        return res.status(400).json({ success: false, error: 'Attach a project to preview cited source.' });
+      }
+      if (!await authorizeAttachedUpload(res, filename, upload_session_id, project_id, commit_sha, false)) return;
+      const pythonUrl = process.env.PYTHON_API_URL || 'http://localhost:9002';
+      const pyRes = await fetch(`${pythonUrl}/code-tools/read`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ filename, project_id, commit_sha, path, line }),
+      });
+      const data = await pyRes.json().catch(() => ({}));
+      if (!pyRes.ok) return res.status(pyRes.status).json({ success: false, error: data.detail || 'Source unavailable.' });
+      return res.json(data);
+    } catch (error: any) {
+      return res.status(502).json({ success: false, error: error.message || 'Source unavailable.' });
     }
   });
 
@@ -1909,6 +2032,7 @@ async function startServer() {
         headers: {
           'Content-Type': 'application/json',
           'X-RAG-Trace-Id': queryId,
+            ...answerOwnerHeaders(res),
         },
         // Forward the client body verbatim (so preview/preview_mode and any
         // other keys ride along) while pinning computed fields below.
@@ -2044,6 +2168,7 @@ async function startServer() {
           headers: {
             'Content-Type': 'application/json',
             'X-RAG-Trace-Id': jobToQueryId.get(job_id) || job_id,
+            ...answerOwnerHeaders(res),
           },
           body: JSON.stringify({
             query: actualQuery,
@@ -2059,6 +2184,11 @@ async function startServer() {
             project_profile: (status as any).project_profile ?? undefined,
             use_remote: wantRemote,
             route: status.route_name || 'explain',
+            // Project identity from the job record lets code tools read the
+            // indexed revision instead of a retained upload workspace.
+            ...((status as any).project_id
+              ? { project_id: (status as any).project_id, commit_sha: (status as any).commit_sha || undefined }
+              : {}),
             ...(typeof req.body?.domain_context_mode === 'string'
               ? { domain_context_mode: req.body.domain_context_mode }
               : {}),
@@ -2088,6 +2218,10 @@ async function startServer() {
         result.context_preview = answer.context_preview;
         result.preview_only = answer.preview_only;
         result.preview_mode = answer.preview_mode;
+        result.tool_calls = answer.tool_calls || [];
+        result.tools = answer.tools || null;
+        result.paused = Boolean(answer.paused);
+        result.approval = answer.approval || null;
 
         if (previewRequested) {
           // Never cache a preview-only response; return it straight to the
@@ -2116,6 +2250,10 @@ async function startServer() {
           context_preview: result.context_preview,
           preview_only: result.preview_only,
           preview_mode: result.preview_mode,
+          tool_calls: result.tool_calls,
+          tools: result.tools,
+          paused: result.paused,
+          approval: result.approval,
           steps: result.steps,
           status: result.status,
           route_name: result.route_name,
