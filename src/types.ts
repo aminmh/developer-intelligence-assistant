@@ -388,6 +388,42 @@ export interface RetrievalInsightSource {
   score: number;
 }
 
+/** One model tool call as recorded in the answer trace (`agent.tool_calls`). */
+export interface AgentTraceCall {
+  id: string | null;
+  name: string;
+  arguments: Record<string, unknown> | string;
+  status: 'success' | 'error' | null;
+  error: string | null;
+  duration_ms: number | null;
+  truncated: boolean;
+  source: string | null;
+  effect: string | null;
+  version: string;
+}
+
+/** The source revision the model's tools read. */
+export interface AgentTraceRevision {
+  project_id: string | null;
+  revision_id: string | null;
+  commit_sha: string | null;
+  workflow: string;
+  source?: 'revision' | 'workspace' | null;
+  source_error?: string;
+  archive_sha256?: string | null;
+  project_root?: string;
+  workspace?: string;
+}
+
+/** The tool-calling part of an answer's trace; absent when no agent ran. */
+export interface AgentTrace {
+  status: 'done' | 'truncated' | 'paused';
+  model: string | null;
+  approval_id?: string;
+  revision: AgentTraceRevision;
+  tool_calls: AgentTraceCall[];
+}
+
 export interface RetrievalInsights {
   trace_id: string;
   query_hash: string;
@@ -411,6 +447,7 @@ export interface RetrievalInsights {
     latency_ms: number;
     fallback_reason?: string | null;
   };
+  agent?: AgentTrace;
 }
 
 export interface QueryResponse {

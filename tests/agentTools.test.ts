@@ -73,3 +73,23 @@ test('schema text must be empty or a JSON object schema', async () => {
   assert.match(parseSchemaText('[]').error!, /JSON object/);
   assert.match(parseSchemaText('{"type":"string"}').error!, /"type": "object"/);
 });
+
+test('agent trace headlines name the outcome, call count and failures', async () => {
+  const { describeAgentRun, describeTraceRevision, traceArguments } = await import('../src/utils/agentTools');
+  const call = (status: 'success' | 'error') => ({ id: null, name: 'code_read', arguments: {}, status, error: null,
+    duration_ms: 3, truncated: false, source: 'builtin', effect: 'read_only', version: 'builtin' });
+  const agent = {
+    status: 'truncated' as const, model: 'm',
+    revision: { project_id: 'pizza', revision_id: 'rev_1', commit_sha: '1670d9ecc83f95d2', workflow: 'search',
+      source: 'revision' as const, archive_sha256: '96721091694a1c8b', project_root: '.' },
+    tool_calls: [call('success'), call('error')],
+  };
+
+  assert.equal(describeAgentRun(agent), 'Stopped at the tool-call limit · 2 calls · 1 failed');
+  assert.equal(describeTraceRevision(agent), 'commit 1670d9e · archive 96721091');
+  assert.equal(describeTraceRevision({ ...agent, revision: { ...agent.revision, source: 'workspace', workspace: 'upload_42' } }),
+    'uploaded workspace upload_42');
+  assert.equal(describeTraceRevision({ ...agent, revision: { project_id: null, revision_id: null, commit_sha: null,
+    workflow: 'chat', source: null, source_error: 'no_source' } }), 'no project source');
+  assert.deepEqual(traceArguments('{"q": "cut…'), {});
+});

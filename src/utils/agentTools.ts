@@ -1,4 +1,4 @@
-import type { ToolCallView } from '../types';
+import type { AgentTrace, ToolCallView } from '../types';
 
 /** Merge `tool_completed` events or a finished answer's `tool_calls` into the calls shown so far. */
 export function mergeToolCalls(current: ToolCallView[] | undefined, finished: unknown): ToolCallView[] {
@@ -124,4 +124,37 @@ export function parseSchemaText(text: string): { schema: Record<string, unknown>
     return { schema: null, error: 'Argument schema must have "type": "object".' };
   }
   return { schema: value as Record<string, unknown>, error: null };
+}
+
+const RUN_STATUS: Record<AgentTrace['status'], string> = {
+  done: 'Finished',
+  truncated: 'Stopped at the tool-call limit',
+  paused: 'Waiting for approval',
+};
+
+/** Headline for an answer's tool trace, e.g. `Finished · 3 calls · 1 failed`. */
+export function describeAgentRun(agent: AgentTrace): string {
+  const calls = agent.tool_calls.length;
+  const failed = agent.tool_calls.filter((call) => call.status !== 'success').length;
+  const parts = [RUN_STATUS[agent.status] ?? agent.status, calls === 1 ? '1 call' : `${calls} calls`];
+  if (failed) parts.push(`${failed} failed`);
+  return parts.join(' · ');
+}
+
+/** Which source the tools read, e.g. `commit 1670d9e · archive 96721091`. */
+export function describeTraceRevision(agent: AgentTrace): string {
+  const rev = agent.revision ?? ({} as AgentTrace['revision']);
+  if (rev.source === 'workspace') return `uploaded workspace ${rev.workspace ?? ''}`.trim();
+  const parts: string[] = [];
+  if (rev.commit_sha) parts.push(`commit ${rev.commit_sha.slice(0, 7)}`);
+  else if (rev.revision_id) parts.push(`revision ${rev.revision_id}`);
+  if (rev.archive_sha256) parts.push(`archive ${rev.archive_sha256.slice(0, 8)}`);
+  if (rev.project_root && rev.project_root !== '.') parts.push(`root ${rev.project_root}`);
+  if (rev.source_error) parts.push(describeToolError(rev.source_error));
+  return parts.join(' · ') || 'no project revision';
+}
+
+/** Trace arguments may be cut to a string; keep only real objects for `describeToolCall`. */
+export function traceArguments(value: Record<string, unknown> | string): Record<string, unknown> {
+  return value && typeof value === 'object' ? value : {};
 }

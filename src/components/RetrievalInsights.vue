@@ -1,7 +1,8 @@
 <script setup lang="ts">
 import { ref } from 'vue';
-import { ChevronDown, ChevronUp, CircleAlert, Database, GitBranch, Loader2, Sparkles } from 'lucide-vue-next';
+import { ChevronDown, ChevronUp, CircleAlert, CircleCheck, CircleX, Database, GitBranch, Loader2, Sparkles, Wrench } from 'lucide-vue-next';
 import type { RetrievalInsights } from '../types';
+import { describeAgentRun, describeToolCall, describeToolError, describeTraceRevision, traceArguments } from '../utils/agentTools';
 
 const props = defineProps<{ queryId: string }>();
 
@@ -11,7 +12,8 @@ const error = ref<string | null>(null);
 const insights = ref<RetrievalInsights | null>(null);
 
 const load = async () => {
-  if (insights.value || loading.value) return;
+  // A run waiting for approval gains more calls once it resumes, so fetch it again.
+  if ((insights.value && insights.value.agent?.status !== 'paused') || loading.value) return;
   loading.value = true;
   error.value = null;
   try {
@@ -137,6 +139,37 @@ const modeClasses = (mode: RetrievalInsights['mode']) => {
             >GRAPH</span>
             <span class="text-[9px] text-slate-500 font-mono">{{ Math.round(source.score * 100) }}%</span>
           </div>
+        </div>
+
+        <div v-if="insights.agent" class="mt-3 space-y-1.5">
+          <div class="flex items-center justify-between gap-2">
+            <p class="text-[9px] uppercase tracking-wider text-slate-500 font-semibold">Model tools</p>
+            <span class="text-[9px] text-slate-500 font-mono truncate">{{ insights.agent.model }}</span>
+          </div>
+          <p class="text-[10px] text-slate-300 font-mono">{{ describeAgentRun(insights.agent) }}</p>
+          <p class="text-[9px] text-slate-500 font-mono truncate" :title="insights.agent.revision.archive_sha256 || ''">
+            Source: {{ describeTraceRevision(insights.agent) }}
+          </p>
+          <div
+            v-for="(call, index) in insights.agent.tool_calls"
+            :key="call.id || `${call.name}-${index}`"
+            class="flex items-center gap-2 rounded-lg bg-slate-900/40 border border-slate-800 px-2.5 py-2"
+          >
+            <CircleCheck v-if="call.status === 'success'" class="w-3 h-3 text-emerald-400 shrink-0" />
+            <CircleX v-else class="w-3 h-3 text-rose-400 shrink-0" />
+            <Wrench class="w-3 h-3 text-slate-500 shrink-0" />
+            <span class="min-w-0 flex-1 truncate text-[10px] text-slate-300 font-mono"
+                  :title="typeof call.arguments === 'string' ? call.arguments : JSON.stringify(call.arguments)">
+              {{ describeToolCall({ name: call.name, arguments: traceArguments(call.arguments) }) }}
+              <span v-if="call.error" class="text-rose-300"> — {{ describeToolError(call.error) }}</span>
+              <span v-else-if="call.truncated" class="text-amber-300"> — output truncated</span>
+            </span>
+            <span class="shrink-0 text-[8px] text-slate-500 font-mono max-w-[9rem] truncate" :title="call.version">{{ call.version }}</span>
+            <span v-if="call.duration_ms != null" class="shrink-0 text-[9px] text-slate-500 font-mono">{{ Math.round(call.duration_ms) }}ms</span>
+          </div>
+          <p v-if="!insights.agent.tool_calls.length" class="text-[9px] text-slate-500 font-mono">
+            The model answered from retrieval without calling tools.
+          </p>
         </div>
 
         <p class="mt-3 pt-3 border-t border-slate-800 text-[9px] leading-relaxed text-slate-600">
