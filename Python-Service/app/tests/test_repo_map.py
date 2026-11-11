@@ -159,3 +159,25 @@ def test_stored_map_paths_drop_the_archive_wrapper_folder(tmp_path, monkeypatch)
     repo_map.store_repo_map("c" * 64, repo_map.build_repo_map([_chunk("f", file="proxy/main.go")]))
 
     assert [f["path"] for f in _repo_map({}, ToolContext(workflow="search"))["files"]] == ["main.go"]
+
+
+def test_partly_qualified_names_resolve_to_the_matching_owner():
+    from inspection.service import InspectionService
+
+    class Query:
+        def resolve_by_fqn(self, collection, fqn):
+            return []
+
+        def resolve_by_name(self, collection, name):
+            rows = [{"fqn": "App\\Enums\\UserRole::isAdmin"}, {"fqn": "App\\Models\\User::isAdmin"}]
+            return rows if name == "isAdmin" else []
+
+    service = InspectionService.__new__(InspectionService)
+    service._query = Query()
+    fqns = lambda name: [r["fqn"] for r in service.resolve_symbol("c", name)]  # noqa: E731
+
+    assert fqns("User::isAdmin") == ["App\\Models\\User::isAdmin"]
+    assert fqns("Models\\User::isAdmin") == ["App\\Models\\User::isAdmin"]
+    assert fqns("User->isAdmin") == fqns("User.isAdmin") == ["App\\Models\\User::isAdmin"]
+    assert fqns("isAdmin") == ["App\\Enums\\UserRole::isAdmin", "App\\Models\\User::isAdmin"]
+    assert fqns("Nope::isAdmin") == []

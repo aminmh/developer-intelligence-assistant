@@ -206,7 +206,23 @@ class InspectionService:
         rows = self._query.resolve_by_fqn(collection, fqn)
         if rows:
             return rows
-        return self._query.resolve_by_name(collection, symbol.strip())
+        rows = self._query.resolve_by_name(collection, symbol.strip())
+        if rows:
+            return rows
+        return self._resolve_partial(collection, fqn)
+
+    def _resolve_partial(self, collection: str, symbol: str) -> list[dict[str, Any]]:
+        """Partly qualified names: `User::isAdmin`, `Models\\User`, `User.isAdmin`, `User->isAdmin`.
+
+        Looks up the last segment by name and keeps definitions whose full name ends with
+        the given qualifier, so `User::isAdmin` matches `App\\Models\\User::isAdmin` only.
+        """
+        partial = re.sub(r"->|\.(?=[A-Za-z_][A-Za-z0-9_]*$)", "::", symbol.strip())
+        last = re.split(r"::|\\", partial)[-1]
+        if not last or last == partial:
+            return []
+        return [row for row in self._query.resolve_by_name(collection, last)
+                if (str(row.get("fqn") or "") == partial or str(row.get("fqn") or "").endswith("\\" + partial))]
 
     def list_projects(self) -> list[dict[str, Any]]:
         return self._query.list_projects()
