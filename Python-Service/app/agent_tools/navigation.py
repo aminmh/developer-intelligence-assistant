@@ -266,8 +266,12 @@ def _symbol_row(record: dict[str, Any], root: SourceRoot | None) -> dict[str, An
     # The edge's origin when this row is a reference, else the definition's; older graphs have neither.
     edge = record.get("ref") if isinstance(record.get("ref"), dict) else {}
     origin = edge.get("origin") or record.get("origin") or "php-parser"
+    # Reference rows locate the call site (edge) but name the calling or called definition (record).
     return {"path": path, "line": node.get("line") or node.get("start_line"),
-            "kind": node.get("kind"), "symbol": node.get("fqn") or node.get("name"), "origin": origin}
+            "kind": node.get("kind"), "symbol": record.get("fqn") or record.get("name"), "origin": origin}
+
+
+_MAX_LOOKUP_DEFINITIONS = 5
 
 
 def _symbol_lookup(args: dict[str, Any], context: ToolContext) -> dict[str, Any]:
@@ -295,14 +299,17 @@ def _symbol_lookup(args: dict[str, Any], context: ToolContext) -> dict[str, Any]
     else:
         if not definitions:
             return {"coverage": "complete", "items": [], "detail": f"No definition named {name} in the symbol graph."}
-        fqn = str(definitions[0].get("fqn") or name)
-        if relation == "references":
-            rows = service.find_references(collection, fqn, name=name)
-        elif relation == "implementations":
-            rows = service.find_implementations(collection, fqn)
-        else:
-            hierarchy = service.call_hierarchy(collection, fqn, name=name) or {}
-            rows = hierarchy.get(relation, []) if isinstance(hierarchy, dict) else []
+        # A short name can match several definitions (User::isAdmin, UserRole::isAdmin); look up each.
+        rows = []
+        for definition in definitions[:_MAX_LOOKUP_DEFINITIONS]:
+            fqn = str(definition.get("fqn") or name)
+            if relation == "references":
+                rows += service.find_references(collection, fqn, name=name)
+            elif relation == "implementations":
+                rows += service.find_implementations(collection, fqn)
+            else:
+                hierarchy = service.call_hierarchy(collection, fqn, name=name) or {}
+                rows += hierarchy.get(relation, []) if isinstance(hierarchy, dict) else []
     items = [row for row in (_symbol_row(r, root) for r in rows if isinstance(r, dict)) if row]
     items.sort(key=lambda i: (i.get("path") or "", i.get("line") or 0))
     return {"coverage": "complete", "relation": relation, "items": items[:limit], "truncated": len(items) > limit,
@@ -320,8 +327,13 @@ def _repo_map(args: dict[str, Any], context: ToolContext) -> dict[str, Any]:
     root = resolve_source(context)
     repo_map = map_for_source(root.path, root.archive_sha256)
     glob = str(args.get("path_glob") or "")
-    files = [f for f in repo_map.get("files") or []
-             if not root.is_excluded(f["path"]) and (not glob or fnmatch(f["path"], glob))]
+    # Maps stored at index time hold archive paths; the other tools use paths below the project root.
+    prefix = root.wrapper_prefix + "/" if root.wrapper_prefix else ""
+    files = []
+    for entry in repo_map.get("files") or []:
+        path = entry["path"][len(prefix):] if prefix and entry["path"].startswith(prefix) else entry["path"]
+        if not root.is_excluded(path) and (not glob or fnmatch(path, glob)):
+            files.append({**entry, "path": path})
     limit = int(args.get("max_files", 25))
     return {
         "source": root.origin,

@@ -122,3 +122,40 @@ def test_census_without_scc_keeps_file_counts(tmp_path, monkeypatch):
 
     census = structure_profile.language_census(tmp_path, line_counts=True)
     assert census["languages"] == [{"language": "go", "files": 1}] and "line_counts_source" not in census
+
+
+def test_reference_rows_name_the_calling_definition_not_the_edge():
+    row = _symbol_row({"kind": "method", "fqn": "p\\Server::ServeHTTP", "file": "main.go", "line": 10,
+                       "ref": {"kind": "method_call", "file": "main.go", "line": 238, "origin": "tree-sitter"}}, None)
+    assert (row["symbol"], row["line"], row["kind"]) == ("p\\Server::ServeHTTP", 238, "method_call")
+
+
+def test_lookup_covers_every_definition_sharing_a_short_name(monkeypatch):
+    class Service:
+        def list_projects(self):
+            return [{"collection": "sym_x", "project_id": "p", "commit_sha": "c"}]
+
+        def resolve_symbol(self, collection, name):
+            return [{"fqn": "App\\Enums\\UserRole::isAdmin"}, {"fqn": "App\\Models\\User::isAdmin"}]
+
+        def call_hierarchy(self, collection, fqn, name=None):
+            callers = [{"fqn": "App\\Policies\\CartPolicy::view", "file": "app/Policies/CartPolicy.php", "line": 14,
+                        "ref": {"file": "app/Policies/CartPolicy.php", "line": 14}}]
+            return {"callers": callers if "Models" in fqn else []}
+
+    monkeypatch.setattr("inspection.service.inspection_service", lambda: Service())
+    monkeypatch.setattr("agent_tools.navigation._graph_collection", lambda context, projects: "sym_x")
+    monkeypatch.setattr("agent_tools.navigation.resolve_source", lambda context: (_ for _ in ()).throw(
+        __import__("agent_tools.types", fromlist=["ToolCallRejected"]).ToolCallRejected("no_source", "none")))
+    from agent_tools.navigation import _symbol_lookup
+
+    result = _symbol_lookup({"symbol": "isAdmin", "relation": "callers"}, ToolContext(workflow="search"))
+    assert [i["symbol"] for i in result["items"]] == ["App\\Policies\\CartPolicy::view"]
+
+
+def test_stored_map_paths_drop_the_archive_wrapper_folder(tmp_path, monkeypatch):
+    root = SourceRoot(path=tmp_path, origin="revision", archive_sha256="c" * 64, wrapper_prefix="proxy")
+    monkeypatch.setattr("agent_tools.navigation.resolve_source", lambda context: root)
+    repo_map.store_repo_map("c" * 64, repo_map.build_repo_map([_chunk("f", file="proxy/main.go")]))
+
+    assert [f["path"] for f in _repo_map({}, ToolContext(workflow="search"))["files"]] == ["main.go"]

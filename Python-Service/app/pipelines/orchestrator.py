@@ -1009,13 +1009,41 @@ class Orchestrator:
             )
             return None
 
+    @staticmethod
+    def _non_php_index(workspace_path: str) -> dict[str, Any] | None:
+        """Chunks and symbol export for a project without PHP; None keeps the PHP parser.
+
+        Same rule as snapshot indexing: any PHP file keeps the PHP CLI. Go, Java, C#,
+        Ruby, and Rust also return a symbol export; Python and JS/TS return chunks only.
+        """
+        from projects.structure_profile import language_census
+
+        census = language_census(workspace_path)
+        primary = census.get("primary")
+        if primary is None or any(lang.get("language") == "php" and lang.get("files")
+                                  for lang in census.get("languages") or []):
+            return None
+        from projects.lang_index import produce_chunks
+
+        result = produce_chunks(workspace_path, primary)
+        chunks = result.get("chunks") or []
+        if not chunks:
+            return {"error": f"No code index for this {primary} project: {result.get('error') or 'no definitions found'}"}
+        exported = result.get("symbol_index") or {}
+        return {"chunks": chunks, "definitions": exported.get("definitions") or [],
+                "references": exported.get("references") or []}
+
     def _php_code_parse(self, workspace_path: str | None, args: dict[str, Any]) -> dict[str, Any]:
         if not workspace_path or not os.path.isdir(workspace_path):
             return {"success": False, "error": f"Workspace not found: {workspace_path}"}
 
-        from infra.php_tools import run_code_index
+        index = self._non_php_index(workspace_path)
+        if index is not None and index.get("error"):
+            return {"success": False, "error": index["error"]}
+        if index is None:
+            from infra.php_tools import run_code_index
 
-        index = run_code_index(workspace_path)
+            index = run_code_index(workspace_path)
         definitions = index.get("definitions", [])
         references = index.get("references", [])
         symbol_index: dict[str, Any] = {
