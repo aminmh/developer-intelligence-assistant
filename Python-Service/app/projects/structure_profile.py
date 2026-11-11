@@ -651,9 +651,56 @@ def _collect(root: Path) -> dict[str, Any]:
     }
 
 
+# scc's language names -> census keys (LANG_EXTENSIONS).
+_SCC_LANGUAGES: dict[str, str] = {
+    "PHP": "php", "Python": "python", "JavaScript": "javascript", "JSX": "javascript",
+    "TypeScript": "typescript", "TypeScript Typings": "typescript", "TSX": "typescript",
+    "Java": "java", "Go": "go", "Ruby": "ruby", "Rust": "rust", "C#": "csharp",
+    "C++": "cpp", "C++ Header": "cpp", "C": "c", "C Header": "c",
+}
+_SCC_TIMEOUT_SECONDS = 30
+
+
+def _scc_line_counts(root: Path) -> dict[str, dict[str, int]] | None:
+    """Per-language line, code, comment, and blank counts from scc; None when scc is unavailable."""
+    import json
+    import shutil
+    import subprocess
+
+    binary = shutil.which("scc")
+    if binary is None:
+        return None
+    try:
+        proc = subprocess.run(
+            [binary, "--format", "json", "--no-cocomo", "--exclude-dir", ",".join(sorted(_SKIP_DIR_NAMES)), "."],
+            cwd=str(root), capture_output=True, text=True, timeout=_SCC_TIMEOUT_SECONDS, check=False)
+        rows = json.loads(proc.stdout or "[]") if proc.returncode == 0 else None
+    except (OSError, subprocess.SubprocessError, ValueError):
+        return None
+    if not isinstance(rows, list):
+        return None
+    counts: dict[str, dict[str, int]] = {}
+    for row in rows:
+        lang = _SCC_LANGUAGES.get(str(row.get("Name"))) if isinstance(row, dict) else None
+        if lang is None:
+            continue
+        entry = counts.setdefault(lang, {"lines": 0, "code": 0, "comments": 0, "blanks": 0})
+        for ours, theirs in (("lines", "Lines"), ("code", "Code"), ("comments", "Comment"), ("blanks", "Blank")):
+            entry[ours] += int(row.get(theirs) or 0)
+    return counts
+
+
+def _with_line_counts(root: Path, languages: list[dict[str, Any]]) -> tuple[list[dict[str, Any]], bool]:
+    """Census languages with scc's line counts merged in, and whether scc ran."""
+    counts = _scc_line_counts(root)
+    if counts is None:
+        return languages, False
+    return [{**lang, **counts.get(lang["language"], {})} for lang in languages], True
+
+
 # --- public step functions ------------------------------------------------------
 
-def language_census(workspace_path: str | Path) -> dict[str, Any]:
+def language_census(workspace_path: str | Path, *, line_counts: bool = False) -> dict[str, Any]:
     """Walk the tree once and count languages + manifests.
 
     Skips ``_SKIP_DIR_NAMES`` (case-insensitively), sorts every level, and
@@ -661,6 +708,9 @@ def language_census(workspace_path: str | Path) -> dict[str, Any]:
     (source, manifests, READMEs, assets — truthful), while ``languages`` keeps
     per-language counts separate. Returns
     ``{"languages": [...], "total_files", "primary", "manifests"}``.
+
+    ``line_counts`` adds scc's ``lines``/``code``/``comments``/``blanks`` to
+    each language (and ``line_counts_source: "scc"``) when scc is installed.
     """
     root = _resolve_root(workspace_path)
     empty = {
@@ -673,12 +723,17 @@ def language_census(workspace_path: str | Path) -> dict[str, Any]:
         return empty
     try:
         census = _collect(root)
-        return {
+        result = {
             "languages": census["languages"],
             "total_files": census["total_files"],
             "primary": census["primary"],
             "manifests": census["manifests"][:_MAX_MANIFESTS],
         }
+        if line_counts:
+            result["languages"], ran = _with_line_counts(root, census["languages"])
+            if ran:
+                result["line_counts_source"] = "scc"
+        return result
     except OSError:
         return empty
 
@@ -792,6 +847,7 @@ def build_structure_profile(
 
     try:
         census = _collect(root)
+        census["languages"], scc_ran = _with_line_counts(root, census["languages"])
         _report(progress, 20, "language census")
         primary = census["primary"]
         rels = census["manifests"][:_MAX_MANIFESTS]
@@ -840,6 +896,7 @@ def build_structure_profile(
                 "database_confidence": db["confidence"],
                 "evidence": db["evidence"],
                 "languages": census["languages"],
+                "line_counts_source": "scc" if scc_ran else None,
                 "total_files": census["total_files"],
                 "top_level_dirs": arch["top_level_dirs"],
                 "entrypoints": arch["entrypoints"],

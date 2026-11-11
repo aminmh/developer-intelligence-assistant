@@ -163,7 +163,7 @@ UNWIND $data AS row
 MATCH (s:CodeSymbol {id: row.source_id})
 MATCH (t:CodeSymbol {id: row.target_id})
 MERGE (s)-[r:CALLS]->(t)
-SET r.collection = row.collection
+SET r.collection = row.collection, r.origin = row.origin
 RETURN count(*) AS count
 """
 
@@ -609,6 +609,14 @@ def build_embeddable_text(chunk: Dict[str, Any]) -> str:
     return text
 
 
+_ORIGIN_BY_LANGUAGE = {"javascript": "tree-sitter", "typescript": "tree-sitter", "python": "python-ast"}
+
+
+def _edge_origin(chunk: Dict[str, Any]) -> str:
+    """Which extractor found a call edge: the chunk's own origin, else by language (PHP parser by default)."""
+    return str(chunk.get("origin") or _ORIGIN_BY_LANGUAGE.get(str(chunk.get("language") or ""), "php-parser"))
+
+
 def _strip_none(mapping: Dict[str, Any]) -> Dict[str, Any]:
     return {k: v for k, v in mapping.items() if v is not None}
 
@@ -974,7 +982,8 @@ class CodePropertyGraph:
                     if dst is not None and (src, dst) not in seen_rels:
                         seen_rels.add((src, dst))
                         rel_rows.append({"source_id": src, "target_id": dst,
-                                         "label": "CALLS", "collection": collection_name})
+                                         "label": "CALLS", "collection": collection_name,
+                                         "origin": _edge_origin(c)})
                     continue
                 if not isinstance(target, str) or "::" not in target:
                     continue
@@ -996,6 +1005,7 @@ class CodePropertyGraph:
                         # traversal to the caller's project collection (legacy
                         # edges without the prop keep matching via IS NULL).
                         "collection": collection_name,
+                        "origin": _edge_origin(c),
                     }
                 )
 

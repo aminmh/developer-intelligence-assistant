@@ -104,7 +104,7 @@ def test_registry_exposes_builtins_and_valid_rest_tools():
 
     names = [t.name for t in registry.tools_for("search")]
 
-    assert names == ["code_outline", "code_read", "code_stats", "code_structural_search", "code_symbol_lookup",
+    assert names == ["code_outline", "code_read", "code_repo_map", "code_stats", "code_structural_search", "code_symbol_lookup",
                      "code_text_search", "get_item", "project_structure"]
     rest = next(t for t in registry.tools_for("search") if t.name == "get_item")
     assert rest.effect == EFFECT_SIDE_EFFECTING  # no effect configured

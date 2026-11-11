@@ -172,6 +172,7 @@ class InspectionService:
                     "file": r.get("file", ""),
                     "line": r.get("line", 0),
                     "to_member": r.get("to_member"),
+                    "origin": r.get("origin") or "php-parser",
                 }
             )
             linked += 1

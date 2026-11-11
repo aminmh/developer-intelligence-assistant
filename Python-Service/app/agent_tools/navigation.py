@@ -263,8 +263,11 @@ def _symbol_row(record: dict[str, Any], root: SourceRoot | None) -> dict[str, An
     path = _graph_path(node.get("file") or node.get("source_file"), root)
     if path and root is not None and root.is_excluded(path):
         return None
+    # The edge's origin when this row is a reference, else the definition's; older graphs have neither.
+    edge = record.get("ref") if isinstance(record.get("ref"), dict) else {}
+    origin = edge.get("origin") or record.get("origin") or "php-parser"
     return {"path": path, "line": node.get("line") or node.get("start_line"),
-            "kind": node.get("kind"), "symbol": node.get("fqn") or node.get("name"), "origin": "php-parser"}
+            "kind": node.get("kind"), "symbol": node.get("fqn") or node.get("name"), "origin": origin}
 
 
 def _symbol_lookup(args: dict[str, Any], context: ToolContext) -> dict[str, Any]:
@@ -303,7 +306,31 @@ def _symbol_lookup(args: dict[str, Any], context: ToolContext) -> dict[str, Any]
     items = [row for row in (_symbol_row(r, root) for r in rows if isinstance(r, dict)) if row]
     items.sort(key=lambda i: (i.get("path") or "", i.get("line") or 0))
     return {"coverage": "complete", "relation": relation, "items": items[:limit], "truncated": len(items) > limit,
-            "detail": "Static PHP graph: dynamic calls, reflection, and container resolution may be missing."}
+            "detail": "Static graph: dynamic calls, reflection, and container resolution may be missing; "
+                      "each item's origin names the extractor (php-parser or tree-sitter)."}
+
+
+# --- code_repo_map ----------------------------------------------------------------------------------------
+
+def _repo_map(args: dict[str, Any], context: ToolContext) -> dict[str, Any]:
+    from fnmatch import fnmatch
+
+    from agent_tools.repo_map import map_for_source
+
+    root = resolve_source(context)
+    repo_map = map_for_source(root.path, root.archive_sha256)
+    glob = str(args.get("path_glob") or "")
+    files = [f for f in repo_map.get("files") or []
+             if not root.is_excluded(f["path"]) and (not glob or fnmatch(f["path"], glob))]
+    limit = int(args.get("max_files", 25))
+    return {
+        "source": root.origin,
+        "ranking": "Files and symbols ranked by callers in other files (score, callers_elsewhere), then by all "
+                   "callers, in the static call graph. Dynamic calls and dependency injection may be missing.",
+        "symbols": repo_map.get("symbols", 0), "edges": repo_map.get("edges", 0),
+        "files": files[:limit], "truncated": len(files) > limit,
+        **({"error": repo_map["error"]} if repo_map.get("error") else {}),
+    }
 
 
 # --- code_stats -------------------------------------------------------------------------------------------
@@ -382,7 +409,7 @@ NAVIGATION_TOOLS = [
     ),
     _definition(
         "code_symbol_lookup",
-        "Look up a PHP symbol in the project's symbol graph: its definition, references, callers, callees, "
+        "Look up a symbol (PHP, Go, Java, C#, Ruby, or Rust) in the project's symbol graph: its definition, references, callers, callees, "
         "or implementations. Symbol may be a short name or a fully qualified name.",
         {"type": "object", "properties": {
             "symbol": {"type": "string", "minLength": 1, "maxLength": 300},
@@ -391,6 +418,16 @@ NAVIGATION_TOOLS = [
             "max_results": _MAX_RESULTS},
          "required": ["symbol"], "additionalProperties": False},
         _symbol_lookup,
+    ),
+    _definition(
+        "code_repo_map",
+        "Rank the project's files and their main classes, methods, and functions by how many other definitions "
+        "call them. Use it to find the central code for a broad question before searching or reading.",
+        {"type": "object", "properties": {
+            "path_glob": _PATH_GLOB,
+            "max_files": {"type": "integer", "minimum": 1, "maximum": 60, "default": 25},
+        }, "additionalProperties": False},
+        _repo_map,
     ),
     _definition(
         "code_stats",

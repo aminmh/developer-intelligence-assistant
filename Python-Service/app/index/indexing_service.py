@@ -174,7 +174,7 @@ class IndexingService:
             self.write_status(download_id, "embedding", 0, 0, collection_name)
             file_count = extract_zip_safely(zip_data, str(workdir))
             logger.info("Parse extracted %s files: %s", file_count, collection_name)
-            chunks = run_code_parse(str(workdir))
+            chunks, index, parse_error = self._parse_source(str(workdir), filename)
             snapshot = None
             if identity:
                 from telemetry.snapshot import Snapshot
@@ -187,18 +187,15 @@ class IndexingService:
                 for chunk in chunks:
                     chunk.update(snapshot.metadata())
                     chunk["symbol_id"] = from_chunk(chunk)
-            try:
-                from inspection.cli import inspect_index
-
-                index = inspect_index(str(workdir))
-            except Exception as exc:  # noqa: BLE001 — symbol graph is best-effort
-                logger.warning("Symbol export failed for %s: %s", filename, exc)
-                index = {"definitions": [], "references": []}
+            if chunks and identity:
+                self._store_repo_map(identity.get("source_archive_sha256"), chunks)
             if not chunks:
-                logger.warning("No PHP chunks produced: %s", collection_name)
+                logger.warning("No chunks produced: %s (%s)", collection_name, parse_error)
                 self.write_status(
                     download_id, "error", 0, 0, collection_name,
-                    error="No indexable PHP source was found. Upload a ZIP containing project PHP source outside dependency and generated directories.",
+                    error=parse_error or (
+                        "No indexable source was found. Upload a ZIP containing project source "
+                        "outside dependency and generated directories."),
                 )
                 return
             definitions = index.get("definitions", [])
@@ -234,6 +231,52 @@ class IndexingService:
             self.write_status(download_id, "error", 0, 0, collection_name, error=error)
         finally:
             shutil.rmtree(workdir, ignore_errors=True)
+
+    @staticmethod
+    def _store_repo_map(archive_sha256: str | None, chunks: list[dict[str, Any]]) -> None:
+        """Rank this revision's files and symbols for ``code_repo_map``. Best-effort."""
+        try:
+            from agent_tools.repo_map import build_repo_map, store_repo_map
+
+            store_repo_map(archive_sha256, build_repo_map(chunks))
+        except Exception as exc:  # noqa: BLE001 — the map is rebuilt from source on first use
+            logger.warning("Repository map not stored: %s", exc)
+
+    @staticmethod
+    def _parse_source(workdir: str, filename: str) -> tuple[list[dict[str, Any]], dict[str, Any], str | None]:
+        """Chunks, symbol export, and an error message for the project's primary language.
+
+        Projects with any PHP keep the PHP CLI parser and inspector. Go, Java, C#, Ruby, and Rust use the
+        Tree-sitter producer, which also returns the symbol export; Python and JS/TS
+        index chunks without a symbol graph.
+        """
+        from projects.structure_profile import language_census
+
+        census = language_census(workdir)
+        primary = census.get("primary")
+        has_php = any(lang.get("language") == "php" and lang.get("files") for lang in census.get("languages") or [])
+        # Any PHP keeps the PHP parser, as before: a Laravel app with a large frontend stays PHP.
+        if primary is None or has_php:
+            chunks = run_code_parse(workdir)
+            try:
+                from inspection.cli import inspect_index
+
+                index = inspect_index(workdir)
+            except Exception as exc:  # noqa: BLE001 — symbol graph is best-effort
+                logger.warning("Symbol export failed for %s: %s", filename, exc)
+                index = {"definitions": [], "references": []}
+            error = None if chunks else (
+                "No indexable PHP source was found. Upload a ZIP containing project PHP source "
+                "outside dependency and generated directories.")
+            return chunks, index, error
+        from projects.lang_index import produce_chunks
+
+        result = produce_chunks(workdir, primary)
+        index = result.get("symbol_index") or {"definitions": [], "references": []}
+        logger.info("Indexed %s with %s: %s chunks, coverage %s", filename, result.get("producer"),
+                    len(result.get("chunks") or []), result.get("coverage"))
+        error = result.get("error") and f"Project indexing failed for {primary}: {result['error']}"
+        return list(result.get("chunks") or []), index, error
 
     def _index_symbol_graph(
         self,

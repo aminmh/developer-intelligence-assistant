@@ -173,6 +173,7 @@ def main():
                    "citations_valid": valid, "citations_invalid": invalid,
                    "seconds": round(time.monotonic() - started, 1), "tokens": usage.get("total_tokens"),
                    "tokens_estimated": bool(usage.get("estimated")), "tool_calls": len(result.get("tool_calls") or []),
+                   "tool_names": [c.get("name") for c in result.get("tool_calls") or []],
                    "provider": result.get("provider"), "error": error or (None if answer else "empty answer"),
                    "answer": answer}
             with open(OUT, "a") as fh:

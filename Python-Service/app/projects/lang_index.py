@@ -484,6 +484,12 @@ _PRODUCER_NAMES: dict[str, str] = {
     "python": "python-ast",
     "javascript": "tree-sitter-javascript",
     "typescript": "tree-sitter-typescript",
+    # Generic Tree-sitter producer (projects/ts_index.py).
+    "go": "tree-sitter-go",
+    "java": "tree-sitter-java",
+    "csharp": "tree-sitter-csharp",
+    "ruby": "tree-sitter-ruby",
+    "rust": "tree-sitter-rust",
 }
 
 
@@ -571,6 +577,16 @@ def produce_chunks(
             from projects.js_ts_index import produce_chunks as produce_js_ts_chunks
 
             result = produce_js_ts_chunks(root, primary)
+            result.update({
+                "language": primary,
+                "producer": producer,
+                "files": int(result.get("files") or lang_files),
+            })
+            return result
+        from projects import ts_index
+
+        if primary in ts_index.LANGS:
+            result = ts_index.produce_chunks(root, primary)
             result.update({
                 "language": primary,
                 "producer": producer,

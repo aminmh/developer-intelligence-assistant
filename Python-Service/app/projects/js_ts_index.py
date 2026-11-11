@@ -104,6 +104,7 @@ def _definition(
     body = _field(node, "body") or node
     return {
         "type": kind,
+        "origin": "tree-sitter",
         "name": name[:120],
         "class": class_name,
         "class_fqn": f"{module}\\{class_name}" if class_name else qualified,

@@ -36,7 +36,7 @@ UNWIND $data AS row
 MATCH (s:PhpSymbol {id: row.source_id})
 MATCH (t:PhpSymbol {id: row.target_id})
 MERGE (s)-[r:REFERENCES {kind: row.kind}]->(t)
-SET r.file = row.file, r.line = row.line, r.to_member = row.to_member
+SET r.file = row.file, r.line = row.line, r.to_member = row.to_member, r.origin = row.origin
 RETURN count(*) AS count
 """
 
@@ -305,6 +305,8 @@ def node_properties(
             "static": record.get("static"),
             "abstract": record.get("abstract"),
             "owner": record.get("owner"),
+            # Which extractor produced the definition: php-parser, tree-sitter, or scip.
+            "origin": record.get("origin") or "php-parser",
             "collection": collection,
         }
     )

@@ -386,12 +386,16 @@ def _prepare_workspace_http(filename: str) -> str | None:
         return None
 
 
-def _index_sym_graph(workspace_path: str, stem: str) -> dict[str, Any]:
-    """Best-effort PHP symbol graph (sym_<stem>); graph down → skipped dict."""
+def _index_sym_graph(workspace_path: str, stem: str, exported: dict[str, Any] | None = None) -> dict[str, Any]:
+    """Best-effort symbol graph (sym_<stem>); graph down → skipped dict.
+
+    PHP runs the PHP inspector; ``exported`` is a producer's own symbol export
+    (the Tree-sitter producer for Go, Java, C#, Ruby, and Rust).
+    """
     try:
         from inspection.service import inspection_service
 
-        return inspection_service().index(workspace_path, stem)
+        return inspection_service().index(workspace_path, stem, exported=exported)
     except Exception as exc:  # noqa: BLE001 — sym graph is enhancement-only
         get_exception_logger().warning("Sym graph index skipped: %s", exc)
         return {"indexed": False, "error": str(exc)[:200]}
@@ -512,6 +516,8 @@ def persist_code_index(job_id: str, label: str = "") -> dict[str, Any] | None:
                 ingest = CodePropertyGraph().ingest(chunks, collection) or {}
                 if result.get("producer") == "code-parse":
                     sym = _index_sym_graph(workspace_path, stem)
+                elif result.get("symbol_index"):
+                    sym = _index_sym_graph(workspace_path, stem, result["symbol_index"])
     except Exception as exc:  # noqa: BLE001 — persistence must not hard-fail the run
         get_exception_logger().error(
             "Code index ingest failed for analysis %s: %s", job_id, exc

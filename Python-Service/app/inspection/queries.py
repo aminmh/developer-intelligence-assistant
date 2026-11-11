@@ -50,7 +50,7 @@ _FIND_REFERENCES = """
 MATCH (t:PhpSymbol {id: $target_id})<-[r:REFERENCES]-(caller:PhpSymbol)
 WHERE caller.collection = $collection AND t.collection = $collection
 RETURN caller AS n, r.kind AS rkind, r.file AS file, r.line AS line,
-       r.to_member AS to_member
+       r.to_member AS to_member, r.origin AS origin
 ORDER BY caller.file, r.line
 """
 
@@ -58,7 +58,7 @@ _CALLEES = """
 MATCH (s:PhpSymbol {id: $source_id})-[r:REFERENCES]->(t:PhpSymbol)
 WHERE s.collection = $collection AND t.collection = $collection
 RETURN t AS n, r.kind AS rkind, r.file AS file, r.line AS line,
-       r.to_member AS to_member
+       r.to_member AS to_member, r.origin AS origin
 ORDER BY t.file, r.line
 """
 
@@ -66,7 +66,7 @@ _CALLERS = """
 MATCH (s:PhpSymbol {id: $source_id})<-[r:REFERENCES]-(c:PhpSymbol)
 WHERE s.collection = $collection AND c.collection = $collection
 RETURN c AS n, r.kind AS rkind, r.file AS file, r.line AS line,
-       r.to_member AS to_member
+       r.to_member AS to_member, r.origin AS origin
 ORDER BY c.file, r.line
 """
 
@@ -146,6 +146,7 @@ def _node_row(node: Any) -> dict[str, Any]:
         "static": props.get("static"),
         "abstract": props.get("abstract"),
         "owner": props.get("owner"),
+        "origin": props.get("origin") or "php-parser",
     }
 
 
@@ -157,6 +158,7 @@ def _edge_ref(row: dict[str, Any]) -> dict[str, Any]:
         "file": row.get("file", ""),
         "line": row.get("line"),
         "to_member": row.get("to_member"),
+        "origin": row.get("origin") or "php-parser",
     }
 
 
