@@ -60,4 +60,5 @@ def to_definition(record: dict[str, Any]) -> ToolDefinition:
         handler=_rest_handler(record),
         tool_id=record.get("id"),
         timeout_seconds=float(timeout) if isinstance(timeout, (int, float)) and timeout > 0 else None,
+        version=f"managed {record['updated_at']}" if record.get("updated_at") else "managed",
     )

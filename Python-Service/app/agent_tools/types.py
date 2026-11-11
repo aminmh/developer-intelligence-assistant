@@ -67,6 +67,8 @@ class ToolDefinition:
     tool_id: str | None = None
     timeout_seconds: float | None = None
     max_output_bytes: int | None = None
+    # Recorded in the answer trace; built-in tools report their backing binary instead.
+    version: str | None = None
 
     def model_schema(self) -> dict[str, Any]:
         """OpenAI-style function schema; carries no credentials or config."""

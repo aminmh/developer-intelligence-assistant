@@ -317,8 +317,8 @@ def _drive(agent: Any, payload: Any, config: dict[str, Any], state: _RunState) -
                     summary = _summary(message)
                     if summary["id"] in state.denied:
                         summary.update(status="error", error="denied")
-                    state.tool_calls.append(summary)
                     call = state.calls_by_id.get(str(summary["id"]), {})
+                    state.tool_calls.append({**summary, "arguments": call.get("args") or {}})
                     state.transcript.append({"name": summary["name"], "arguments": call.get("args") or {},
                                              "result": str(getattr(message, "content", ""))[:_TRANSCRIPT_RESULT_CHARS]})
                     yield {"type": "tool_completed", **summary}
@@ -368,6 +368,22 @@ def _final_answer(model: Any, system_prompt: str, question: str, state: _RunStat
         yield {"type": "delta", "text": _NO_ANSWER_TEXT}
 
 
+def _trace(run_meta: dict[str, Any], context: ToolContext, registry: ToolRegistry, state: _RunState, *,
+           status: str, model: str, approval_id: str | None = None) -> None:
+    """Record the run's tool calls in the answer's retrieval trace (navigation plan task 19)."""
+    trace_id = run_meta.get("trace_id")
+    if not trace_id:
+        return
+    from agent_tools.trace import record_tool_trace
+
+    try:
+        definitions = {d.name: d for d in registry.tools_for(context.workflow)}
+    except Exception:  # noqa: BLE001 — a trace without versions beats no answer
+        definitions = {}
+    record_tool_trace(trace_id, context, state.tool_calls, definitions, status=status, model=model,
+                      approval_id=approval_id)
+
+
 def _finish(agent: Any, payload: Any, config: dict[str, Any], state: _RunState, *, context: ToolContext,
             system_prompt: str, registry: ToolRegistry, model_name: str, run_meta: dict[str, Any],
             started: float, model: Any = None, limits: ToolLimits | None = None) -> Iterator[dict[str, Any]]:
@@ -411,6 +427,8 @@ def _finish(agent: Any, payload: Any, config: dict[str, Any], state: _RunState, 
             run={**{k: v for k, v in run_meta.items() if k != "resumed"}, "context": context.__dict__,
                  "system_prompt": system_prompt, "model": model_name, "state": state.saved()},
         )
+        _trace(run_meta, context, registry, state, status="paused", model=model_name,
+               approval_id=approval.approval_id)
         yield {"type": "approval_required", "approval_id": approval.approval_id, "calls": calls,
                "expires_at": approval.expires_at}
         yield {"type": "agent_paused", "approval_id": approval.approval_id, "answer": "".join(state.buffer),
@@ -419,6 +437,7 @@ def _finish(agent: Any, payload: Any, config: dict[str, Any], state: _RunState, 
                "duration_ms": int((time.monotonic() - started) * 1000)}
         return
 
+    _trace(run_meta, context, registry, state, status="truncated" if state.truncated else "done", model=model_name)
     yield {
         "type": "agent_done",
         "answer": "".join(state.buffer),

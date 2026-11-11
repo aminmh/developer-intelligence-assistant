@@ -67,6 +67,7 @@ class SourceRoot:
     revision_id: str | None = None
     exclusion_patterns: list[str] = field(default_factory=list)
     wrapper_prefix: str = ""  # archive folders skipped above the project root
+    archive_sha256: str | None = None  # the revision's verified source archive
 
     def is_excluded(self, relative: str) -> bool:
         from code_quality.exclusions import matches_exclusion
@@ -175,6 +176,7 @@ def _revision_root(context: ToolContext) -> SourceRoot:
         path=target, origin="revision", project_id=context.project_id,
         revision_id=snapshot.get("revision_id"),
         exclusion_patterns=ReportStore().exclusions(context.project_id),
+        archive_sha256=checksum,
     )
 
 
@@ -225,4 +227,5 @@ def resolve_source(context: ToolContext) -> SourceRoot:
     if not prefix:
         return base
     return SourceRoot(path=root, origin=base.origin, project_id=base.project_id, revision_id=base.revision_id,
-                      exclusion_patterns=base.exclusion_patterns, wrapper_prefix=prefix)
+                      exclusion_patterns=base.exclusion_patterns, wrapper_prefix=prefix,
+                      archive_sha256=base.archive_sha256)

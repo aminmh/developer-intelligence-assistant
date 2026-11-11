@@ -66,7 +66,7 @@ class AnswerService:
             route=body.get("route", "chat"),
             preview_only=preview_only,
             preview_mode=preview_mode,
-            run_meta=self._run_meta(body, results, rule_sources, tools, owner),
+            run_meta=self._run_meta(body, results, rule_sources, tools, owner, trace_id),
         )
         response = self._response(results, generated, preview_mode, body.get("runtime_symbol_metrics"))
         if generated.get("paused"):
@@ -107,7 +107,7 @@ class AnswerService:
                 route=body.get("route", "chat"),
                 preview_only=preview_only,
                 preview_mode=preview_mode,
-                run_meta=self._run_meta(body, results, rule_sources, tools, owner),
+                run_meta=self._run_meta(body, results, rule_sources, tools, owner, trace_id),
             ):
                 if event.get("type") == "done":
                     event["matches"] = self._matches(results, body.get("runtime_symbol_metrics"))
@@ -118,9 +118,13 @@ class AnswerService:
             self._report_stream_error(exc)
             yield f"data: {json.dumps({'type': 'error', 'detail': str(exc)})}\n\n"
 
-    def _run_meta(self, body: dict, results: list, rule_sources: list, tools: dict, owner: str | None) -> dict:
-        """What a paused run needs to finish its answer after the user decides."""
-        return {"owner": owner, "extras": {
+    def _run_meta(self, body: dict, results: list, rule_sources: list, tools: dict, owner: str | None,
+                  trace_id: str | None = None) -> dict:
+        """What a paused run needs to finish its answer after the user decides.
+
+        ``trace_id`` lets the agent add its tool calls to this answer's retrieval trace.
+        """
+        return {"owner": owner, "trace_id": trace_id, "extras": {
             "matches": self._matches(results, body.get("runtime_symbol_metrics")),
             "business_rules": rule_sources, "tools": tools}}
 
