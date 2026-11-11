@@ -427,7 +427,7 @@ export interface AgentTrace {
 export interface RetrievalInsights {
   trace_id: string;
   query_hash: string;
-  mode: 'hybrid' | 'vector_only' | 'no_results' | 'vector_unavailable' | 'explicit_context';
+  mode: 'hybrid' | 'vector_only' | 'no_results' | 'vector_unavailable' | 'explicit_context' | 'project' | 'no_index' | 'chat_no_index';
   collection?: string | null;
   searched_collections: string[];
   vector_result_count: number;

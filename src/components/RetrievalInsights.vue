@@ -39,13 +39,16 @@ const modeLabel = (mode: RetrievalInsights['mode']) => {
   if (mode === 'hybrid') return 'Graph-assisted';
   if (mode === 'vector_only') return 'Vector search';
   if (mode === 'explicit_context') return 'Tool context';
+  if (mode === 'project') return 'Project index';
+  if (mode === 'no_index') return 'Project not indexed';
+  if (mode === 'chat_no_index') return 'Chat, no index';
   if (mode === 'no_results') return 'No results';
   return 'Retrieval unavailable';
 };
 
 const modeClasses = (mode: RetrievalInsights['mode']) => {
   if (mode === 'hybrid') return 'text-emerald-300 bg-emerald-500/10 border-emerald-500/25';
-  if (mode === 'vector_only') return 'text-indigo-300 bg-indigo-500/10 border-indigo-500/25';
+  if (mode === 'vector_only' || mode === 'project') return 'text-indigo-300 bg-indigo-500/10 border-indigo-500/25';
   if (mode === 'explicit_context') return 'text-amber-300 bg-amber-500/10 border-amber-500/25';
   return 'text-slate-400 bg-slate-500/10 border-slate-500/25';
 };
