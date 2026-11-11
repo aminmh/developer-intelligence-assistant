@@ -908,6 +908,20 @@ const sendMessage = async (text: string, domainRequest?: DomainContextRequest) =
           } else if (rData.phase === 'done' && !rData.answer) {
             // Orchestration finished — web server is generating the final answer.
             generatingAnswer.value = true;
+          } else if (rData.phase === 'error') {
+            stopped = true;
+            resetPollTimer();
+            messages.value.push({
+              id: `assistant_${Date.now()}`,
+              role: 'assistant',
+              content: `❌ **Error:** ${rData.error || 'Processing failed.'}`,
+              timestamp: new Date().toLocaleTimeString(),
+            });
+            loading.value = false;
+            orchestrationSteps.value = [];
+            generatingAnswer.value = false;
+            scrollToBottom();
+            return;
           }
         } catch {
           // Polling error — keep trying

@@ -2112,6 +2112,16 @@ async function startServer() {
 
       const status = await sRes.json();
       const isDone = status.status === 'done';
+      // A failed job never reaches 'done'; say so instead of letting the chat poll until it times out.
+      if (status.status === 'error' || status.status === 'failed') {
+        return res.json({
+          phase: 'error',
+          job_id,
+          status: status.status,
+          steps: status.steps || [],
+          error: status.error || 'Processing failed.',
+        });
+      }
 
       // Once a project's orchestration completes, remember it so subsequent
       // queries in this session skip re-indexing.
