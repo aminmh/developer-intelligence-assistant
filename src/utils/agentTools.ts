@@ -47,6 +47,7 @@ const TOOL_LABELS: Record<string, string> = {
   code_outline: 'Outlined',
   code_symbol_lookup: 'Looked up',
   code_stats: 'Counted code',
+  code_repo_map: 'Mapped repository',
   project_structure: 'Listed structure',
 };
 
@@ -67,6 +68,8 @@ export function describeToolCall(call: Pick<ToolCallView, 'name' | 'arguments'>)
       return `${label} ${text(args.path)}`;
     case 'code_symbol_lookup':
       return `${label} ${text(args.relation || 'definition')} of ${text(args.symbol)}`;
+    case 'code_repo_map':
+      return args.path_glob ? `${label} (${text(args.path_glob)})` : label;
     case 'project_structure':
       return args.depth ? `${label} (depth ${text(args.depth)})` : label;
     default:
