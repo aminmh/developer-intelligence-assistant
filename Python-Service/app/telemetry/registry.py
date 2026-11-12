@@ -11,7 +11,8 @@ from uuid import uuid4
 from datetime import datetime, timedelta, timezone
 from typing import Iterator
 
-from telemetry.snapshot import Snapshot, storage_id, validate_project_id, validate_revision_id, validate_scope, validate_source_ref
+from telemetry.snapshot import (SOURCE_KINDS, Snapshot, is_git_reference, storage_id, validate_project_id,
+                                validate_revision_id, validate_scope, validate_source_ref)
 
 
 # The host reporter reconciles every 60 seconds. Treat a running row without a
@@ -50,6 +51,17 @@ class SnapshotRegistry:
                     ("rev_" + uuid4().hex, row["project_id"], row["commit_sha"]),
                 )
             db.execute("CREATE UNIQUE INDEX IF NOT EXISTS snapshots_revision_id_unique ON snapshots(revision_id)")
+            # Revision lineage: what kind of source a revision is, when it arrived, the
+            # commit a working tree started from, and the project revision it followed.
+            for column in ("source_kind", "base_commit_sha", "parent_revision_id", "created_at"):
+                if column not in columns:
+                    db.execute(f"ALTER TABLE snapshots ADD COLUMN {column} TEXT")
+            db.execute("UPDATE snapshots SET created_at=updated_at WHERE created_at IS NULL")
+            db.execute("""UPDATE snapshots SET source_kind=CASE
+                WHEN commit_sha LIKE 'upload\\_%' ESCAPE '\\' THEN 'upload'
+                WHEN commit_sha LIKE 'wt\\_%' ESCAPE '\\' THEN 'working_tree' ELSE 'git' END
+                WHERE source_kind IS NULL""")
+            db.execute("CREATE INDEX IF NOT EXISTS snapshots_project_created ON snapshots(project_id, created_at)")
             db.execute("""CREATE TABLE IF NOT EXISTS deployments (
                 host_id TEXT NOT NULL, container_id TEXT NOT NULL,
                 project_id TEXT NOT NULL, environment TEXT NOT NULL, service TEXT NOT NULL,
@@ -99,6 +111,23 @@ class SnapshotRegistry:
             return None
         return {"value": value, "updated_at": row["updated_at"]}
 
+    def update_runtime_setting(self, key: str, change) -> dict:
+        """Read-modify-write one setting under an immediate lock, so concurrent writers cannot lose updates."""
+        with self._connect() as db:
+            db.execute("BEGIN IMMEDIATE")
+            row = db.execute("SELECT setting_value FROM runtime_settings WHERE setting_key=?", (key,)).fetchone()
+            try:
+                current = json.loads(row["setting_value"]) if row else None
+            except (TypeError, ValueError):
+                current = None
+            value = change(current)
+            db.execute(
+                """INSERT INTO runtime_settings(setting_key, setting_value) VALUES (?, ?)
+                   ON CONFLICT(setting_key) DO UPDATE SET setting_value=excluded.setting_value,
+                   updated_at=CURRENT_TIMESTAMP""",
+                (key, json.dumps(value, separators=(",", ":"), sort_keys=True)))
+        return value
+
     def set_runtime_setting(self, key: str, value: dict) -> None:
         encoded = json.dumps(value, separators=(",", ":"), sort_keys=True)
         with self._connect() as db:
@@ -129,13 +158,40 @@ class SnapshotRegistry:
                              (project_id, commit_sha)).fetchone()
         if row is None:
             return {"project_id": project_id, "source_ref": commit_sha,
-                    "commit_sha": None if commit_sha.startswith("upload_") else commit_sha, "state": "awaiting_source"}
+                    "commit_sha": commit_sha if is_git_reference(commit_sha) else None, "state": "awaiting_source"}
+        return self._row_result(row)
+
+    @staticmethod
+    def _row_result(row: sqlite3.Row) -> dict:
         metadata = json.loads(row["metadata"])
+        keys = row.keys()
         result = {**metadata, "revision_id": row["revision_id"], "state": row["state"], "error_code": row["error_code"],
-                  "updated_at": row["updated_at"]}
+                  "updated_at": row["updated_at"],
+                  **{key: row[key] for key in ("source_kind", "base_commit_sha", "parent_revision_id", "created_at")
+                     if key in keys}}
         if row["state"] == "ready":
-            result["collection_name"] = "snapshot_" + storage_id(project_id, commit_sha, "")
+            result["collection_name"] = "snapshot_" + storage_id(row["project_id"], row["commit_sha"], "")
         return result
+
+    def latest_ready(self, project_id: str, kinds: tuple[str, ...] = SOURCE_KINDS) -> dict | None:
+        """The project's newest ready revision of the given source kinds, or None."""
+        validate_project_id(project_id)
+        if not kinds or any(kind not in SOURCE_KINDS for kind in kinds):
+            raise ValueError("Invalid source kinds")
+        marks = ",".join("?" for _ in kinds)
+        with self._connect() as db:
+            row = db.execute(
+                f"""SELECT * FROM snapshots WHERE project_id=? AND state='ready' AND source_kind IN ({marks})
+                    ORDER BY created_at DESC, rowid DESC LIMIT 1""", (project_id, *kinds)).fetchone()
+        return self._row_result(row) if row else None
+
+    def project_revisions(self, project_id: str) -> list[dict]:
+        """All revisions of a project, newest first."""
+        validate_project_id(project_id)
+        with self._connect() as db:
+            rows = db.execute("SELECT * FROM snapshots WHERE project_id=? ORDER BY created_at DESC, rowid DESC",
+                              (project_id,)).fetchall()
+        return [self._row_result(row) for row in rows]
 
     def get_by_revision_id(self, project_id: str, revision_id: str) -> dict | None:
         validate_project_id(project_id)
@@ -147,17 +203,7 @@ class SnapshotRegistry:
             ).fetchone()
         if row is None:
             return None
-        metadata = json.loads(row["metadata"])
-        result = {
-            **metadata,
-            "revision_id": row["revision_id"],
-            "state": row["state"],
-            "error_code": row["error_code"],
-            "updated_at": row["updated_at"],
-        }
-        if row["state"] == "ready":
-            result["collection_name"] = "snapshot_" + storage_id(project_id, row["commit_sha"], "")
-        return result
+        return self._row_result(row)
 
     def archive_key(self, project_id: str, commit_sha: str) -> str | None:
         with self._connect() as db:
@@ -348,7 +394,16 @@ class SnapshotRegistry:
             db.execute("DELETE FROM deployments WHERE state='stopped' AND stopped_at < ?", (cutoff,))
             db.execute("DELETE FROM deployment_events WHERE received_at < datetime('now','-7 days')")
 
-    def register(self, snapshot: Snapshot) -> None:
+    def register(self, snapshot: Snapshot, *, base_commit_sha: str | None = None) -> None:
+        """Record a revision once; repeats of the same source bytes are no-ops.
+
+        ``base_commit_sha`` is the commit a working tree started from. It is lineage
+        metadata only and never becomes the revision's ``commit_sha``.
+        """
+        if base_commit_sha is not None:
+            if not snapshot.dirty:
+                raise ValueError("Only working-tree revisions record a base commit")
+            validate_scope(snapshot.project_id, base_commit_sha)
         with self._connect() as db:
             db.execute("BEGIN IMMEDIATE")
             row = db.execute("SELECT checksum,state FROM snapshots WHERE project_id=? AND commit_sha=?",
@@ -357,11 +412,16 @@ class SnapshotRegistry:
                 raise SnapshotConflict("This clean snapshot already has a different source archive")
             if row and row["state"] == "deleting":
                 raise SnapshotConflict("This revision is being removed. Retry after removal finishes.")
+            parent = db.execute("""SELECT revision_id FROM snapshots WHERE project_id=? AND state='ready'
+                ORDER BY created_at DESC, rowid DESC LIMIT 1""", (snapshot.project_id,)).fetchone()
             db.execute("""INSERT OR IGNORE INTO snapshots
-                (project_id, commit_sha, checksum, metadata, snapshot_key, state, revision_id)
-                VALUES (?, ?, ?, ?, ?, 'awaiting_source', ?)""",
+                (project_id, commit_sha, checksum, metadata, snapshot_key, state, revision_id,
+                 source_kind, base_commit_sha, parent_revision_id, created_at)
+                VALUES (?, ?, ?, ?, ?, 'awaiting_source', ?, ?, ?, ?, ?)""",
                 (snapshot.project_id, snapshot.reference, snapshot.source_archive_sha256,
-                 json.dumps(snapshot.metadata()), snapshot.key, "rev_" + uuid4().hex))
+                 json.dumps(snapshot.metadata()), snapshot.key, "rev_" + uuid4().hex,
+                 snapshot.source_kind, base_commit_sha, parent["revision_id"] if parent else None,
+                 datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S.%f")))
 
     def save_git_source(self, user_id: str, project_id: str, repository: str, branch: str,
                         credential_id: str) -> dict:

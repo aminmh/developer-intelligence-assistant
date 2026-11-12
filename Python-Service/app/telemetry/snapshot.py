@@ -20,7 +20,7 @@ def validate_scope(project_id: str, commit_sha: str) -> None:
 
 def validate_source_ref(project_id: str, source_ref: str) -> None:
     validate_project_id(project_id)
-    if not isinstance(source_ref, str) or not re.fullmatch(r"(?:[0-9a-f]{40}|[0-9a-f]{64}|upload_[0-9a-f]{64})", source_ref):
+    if not isinstance(source_ref, str) or not re.fullmatch(r"(?:[0-9a-f]{40}|[0-9a-f]{64}|(?:upload|wt)_[0-9a-f]{64})", source_ref):
         raise ValueError("Invalid source reference")
 
 
@@ -35,6 +35,11 @@ def source_reference(metadata: dict[str, Any]) -> str:
 def source_filter(metadata: dict[str, Any]) -> dict[str, str]:
     reference = source_reference(metadata)
     return {"commit_sha": reference} if metadata.get("commit_sha") else {"source_ref": reference}
+
+
+def is_git_reference(source_ref: str) -> bool:
+    """True for a commit reference; False for archive-identified uploads and working trees."""
+    return not source_ref.startswith(("upload_", "wt_"))
 
 
 def validate_project_id(project_id: str) -> None:
@@ -53,8 +58,20 @@ def storage_id(project_id: str, commit_sha: str, symbol_id: str) -> str:
     return hashlib.sha256(raw.encode("utf-8")).hexdigest()
 
 
+SOURCE_KINDS = ("upload", "git", "working_tree")
+
+
 @dataclass(frozen=True)
 class Snapshot:
+    """One immutable source revision.
+
+    Clean revisions are a Git commit (``commit_sha``) or an uploaded archive
+    (``upload_<sha256>``). A working-tree revision is the uncommitted state of a
+    developer's folder: ``dirty=True``, no ``commit_sha`` (its base commit is
+    registry metadata only), and reference ``wt_<sha256>``, so it can never be
+    mistaken for the clean revision of the commit it started from.
+    """
+
     project_id: str
     commit_sha: str | None
     source_archive_sha256: str
@@ -68,8 +85,10 @@ class Snapshot:
             validate_scope(self.project_id, self.commit_sha)
         if not re.fullmatch(r"[0-9a-f]{64}", self.source_archive_sha256):
             raise ValueError("Source checksum must be SHA256")
-        if self.dirty is not False:
-            raise ValueError("CI snapshots require clean source; dirty evidence is approximate only")
+        if self.dirty not in (False, True):
+            raise ValueError("Snapshot dirty flag must be a boolean")
+        if self.dirty and self.commit_sha is not None:
+            raise ValueError("Commit snapshots require clean source; dirty evidence is approximate only")
         if self.telemetry_schema_version != SCHEMA_VERSION:
             raise ValueError("Unsupported telemetry schema version")
         if self.revision_id is not None:
@@ -77,7 +96,15 @@ class Snapshot:
 
     @property
     def reference(self) -> str:
+        if self.dirty:
+            return "wt_" + self.source_archive_sha256
         return self.commit_sha or "upload_" + self.source_archive_sha256
+
+    @property
+    def source_kind(self) -> str:
+        if self.dirty:
+            return "working_tree"
+        return "git" if self.commit_sha else "upload"
 
     @property
     def key(self) -> str:
