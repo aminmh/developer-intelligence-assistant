@@ -236,7 +236,7 @@ test('viewers can read benchmark results but cannot configure targets or start r
     registerCodeQualityRoutes(app as any, {
       apiUrl: 'http://python-api', internalSecret: 'x'.repeat(40), helperUrl: 'http://127.0.0.1:47831',
       webOrigin: 'http://localhost:3000', getUser: () => ({ sub: 'viewer' }), canAccessProject: () => true,
-      canOperateProject: () => false, isGlobalAdmin: () => false, ruleSyncIntervalMs: 0,
+      canOperateProject: () => false, isGlobalAdmin: () => false, ruleSyncIntervalMs: 0, gitReconcileIntervalMs: 0,
     });
     const response = () => ({ statusCode: 200, body: undefined as any,
       status(code: number) { this.statusCode = code; return this; }, json(body: unknown) { this.body = body; return this; } });

@@ -17,6 +17,8 @@ type RouteDependencies = {
   webOrigin: string;
   /** How often to re-sync Outline business rules for every connected project; 0 disables it. */
   ruleSyncIntervalMs?: number;
+  /** How often to fetch every connected Git branch, catching missed webhooks; 0 disables it. */
+  gitReconcileIntervalMs?: number;
 };
 
 export function registerCodeQualityRoutes(app: Express, dependencies: RouteDependencies) {
@@ -222,6 +224,40 @@ export function registerCodeQualityRoutes(app: Express, dependencies: RouteDepen
     } catch { return res.status(502).json({ detail: 'Git source synchronization failed. Check the repository and retry.' }); }
   });
 
+  // Fetch the branch with the saved token (from the desktop helper) and sync it as the configuring user.
+  // The webhook and the scheduled reconcile share this; neither trusts a pushed commit on its own.
+  type GitTarget = { project_id: string; user_id: string; credential_id: string; branch?: string };
+  const syncGitTarget = async (target: GitTarget): Promise<boolean> => {
+    const credentialStatus = await callGitCredentialHelper(target.project_id, target.credential_id,
+      'code-quality-github-manage', 'POST', { action: 'status' });
+    if (!credentialStatus.response.ok) return false;
+    let token: string | undefined;
+    if (credentialStatus.data.saved === true) {
+      const credential = await callGitCredentialHelper(target.project_id, target.credential_id, 'code-quality-github-fetch', 'POST', {});
+      if (!credential.response.ok || typeof credential.data.token !== 'string') return false;
+      token = credential.data.token;
+    }
+    const sync = await forward(`/telemetry/git/projects/${encodeURIComponent(target.project_id)}/sync`,
+      { sub: target.user_id }, { method: 'POST', body: JSON.stringify(token ? { token } : {}) });
+    return sync.ok;
+  };
+  const runScheduledGitReconcile = async () => {
+    try {
+      const listed = await forward('/telemetry/git/sources', null);
+      if (!listed.ok) return;
+      const { sources = [] } = await listed.json().catch(() => ({})) as { sources?: GitTarget[] };
+      for (const source of sources) {
+        // A stopped desktop helper or unreachable GitHub only skips this round; the next one retries.
+        await syncGitTarget(source).catch(() => false);
+      }
+    } catch { /* API unavailable: try again next round */ }
+  };
+  const gitReconcileInterval = dependencies.gitReconcileIntervalMs ?? 10 * 60_000;
+  if (gitReconcileInterval > 0) {
+    setTimeout(() => void runScheduledGitReconcile(), 60_000).unref?.();
+    setInterval(() => void runScheduledGitReconcile(), gitReconcileInterval).unref?.();
+  }
+
   app.post('/api/code-quality/github/webhook', async (req, res) => {
     const secret = process.env.CODE_QUALITY_GITHUB_WEBHOOK_SECRET || '';
     const rawBody = (req as any).rawBody as Buffer | undefined;
@@ -245,18 +281,7 @@ export function registerCodeQualityRoutes(app: Express, dependencies: RouteDepen
       const targetResponse = await forward(`/telemetry/git/webhook-target?repository=${encodeURIComponent(repository)}`, null);
       const target = await targetResponse.json().catch(() => ({})) as any;
       if (!targetResponse.ok || ref !== `refs/heads/${target.branch}`) return res.status(202).json({ accepted: true, ignored: true });
-      const credentialStatus = await callGitCredentialHelper(target.project_id, target.credential_id,
-        'code-quality-github-manage', 'POST', { action: 'status' });
-      if (!credentialStatus.response.ok) return res.status(503).json({ detail: 'Verified webhook could not start synchronization.' });
-      let token: string | undefined;
-      if (credentialStatus.data.saved === true) {
-        const credential = await callGitCredentialHelper(target.project_id, target.credential_id, 'code-quality-github-fetch', 'POST', {});
-        if (!credential.response.ok || typeof credential.data.token !== 'string') return res.status(503).json({ detail: 'Verified webhook could not start synchronization.' });
-        token = credential.data.token;
-      }
-      const sync = await forward(`/telemetry/git/projects/${encodeURIComponent(target.project_id)}/sync`,
-        { sub: target.user_id }, { method: 'POST', body: JSON.stringify(token ? { token } : {}) });
-      if (!sync.ok) return res.status(503).json({ detail: 'Verified webhook synchronization failed.' });
+      if (!await syncGitTarget(target)) return res.status(503).json({ detail: 'Verified webhook synchronization failed.' });
       return res.status(202).json({ accepted: true });
     } catch { return res.status(503).json({ detail: 'Verified webhook synchronization failed.' }); }
   });

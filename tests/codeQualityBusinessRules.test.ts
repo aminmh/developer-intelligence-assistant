@@ -4,7 +4,7 @@ import { registerCodeQualityRoutes } from '../src/server/codeQualityRoutes';
 
 const CREDENTIAL = '12345678-1234-5678-1234-567812345678';
 
-function routeHarness(options: { canAccess?: boolean; ruleSyncIntervalMs?: number } = {}) {
+function routeHarness(options: { canAccess?: boolean; ruleSyncIntervalMs?: number; gitReconcileIntervalMs?: number } = {}) {
   const handlers = new Map<string, (...args: any[]) => Promise<unknown>>();
   const app = Object.fromEntries(['get', 'post', 'put', 'delete', 'patch'].map((method) => [method,
     (path: string, handler: (...args: any[]) => Promise<unknown>) => handlers.set(`${method.toUpperCase()} ${path}`, handler)]));
@@ -13,6 +13,7 @@ function routeHarness(options: { canAccess?: boolean; ruleSyncIntervalMs?: numbe
     webOrigin: 'http://localhost:3000', getUser: () => ({ sub: 'alice' }),
     canAccessProject: () => options.canAccess ?? true, isGlobalAdmin: () => false,
     ruleSyncIntervalMs: options.ruleSyncIntervalMs ?? 0,
+    gitReconcileIntervalMs: options.gitReconcileIntervalMs ?? 0,
   });
   const response = { statusCode: 200, body: undefined as any,
     status(code: number) { this.statusCode = code; return this; }, json(body: unknown) { this.body = body; return this; } };
@@ -104,5 +105,35 @@ test('the scheduler syncs connected projects and skips quietly when the helper i
     await new Promise((resolve) => setTimeout(resolve, 80));
     assert.ok(synced.some((url) => url.endsWith('/code-quality/projects/pizza/outline/sync')));
     assert.equal(synced.some((url) => url.includes('/projects/down/')), false);
+  } finally { globalThis.fetch = originalFetch; }
+});
+
+test('Scheduled Git reconcile fetches every connected branch with its saved token and skips failures', async () => {
+  const originalFetch = globalThis.fetch;
+  const synced: { url: string; body: any }[] = [];
+  globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
+    const url = String(input);
+    if (url.endsWith('/telemetry/git/sources')) {
+      return new Response(JSON.stringify({ sources: [
+        { project_id: 'shop', user_id: 'alice', credential_id: CREDENTIAL, repository: 'acme/shop', branch: 'main' },
+        { project_id: 'down', user_id: 'bob', credential_id: CREDENTIAL, repository: 'acme/down', branch: 'main' },
+      ] }));
+    }
+    const body = init?.body ? JSON.parse(String(init.body)) : {};
+    if (url.endsWith('/code-quality-github')) {
+      return body.project_id === 'down'
+        ? new Response(JSON.stringify({ detail: 'helper stopped' }), { status: 503 })
+        : new Response(JSON.stringify({ saved: true }));
+    }
+    if (url.endsWith('/code-quality-github-use')) return new Response(JSON.stringify({ token: 'transient-git-token' }));
+    if (url.endsWith('/sync')) { synced.push({ url, body }); return new Response(JSON.stringify({ status: 'queued' })); }
+    throw new Error(`Unexpected request: ${url}`);
+  }) as typeof fetch;
+  try {
+    routeHarness({ gitReconcileIntervalMs: 20 });
+    await new Promise((resolve) => setTimeout(resolve, 80));
+    assert.ok(synced.some((call) => call.url.endsWith('/telemetry/git/projects/shop/sync')
+      && call.body.token === 'transient-git-token'));
+    assert.equal(synced.some((call) => call.url.includes('/projects/down/')), false);
   } finally { globalThis.fetch = originalFetch; }
 });
