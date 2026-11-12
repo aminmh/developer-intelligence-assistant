@@ -146,6 +146,9 @@ async def lifespan(app: FastAPI):
             try:
                 worked = await asyncio.to_thread(service.process_one)
                 now = time.monotonic()
+                if worked:
+                    # A finished job may have made an older or superseded working tree removable.
+                    next_retention = 0.0
                 if now >= next_schema_check:
                     # Cached per storage target, so this is a no-op once the active target is ready.
                     # Policy and aggregation query the owned columns, so they wait for it.
@@ -279,12 +282,14 @@ from telemetry.http import (
     runtime_router as telemetry_runtime_router,
     git_router as telemetry_git_router,
     chat_router as telemetry_chat_router,
+    working_tree_router as telemetry_working_tree_router,
 )
 app.include_router(telemetry_router)
 app.include_router(telemetry_host_router)
 app.include_router(telemetry_runtime_router)
 app.include_router(telemetry_git_router)
 app.include_router(telemetry_chat_router)
+app.include_router(telemetry_working_tree_router)
 
 from inspection.http import router as inspection_router  # noqa: E402 — after app exists
 from routers.developer_logs import router as developer_logs_router  # noqa: E402 — after app exists

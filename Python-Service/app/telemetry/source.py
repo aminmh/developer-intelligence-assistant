@@ -61,6 +61,10 @@ def _normalize_exported_paths(exported: dict[str, list[dict[str, Any]]], workspa
                 record[field] = relative_path(value)
 
 
+class Superseded(RuntimeError):
+    """A newer working tree of the same project replaced this one while it indexed."""
+
+
 def _unavailable_semantic_index(reason: str) -> dict:
     # Static assessment supports more languages than the indexers. Publish the source
     # snapshot while marking semantic indexing unavailable; callers must not read this
@@ -121,7 +125,16 @@ def index_source(workspace: str, snapshot: Snapshot) -> dict:
             return _unavailable_semantic_index(error or "No supported language indexer found source to index.")
     _normalize_exported_paths(exported, workspace)
     registered = resolve_registered_revision(snapshot)
-    if registered.revision_id:
+    progress = None
+    if snapshot.dirty:
+        # Working trees: latest wins. Stop between embedding batches once a newer one arrived.
+        registry = default_registry()
+
+        def progress(*_):
+            if registry.is_superseded(snapshot.project_id, snapshot.reference):
+                raise Superseded("A newer working tree replaced this one")
+    # SCIP is skipped for working trees: they change every few minutes and SCIP is slow.
+    if registered.revision_id and not snapshot.dirty:
         identity = {"project_id": snapshot.project_id, "commit_sha": snapshot.commit_sha,
                     "revision_id": registered.revision_id,
                     "source_archive_sha256": snapshot.source_archive_sha256}
@@ -130,7 +143,10 @@ def index_source(workspace: str, snapshot: Snapshot) -> dict:
     result = CodePropertyGraph().ingest(
         chunks, snapshot.collection, snapshot=snapshot,
         symbol_definitions=exported["definitions"], symbol_references=exported["references"],
+        **({"progress_callback": progress} if progress else {}),
     )
+    if progress:
+        progress()
     InspectionService().index(workspace, snapshot.key, exported=exported, snapshot=snapshot)
     return result
 
@@ -173,6 +189,25 @@ class SourceService:
             self.registry.queue_source_index(project_id, commit_sha)
             return self.registry.get(project_id, commit_sha)
 
+    def upload_working_tree(self, project_id: str, data: bytes, base_commit_sha: str | None = None) -> dict:
+        """Stage a working-tree archive and queue it; older unfinished working trees stop (latest wins)."""
+        snapshot = Snapshot(project_id, None, hashlib.sha256(data).hexdigest(), dirty=True)
+        validate_archive(data)
+        reference = snapshot.reference
+        with self.registry.lock(project_id, reference):
+            self.registry.register(snapshot, base_commit_sha=base_commit_sha)
+            self.registry.supersede_working_trees(project_id, reference)
+            current = self.registry.get(project_id, reference)
+            if current["state"] == "ready":
+                self.registry.touch_created(project_id, reference)
+                return self.registry.get(project_id, reference)
+            if not self.registry.archive_key(project_id, reference):
+                self.registry.transition(snapshot, "storing")
+                key = self.storage.put_snapshot_archive(snapshot.key, snapshot.source_archive_sha256, data)
+                self.registry.transition(snapshot, "indexing", archive_key=key)
+            self.registry.queue_source_index(project_id, reference)
+            return self.registry.get(project_id, reference)
+
     def process_one(self) -> bool:
         """Run one durable job. A running job is reclaimable after process restart."""
         with (self.registry.root / "index-worker.lock").open("a") as lock:
@@ -203,6 +238,8 @@ class SourceService:
                         or result.get("graph_nodes") != count or result.get("embed_fails", 0))):
                     raise RuntimeError("Incomplete snapshot indexing")
                 self.registry.finish_job(project_id, commit_sha, success=True)
+            except Superseded:
+                self.registry.finish_job(project_id, commit_sha, success=False)  # recorded as superseded
             except Exception as exc:
                 logging.getLogger(__name__).error(
                     "Snapshot indexing failed for project=%s revision_id=%s: %s",

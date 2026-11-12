@@ -88,6 +88,12 @@ class SnapshotRegistry:
                 last_commit_sha TEXT, last_revision_id TEXT, error_code TEXT,
                 updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
                 PRIMARY KEY(user_id, project_id), UNIQUE(repository, project_id))""")
+            # Revocable working-tree upload grants: a desktop helper syncs one folder to one
+            # project on behalf of the user who granted it (sync plan phase 6).
+            db.execute("""CREATE TABLE IF NOT EXISTS working_tree_grants (
+                grant_id TEXT PRIMARY KEY, project_id TEXT NOT NULL, user_json TEXT NOT NULL,
+                token_sha256 TEXT NOT NULL, created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                revoked_at TEXT, last_upload_at TEXT, last_status TEXT, last_revision_id TEXT)""")
             db.execute("""CREATE TABLE IF NOT EXISTS runtime_settings (
                 setting_key TEXT PRIMARY KEY, setting_value TEXT NOT NULL,
                 updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP)""")
@@ -383,6 +389,13 @@ class SnapshotRegistry:
 
     def finish_job(self, project_id: str, commit_sha: str, *, success: bool) -> None:
         with self._connect() as db:
+            job = db.execute("SELECT state FROM index_jobs WHERE project_id=? AND commit_sha=?",
+                             (project_id, commit_sha)).fetchone()
+            if job and job["state"] == "superseded":
+                # A newer working tree replaced this one while it indexed; retention removes it.
+                db.execute("UPDATE snapshots SET state='superseded',updated_at=CURRENT_TIMESTAMP WHERE project_id=? AND commit_sha=? AND state!='deleting'",
+                           (project_id, commit_sha))
+                return
             state = 'done' if success else 'failed'
             db.execute("UPDATE index_jobs SET state=?,updated_at=CURRENT_TIMESTAMP WHERE project_id=? AND commit_sha=?", (state, project_id, commit_sha))
             db.execute("UPDATE snapshots SET state=?,error_code=?,updated_at=CURRENT_TIMESTAMP WHERE project_id=? AND commit_sha=?",
@@ -481,9 +494,40 @@ class SnapshotRegistry:
                 WHERE user_id=? AND project_id=?""",
                 (status, commit_sha, revision_id, error_code, user_id, project_id))
 
+    def is_superseded(self, project_id: str, source_ref: str) -> bool:
+        with self._connect() as db:
+            row = db.execute("SELECT state FROM index_jobs WHERE project_id=? AND commit_sha=?",
+                             (project_id, source_ref)).fetchone()
+        return bool(row and row["state"] == "superseded")
+
+    def supersede_working_trees(self, project_id: str, keep_ref: str) -> int:
+        """Latest wins: every other unfinished working-tree job of the project stops.
+
+        A queued job is never claimed; a running one sees the flag between embedding
+        batches and stops. Its revision becomes 'superseded' and retention removes it.
+        """
+        validate_source_ref(project_id, keep_ref)
+        with self._connect() as db:
+            db.execute("BEGIN IMMEDIATE")
+            refs = [row[0] for row in db.execute(
+                """SELECT commit_sha FROM index_jobs WHERE project_id=? AND substr(commit_sha, 1, 3)='wt_'
+                   AND commit_sha!=? AND state IN ('queued','running')""", (project_id, keep_ref))]
+            for ref in refs:
+                db.execute("UPDATE index_jobs SET state='superseded',updated_at=CURRENT_TIMESTAMP WHERE project_id=? AND commit_sha=?",
+                           (project_id, ref))
+                db.execute("""UPDATE snapshots SET state='superseded',updated_at=CURRENT_TIMESTAMP
+                    WHERE project_id=? AND commit_sha=? AND state IN ('queued','storing','uploaded')""", (project_id, ref))
+        return len(refs)
+
+    def touch_created(self, project_id: str, source_ref: str) -> None:
+        """A working tree that returned to an earlier state becomes the latest again."""
+        with self._connect() as db:
+            db.execute("UPDATE snapshots SET created_at=? WHERE project_id=? AND commit_sha=?",
+                       (datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S.%f"), project_id, source_ref))
+
     def queue_source_index(self, project_id: str, commit_sha: str) -> bool:
-        """Queue a Git source snapshot without asserting a Runtime deployment exists."""
-        validate_scope(project_id, commit_sha)
+        """Queue a Git or working-tree snapshot without asserting a Runtime deployment exists."""
+        validate_source_ref(project_id, commit_sha)
         with self._connect() as db:
             row = db.execute("SELECT state,archive_key FROM snapshots WHERE project_id=? AND commit_sha=?",
                              (project_id, commit_sha)).fetchone()

@@ -8,6 +8,11 @@ def assessment_index_readiness(project_id, revision_id, registry):
               "reason": "Index this project revision in Knowledge Base → Files & indexing before running an assessment."}
     if snapshot is None:
         return result
+    if snapshot.get("source_kind") == "working_tree" or snapshot.get("dirty") is True:
+        # Uncommitted edits change every few minutes and match no deployment; reports need a fixed source.
+        return {**result, "status": "working_tree_unavailable",
+                "reason": "This is a working-tree revision with uncommitted edits, so it can't be assessed. "
+                          "Commit and sync from Git, or upload a ZIP, to assess this code."}
     if snapshot.get("state") != "ready":
         if snapshot.get("state") in {"queued", "indexing", "storing"}:
             result.update(status="indexing", reason="This revision is still indexing. Wait for indexing to complete in Knowledge Base, then check again.")

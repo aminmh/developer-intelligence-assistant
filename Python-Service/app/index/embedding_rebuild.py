@@ -110,7 +110,7 @@ def _run_rebuild(lock: threading.Lock, job_id: str, filename: str, archive: byte
     from telemetry.registry import default_registry
     from telemetry.snapshot import Snapshot
 
-    snapshot = Snapshot(identity["project_id"], identity["commit_sha"], identity["source_archive_sha256"])
+    snapshot = Snapshot.from_row(identity["project_id"], identity)  # keeps a working tree's dirty flag
     registry = default_registry()
     try:
         with registry.lock(snapshot.project_id, snapshot.reference):
@@ -141,10 +141,7 @@ def _run_rebuild_locked(lock: threading.Lock, job_id: str, filename: str, archiv
         from telemetry.snapshot import Snapshot
 
         exported = inspect_index(str(workdir))
-        snapshot = Snapshot(
-            identity["project_id"], identity["commit_sha"],
-            identity["source_archive_sha256"],
-        )
+        snapshot = Snapshot.from_row(identity["project_id"], identity)
         if snapshot.collection != snapshot_collection:
             raise RuntimeError("Snapshot identity changed while the rebuild was queued")
 

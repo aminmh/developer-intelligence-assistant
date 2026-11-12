@@ -273,6 +273,28 @@ def serve_helper() -> None:
                 "certificates": plan["certificates"], "changes": plan["changes"],
                 "approval_items": plan["approval_items"]})
 
+        def _working_tree_grant(self) -> None:
+            """Choose, approve and start syncing a folder for a grant the web app created."""
+            import working_tree_sync
+
+            body = self._read_json(4096)
+            if body is None:
+                return self._json(400, {"detail": "Invalid working-tree grant request."})
+            project_id, grant_id = body.get("project_id"), body.get("grant_id")
+            if not isinstance(project_id, str) or not isinstance(grant_id, str) or not self._authorized(
+                    operation="working-tree-grant", project_id=project_id, target_id=grant_id):
+                return self._json(403, {"detail": "Working-tree sync authorization is invalid or expired."})
+            if not self._consume_authorization():
+                return self._json(403, {"detail": "This working-tree authorization was already used."})
+            try:
+                result = working_tree_sync.add_grant(project_id, grant_id, body.get("grant_token"),
+                                                     helper_origin(), native_approval)
+            except (ApprovalCancelled, ApprovalUnavailable) as exc:
+                return self._json(409, {"detail": str(exc)})
+            except (working_tree_sync.SyncError, RuntimeError, OSError) as exc:
+                return self._json(422, {"detail": str(exc)})
+            return self._json(200, result)
+
         def do_OPTIONS(self) -> None:
             origin = self.headers.get("Origin", "")
             if origin != helper_origin():
@@ -285,6 +307,8 @@ def serve_helper() -> None:
             self.end_headers()
 
         def do_POST(self) -> None:
+            if self.path == "/working-tree/grant":
+                return self._working_tree_grant()
             if self.path in {"/code-quality-github", "/code-quality-github-use"}:
                 length = self.headers.get("Content-Length", "0")
                 if not length.isdigit() or not 1 <= int(length) <= 12 * 1024:
@@ -672,6 +696,9 @@ def serve_helper() -> None:
     try:
         helper_secret()
         server = ThreadingHTTPServer((HELPER_HOST, HELPER_PORT), Handler)
+        import working_tree_sync
+        if working_tree_sync.read_grants():
+            working_tree_sync.start_watcher()  # resume folders granted before a restart
     except OSError as exc:
         raise RuntimeError(f"Cannot bind Runtime setup helper to {HELPER_HOST}:{HELPER_PORT}: {exc}") from exc
     print(f"Runtime setup helper listening on http://{HELPER_HOST}:{HELPER_PORT}")

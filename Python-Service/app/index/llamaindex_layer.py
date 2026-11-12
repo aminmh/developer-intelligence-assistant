@@ -1233,6 +1233,9 @@ class CodePropertyGraph:
                 if progress_callback:
                     progress_callback("embedding", completed, embeddable_total)
 
+            if progress_callback:
+                # Outside the try: a callback may stop ingest (e.g. a superseded working tree).
+                progress_callback("embedding", completed, embeddable_total)
             try:
                 vectors = embed_texts(
                     [text for _, text in batch],

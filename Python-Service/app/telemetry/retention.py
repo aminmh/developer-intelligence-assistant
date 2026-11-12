@@ -14,7 +14,8 @@ removed by retention when it is:
 
 Only ready revisions are chosen: queued, indexing, failed and deployment-waiting
 rows have their own lifecycles. A removal interrupted part-way (state ``deleting``)
-is retried on every pass until it completes. Cleanup runs in the index worker loop between jobs,
+is retried on every pass until it completes, and so is a working tree a newer one
+superseded (state ``superseded``). Cleanup runs in the index worker loop between jobs,
 because ``remove_revision`` refuses while a job holds the worker lock; a busy
 revision is simply retried on the next pass.
 """
@@ -148,7 +149,7 @@ def plan_cleanup(*, registry: Any = None, store: Any = None) -> dict[str, list[d
     for project_id in project_ids:
         # A removal that failed part-way (e.g. ClickHouse down) leaves the row in 'deleting';
         # its index data may already be gone, so it is finished first, whatever the policy.
-        interrupted = [row for row in registry.project_revisions(project_id) if row.get("state") == "deleting"]
+        interrupted = [row for row in registry.project_revisions(project_id) if row.get("state") in ("deleting", "superseded")]
         rows = interrupted + removable_revisions(project_id, registry=registry, policy=get_policy(project_id, store=store),
                                    reported=_reported_revisions(project_id),
                                    git_revisions=_git_revisions(registry, project_id))

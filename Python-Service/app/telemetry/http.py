@@ -615,3 +615,86 @@ def chat_revisions(request: Request) -> dict:
     return {"projects": [{"project_id": project_id,
                           "revisions": [revision_label(row, "pinned") for row in rows]}
                          for project_id, rows in sorted(get_registry().ready_revisions_by_project().items())]}
+
+
+working_tree_router = APIRouter(prefix="/telemetry/working-tree", tags=["Working-tree sync"])
+
+
+@working_tree_router.post("/projects/{project_id}/grants")
+async def create_working_tree_grant(project_id: str, request: Request) -> dict:
+    """Called by the web server after it checked the user's project access."""
+    from telemetry.working_tree import GrantError, WorkingTreeGrants
+
+    authorize_internal(request)
+    payload = await _read_git_source_json(request)
+    try:
+        return {"grant": WorkingTreeGrants(get_registry()).create(project_id, payload.get("user"))}
+    except (GrantError, ValueError) as exc:
+        raise HTTPException(422, str(exc)) from exc
+
+
+@working_tree_router.get("/projects/{project_id}/grants")
+def list_working_tree_grants(project_id: str, request: Request) -> dict:
+    from telemetry.working_tree import WorkingTreeGrants
+
+    authorize_internal(request)
+    try:
+        return {"grants": WorkingTreeGrants(get_registry()).list(project_id)}
+    except ValueError as exc:
+        raise HTTPException(422, "Invalid project identity") from exc
+
+
+@working_tree_router.delete("/projects/{project_id}/grants/{grant_id}")
+def revoke_working_tree_grant(project_id: str, grant_id: str, request: Request) -> dict:
+    from telemetry.working_tree import WorkingTreeGrants
+
+    authorize_internal(request)
+    try:
+        return {"revoked": WorkingTreeGrants(get_registry()).revoke(project_id, grant_id)}
+    except ValueError as exc:
+        raise HTTPException(422, "Invalid project identity") from exc
+
+
+@working_tree_router.post("/grants/{grant_id}/verify")
+async def verify_working_tree_grant(grant_id: str, request: Request) -> dict:
+    """Resolve a helper's grant token to its project and granting user (the web server re-checks access)."""
+    from telemetry.working_tree import WorkingTreeGrants
+
+    authorize_internal(request)
+    payload = await _read_git_source_json(request)
+    grant = WorkingTreeGrants(get_registry()).verify(grant_id, payload.get("token"))
+    if grant is None:
+        raise HTTPException(401, "The working-tree grant is invalid or revoked.")
+    return {"grant": grant}
+
+
+@working_tree_router.post("/grants/{grant_id}/upload")
+async def upload_working_tree(grant_id: str, request: Request) -> dict:
+    """Stage one working-tree archive (raw ZIP body) for the grant's project."""
+    from telemetry.working_tree import GrantError, WorkingTreeGrants, validate_base_commit
+
+    authorize_internal(request)
+    grants = WorkingTreeGrants(get_registry())
+    grant = grants.get(grant_id)
+    if grant is None or grant["revoked_at"]:
+        raise HTTPException(401, "The working-tree grant is invalid or revoked.")
+    try:
+        base_commit = validate_base_commit(request.headers.get("x-base-commit"))
+    except GrantError as exc:
+        raise HTTPException(422, str(exc)) from exc
+    body = bytearray()
+    async for chunk in request.stream():
+        body.extend(chunk)
+        if len(body) > MAX_ARCHIVE_BYTES:
+            raise HTTPException(413, "The working-tree archive exceeds the 64 MiB limit.")
+    try:
+        result = await run_in_threadpool(SourceService(get_registry(), get_storage()).upload_working_tree,
+                                         grant["project_id"], bytes(body), base_commit)
+    except SnapshotConflict as exc:
+        grants.record_upload(grant_id, "conflict", None)
+        raise HTTPException(409, str(exc)) from exc
+    except ValueError as exc:
+        grants.record_upload(grant_id, "rejected", None)
+        raise HTTPException(422, str(exc)) from exc
+    grants.record_upload(grant_id, result.get("state", "queued"), result.get("revision_id"))
+    return {"revision": {key: result.get(key) for key in ("revision_id", "state", "source_kind", "base_commit_sha")}}
