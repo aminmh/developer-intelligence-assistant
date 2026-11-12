@@ -596,6 +596,121 @@ _DYNAMIC_CALLS = {"eval", "exec", "system", "popen", "passthru", "shell_exec",
                   "runtime.exec", "processbuilder", "spawn", "child_process.exec"}
 
 
+# PHP request-to-sink data flow (external-analyzer spec clause 31). Application-owned; project
+# files never contribute Joern code. Sources: Laravel request accessors, request(), and $_GET-style
+# superglobal reads. Sinks: raw SQL, shell execution, eval, unserialize, file paths, redirects.
+_PHP_FLOW_SCRIPT = r'''@main def exec(cpgFile: String, outFile: String) = {
+  importCpg(cpgFile)
+  def enc(value: String): String = java.util.Base64.getEncoder.encodeToString(Option(value).getOrElse("").getBytes("UTF-8"))
+  val requestNames = "(input|query|get|post|all|only|except|validated|safe|string|integer|boolean|date|cookie|header|file|json|route|collect)"
+  val requestCalls = cpg.call.name(requestNames).filter { c =>
+    c.methodFullName.startsWith("Illuminate\\Http\\Request") ||
+      c.receiver.code.l.exists(r => r == "$request" || r.startsWith("request()") || r.startsWith("$this->request"))
+  }.l
+  val helperCalls = cpg.call.name("request").filter(_.argument.size > 0).l
+  // $_GET["x"] is an index access on the identifier _GET; the access is the value that flows.
+  val superglobals = cpg.call.name("<operator>.indexAccess")
+    .filter(_.argument.isIdentifier.name("_(GET|POST|REQUEST|COOKIE|FILES|SERVER)").nonEmpty).l
+  val sources: List[io.shiftleft.codepropertygraph.generated.nodes.CfgNode] = requestCalls ++ helperCalls ++ superglobals
+  val sinkKinds: List[(String, String)] = List(
+    "sql" -> "(?i)(raw|whereRaw|selectRaw|orderByRaw|havingRaw|groupByRaw|unprepared|statement|mysqli_query|pg_query)",
+    "command" -> "(exec|system|shell_exec|passthru|proc_open|popen|pcntl_exec)",
+    "code" -> "(eval|assert|create_function)",
+    "deserialization" -> "unserialize",
+    "file_path" -> "(file_get_contents|file_put_contents|fopen|readfile|unlink|include|include_once|require|require_once)",
+    "redirect" -> "(header|away)")
+  val lines = sinkKinds.flatMap { case (kind, pattern) =>
+    cpg.call.name(pattern).argument.reachableByFlows(sources.iterator).take(200).map { path =>
+      val first = path.elements.head
+      val last = path.elements.last
+      // Long paths keep their first steps and always the sink.
+      val steps = if (path.elements.size > 16) path.elements.take(15) :+ last else path.elements
+      val elements = steps.map { e =>
+        enc(e.file.name.headOption.getOrElse("") + "\u001f" + e.lineNumber.getOrElse(0).toString + "\u001f" + e.code.take(160))
+      }
+      (List(enc(kind)) ++ elements).mkString("\t")
+    }.l
+  }.distinct.take(300)
+  lines #> outFile
+}
+'''
+_PHP_FLOW_SEVERITY = {"sql": "error", "command": "error", "code": "error", "deserialization": "error",
+                      "file_path": "warning", "redirect": "warning"}
+_PHP_FLOW_LABEL = {"sql": "raw SQL", "command": "shell command", "code": "code evaluation",
+                   "deserialization": "unserialize", "file_path": "file path", "redirect": "redirect"}
+MAX_PHP_FLOWS = 100
+
+
+def _php_flow_findings(output_path: str, php_files: list[str], version: str) -> list[dict[str, Any]]:
+    """Parse the flow query output into bounded findings, one per (kind, source, sink)."""
+    def match(file_path: str) -> str | None:
+        relative = file_path.replace("\\", "/").lstrip("./")
+        return next((path for path in php_files if relative == path or relative.endswith("/" + path)), None)
+
+    findings: list[dict[str, Any]] = []
+    seen: set[tuple] = set()
+    with open(output_path, encoding="ascii", errors="ignore") as output:
+        for line in output:
+            try:
+                fields = [base64.b64decode(value, validate=True).decode("utf-8", "replace")
+                          for value in line.rstrip("\r\n").split("\t")]
+            except (ValueError, UnicodeError):
+                continue
+            kind, raw_steps = fields[0], fields[1:]
+            if kind not in _PHP_FLOW_SEVERITY or len(raw_steps) < 2:
+                continue
+            steps = []
+            for raw in raw_steps[:16]:
+                parts = raw.split("\x1f")
+                path = match(parts[0]) if len(parts) == 3 else None
+                if path is None or not parts[1].isdigit() or int(parts[1]) < 1:
+                    continue
+                steps.append({"file": path, "line": int(parts[1]), "code": parts[2][:160]})
+            if len(steps) < 2:
+                continue
+            source, sink = steps[0], steps[-1]
+            key = (kind, source["file"], source["line"], sink["file"], sink["line"])
+            if key in seen:
+                continue
+            seen.add(key)
+            findings.append({
+                "rule": "joern:php-request-to-" + kind.replace("_", "-"), "category": "security",
+                "severity": _PHP_FLOW_SEVERITY[kind], "file": sink["file"], "line": sink["line"],
+                "message": (f"Request input from {source['file']}:{source['line']} reaches a "
+                            f"{_PHP_FLOW_LABEL[kind]} sink without passing a recognized sanitizer."),
+                "tool": "joern", "version": version, "trace": steps})
+            if len(findings) >= MAX_PHP_FLOWS:
+                break
+    return findings
+
+
+def _run_php_flows(joern: str, workdir: str, cpg_file: str, php_files: list[str], version: str,
+                   deadline: float, findings: list[dict[str, Any]]) -> str | None:
+    """Run the PHP request-to-sink query on a built CPG; append findings; return an error or None."""
+    script_path = os.path.join(workdir, "php-flows.sc")
+    output_path = os.path.join(workdir, "php-flows.tsv")
+    with open(script_path, "w", encoding="utf-8") as script_file:
+        script_file.write(_PHP_FLOW_SCRIPT)
+    remaining = max(1, min(90, int(deadline - time.monotonic())))
+    try:
+        queried = subprocess.run([joern, "--script", script_path, "--param", "cpgFile=" + cpg_file,
+                                  "--param", "outFile=" + output_path], cwd=workdir,
+                                 env={"PATH": os.environ.get("PATH", ""), "HOME": workdir, "LANG": "C.UTF-8",
+                                      "JAVA_TOOL_OPTIONS": "-Xms128m -Xmx2g -XX:MaxMetaspaceSize=768m"},
+                                 stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=remaining,
+                                 check=False, preexec_fn=_limit_analyzer_process if resource is not None else None)
+    except subprocess.TimeoutExpired:
+        return "php data-flow query exceeded the Joern execution limit"
+    except (OSError, subprocess.SubprocessError):
+        return "php data-flow query could not start"
+    if queried.returncode != 0 or not os.path.isfile(output_path):
+        return "php data-flow query failed"
+    if os.path.getsize(output_path) > 4_000_000:
+        return "php data-flow query output exceeded the limit"
+    findings.extend(_php_flow_findings(output_path, php_files, version))
+    return None
+
+
 def run_joern(settings: dict[str, Any], archive_data: bytes, files: list[str], languages: dict[str, int]) -> dict[str, Any]:
     """Build bounded Joern CPGs and report dynamic-execution call signals."""
     result = {"name": "joern", "version": "unknown", "status": "unavailable",
@@ -623,10 +738,12 @@ def run_joern(settings: dict[str, Any], archive_data: bytes, files: list[str], l
         result["reason"] = "No detected source language has an installed Joern frontend mapping."
         return result
     try:
+        # `joern --version` opens the shell and prints a banner; read its "Version: x" line.
         version = subprocess.run([joern, "--version"], stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
-                                 timeout=8, check=False, env={"PATH": os.environ.get("PATH", "")})
-        result["version"] = (version.stdout.decode("utf-8", "replace").strip().splitlines()[-1][:80]
-                             if version.stdout and version.returncode == 0 else "unknown")
+                                 stdin=subprocess.DEVNULL, timeout=30, check=False,
+                                 env={"PATH": os.environ.get("PATH", ""), "HOME": tempfile.gettempdir()})
+        found = re.search(r"Version:\s*([0-9][0-9A-Za-z.+-]*)", version.stdout.decode("utf-8", "replace"))
+        result["version"] = found.group(1)[:80] if found else "unknown"
     except (OSError, subprocess.TimeoutExpired):
         result["version"] = "unknown"
     findings: list[dict[str, Any]] = []
@@ -656,7 +773,7 @@ def run_joern(settings: dict[str, Any], archive_data: bytes, files: list[str], l
   importCpg(cpgFile)
   def enc(value: String): String = java.util.Base64.getEncoder.encodeToString(value.getBytes("UTF-8"))
   cpg.call.name("(?i)(eval|exec|system|popen|passthru|shell_exec|spawn|processbuilder)").take(500).map { call =>
-    List(call.name, call.filename, call.lineNumber.getOrElse(0).toString)
+    List(call.name, call.file.name.headOption.getOrElse(""), call.lineNumber.getOrElse(0).toString)
       .map(value => enc(Option(value).getOrElse(""))).mkString("\t")
   }.l #> outFile
 }
@@ -728,6 +845,11 @@ def run_joern(settings: dict[str, Any], archive_data: bytes, files: list[str], l
                                              "severity": "warning", "file": matched_file,
                                              "line": line_number, "message": "Dynamic or shell execution call requires review: " + name[:80],
                                              "tool": "joern", "version": result["version"]})
+                if language == "php":
+                    flow_error = _run_php_flows(joern, workdir, cpg_file, file_languages[language],
+                                                result["version"], deadline, findings)
+                    if flow_error:
+                        failures.append(flow_error)
                 languages_completed.append(language)
                 try:
                     os.remove(output_path)

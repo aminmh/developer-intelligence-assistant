@@ -102,6 +102,13 @@ RUN set -eux; \
     scip-typescript --version; \
     scip-python --version
 
+# PHP CLI for Joern's PHP frontend (php2cpg runs PHP to parse) and Rector. Distribution
+# packages only; no Composer, so no project dependency is ever installed.
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends php-cli php-mbstring php-xml \
+    && rm -rf /var/lib/apt/lists/* \
+    && php --version
+
 # App code last, so code changes rebuild only these layers, not the downloads above.
 COPY Python-Service/app/code_quality/__init__.py /app/code_quality/__init__.py
 COPY Python-Service/app/code_quality/service.py /app/code_quality/service.py

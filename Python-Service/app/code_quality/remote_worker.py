@@ -269,6 +269,20 @@ def _unavailable(name: str, reason: str, status: str = "unavailable") -> dict[st
             "scanned_files": 0, "skipped_files": 0, "reason": reason[:300]}
 
 
+def _validate_trace(trace: Any, selected_files: set[str], line_counts: dict[str, int]) -> list[dict[str, Any]]:
+    """A data-flow path: at most 16 steps, each inside the revision's files and lines."""
+    if not isinstance(trace, list) or not 2 <= len(trace) <= 16:
+        raise RemoteWorkerError("The analyzer worker returned a malformed data-flow trace.")
+    steps = []
+    for step in trace:
+        if (not isinstance(step, dict) or step.get("file") not in selected_files or type(step.get("line")) is not int
+                or not 1 <= step["line"] <= line_counts.get(step["file"], 0)
+                or not isinstance(step.get("code"), str) or len(step["code"]) > 160):
+            raise RemoteWorkerError("The analyzer worker returned a data-flow step outside the revision.")
+        steps.append({"file": step["file"], "line": step["line"], "code": step["code"]})
+    return steps
+
+
 def _validate_result(name: str, value: Any, selected_files: set[str],
                      line_counts: dict[str, int]) -> dict[str, Any]:
     if not isinstance(value, dict) or value.get("name") != name or value.get("status") not in _ALLOWED_STATUSES:
@@ -290,8 +304,11 @@ def _validate_result(name: str, value: Any, selected_files: set[str],
                 or len(finding["severity"]) > 24 or not isinstance(finding.get("version"), str)
                 or len(finding["version"]) > 80):
             raise RemoteWorkerError("The analyzer worker returned an out-of-revision finding.")
-        safe_findings.append({key: finding.get(key) for key in
-                              ("rule", "category", "severity", "file", "line", "message", "tool", "version")})
+        safe = {key: finding.get(key) for key in
+                ("rule", "category", "severity", "file", "line", "message", "tool", "version")}
+        if "trace" in finding:
+            safe["trace"] = _validate_trace(finding["trace"], selected_files, line_counts)
+        safe_findings.append(safe)
     result = {key: value.get(key) for key in
               ("name", "version", "status", "scanned_files", "skipped_files", "supported_languages",
                "unsupported_languages", "languages", "unresolved", "reason")}
