@@ -11,7 +11,7 @@ import BusinessRuleReviews from './code-quality/BusinessRuleReviews.vue';
 import ExternalAnalyzerSetup from './code-quality/ExternalAnalyzerSetup.vue';
 import { useUrlTab } from '../composables/useUrlTab';
 import type { UploadedFile } from '../types';
-import { assessmentRevisions, revisionKey, type ProjectRevision } from '../code-quality/projectRevisions';
+import { assessmentRevisions, isWorkingTreeRevision, revisionKey, type ProjectRevision } from '../code-quality/projectRevisions';
 
 const props = defineProps<{ files: UploadedFile[] }>();
 const emit = defineEmits<{ openKnowledgeBase: []; revisionRemoved: [] }>();
@@ -259,7 +259,7 @@ const loadProjectsAndPreferences = async () => {
     const preference = await preferenceResponse.json();
     if (preference.weights) { weights.value = preference.weights; savedWeights.value = { ...preference.weights }; }
     if (projects.value.length && !projects.value.some((project) => revisionKey(project) === selectedRevision.value)) {
-      const first = projects.value[0];
+      const first = projects.value.find((project) => !isWorkingTreeRevision(project)) ?? projects.value[0];
       selectedRevision.value = revisionKey(first);
     }
   } catch (cause: any) {
@@ -578,7 +578,8 @@ watch(selectedProject, () => {
 });
 watch(projects, (revisions) => {
   if (!revisions.some((project) => revisionKey(project) === selectedRevision.value)) {
-    selectedRevision.value = revisions.length ? revisionKey(revisions[0]) : '';
+    const first = revisions.find((project) => !isWorkingTreeRevision(project)) ?? revisions[0];
+    selectedRevision.value = first ? revisionKey(first) : '';
   }
 });
 watch(() => selectedProject.value?.project_id, (projectId) => loadProjectExclusions(projectId), { immediate: true });
@@ -600,8 +601,8 @@ onMounted(loadProjectsAndPreferences);
           <select id="quality-revision" v-model="selectedRevision" :disabled="loadingProjects || assessing || checkingIndex || !projects.length" class="min-w-0 flex-1 rounded-lg border border-slate-700 bg-slate-900 px-3 py-2.5 text-sm outline-none focus:border-indigo-400 focus:ring-2 focus:ring-indigo-400/20">
             <option v-if="loadingProjects" value="">Loading project revisions…</option>
             <option v-else-if="!projects.length" value="">No project revisions in Knowledge Base</option>
-            <option v-for="project in projects" :key="revisionKey(project)" :value="revisionKey(project)" :title="project.revision_id || project.commit_sha || 'Upload revision'">
-              {{ project.project_id }}
+            <option v-for="project in projects" :key="revisionKey(project)" :value="revisionKey(project)" :title="project.revision_id || project.commit_sha || 'Upload revision'" :disabled="isWorkingTreeRevision(project)">
+              {{ project.project_id }}{{ isWorkingTreeRevision(project) ? ' · working tree (can’t assess uncommitted edits)' : '' }}
             </option>
           </select>
           <button v-if="selectedProject?.revision_id" type="button" class="shrink-0 rounded-lg border border-rose-500/40 px-3 py-2 text-sm text-rose-300 hover:bg-rose-500/10 disabled:opacity-50" :disabled="assessing || deletingRevision" @click="revisionDeleteTarget = selectedProject; revisionDeleteError = ''">Remove revision</button>

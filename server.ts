@@ -11,6 +11,7 @@ import { UploadedFile } from './src/types';
 import { openDocument, complete as completeDockerfile, format as formatDockerfile, closeSession as closeDockerfileSession, closeAllSessions, bridgeStatus } from './src/server/dockerfileLanguageBridge';
 import { installOidcAuth, authRoleFor, authIsBootstrapAdmin, authCanRunRuntimeSetup } from './src/server/oidcAuth';
 import { registerCodeQualityRoutes } from './src/server/codeQualityRoutes';
+import { registerWorkingTreeGrants, registerWorkingTreeUpload, type WorkingTreeDependencies } from './src/server/workingTreeRoutes';
 import { registerSchemaDraftRoutes } from './src/server/schemaDraftRoutes';
 
 dotenv.config();
@@ -507,7 +508,18 @@ async function startServer() {
     next();
   });
 
+  const workingTree: WorkingTreeDependencies = {
+    pythonApiUrl: PYTHON_API_URL,
+    internalSecret: INTERNAL_SECRET,
+    webOrigin: process.env.WEB_ORIGIN || 'http://localhost:3000',
+    roleFor: (user, projectId) => authRoleFor(user, projectId),
+    isGlobalAdmin: (user) => authIsBootstrapAdmin(user),
+    getUser: (res) => (res.locals as any).authUser,
+  };
+  // The desktop helper's upload authenticates with its grant, so it is registered before sessions.
+  registerWorkingTreeUpload(app, workingTree);
   installOidcAuth(app);
+  registerWorkingTreeGrants(app, workingTree);
   registerSchemaDraftRoutes(app, {
     apiUrl: PYTHON_API_URL,
     internalSecret: INTERNAL_SECRET,

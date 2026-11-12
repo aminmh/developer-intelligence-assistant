@@ -18,7 +18,7 @@ import {
 } from 'lucide-vue-next';
 import type { RAGConfig, SearchMatch, LLMUsage, ContextUsage, ChatBusinessRuleSource, ToolCallView, ToolAvailability, CitationPreview, ApprovalView } from './types';
 import { mergeToolCalls } from './utils/agentTools';
-import { describeRevision, parseRevisionOption, revisionOptionValue, type ChatProjectRevisions, type RevisionView } from './utils/chatRevisions';
+import { describeRevision, parseRevisionOption, relativeAge, revisionOptionValue, type ChatProjectRevisions, type RevisionView } from './utils/chatRevisions';
 import { makeRequest } from './ui/makeRequest';
 import { useProjectFiles } from './composables/useProjectFiles';
 import { validateUploadIdentity } from './services/uploadIdentity';
@@ -60,6 +60,12 @@ const remoteSourceSaving = ref(false);
 // Revision retention: keep the latest N ready revisions plus pinned ones; null = not loaded.
 const retention = ref<{ projectId: string; keep_latest: number; pinned: string[] } | null>(null);
 const retentionSaving = ref(false);
+// Working-tree sync grants: a desktop helper uploads a chosen folder for this project.
+type WorkingTreeGrant = { grant_id: string; user: { sub: string; email?: string; name?: string };
+  created_at: string; revoked_at: string | null; last_upload_at: string | null; last_status: string | null };
+const workingTreeGrants = ref<WorkingTreeGrant[]>([]);
+const workingTreeBusy = ref(false);
+const RUNTIME_HELPER_URL = 'http://127.0.0.1:47831';
 const sidebarCollapsed = ref(false);
 const appearance = useAppearancePreferences();
 let handlingHistoryNavigation = false;
@@ -102,7 +108,55 @@ const loadProjectMembers = async () => {
   if (!uploadProjectId.value.trim()) return;
   const response = await makeRequest(`/api/auth/projects/${encodeURIComponent(uploadProjectId.value.trim())}/members`);
   if (response.ok) members.value = (await response.json()).members ?? [];
-  await Promise.all([loadRemoteSource(), loadRetention(), fetchChatRevisions()]);
+  await Promise.all([loadRemoteSource(), loadRetention(), fetchChatRevisions(), loadWorkingTreeGrants()]);
+};
+const loadWorkingTreeGrants = async () => {
+  const projectId = uploadProjectId.value.trim();
+  workingTreeGrants.value = [];
+  if (!projectId) return;
+  const response = await makeRequest(`/api/projects/${encodeURIComponent(projectId)}/working-tree/grants`);
+  if (response.ok && uploadProjectId.value.trim() === projectId) {
+    workingTreeGrants.value = ((await response.json()).grants ?? []).filter((grant: WorkingTreeGrant) => !grant.revoked_at);
+  }
+};
+const revokeWorkingTreeGrant = async (projectId: string, grantId: string) => {
+  const response = await makeRequest(`/api/projects/${encodeURIComponent(projectId)}/working-tree/grants/${grantId}`, { method: 'DELETE' });
+  if (!response.ok) triggerToast((await response.json().catch(() => ({}))).detail || 'The grant could not be revoked.', false);
+  await loadWorkingTreeGrants();
+};
+/** Grant sync for this project; the desktop helper asks the user to choose and approve the folder. */
+const syncWorkingTree = async () => {
+  const projectId = uploadProjectId.value.trim();
+  if (!projectId || workingTreeBusy.value) return;
+  workingTreeBusy.value = true;
+  let grantId = '';
+  try {
+    const response = await makeRequest(`/api/projects/${encodeURIComponent(projectId)}/working-tree/grants`, { method: 'POST' });
+    const data = await response.json().catch(() => ({}));
+    if (!response.ok) throw new Error(data.detail || 'The working-tree grant could not be created.');
+    grantId = data.grant.grant_id;
+    let helper: Response;
+    try {
+      helper = await fetch(`${RUNTIME_HELPER_URL}/working-tree/grant`, {
+        method: 'POST', cache: 'no-store',
+        headers: { Authorization: `Bearer ${data.helper_authorization}`, 'Content-Type': 'application/json' },
+        body: JSON.stringify({ project_id: projectId, grant_id: grantId, grant_token: data.grant.token }),
+      });
+    } catch {
+      throw new Error('The desktop helper is not running. Start it with `python3 api/telemetry-dev/runtime_setup.py helper`, then retry.');
+    }
+    const result = await helper.json().catch(() => ({}));
+    if (!helper.ok) throw new Error(result.detail || 'The desktop helper did not accept the folder.');
+    grantId = '';
+    triggerToast(`Syncing ${result.folder} to ${projectId}. Edits are indexed a minute after they settle.`, true);
+  } catch (cause: any) {
+    triggerToast(cause?.message || 'Working-tree sync could not start.', false);
+  } finally {
+    // A grant the helper never stored is useless; revoke it rather than leave it active.
+    if (grantId) await revokeWorkingTreeGrant(projectId, grantId).catch(() => undefined);
+    workingTreeBusy.value = false;
+    await loadWorkingTreeGrants();
+  }
 };
 const loadRetention = async () => {
   const projectId = uploadProjectId.value.trim();
@@ -1346,6 +1400,24 @@ onUnmounted(() => window.removeEventListener('popstate', syncTabFromHistory));
             {{ describeRevision(revision) }}
             <span class="text-slate-500">{{ revision.revision_id.slice(4, 10) }}</span>
           </label>
+        </div>
+        <div class="flex w-full flex-wrap items-center gap-2 text-[10px] text-slate-300">
+          <button
+            type="button"
+            class="rounded border border-slate-700 px-2 py-1 hover:border-indigo-400 disabled:opacity-50"
+            :disabled="workingTreeBusy || !uploadProjectId.trim()"
+            title="The desktop helper asks you to choose a folder and approve it, then indexes your uncommitted edits a minute after they settle. Chat can use them; Code Quality can't."
+            @click="syncWorkingTree"
+          >{{ workingTreeBusy ? 'Waiting for the desktop helper…' : 'Sync a working-tree folder…' }}</button>
+          <span v-if="!workingTreeGrants.length" class="text-slate-500">No folder syncs to this project.</span>
+          <span
+            v-for="grant in workingTreeGrants" :key="grant.grant_id"
+            class="flex items-center gap-1 rounded border border-slate-800 px-2 py-1"
+          >
+            Folder sync by {{ grant.user.email || grant.user.name || grant.user.sub }}
+            <span class="text-slate-500">· {{ grant.last_upload_at ? `last upload ${relativeAge(grant.last_upload_at)} (${grant.last_status})` : 'no upload yet' }}</span>
+            <button type="button" class="ml-1 text-rose-400" title="Revoke: the helper stops uploading this folder" @click="revokeWorkingTreeGrant(uploadProjectId.trim(), grant.grant_id)">Revoke</button>
+          </span>
         </div>
       </div>
       <header class="app-header h-16 px-6 flex items-center justify-between select-none backdrop-blur">

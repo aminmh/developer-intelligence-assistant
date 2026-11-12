@@ -447,7 +447,8 @@ export function registerCodeQualityRoutes(app: Express, dependencies: RouteDepen
       const projects = data.filter((item: any) => typeof item.project_id === 'string' && typeof item.revision_id === 'string'
         && dependencies.canAccessProject(user, item.project_id))
         .map((item: any) => ({ project_id: item.project_id, revision_id: item.revision_id,
-          commit_sha: item.commit_sha, source_ref: item.source_ref, state: item.state, updated_at: item.updated_at }));
+          commit_sha: item.commit_sha, source_ref: item.source_ref, state: item.state, updated_at: item.updated_at,
+          dirty: item.dirty === true }));
       return res.json({ projects });
     } catch {
       return res.status(502).json({ detail: 'Indexed project inventory is unavailable.' });

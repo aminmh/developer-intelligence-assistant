@@ -7,7 +7,12 @@ export type ProjectRevision = {
   source_ref?: string;
   state?: string;
   updated_at?: string;
+  /** A working-tree revision (uncommitted edits): listed but never assessable. */
+  dirty?: boolean;
 };
+
+export const isWorkingTreeRevision = (revision: ProjectRevision) =>
+  revision.dirty === true || (revision.source_ref?.startsWith('wt_') ?? false);
 
 export const revisionKey = (revision: ProjectRevision) => `${revision.project_id}:${revision.commit_sha || revision.source_ref || revision.revision_id}`;
 
