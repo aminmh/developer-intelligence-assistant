@@ -1937,6 +1937,46 @@ async function startServer() {
     }
   });
 
+  // Per-project revision retention (sync plan phase 5): keep the latest N ready
+  // revisions plus pinned ones. Members can read it; administrators change it.
+  const retentionPath = (projectId: string) =>
+    `${PYTHON_API_URL}/projects/${encodeURIComponent(projectId)}/retention`;
+
+  app.get('/api/auth/projects/:projectId/retention', async (req, res) => {
+    try {
+      const user = (res.locals as any).authUser;
+      if (!authIsBootstrapAdmin(user) && !authRoleFor(user, req.params.projectId)) {
+        return res.status(403).json({ detail: 'Project access denied.' });
+      }
+      const pyRes = await fetch(retentionPath(req.params.projectId), { headers: { 'X-Internal-Secret': INTERNAL_SECRET } });
+      const data = await pyRes.json().catch(() => ({ detail: 'The setting is unavailable.' }));
+      return res.status(pyRes.status).json(data);
+    } catch {
+      return res.status(502).json({ detail: 'The setting is unavailable.' });
+    }
+  });
+
+  app.put('/api/auth/projects/:projectId/retention', async (req, res) => {
+    try {
+      const user = (res.locals as any).authUser;
+      if (!authIsBootstrapAdmin(user) && authRoleFor(user, req.params.projectId) !== 'admin') {
+        return res.status(403).json({ detail: 'Project administrator access is required to change this setting.' });
+      }
+      const change: Record<string, unknown> = {};
+      if (req.body?.keep_latest !== undefined) change.keep_latest = req.body.keep_latest;
+      if (req.body?.pinned !== undefined) change.pinned = req.body.pinned;
+      const pyRes = await fetch(retentionPath(req.params.projectId), {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json', 'X-Internal-Secret': INTERNAL_SECRET },
+        body: JSON.stringify(change),
+      });
+      const data = await pyRes.json().catch(() => ({ detail: 'The setting could not be saved.' }));
+      return res.status(pyRes.status).json(data);
+    } catch {
+      return res.status(502).json({ detail: 'The setting could not be saved.' });
+    }
+  });
+
   // Approve or deny a paused agent tool call (ADR paused-agent-runs-resume-from-
   // checkpoint-on-new-stream). The response is the continued answer as SSE.
   // Only the user who started the chat may decide (enforced in Python), and on a

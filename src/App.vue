@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { defineAsyncComponent, ref, watch, onMounted, onUnmounted } from 'vue';
+import { computed, defineAsyncComponent, ref, watch, onMounted, onUnmounted } from 'vue';
 import { 
   FileText, 
   Settings, 
@@ -18,7 +18,7 @@ import {
 } from 'lucide-vue-next';
 import type { RAGConfig, SearchMatch, LLMUsage, ContextUsage, ChatBusinessRuleSource, ToolCallView, ToolAvailability, CitationPreview, ApprovalView } from './types';
 import { mergeToolCalls } from './utils/agentTools';
-import { parseRevisionOption, revisionOptionValue, type ChatProjectRevisions, type RevisionView } from './utils/chatRevisions';
+import { describeRevision, parseRevisionOption, revisionOptionValue, type ChatProjectRevisions, type RevisionView } from './utils/chatRevisions';
 import { makeRequest } from './ui/makeRequest';
 import { useProjectFiles } from './composables/useProjectFiles';
 import { validateUploadIdentity } from './services/uploadIdentity';
@@ -57,6 +57,9 @@ const members = ref<Array<{ subject: string; role: 'viewer' | 'operator' | 'admi
 // Per-project consent for sending source to the external model; null = not loaded.
 const remoteSourceAllowed = ref<boolean | null>(null);
 const remoteSourceSaving = ref(false);
+// Revision retention: keep the latest N ready revisions plus pinned ones; null = not loaded.
+const retention = ref<{ projectId: string; keep_latest: number; pinned: string[] } | null>(null);
+const retentionSaving = ref(false);
 const sidebarCollapsed = ref(false);
 const appearance = useAppearancePreferences();
 let handlingHistoryNavigation = false;
@@ -99,8 +102,48 @@ const loadProjectMembers = async () => {
   if (!uploadProjectId.value.trim()) return;
   const response = await makeRequest(`/api/auth/projects/${encodeURIComponent(uploadProjectId.value.trim())}/members`);
   if (response.ok) members.value = (await response.json()).members ?? [];
-  await loadRemoteSource();
+  await Promise.all([loadRemoteSource(), loadRetention(), fetchChatRevisions()]);
 };
+const loadRetention = async () => {
+  const projectId = uploadProjectId.value.trim();
+  retention.value = null;
+  if (!projectId) return;
+  const response = await makeRequest(`/api/auth/projects/${encodeURIComponent(projectId)}/retention`);
+  if (!response.ok || uploadProjectId.value.trim() !== projectId) return;
+  const data = await response.json();
+  retention.value = { projectId, keep_latest: data.keep_latest, pinned: Array.isArray(data.pinned) ? data.pinned : [] };
+};
+const saveRetention = async (change: { keep_latest?: number; pinned?: string[] }) => {
+  // Saves to the project the panel loaded, even if the project field was edited since.
+  const projectId = retention.value?.projectId;
+  if (!projectId || retentionSaving.value) return;
+  retentionSaving.value = true;
+  try {
+    const response = await makeRequest(`/api/auth/projects/${encodeURIComponent(projectId)}/retention`, {
+      method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(change),
+    });
+    const data = await response.json().catch(() => ({}));
+    if (response.ok) retention.value = { projectId, keep_latest: data.keep_latest, pinned: data.pinned ?? [] };
+    else triggerToast(data.detail || 'The setting could not be saved.', false);
+  } finally {
+    retentionSaving.value = false;
+  }
+};
+const changeKeepLatest = (event: Event) => {
+  const value = Number((event.target as HTMLInputElement).value);
+  if (Number.isInteger(value) && value >= 1 && value <= 100 && value !== retention.value?.keep_latest) {
+    void saveRetention({ keep_latest: value });
+  }
+};
+const toggleRevisionPin = (revisionId: string) => {
+  if (!retention.value) return;
+  const pinned = new Set(retention.value.pinned);
+  if (pinned.has(revisionId)) pinned.delete(revisionId);
+  else pinned.add(revisionId);
+  void saveRetention({ pinned: [...pinned] });
+};
+const retentionRevisions = computed(() =>
+  chatRevisions.value.find((project) => project.project_id === retention.value?.projectId)?.revisions ?? []);
 const loadRemoteSource = async () => {
   const projectId = uploadProjectId.value.trim();
   remoteSourceAllowed.value = null;
@@ -1272,6 +1315,38 @@ onUnmounted(() => window.removeEventListener('popstate', syncTabFromHistory));
           <span v-if="remoteSourceAllowed === null" class="text-slate-500">· loading</span>
           <span v-else-if="!remoteSourceAllowed" class="text-amber-300/80">· chat is blocked for this project</span>
         </label>
+        <div class="flex w-full flex-wrap items-center gap-2 text-[10px] text-slate-300">
+          <label
+            class="flex items-center gap-2 rounded border border-slate-800 px-2 py-1"
+            title="Older ready revisions are removed automatically. The latest revision, pinned ones, ones with Code Quality reports, a running deployment, or Git's last sync are always kept, so more may remain."
+          >
+            Keep latest
+            <input
+              type="number" min="1" max="100"
+              class="w-12 rounded border border-slate-800 bg-slate-950 px-1 py-0.5 text-xs text-slate-200"
+              :value="retention?.keep_latest ?? ''"
+              :disabled="!retention || retentionSaving"
+              @change="changeKeepLatest"
+            />
+            revisions
+            <span class="text-slate-500">· a minimum: protected revisions also stay</span>
+            <span v-if="!retention" class="text-slate-500">· loading</span>
+          </label>
+          <span v-if="retention && retentionRevisions.length" class="text-slate-500">Keep always:</span>
+          <label
+            v-for="revision in retentionRevisions" :key="revision.revision_id"
+            class="flex items-center gap-1 rounded border border-slate-800 px-2 py-1"
+          >
+            <input
+              type="checkbox" class="h-3 w-3 accent-indigo-400"
+              :checked="retention?.pinned.includes(revision.revision_id)"
+              :disabled="!retention || retentionSaving"
+              @change="toggleRevisionPin(revision.revision_id)"
+            />
+            {{ describeRevision(revision) }}
+            <span class="text-slate-500">{{ revision.revision_id.slice(4, 10) }}</span>
+          </label>
+        </div>
       </div>
       <header class="app-header h-16 px-6 flex items-center justify-between select-none backdrop-blur">
         <div class="flex items-center gap-2">
