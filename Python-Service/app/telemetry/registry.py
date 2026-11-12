@@ -185,6 +185,17 @@ class SnapshotRegistry:
                     ORDER BY created_at DESC, rowid DESC LIMIT 1""", (project_id, *kinds)).fetchone()
         return self._row_result(row) if row else None
 
+    def ready_revisions_by_project(self, per_project: int = 10) -> dict[str, list[dict]]:
+        """Each project's ready revisions, newest first, for the chat revision picker."""
+        with self._connect() as db:
+            rows = db.execute("SELECT * FROM snapshots WHERE state='ready' ORDER BY project_id, created_at DESC, rowid DESC").fetchall()
+        result: dict[str, list[dict]] = {}
+        for row in rows:
+            items = result.setdefault(row["project_id"], [])
+            if len(items) < per_project:
+                items.append(self._row_result(row))
+        return result
+
     def project_revisions(self, project_id: str) -> list[dict]:
         """All revisions of a project, newest first."""
         validate_project_id(project_id)

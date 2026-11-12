@@ -32,6 +32,12 @@ def read_citation(body: dict) -> dict[str, Any]:
         raise HTTPException(400, "line must be a number") from None
     if not isinstance(path, str) or not path:
         raise HTTPException(400, "path is required")
+    from rag.revision_source import RevisionUnavailable, resolve_revision
+
+    try:
+        body = resolve_revision(body)
+    except RevisionUnavailable as exc:
+        raise HTTPException(409, str(exc)) from exc
     filename = str(body.get("filename") or "")
     context = ToolContext(
         workflow="chat",

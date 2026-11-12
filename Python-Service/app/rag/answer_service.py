@@ -75,6 +75,7 @@ class AnswerService:
         response["business_rules"] = rule_sources
         response["tool_calls"] = generated.get("tool_calls") or []
         response["tools"] = tools
+        response["revision"] = body.get("resolved_revision")
         return response
 
     def stream(self, body: dict, trace_id: str | None = None, owner: str | None = None) -> Iterator[str]:
@@ -113,6 +114,8 @@ class AnswerService:
                     event["matches"] = self._matches(results, body.get("runtime_symbol_metrics"))
                     event["business_rules"] = rule_sources
                     event["tools"] = tools
+                    # The revision that answered, so the chat can label it and pin follow-ups to it.
+                    event["revision"] = body.get("resolved_revision")
                 yield f"data: {json.dumps(event)}\n\n"
         except Exception as exc:  # noqa: BLE001 — preserve SSE error contract
             self._report_stream_error(exc)
@@ -126,7 +129,7 @@ class AnswerService:
         """
         return {"owner": owner, "trace_id": trace_id, "extras": {
             "matches": self._matches(results, body.get("runtime_symbol_metrics")),
-            "business_rules": rule_sources, "tools": tools}}
+            "business_rules": rule_sources, "tools": tools, "revision": body.get("resolved_revision")}}
 
     def _consent_block(self, body: dict) -> dict | None:
         """A finished, model-free answer when the project forbids external-model use, else None.

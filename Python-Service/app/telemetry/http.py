@@ -18,6 +18,7 @@ router = APIRouter(prefix="/telemetry/projects", tags=["Telemetry snapshots"])
 host_router = APIRouter(prefix="/telemetry/host", tags=["Telemetry deployments"])
 runtime_router = APIRouter(prefix="/telemetry/runtime", tags=["Runtime telemetry"])
 git_router = APIRouter(prefix="/telemetry/git", tags=["Git source synchronization"])
+chat_router = APIRouter(prefix="/telemetry/chat", tags=["Chat revisions"])
 MAX_HOST_REPORT_BYTES = 2 * 1024 * 1024
 MAX_PROFILE_BATCH_BYTES = 2 * 1024 * 1024
 MAX_RUNTIME_SETUP_BYTES = 100 * 1024
@@ -603,3 +604,14 @@ async def report_deployments(request: Request) -> dict:
     if event_id is not None:
         registry.mark_event(host_id, event_id)
     return {"accepted": True, "containers": len(clean), "queued": queued}
+
+
+@chat_router.get("/revisions")
+def chat_revisions(request: Request) -> dict:
+    """Ready revisions per project, newest first, for the chat picker; the web server filters by access."""
+    authorize_internal(request)
+    from rag.revision_source import revision_label
+
+    return {"projects": [{"project_id": project_id,
+                          "revisions": [revision_label(row, "pinned") for row in rows]}
+                         for project_id, rows in sorted(get_registry().ready_revisions_by_project().items())]}

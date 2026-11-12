@@ -269,11 +269,13 @@ from telemetry.http import (
     host_router as telemetry_host_router,
     runtime_router as telemetry_runtime_router,
     git_router as telemetry_git_router,
+    chat_router as telemetry_chat_router,
 )
 app.include_router(telemetry_router)
 app.include_router(telemetry_host_router)
 app.include_router(telemetry_runtime_router)
 app.include_router(telemetry_git_router)
+app.include_router(telemetry_chat_router)
 
 from inspection.http import router as inspection_router  # noqa: E402 — after app exists
 from routers.developer_logs import router as developer_logs_router  # noqa: E402 — after app exists
@@ -1971,8 +1973,13 @@ def answer_prompt(
     x_internal_secret: Annotated[str | None, Header(alias="X-Internal-Secret")] = None,
     x_user_id: Annotated[str | None, Header(alias="X-User-Id")] = None,
 ):
+    from rag.revision_source import RevisionUnavailable, resolve_revision
+
     try:
+        body = resolve_revision(body)
         return _answer_service().answer(body, x_rag_trace_id, owner=_request_owner(x_internal_secret, x_user_id))
+    except RevisionUnavailable as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
     except InvalidAnswerRequest as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
@@ -1999,8 +2006,14 @@ def answer_stream(
 ):
     if not isinstance(body.get("query"), str) or not body.get("query"):
         raise HTTPException(status_code=400, detail="Missing or invalid query")
+    from rag.revision_source import RevisionUnavailable, resolve_revision
+
     try:
+        # Resolved before streaming starts, so an unavailable revision is a clean 409, not a broken stream.
+        body = resolve_revision(body)
         stream = _answer_service().stream(body, x_rag_trace_id, owner=_request_owner(x_internal_secret, x_user_id))
+    except RevisionUnavailable as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
     except InvalidAnswerRequest as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     return StreamingResponse(
