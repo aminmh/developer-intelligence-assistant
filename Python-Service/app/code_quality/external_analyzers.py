@@ -102,6 +102,16 @@ class ExternalAnalyzerError(ValueError):
     """Safe configuration error for optional external analyzers."""
 
 
+def _java_options() -> str:
+    """JVM options for Joern. Joern's graph storage loads a native zstd library from java.io.tmpdir,
+    which fails on the worker's noexec /tmp; ANALYZER_JAVA_TMPDIR names a separate tmpfs that allows it."""
+    options = "-Xms128m -Xmx2g -XX:MaxMetaspaceSize=768m"
+    tmpdir = os.environ.get("ANALYZER_JAVA_TMPDIR", "").strip()
+    if tmpdir and os.path.isdir(tmpdir):
+        options += " -Djava.io.tmpdir=" + tmpdir
+    return options
+
+
 def _limit_analyzer_process() -> None:
     if resource is None:
         return
@@ -262,6 +272,8 @@ def capability_snapshot(settings: dict[str, Any]) -> dict[str, Any]:
                                                        "reason": worker_reason}),
         "joern": capabilities.get("joern", {"enabled": False, "status": worker_status,
                                                "reason": worker_reason}),
+        "scip": capabilities.get("scip", {"enabled": False, "status": worker_status,
+                                             "reason": worker_reason}),
     }
 
 
@@ -696,7 +708,7 @@ def _run_php_flows(joern: str, workdir: str, cpg_file: str, php_files: list[str]
         queried = subprocess.run([joern, "--script", script_path, "--param", "cpgFile=" + cpg_file,
                                   "--param", "outFile=" + output_path], cwd=workdir,
                                  env={"PATH": os.environ.get("PATH", ""), "HOME": workdir, "LANG": "C.UTF-8",
-                                      "JAVA_TOOL_OPTIONS": "-Xms128m -Xmx2g -XX:MaxMetaspaceSize=768m"},
+                                      "JAVA_TOOL_OPTIONS": _java_options()},
                                  stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=remaining,
                                  check=False, preexec_fn=_limit_analyzer_process if resource is not None else None)
     except subprocess.TimeoutExpired:
@@ -805,7 +817,7 @@ def run_joern(settings: dict[str, Any], archive_data: bytes, files: list[str], l
                 parsed = subprocess.run([parser, language_root, "--language", frontend, "--output", cpg_file],
                                         cwd=workdir, env={"PATH": os.environ.get("PATH", ""),
                                                           "HOME": workdir, "LANG": "C.UTF-8",
-                                                          "JAVA_TOOL_OPTIONS": "-Xms128m -Xmx2g -XX:MaxMetaspaceSize=768m"},
+                                                          "JAVA_TOOL_OPTIONS": _java_options()},
                                         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
                                         timeout=remaining, check=False,
                                         preexec_fn=_limit_analyzer_process if resource is not None else None)
@@ -817,7 +829,7 @@ def run_joern(settings: dict[str, Any], archive_data: bytes, files: list[str], l
                                           "--param", "outFile=" + output_path], cwd=workdir,
                                          env={"PATH": os.environ.get("PATH", ""), "HOME": workdir,
                                               "LANG": "C.UTF-8",
-                                              "JAVA_TOOL_OPTIONS": "-Xms128m -Xmx2g -XX:MaxMetaspaceSize=768m"}, stdout=subprocess.DEVNULL,
+                                              "JAVA_TOOL_OPTIONS": _java_options()}, stdout=subprocess.DEVNULL,
                                          stderr=subprocess.DEVNULL, timeout=remaining, check=False,
                                          preexec_fn=_limit_analyzer_process if resource is not None else None)
                 if queried.returncode != 0 or not os.path.isfile(output_path):

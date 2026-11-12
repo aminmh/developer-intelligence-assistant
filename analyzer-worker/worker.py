@@ -212,16 +212,27 @@ async def capabilities() -> dict[str, Any]:
                   "status": "ready" if joern and parser else "unavailable",
                   "reason": None if joern and parser else "Pinned Joern commands are not installed."},
     }
+    # Both CLIs print logs or a banner around their version; keep only the version number.
+    patterns = {"sonarqube": r"SonarScanner CLI ([0-9][0-9.]*)", "joern": r"Version:\s*([0-9][0-9A-Za-z.+-]*)"}
     for name, executable in (("sonarqube", scanner), ("joern", joern)):
         if executable:
             try:
-                version = subprocess.run([executable, "--version"], capture_output=True,
-                                          check=False, timeout=8,
-                                          env={"PATH": os.environ.get("PATH", "")})
-                output = (version.stdout + version.stderr).decode("utf-8", "replace")[:512].strip()
-                snapshot[name]["version"] = output or "unknown"
+                version = subprocess.run([executable, "--version"], capture_output=True, stdin=subprocess.DEVNULL,
+                                          check=False, timeout=30,
+                                          env={"PATH": os.environ.get("PATH", ""), "HOME": "/tmp"})
+                output = (version.stdout + version.stderr).decode("utf-8", "replace")
+                found = re.search(patterns[name], output)
+                snapshot[name]["version"] = found.group(1)[:80] if found else "unknown"
             except (OSError, subprocess.SubprocessError):
                 snapshot[name]["version"] = "unknown"
+    from code_quality.scip_index import INDEXERS, version as tool_version
+    scip_tools = {"scip": tool_version("scip"), **{binary: tool_version(binary) for binary, _ in INDEXERS.values()}}
+    missing = sorted(name for name, found in scip_tools.items() if not found)
+    snapshot["scip"] = {"enabled": True, "analyzer_available": not missing,
+                        "status": "ready" if not missing else "unavailable",
+                        "reason": None if not missing else "Not installed: " + ", ".join(missing),
+                        "languages": ["typescript", "javascript", "python"],
+                        "versions": {name: found for name, found in scip_tools.items() if found}}
     return {"schema_version": 1, "analyzers": snapshot}
 
 

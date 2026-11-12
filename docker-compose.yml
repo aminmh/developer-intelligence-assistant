@@ -130,6 +130,8 @@ services:
       ANALYZER_WORKER_TLS_KEY_FILE: /run/analyzer-tls/worker.key
       ANALYZER_WORKER_API_CA_FILE: /run/analyzer-tls/api-ca.crt
       ANALYZER_ALLOWED_SONAR_HOSTS: ${ANALYZER_ALLOWED_SONAR_HOSTS:-sonarqube}
+      # Joern loads a native zstd library from Java's temp dir; /tmp stays noexec.
+      ANALYZER_JAVA_TMPDIR: /var/tmp/analyzer-java
     ports:
       - "${ANALYZER_WORKER_BIND:-127.0.0.1}:${ANALYZER_WORKER_PORT:-9443}:9443"
     volumes:
@@ -138,6 +140,7 @@ services:
       - "${ANALYZER_CERT_GID:-10001}"
     tmpfs:
       - /tmp:rw,noexec,nosuid,size=2g,mode=1777
+      - /var/tmp/analyzer-java:rw,exec,nosuid,size=1g,mode=1777
     healthcheck:
       test: ["CMD", "python", "-c", "from pathlib import Path; raise SystemExit(0 if b'/opt/analyzer-worker/worker.py' in Path('/proc/1/cmdline').read_bytes() else 1)"]
       interval: 20s

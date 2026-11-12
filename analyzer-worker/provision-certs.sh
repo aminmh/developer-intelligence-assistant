@@ -39,13 +39,13 @@ openssl req -x509 -newkey rsa:3072 -nodes -sha256 -days 365 \
 
 san_list=""
 IFS=',' read -r -a dns_names <<< "$worker_dns_names"
-for dns_name in "${dns_names[@]}"; do
+for dns_name in ${dns_names[@]+"${dns_names[@]}"}; do
   [[ -n "$dns_name" ]] || continue
   [[ -z "$san_list" ]] || san_list+=,
   san_list+="DNS:$dns_name"
 done
 IFS=',' read -r -a ip_addresses <<< "$worker_ip_addresses"
-for ip_address in "${ip_addresses[@]}"; do
+for ip_address in ${ip_addresses[@]+"${ip_addresses[@]}"}; do
   [[ -n "$ip_address" ]] || continue
   [[ -z "$san_list" ]] || san_list+=,
   san_list+="IP:$ip_address"

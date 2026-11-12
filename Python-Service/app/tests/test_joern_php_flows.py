@@ -57,3 +57,14 @@ def test_worker_traces_are_checked_against_the_revision():
                 [good[0], {"file": "a.php", "line": 2, "code": "x" * 161}], "trace"):
         with pytest.raises(RemoteWorkerError):
             _validate_trace(bad, {"a.php"}, counts)
+
+
+def test_jvm_temp_dir_moves_off_the_noexec_tmp_only_when_configured(tmp_path, monkeypatch):
+    from code_quality.external_analyzers import _java_options
+
+    monkeypatch.delenv("ANALYZER_JAVA_TMPDIR", raising=False)
+    assert "java.io.tmpdir" not in _java_options()
+    monkeypatch.setenv("ANALYZER_JAVA_TMPDIR", str(tmp_path))
+    assert _java_options().endswith(f"-Djava.io.tmpdir={tmp_path}")
+    monkeypatch.setenv("ANALYZER_JAVA_TMPDIR", str(tmp_path / "missing"))
+    assert "java.io.tmpdir" not in _java_options()
