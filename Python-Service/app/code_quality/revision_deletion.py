@@ -30,7 +30,7 @@ def remove_revision(project_id: str, revision_id: str) -> bool:
     if item is None:
         return False
     reference = source_reference(item)
-    snapshot = Snapshot(project_id, item.get("commit_sha"), item["source_archive_sha256"])
+    snapshot = Snapshot.from_row(project_id, item)
     try:
         with registry.lock(project_id, reference, blocking=False):
             with (registry.root / "index-worker.lock").open("a") as worker_lock:
@@ -110,11 +110,30 @@ def remove_revision(project_id: str, revision_id: str) -> bool:
                         db.execute("UPDATE git_sources SET last_revision_id=NULL,last_commit_sha=NULL WHERE project_id=? AND last_revision_id=?", (project_id, revision_id))
                         db.execute("DELETE FROM deployments WHERE project_id=? AND commit_sha=? AND state!='running'", (project_id, reference))
                         db.execute("DELETE FROM snapshots WHERE project_id=? AND revision_id=? AND state='deleting'", (project_id, revision_id))
+                        shared = db.execute("SELECT 1 FROM snapshots WHERE checksum=? LIMIT 1",
+                                            (snapshot.source_archive_sha256,)).fetchone()
+                    if not shared:
+                        _remove_archive_caches(snapshot.source_archive_sha256)
                     return True
                 finally:
                     rebuild_lock.release()
     except BlockingIOError as exc:
         raise RevisionBusy("This revision is being indexed or assessed. Retry when it completes.") from exc
+
+
+def _remove_archive_caches(archive_sha256: str) -> None:
+    """The repo map and code-tools extraction are keyed by archive checksum, so they go
+    only when no revision (of any project) still has the same source bytes."""
+    import logging
+
+    from agent_tools.repo_map import remove_repo_map
+    from agent_tools.source import drop_cached_revision
+
+    for cleanup in (remove_repo_map, drop_cached_revision):
+        try:
+            cleanup(archive_sha256)
+        except OSError as exc:  # derived data; a leftover costs disk, not correctness
+            logging.getLogger(__name__).warning("Could not remove cached data for a removed revision: %s", exc)
 
 
 def _remove_runtime(project_id: str, revision_id: str) -> None:

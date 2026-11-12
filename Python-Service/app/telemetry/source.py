@@ -185,7 +185,7 @@ class SourceService:
                 return False
             project_id, commit_sha = job
             current = self.registry.get(project_id, commit_sha)
-            snapshot = Snapshot(project_id, current.get("commit_sha"), current["source_archive_sha256"])
+            snapshot = Snapshot.from_row(project_id, current)
             try:
                 key = self.registry.archive_key(project_id, commit_sha)
                 if not key:

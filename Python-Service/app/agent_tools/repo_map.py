@@ -119,6 +119,17 @@ def store_repo_map(archive_sha256: str | None, repo_map: dict[str, Any]) -> None
     os.replace(staging, target)
 
 
+def remove_repo_map(archive_sha256: str | None) -> bool:
+    """Delete a stored map (after the last revision with that archive is removed)."""
+    if not archive_sha256 or not _SHA256.match(archive_sha256):
+        return False
+    try:
+        (map_dir() / f"{archive_sha256}.json").unlink()
+    except FileNotFoundError:
+        return False
+    return True
+
+
 def load_repo_map(archive_sha256: str | None) -> dict[str, Any] | None:
     if not archive_sha256 or not _SHA256.match(archive_sha256):
         return None

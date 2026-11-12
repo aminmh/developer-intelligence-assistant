@@ -1,4 +1,4 @@
-"""Per-project setting: may project source go to the external model?
+"""Per-project settings: external-model source consent and revision retention.
 
 Called only by the web server, which checks project-administrator access for
 changes; the shared internal secret keeps other callers out.
@@ -12,6 +12,7 @@ from fastapi import APIRouter, Header, HTTPException
 
 from infra.remote_consent import InvalidProject, get_consent, set_consent
 from infra.settings import settings
+from telemetry.retention import InvalidRetention, get_policy, set_policy
 
 router = APIRouter(prefix="/projects", tags=["Project settings"])
 
@@ -43,4 +44,29 @@ def update_remote_source(
     try:
         return set_consent(project_id, body.get("allowed"))
     except InvalidProject as exc:
+        raise HTTPException(400, str(exc)) from exc
+
+
+@router.get("/{project_id}/retention", summary="Read the project's revision retention")
+def read_retention(
+    project_id: str,
+    x_internal_secret: Annotated[str | None, Header(alias="X-Internal-Secret")] = None,
+) -> dict[str, Any]:
+    _authorize(x_internal_secret)
+    try:
+        return get_policy(project_id)
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
+
+
+@router.put("/{project_id}/retention", summary="Change the project's revision retention")
+def update_retention(
+    project_id: str,
+    body: dict,
+    x_internal_secret: Annotated[str | None, Header(alias="X-Internal-Secret")] = None,
+) -> dict[str, Any]:
+    _authorize(x_internal_secret)
+    try:
+        return set_policy(project_id, body)
+    except (InvalidRetention, ValueError) as exc:
         raise HTTPException(400, str(exc)) from exc

@@ -137,6 +137,19 @@ def _prune(keep: Path) -> None:
         _remove_tree(stale)
 
 
+def drop_cached_revision(archive_sha256: str | None) -> bool:
+    """Remove one revision's extracted source from the code-tools cache (after revision removal)."""
+    if not archive_sha256 or not _SHA256.match(archive_sha256) or not CACHE_ROOT.is_dir():
+        return False
+    target = CACHE_ROOT / archive_sha256
+    with open(CACHE_ROOT / ".lock", "w") as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX)
+        if not target.is_dir():
+            return False
+        _remove_tree(target)
+    return True
+
+
 def _revision_root(context: ToolContext) -> SourceRoot:
     from code_quality.service import ReportStore
     from index.storage import storage

@@ -13,8 +13,8 @@ def assessment_index_readiness(project_id, revision_id, registry):
             result.update(status="indexing", reason="This revision is still indexing. Wait for indexing to complete in Knowledge Base, then check again.")
         return result
     try:
-        collection = Snapshot(project_id, snapshot.get("commit_sha"), snapshot.get("source_archive_sha256")).collection
-    except (ValueError, TypeError):
+        collection = Snapshot.from_row(project_id, snapshot).collection
+    except (KeyError, ValueError, TypeError):
         return result
     if snapshot.get("collection_name") != collection:
         return result

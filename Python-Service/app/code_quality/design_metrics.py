@@ -69,7 +69,7 @@ def read_revision_chunks(project_id: str, revision_id: str, snapshot: dict, file
     try:
         from qdrant_client.models import FieldCondition, Filter, MatchValue
         from index.llamaindex_layer import CodePropertyGraph
-        collection = Snapshot(project_id, snapshot.get("commit_sha"), snapshot.get("source_archive_sha256")).collection
+        collection = Snapshot.from_row(project_id, snapshot).collection
         if (snapshot.get("state") != "ready" or snapshot.get("project_id") != project_id
                 or snapshot.get("revision_id") != revision_id or snapshot.get("collection_name") != collection):
             return [], False, "The selected revision does not have a ready matching index."

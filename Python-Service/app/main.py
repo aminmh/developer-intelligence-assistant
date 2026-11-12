@@ -137,6 +137,7 @@ async def lifespan(app: FastAPI):
         from telemetry.source import SourceService
         service = SourceService(default_registry(), storage)
         next_maintenance = 0.0
+        next_retention = 0.0
         next_aggregation = 0.0
         next_policy_refresh = 0.0
         next_schema_check = 0.0
@@ -159,6 +160,14 @@ async def lifespan(app: FastAPI):
                 if now >= next_maintenance:
                     await asyncio.to_thread(service.expire_unmatched)
                     next_maintenance = now + 3600
+                if not worked and now >= next_retention:
+                    # Between jobs only: removal needs the index-worker lock that a job holds.
+                    try:
+                        from telemetry.retention import run_cleanup
+                        await asyncio.to_thread(run_cleanup)
+                    except Exception as exc:
+                        logging.getLogger(__name__).warning("Revision retention failed: %s", exc)
+                    next_retention = now + 600
                 if schema_ready and now >= next_policy_refresh:
                     try:
                         from telemetry.policy import refresh_sampling_policy

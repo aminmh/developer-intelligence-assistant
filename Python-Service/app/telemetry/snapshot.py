@@ -26,7 +26,7 @@ def validate_source_ref(project_id: str, source_ref: str) -> None:
 
 def source_reference(metadata: dict[str, Any]) -> str:
     """Return a source key without representing archive identity as Git metadata."""
-    snapshot = Snapshot(metadata["project_id"], metadata.get("commit_sha"), metadata["source_archive_sha256"])
+    snapshot = Snapshot.from_row(metadata["project_id"], metadata)
     if metadata.get("source_ref") not in (None, snapshot.reference):
         raise ValueError("Source reference does not match archive identity")
     return snapshot.reference
@@ -116,6 +116,11 @@ class Snapshot:
 
     def metadata(self) -> dict[str, Any]:
         return {**asdict(self), "source_ref": self.reference}
+
+    @classmethod
+    def from_row(cls, project_id: str, row: dict[str, Any]) -> "Snapshot":
+        """The revision a registry row (or its metadata) describes, working trees included."""
+        return cls(project_id, row.get("commit_sha"), row["source_archive_sha256"], dirty=row.get("dirty") is True)
 
 
 def prepare_chunks(chunks: list[dict[str, Any]], snapshot: Snapshot) -> list[dict[str, Any]]:
