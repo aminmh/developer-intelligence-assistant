@@ -18,6 +18,7 @@ import {
 } from 'lucide-vue-next';
 import type { RAGConfig, SearchMatch, LLMUsage, ContextUsage, ChatBusinessRuleSource, ToolCallView, ToolAvailability, CitationPreview, ApprovalView } from './types';
 import { mergeToolCalls } from './utils/agentTools';
+import { parseRevisionOption, revisionOptionValue, type ChatProjectRevisions, type RevisionView } from './utils/chatRevisions';
 import { makeRequest } from './ui/makeRequest';
 import { useProjectFiles } from './composables/useProjectFiles';
 import { validateUploadIdentity } from './services/uploadIdentity';
@@ -74,7 +75,22 @@ const syncTabFromHistory = () => {
   activeTab.value = tabFromUrl();
   handlingHistoryNavigation = false;
 };
+// Revision mode: chat reads a project's latest (or a pinned) indexed revision instead of an
+// uploaded file, so Git-synced and working-tree revisions are selectable too.
+const chatRevisions = ref<ChatProjectRevisions[]>([]);
+const activeRevision = ref<{ projectId: string; revision: string } | null>(null);
+const fetchChatRevisions = async () => {
+  try {
+    const res = await makeRequest('/api/chat/revisions');
+    const data = await res.json().catch(() => ({}));
+    if (res.ok && Array.isArray(data.projects)) chatRevisions.value = data.projects;
+  } catch { /* the picker keeps uploaded files only */ }
+};
+const activeSourceValue = () => activeRevision.value
+  ? revisionOptionValue(activeRevision.value.projectId, activeRevision.value.revision)
+  : activeFileId.value;
 const activeSourceFields = () => {
+  if (activeRevision.value) return { project_id: activeRevision.value.projectId, revision: activeRevision.value.revision };
   const file = files.value.find((item) => item.id === activeFileId.value);
   return file ? { upload_session_id: file.uploadSessionId || file.id, project_id: file.projectId, commit_sha: file.commitSha } : {};
 };
@@ -207,6 +223,8 @@ interface Message {
   toolCalls?: ToolCallView[];
   tools?: ToolAvailability | null;
   approval?: ApprovalView | null;
+  /** The project revision the answer was read from (revision mode only). */
+  revision?: RevisionView | null;
 }
 
 const ROUTES = ['code_explain', 'code_refactor', 'debug', 'search', 'knowledge', 'chat'];
@@ -411,6 +429,7 @@ const consumeAnswerStream = async (res: Response, msgId: string) => {
         m.toolCalls = mergeToolCalls(m.toolCalls, evt.tool_calls);
         if (evt.tools && typeof evt.tools === 'object') m.tools = evt.tools;
         if (evt.paused && evt.approval) m.approval = toApprovalView(evt.approval);
+        if (evt.revision && typeof evt.revision === 'object') m.revision = evt.revision;
         m.streaming = false;
       }
     }
@@ -521,13 +540,19 @@ const pushJobAnswer = (rData: any, queryId: string | undefined, text: string) =>
 // `path:line` citation preview: the chat asks for the lines around a cited
 // location of the attached project.
 const citationPreview = ref<CitationPreview | null>(null);
-const openCitation = async (path: string, line: number) => {
+const openCitation = async (path: string, line: number, messageId?: string) => {
+  // A revision-mode answer cites its own revision, which may differ from the current selection.
+  const answered = messages.value.find((message) => message.id === messageId)?.revision;
   citationPreview.value = { path, line, loading: true };
   try {
     const res = await makeRequest('/api/code/read', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ filename: activeFileName.value, ...activeSourceFields(), path, line }),
+      body: JSON.stringify(answered?.project_id
+        ? { project_id: answered.project_id, revision: answered.revision_id, path, line }
+        : activeRevision.value
+          ? { ...activeSourceFields(), path, line }
+          : { filename: activeFileName.value, ...activeSourceFields(), path, line }),
     });
     const data = await res.json().catch(() => ({}));
     if (citationPreview.value?.path !== path || citationPreview.value.line !== line) return;
@@ -777,7 +802,8 @@ const sendMessage = async (text: string, domainRequest?: DomainContextRequest) =
   scrollToBottom();
 
   const previewMode: RAGConfig['contextPreviewMode'] = config.value.contextPreviewMode || 'off';
-  const requestFilename = domainRequest?.filename || activeFileName.value;
+  // A revision is answered on the streaming path; only uploaded files run the orchestration job.
+  const requestFilename = domainRequest?.filename || (activeRevision.value ? null : activeFileName.value);
 
   // Explicit saved-analysis explanations use the durable analysis bundle;
   // they must not re-extract an upload that may already have expired.
@@ -1008,6 +1034,20 @@ const submitFeedback = async (query: string, route: string) => {
     triggerToast(`Error: ${err.message}`, false);
   }
 };
+
+// Choosing a revision detaches any uploaded file, and choosing a file leaves revision mode.
+const selectSource = (value: string) => {
+  const parsed = parseRevisionOption(value);
+  if (parsed) {
+    activeRevision.value = parsed;
+    clearAttach();
+  } else {
+    activeRevision.value = null;
+    selectAttachment(value);
+  }
+};
+watch(activeFileId, (id) => { if (id) activeRevision.value = null; });
+watch(files, () => { void fetchChatRevisions(); });
 
 onMounted(async () => {
   window.addEventListener('popstate', syncTabFromHistory);
@@ -1269,6 +1309,8 @@ onUnmounted(() => window.removeEventListener('popstate', syncTabFromHistory));
         :files="files"
         :activeFileName="activeFileName"
         :activeFileId="activeFileId"
+        :chatRevisions="chatRevisions"
+        :activeSourceValue="activeSourceValue()"
         :orchestrationSteps="orchestrationSteps"
         :generatingAnswer="generatingAnswer"
         :showSystemMonitor="appearance.preferences.showSystemMonitor"
@@ -1276,7 +1318,7 @@ onUnmounted(() => window.removeEventListener('popstate', syncTabFromHistory));
         :lowPerformanceMode="appearance.preferences.lowPerformanceMode"
         @sendMessage="sendMessage"
         @attachZip="attachZip"
-        @selectAttachment="selectAttachment"
+        @selectAttachment="selectSource"
         @clearAttach="clearAttach"
         @feedback="submitFeedback"
         :useRemote="useRemote"

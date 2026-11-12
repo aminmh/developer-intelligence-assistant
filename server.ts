@@ -180,6 +180,21 @@ async function authorizeAttachedUpload(
   return true;
 }
 
+/**
+ * Revision mode: chat names a project and `revision` ("latest" or a revision ID) instead of an
+ * uploaded file. Python resolves it to one ready revision and pins its collection, so the client
+ * may not also send upload fields or a collection. The project role is enforced by the auth middleware.
+ */
+function revisionModeError(body: any): string | null {
+  if (body?.revision === undefined) return null;
+  if (typeof body.revision !== 'string' || !/^(latest|rev_[0-9a-f]{32})$/.test(body.revision)) return 'Invalid revision.';
+  if (typeof body.project_id !== 'string' || !body.project_id) return 'A project is required to answer from a revision.';
+  if (body.filename || body.upload_session_id || body.collection) {
+    return 'A revision request cannot also name an uploaded file or a collection.';
+  }
+  return null;
+}
+
 async function fetchWithTimeout(url: string, timeoutMs: number): Promise<Response> {
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), timeoutMs);
@@ -1510,6 +1525,23 @@ async function startServer() {
   });
 
   // Get uploaded files list (local tracking + Python/MinIO rag-uploads merged)
+  // Projects the user can access, each with its ready revisions newest first, for the chat picker.
+  app.get('/api/chat/revisions', async (_req, res) => {
+    try {
+      const pyRes = await fetch(`${PYTHON_API_URL}/telemetry/chat/revisions`, {
+        headers: { 'X-Internal-Secret': INTERNAL_SECRET }, signal: AbortSignal.timeout(8000),
+      });
+      const data = await pyRes.json().catch(() => ({})) as { projects?: { project_id: string; revisions: unknown[] }[] };
+      if (!pyRes.ok) return res.status(pyRes.status).json({ success: false, error: 'Revisions are unavailable.' });
+      const user = (res.locals as any).authUser;
+      const projects = (data.projects || []).filter((project) =>
+        Boolean(user && (authIsBootstrapAdmin(user) || authRoleFor(user, project.project_id))));
+      return res.json({ success: true, projects });
+    } catch {
+      return res.status(502).json({ success: false, error: 'Revisions are unavailable.' });
+    }
+  });
+
   app.get('/api/files', async (req, res) => {
     try {
       const files: UploadedFile[] = [...RAGService.getFiles()];
@@ -1958,16 +1990,22 @@ async function startServer() {
   // (project-relative paths, no dependency/build paths, no credential files).
   app.post('/api/code/read', async (req, res) => {
     try {
-      const { filename, upload_session_id, project_id, commit_sha, path, line } = req.body ?? {};
-      if (typeof filename !== 'string' || !filename) {
-        return res.status(400).json({ success: false, error: 'Attach a project to preview cited source.' });
+      const { filename, upload_session_id, project_id, commit_sha, revision, path, line } = req.body ?? {};
+      const revisionError = revisionModeError(req.body);
+      if (revisionError) return res.status(400).json({ success: false, error: revisionError });
+      if (revision === undefined) {
+        if (typeof filename !== 'string' || !filename) {
+          return res.status(400).json({ success: false, error: 'Attach a project to preview cited source.' });
+        }
+        if (!await authorizeAttachedUpload(res, filename, upload_session_id, project_id, commit_sha, false)) return;
       }
-      if (!await authorizeAttachedUpload(res, filename, upload_session_id, project_id, commit_sha, false)) return;
       const pythonUrl = process.env.PYTHON_API_URL || 'http://localhost:9002';
       const pyRes = await fetch(`${pythonUrl}/code-tools/read`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ filename, project_id, commit_sha, path, line }),
+        body: JSON.stringify(revision === undefined
+          ? { filename, project_id, commit_sha, path, line }
+          : { project_id, revision, path, line }),
       });
       const data = await pyRes.json().catch(() => ({}));
       if (!pyRes.ok) return res.status(pyRes.status).json({ success: false, error: data.detail || 'Source unavailable.' });
@@ -1981,7 +2019,9 @@ async function startServer() {
   // Used for chat/knowledge routes where the project is already indexed.
   app.post('/api/query/stream', async (req, res) => {
     try {
-      const { query, filename, use_remote, route, upload_session_id, project_id, commit_sha } = req.body;
+      const { query, filename, use_remote, route, upload_session_id, project_id, commit_sha, revision } = req.body;
+      const revisionError = revisionModeError(req.body);
+      if (revisionError) return res.status(400).json({ success: false, error: revisionError });
       if (!await authorizeAttachedUpload(res, filename, upload_session_id, project_id, commit_sha,
         Boolean(req.body?.domain_analysis_id))) return;
       if (!query || query.trim() === '') {
@@ -2011,7 +2051,7 @@ async function startServer() {
 
       // Route is provided by the client (chat/knowledge) or classified here.
       let routeName: string = route || 'chat';
-      if (filename && (route === undefined || route === '')) {
+      if ((filename || revision) && (route === undefined || route === '')) {
         try {
           const cRes = await fetch(`${pythonUrl}/classify`, {
             method: 'POST',

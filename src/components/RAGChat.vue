@@ -27,6 +27,7 @@ import RetrievalInsights from './RetrievalInsights.vue';
 import SysMonitor from './SysMonitor.vue';
 import WelcomeTerminal from './WelcomeTerminal.vue';
 import type { PipelineStep } from './PipelineProgress.vue';
+import { describeRevision, revisionOptionValue, type ChatProjectRevisions, type RevisionView } from '../utils/chatRevisions';
 
 interface Message {
   id: string;
@@ -49,6 +50,7 @@ interface Message {
   toolCalls?: ToolCallView[];
   tools?: ToolAvailability | null;
   approval?: ApprovalView | null;
+  revision?: RevisionView | null;
 }
 
 const props = defineProps<{
@@ -58,6 +60,10 @@ const props = defineProps<{
   files: UploadedFile[];
   activeFileName: string | null;
   activeFileId: string | null;
+  /** Projects with indexed revisions: "Latest" plus pinnable revisions. */
+  chatRevisions?: ChatProjectRevisions[];
+  /** Selected picker value: an uploaded file ID or a `rev:` revision option. */
+  activeSourceValue?: string | null;
   orchestrationSteps: PipelineStep[];
   generatingAnswer: boolean;
   showSystemMonitor: boolean;
@@ -77,7 +83,7 @@ const emit = defineEmits<{
   (e: 'update:useRemote', value: boolean): void;
   (e: 'confirmSend'): void;
   (e: 'cancelSend'): void;
-  (e: 'openCitation', path: string, line: number): void;
+  (e: 'openCitation', path: string, line: number, messageId?: string): void;
   (e: 'decideApproval', messageId: string, decision: 'approve' | 'deny'): void;
 }>();
 
@@ -96,12 +102,13 @@ const md = new MarkdownIt({
 // `path:line` code spans become citation links that open the cited source.
 const renderMarkdown = (content: string): string => linkCitations(md.render(content || ''));
 
-const onAnswerClick = (event: MouseEvent) => {
+const onAnswerClick = (event: MouseEvent, messageId?: string) => {
   const link = (event.target as HTMLElement | null)?.closest<HTMLElement>('[data-cite-path]');
   if (!link) return;
   event.preventDefault();
   const line = Number(link.dataset.citeLine);
-  if (link.dataset.citePath && Number.isFinite(line)) emit('openCitation', link.dataset.citePath, line);
+  // The message tells the app which revision answered, so the citation opens that revision's source.
+  if (link.dataset.citePath && Number.isFinite(line)) emit('openCitation', link.dataset.citePath, line, messageId);
 };
 
 // Feedback UI state: which message's route picker is open / already submitted
@@ -243,6 +250,11 @@ const chatLocked = computed(() => props.loading || !!props.gatePreview);
               ? 'bg-indigo-600/10 border border-indigo-500/20 text-slate-100 rounded-br-none'
               : 'bg-slate-900/60 border border-slate-800 text-slate-300 rounded-tl-none'"
           >
+            <p v-if="msg.role === 'assistant' && msg.revision"
+              class="mb-2 text-[10px] font-mono text-slate-500"
+              :title="msg.revision.revision_id">
+              Answered from {{ describeRevision(msg.revision) }}<span v-if="msg.revision.requested === 'latest'"> (latest)</span>
+            </p>
             <ToolActivity
               v-if="msg.role === 'assistant'"
               :calls="msg.toolCalls"
@@ -254,7 +266,7 @@ const chatLocked = computed(() => props.loading || !!props.gatePreview);
               :approval="msg.approval"
               @decide="(decision) => emit('decideApproval', msg.id, decision)"
             />
-            <div class="prose prose-invert prose-sm max-w-none text-left" v-if="msg.role === 'assistant'" v-html="renderMarkdown(msg.content)" @click="onAnswerClick"></div>
+            <div class="prose prose-invert prose-sm max-w-none text-left" v-if="msg.role === 'assistant'" v-html="renderMarkdown(msg.content)" @click="onAnswerClick($event, msg.id)"></div>
             <span v-if="msg.role === 'assistant' && msg.streaming" class="inline-block w-2 h-4 bg-indigo-400 animate-pulse ml-0.5 align-text-bottom"></span>
             <div class="text-sm text-left font-mono leading-relaxed text-slate-100 whitespace-pre-wrap break-words" v-if="msg.role !== 'assistant'">{{ msg.content }}</div>
             
@@ -557,13 +569,22 @@ const chatLocked = computed(() => props.loading || !!props.gatePreview);
             <div class="flex items-center gap-1.5">
               <FolderOpen class="w-3.5 h-3.5 text-slate-500" />
               <select
-                :value="activeFileId || ''"
+                :value="activeSourceValue ?? activeFileId ?? ''"
                 @change="onSelectFile"
-                :disabled="files.length === 0"
+                :disabled="files.length === 0 && !(chatRevisions && chatRevisions.length)"
                 class="bg-[#11162d] border border-slate-800 rounded-lg px-2 py-1 text-[10px] font-mono text-slate-300 focus:outline-none focus:border-indigo-500 disabled:opacity-50 max-w-[200px]"
               >
                 <option value="" disabled>Choose from knowledge base…</option>
-                <option v-for="f in files" :key="f.id" :value="f.id">{{ f.name }}<template v-if="f.projectId"> · {{ f.projectId }}</template></option>
+                <optgroup v-for="project in chatRevisions || []" :key="project.project_id" :label="`Project ${project.project_id}`">
+                  <option :value="revisionOptionValue(project.project_id, 'latest')">{{ project.project_id }} · latest</option>
+                  <option v-for="rev in project.revisions" :key="rev.revision_id"
+                    :value="revisionOptionValue(project.project_id, rev.revision_id)">
+                    {{ project.project_id }} · {{ describeRevision(rev) }}
+                  </option>
+                </optgroup>
+                <optgroup v-if="files.length" label="Uploaded files">
+                  <option v-for="f in files" :key="f.id" :value="f.id">{{ f.name }}<template v-if="f.projectId"> · {{ f.projectId }}</template></option>
+                </optgroup>
               </select>
             </div>
           </div>
