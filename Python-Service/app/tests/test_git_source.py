@@ -61,6 +61,13 @@ class GitSourceTests(unittest.TestCase):
     def tearDown(self):
         self.temp.cleanup()
 
+    def test_configured_sources_are_listed_for_the_scheduled_reconcile(self):
+        self.git.configure("user-2", "other", "Owner/Other", "develop")
+        sources = {row["project_id"]: row for row in self.registry.list_git_sources()}
+        self.assertEqual(set(sources), {"sample", "other"})
+        self.assertEqual((sources["other"]["repository"], sources["other"]["branch"], sources["other"]["user_id"]),
+                         ("owner/other", "develop", "user-2"))
+
     def test_validates_fixed_github_repository_and_branch_identity(self):
         self.assertEqual(validate_repository("Owner/Repo"), "owner/repo")
         self.assertEqual(validate_branch("release/v1"), "release/v1")

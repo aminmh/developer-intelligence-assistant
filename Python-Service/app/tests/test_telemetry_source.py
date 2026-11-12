@@ -113,15 +113,43 @@ def test_source_only_revision_can_be_ready_without_php_graph_data(tmp_path):
     assert ready["collection_name"]
 
 
-def test_non_php_source_reports_semantic_index_unavailable(tmp_path):
-    (tmp_path / "app").mkdir()
-    (tmp_path / "app" / "main.py").write_text("def main(): return 'ok'\n")
+def test_source_without_any_indexer_reports_semantic_index_unavailable(tmp_path):
+    (tmp_path / "src").mkdir()
+    (tmp_path / "src" / "main.cpp").write_text("int main() { return 0; }\n")
 
     result = index_source(str(tmp_path), Snapshot("one", SHA, "b" * 64))
 
     assert result["semantic_index_status"] == "unavailable"
     assert result["chunk_count"] == result["graph_nodes"] == 0
-    assert "PHP only" in result["semantic_index_reason"]
+    assert "cpp" in result["semantic_index_reason"]
+
+
+def test_git_snapshots_index_non_php_languages_with_the_shared_pipeline(tmp_path, monkeypatch):
+    (tmp_path / "app").mkdir()
+    (tmp_path / "app" / "main.py").write_text("def main():\n    return helper()\n\n\ndef helper():\n    return 'ok'\n")
+    ingested, graphed, maps = {}, {}, []
+
+    class Graph:
+        def ingest(self, chunks, collection, snapshot=None, symbol_definitions=None, symbol_references=None):
+            ingested.update(chunks=chunks, definitions=symbol_definitions)
+            return {"chunk_count": len(chunks), "ingested": len(chunks), "graph_nodes": len(chunks)}
+
+    class Inspection:
+        def index(self, workspace, stem, exported=None, snapshot=None):
+            graphed.update(exported)
+
+    monkeypatch.setattr("index.llamaindex_layer.CodePropertyGraph", Graph)
+    monkeypatch.setattr("inspection.service.InspectionService", Inspection)
+    monkeypatch.setattr("telemetry.snapshot.resolve_registered_revision", lambda snapshot: snapshot)
+    monkeypatch.setattr("index.indexing_service.IndexingService._store_repo_map",
+                        staticmethod(lambda sha, chunks: maps.append((sha, len(chunks)))))
+
+    result = index_source(str(tmp_path), Snapshot("one", SHA, "b" * 64))
+
+    assert result == {"chunk_count": 2, "ingested": 2, "graph_nodes": 2}
+    assert {c["name"] for c in ingested["chunks"]} == {"main", "helper"}
+    assert {d["fqn"] for d in ingested["definitions"]} == {"app\\main\\main", "app\\main\\helper"}
+    assert graphed["definitions"] == ingested["definitions"] and maps == [("b" * 64, 2)]
 
 
 @pytest.mark.parametrize("result", [None, {"chunk_count": 2, "ingested": 1, "graph_nodes": 2},

@@ -449,6 +449,12 @@ class SnapshotRegistry:
                              (user_id, project_id)).fetchone()
         return dict(row) if row else None
 
+    def list_git_sources(self) -> list[dict]:
+        """Every configured Git source, for the scheduled reconcile of missed webhooks."""
+        with self._connect() as db:
+            rows = db.execute("SELECT * FROM git_sources ORDER BY project_id").fetchall()
+        return [dict(row) for row in rows]
+
     def git_source_for_repository(self, repository: str) -> dict | None:
         with self._connect() as db:
             row = db.execute("SELECT * FROM git_sources WHERE repository=? ORDER BY updated_at DESC LIMIT 1",

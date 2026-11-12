@@ -61,30 +61,72 @@ def _normalize_exported_paths(exported: dict[str, list[dict[str, Any]]], workspa
                 record[field] = relative_path(value)
 
 
-def index_source(workspace: str, snapshot: Snapshot) -> dict:
-    if not any(path.is_file() and path.suffix.lower() == ".php" for path in Path(workspace).rglob("*")):
-        # Static assessment supports more languages than the current call graph
-        # exporter. Publish the source snapshot while marking semantic indexing
-        # unavailable; callers must not interpret this as an empty clean graph.
-        return {"chunk_count": 0, "ingested": 0, "graph_nodes": 0, "graph_relations": 0,
-                "embed_fails": 0, "semantic_index_status": "unavailable",
-                "semantic_index_reason": "The current symbol and call graph exporter supports PHP only."}
+def _unavailable_semantic_index(reason: str) -> dict:
+    # Static assessment supports more languages than the indexers. Publish the source
+    # snapshot while marking semantic indexing unavailable; callers must not read this
+    # as an empty clean graph.
+    return {"chunk_count": 0, "ingested": 0, "graph_nodes": 0, "graph_relations": 0,
+            "embed_fails": 0, "semantic_index_status": "unavailable", "semantic_index_reason": reason}
+
+
+def _workspace_archive(workspace: str) -> bytes:
+    """The extracted revision as ZIP bytes, for steps that read an archive (SCIP)."""
+    buffer = io.BytesIO()
+    root = Path(workspace)
+    with zipfile.ZipFile(buffer, "w", zipfile.ZIP_DEFLATED) as bundle:
+        for path in sorted(root.rglob("*")):
+            if path.is_file() and not path.is_symlink():
+                bundle.write(path, path.relative_to(root).as_posix())
+    return buffer.getvalue()
+
+
+def _php_exact_index(workspace: str) -> tuple[list, dict]:
+    """PHP chunks and symbol export. Git snapshots reject partial parses (the CLI's exit 2)."""
+    import json
 
     from infra.php_cli import PhpCli
-    from index.llamaindex_layer import CodePropertyGraph
-    from inspection.service import InspectionService
 
     cli = PhpCli()
-    # Legacy parser accepts exit 2 (partial parse). Exact snapshots must not.
     result = cli.run("code-parse", ["--path", workspace, "--output", "json"], timeout=600)
     if result.returncode != 0:
         raise ValueError("Source parsing failed or was incomplete")
-    import json
     chunks = json.loads(result.stdout)
     if not isinstance(chunks, list) or not chunks:
         raise ValueError("Source archive contains no indexable PHP")
-    exported = cli.inspect_index(workspace)
+    return chunks, cli.inspect_index(workspace)
+
+
+def index_source(workspace: str, snapshot: Snapshot) -> dict:
+    """Index a Git or CI snapshot with the same pipeline as uploads, for every supported language.
+
+    PHP keeps the exact parser (no partial parses). Other languages use the shared language
+    dispatch (Tree-sitter, Python AST); SCIP adds TS/JS/Python references when the project has
+    a consented analyzer worker; the repo map is stored for code_repo_map. Languages with no
+    indexer publish the snapshot with semantic indexing marked unavailable, as before.
+    """
+    from index.indexing_service import IndexingService
+    from index.llamaindex_layer import CodePropertyGraph
+    from inspection.service import InspectionService
+    from telemetry.snapshot import resolve_registered_revision
+
+    has_php = any(path.is_file() and path.suffix.lower() == ".php" for path in Path(workspace).rglob("*"))
+    if has_php:
+        chunks, exported = _php_exact_index(workspace)
+    else:
+        try:
+            chunks, exported, error = IndexingService._parse_source(workspace, snapshot.project_id)
+        except Exception as exc:  # no recognizable language falls through to the PHP parser
+            chunks, exported, error = [], {}, f"No supported language indexer could parse this source ({type(exc).__name__})."
+        if not chunks:
+            return _unavailable_semantic_index(error or "No supported language indexer found source to index.")
     _normalize_exported_paths(exported, workspace)
+    registered = resolve_registered_revision(snapshot)
+    if registered.revision_id:
+        identity = {"project_id": snapshot.project_id, "commit_sha": snapshot.commit_sha,
+                    "revision_id": registered.revision_id,
+                    "source_archive_sha256": snapshot.source_archive_sha256}
+        exported = IndexingService._with_scip(exported, _workspace_archive(workspace), identity)
+    IndexingService._store_repo_map(snapshot.source_archive_sha256, chunks)
     result = CodePropertyGraph().ingest(
         chunks, snapshot.collection, snapshot=snapshot,
         symbol_definitions=exported["definitions"], symbol_references=exported["references"],

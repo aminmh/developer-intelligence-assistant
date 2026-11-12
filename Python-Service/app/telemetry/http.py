@@ -119,6 +119,16 @@ async def synchronize_git_source(project_id: str, request: Request) -> dict:
         raise HTTPException(422, "Invalid Git source identity") from exc
 
 
+@git_router.get("/sources")
+def git_sources(request: Request) -> dict:
+    """Configured Git sources for the web server's scheduled reconcile (missed webhooks)."""
+    authorize_internal(request)
+    return {"sources": [{"project_id": row["project_id"], "user_id": row["user_id"],
+                         "repository": row["repository"], "branch": row["branch"],
+                         "credential_id": row["credential_id"]}
+                        for row in get_registry().list_git_sources()]}
+
+
 @git_router.get("/webhook-target")
 def git_webhook_target(repository: str, request: Request) -> dict:
     authorize_internal(request)
