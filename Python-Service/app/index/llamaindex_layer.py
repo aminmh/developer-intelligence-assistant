@@ -59,7 +59,7 @@ CODE_METRIC_FIELDS = (
     "reads_properties", "writes_properties", "type_checks", "instantiates", "throws",
     "constructor_dependencies",
 )
-PAYLOAD_INDEX_FIELDS = ("revision_id", "node_type", "file_path")
+PAYLOAD_INDEX_FIELDS = ("revision_id", "node_type", "file_path", "embed_hash", "embed_profile")
 
 
 def ensure_payload_indexes(qdrant: Any, collection_name: str) -> None:
@@ -561,6 +561,32 @@ def enrich_chunks_with_symbol_index(
     return enriched
 
 
+# Bump when build_embeddable_text changes what it produces: vectors made from the
+# old text must not be reused for the new one.
+EMBEDDABLE_TEXT_FORMAT = "1"
+# How many of a project's newest ready revisions a new revision may copy vectors from.
+REUSE_REVISION_LIMIT = 3
+
+
+def embed_profile_key() -> str:
+    """Identity of the vector space: provider, model, dimensions, input type, and text format.
+
+    Vectors are reused only between points with the same key, so a provider, model,
+    or embeddable-text change can never mix vectors from different spaces.
+    """
+    from index.embeddings import embedding_profile
+
+    profile = {**embedding_profile("search_document"), "input_type": "search_document",
+               "text_format": EMBEDDABLE_TEXT_FORMAT, "max_code_chars": _MAX_CODE_CHARS,
+               "max_text_chars": _MAX_TEXT_CHARS}
+    raw = json.dumps(profile, sort_keys=True, separators=(",", ":"), default=str)
+    return hashlib.sha256(raw.encode("utf-8")).hexdigest()[:32]
+
+
+def embed_hash(text: str) -> str:
+    return hashlib.sha256(text.encode("utf-8")).hexdigest()
+
+
 def build_embeddable_text(chunk: Dict[str, Any]) -> str:
     """Build the LLM-facing text for a chunk (mirrors CodeChunk.toEmbeddableText)."""
     parts: List[str] = []
@@ -798,6 +824,7 @@ class CodePropertyGraph:
         progress_callback=None,
         vector_collection_name: str | None = None,
         force_reindex: bool = False,
+        reuse: bool = True,
     ) -> Dict[str, Any]:
         """Ingest code chunks into the Neo4j graph and Qdrant vectors.
 
@@ -843,6 +870,7 @@ class CodePropertyGraph:
             ingested, embed_fails = self._ingest_vectors(
                 deduped, vector_collection_name or collection_name,
                 replace=force_reindex, progress_callback=progress_callback,
+                reuse_from=self._reuse_sources(snapshot) if reuse else None,
             )
             if graph_nodes != len(deduped) or ingested != len(deduped) or embed_fails:
                 raise RuntimeError(
@@ -922,6 +950,7 @@ class CodePropertyGraph:
             "embed_fails": embed_fails,
             "vector_point_count": persisted_points,
             "embedding_error": getattr(self, "_last_embedding_error", None),
+            **getattr(self, "_last_vector_stats", {"embedded": 0, "reused": 0}),
             "symbol_definitions": len(symbol_definitions or []),
             "symbol_references": len(symbol_references or []),
         }
@@ -1073,12 +1102,78 @@ class CodePropertyGraph:
 
         return len(node_rows), len(rel_rows) + len(structure_rows)
 
+    @staticmethod
+    def _reusable_vectors(qdrant: Any, collections: List[str], profile: str, wanted: set,
+                          target: str) -> Dict[str, List[float]]:
+        """Vectors by embed hash from earlier revisions' collections, for this profile only. Best-effort."""
+        from qdrant_client.models import FieldCondition, Filter, MatchAny, MatchValue
+
+        found: Dict[str, List[float]] = {}
+        for source in collections:
+            remaining = sorted(wanted - set(found))
+            if not remaining:
+                break
+            if source == target:
+                continue
+            try:
+                for offset in range(0, len(remaining), 256):
+                    batch = remaining[offset:offset + 256]
+                    records, _ = qdrant.scroll(
+                        collection_name=source,
+                        scroll_filter=Filter(must=[
+                            FieldCondition(key="embed_profile", match=MatchValue(value=profile)),
+                            FieldCondition(key="embed_hash", match=MatchAny(any=batch)),
+                        ]),
+                        limit=len(batch) * 4, with_payload=["embed_hash"], with_vectors=True,
+                    )
+                    for record in records:
+                        key = (record.payload or {}).get("embed_hash")
+                        vector = record.vector
+                        if isinstance(vector, dict):  # named vectors are not used here
+                            continue
+                        if isinstance(key, str) and key in wanted and vector and key not in found:
+                            found[key] = list(vector)
+            except Exception as exc:  # a missing or old collection only costs a re-embed
+                get_exception_logger().warning("Vector reuse lookup skipped for %s: %s", source, type(exc).__name__)
+        if found:
+            sizes = {len(vector) for vector in found.values()}
+            if len(sizes) != 1:  # mixed dimensions would mean a profile collision; never mix them
+                return {}
+        return found
+
+    def _reuse_sources(self, snapshot: Snapshot) -> List[str]:
+        """Vector collections of the project's newest ready revisions, excluding this one."""
+        try:
+            from index.embedding_rebuild import active_vector_collection
+            from telemetry.registry import default_registry
+
+            sources = []
+            for revision in default_registry().project_revisions(snapshot.project_id):
+                if revision.get("state") != "ready" or revision.get("revision_id") == snapshot.revision_id:
+                    continue
+                collection = revision.get("collection_name")
+                active = active_vector_collection(collection) if collection else None
+                if active:
+                    sources.append(active)
+                if len(sources) >= REUSE_REVISION_LIMIT:
+                    break
+            return sources
+        except Exception as exc:  # reuse is an optimization; indexing proceeds without it
+            get_exception_logger().warning("Vector reuse sources unavailable: %s", type(exc).__name__)
+            return []
+
     def _ingest_vectors(
         self, chunks: List[Dict[str, Any]], collection_name: str, *, replace: bool = True,
-        progress_callback=None,
+        progress_callback=None, reuse_from: Optional[List[str]] = None,
     ) -> tuple[int, int]:
+        """Embed and upsert chunk vectors; ``reuse_from`` lists collections to copy unchanged vectors from.
+
+        A chunk whose embeddable text and embedding profile match a point in one of those
+        collections gets that point's vector instead of a provider call.
+        """
         qdrant = self._get_qdrant()
         self._last_embedding_error: str | None = None
+        self._last_vector_stats = {"embedded": 0, "reused": 0}
 
         if replace:
             try:
@@ -1092,7 +1187,42 @@ class CodePropertyGraph:
 
         embeddable = [(chunk, build_embeddable_text(chunk)) for chunk in chunks]
         embeddable = [(chunk, text) for chunk, text in embeddable if text.strip()]
-        completed = 0
+        profile = embed_profile_key()
+        hashes = {id(chunk): embed_hash(text) for chunk, text in embeddable}
+        reused = self._reusable_vectors(qdrant, reuse_from or [], profile, set(hashes.values()), collection_name)
+
+        def add_point(chunk: Dict[str, Any], embedding: List[float]) -> None:
+            nonlocal vector_size
+            if vector_size is None:
+                vector_size = len(embedding)
+                try:
+                    qdrant.create_collection(
+                        collection_name=collection_name,
+                        vectors_config=VectorParams(size=vector_size, distance=Distance.COSINE),
+                    )
+                except Exception:
+                    pass
+                ensure_payload_indexes(qdrant, collection_name)
+            points.append(PointStruct(
+                id=_point_id_for(_chunk_node_id(chunk)),
+                vector=embedding,
+                payload={**_payload(chunk, collection_name), "embed_hash": hashes[id(chunk)],
+                         "embed_profile": profile},
+            ))
+
+        missing = []
+        for chunk, text in embeddable:
+            vector = reused.get(hashes[id(chunk)])
+            if vector is not None:
+                add_point(chunk, vector)
+            else:
+                missing.append((chunk, text))
+        self._last_vector_stats["reused"] = len(embeddable) - len(missing)
+        if progress_callback and len(missing) < len(embeddable):
+            progress_callback("embedding", len(embeddable) - len(missing), len(embeddable))
+        completed = len(embeddable) - len(missing)
+        embeddable_total = len(embeddable)
+        embeddable = missing
         batch_size = 96
         for offset in range(0, len(embeddable), batch_size):
             batch = embeddable[offset:offset + batch_size]
@@ -1101,7 +1231,7 @@ class CodePropertyGraph:
                 nonlocal completed
                 completed += amount
                 if progress_callback:
-                    progress_callback("embedding", completed, len(embeddable))
+                    progress_callback("embedding", completed, embeddable_total)
 
             try:
                 vectors = embed_texts(
@@ -1125,24 +1255,11 @@ class CodePropertyGraph:
                 continue
 
             for (chunk, _), embedding in zip(batch, vectors):
-                if vector_size is None:
-                    vector_size = len(embedding)
-                    try:
-                        qdrant.create_collection(
-                            collection_name=collection_name,
-                            vectors_config=VectorParams(size=vector_size, distance=Distance.COSINE),
-                        )
-                    except Exception:
-                        pass
-                    ensure_payload_indexes(qdrant, collection_name)
-                points.append(PointStruct(
-                    id=_point_id_for(_chunk_node_id(chunk)),
-                    vector=embedding,
-                    payload=_payload(chunk, collection_name),
-                ))
+                add_point(chunk, embedding)
+                self._last_vector_stats["embedded"] += 1
 
         if progress_callback:
-            progress_callback("upserting", completed, len(embeddable))
+            progress_callback("upserting", completed, embeddable_total)
 
         if points:
             ingested = 0

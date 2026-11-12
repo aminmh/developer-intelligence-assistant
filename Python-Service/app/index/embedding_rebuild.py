@@ -50,26 +50,25 @@ def activate_generation(snapshot_collection: str, generation: str, *,
     """Atomically publish a complete generation and retain the prior one."""
     from telemetry.registry import default_registry
 
-    registry = default_registry()
-    saved = registry.get_runtime_setting("cohere_embedding_generations") or {}
-    state = saved.get("value") or {"active": {}, "retained": {}}
-    active = dict(state.get("active") or {})
-    retained = {key: list(value) for key, value in (state.get("retained") or {}).items()}
-    previous = active.get(snapshot_collection)
-    if previous and previous != generation:
-        retained[snapshot_collection] = [previous, *retained.get(snapshot_collection, [])]
-    active[snapshot_collection] = generation
-    domains = dict(state.get("domains") or {})
-    if domain_project_id and domain_generation:
-        previous_domain = domains.get(domain_project_id)
-        domain_key = f"domain:{domain_project_id}"
-        if previous_domain and previous_domain != domain_generation:
-            retained[domain_key] = [previous_domain, *retained.get(domain_key, [])]
-        domains[domain_project_id] = domain_generation
-    registry.set_runtime_setting(
-        "cohere_embedding_generations",
-        {"active": active, "domains": domains, "retained": retained},
-    )
+    def publish(current: dict | None) -> dict:
+        state = current or {"active": {}, "retained": {}}
+        active = dict(state.get("active") or {})
+        retained = {key: list(value) for key, value in (state.get("retained") or {}).items()}
+        previous = active.get(snapshot_collection)
+        if previous and previous != generation:
+            retained[snapshot_collection] = [previous, *retained.get(snapshot_collection, [])]
+        active[snapshot_collection] = generation
+        domains = dict(state.get("domains") or {})
+        if domain_project_id and domain_generation:
+            previous_domain = domains.get(domain_project_id)
+            domain_key = f"domain:{domain_project_id}"
+            if previous_domain and previous_domain != domain_generation:
+                retained[domain_key] = [previous_domain, *retained.get(domain_key, [])]
+            domains[domain_project_id] = domain_generation
+        return {"active": active, "domains": domains, "retained": retained}
+
+    # One locked read-modify-write: frequent revisions must not overwrite each other's update.
+    default_registry().update_runtime_setting("cohere_embedding_generations", publish)
 
 
 def active_generation(snapshot_collection: str) -> str | None:
@@ -167,6 +166,7 @@ def _run_rebuild_locked(lock: threading.Lock, job_id: str, filename: str, archiv
             snapshot=snapshot,
             progress_callback=report,
             vector_collection_name=generation,
+            reuse=False,  # a rebuild exists to re-embed every chunk
         )
         if (result.get("ingested") != result.get("chunk_count")
                 or result.get("embed_fails", 0)):

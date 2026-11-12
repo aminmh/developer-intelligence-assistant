@@ -14,6 +14,46 @@ from infra.settings import settings
 logger = logging.getLogger("download_jobs")
 
 
+def definitions_from_chunks(chunks: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """A symbol-graph export derived from chunks, for indexers that emit none (Python, JS/TS).
+
+    Records use the same canonical identity as the chunks themselves (``from_chunk``), so
+    business-rule links found by searching chunks line up with the symbols a diff touches.
+    """
+    from telemetry.symbols import from_chunk
+
+    definitions: list[dict[str, Any]] = []
+    seen: set[tuple[str, str]] = set()
+    for chunk in chunks:
+        kind = chunk.get("node_type") or chunk.get("type")
+        file = chunk.get("file_path") or chunk.get("file")
+        line = chunk.get("start_line")
+        if kind not in {"class", "method", "function"} or not isinstance(file, str) or not isinstance(line, int):
+            continue
+        try:
+            symbol_id = from_chunk(chunk)
+        except ValueError:
+            continue
+        end_line = chunk.get("end_line") if isinstance(chunk.get("end_line"), int) else line
+        if kind == "method":
+            owner = chunk.get("class_fqn") or chunk.get("parent_symbol") or chunk.get("class")
+            name = chunk.get("method_name") or chunk.get("name")
+            record = {"kind": "method", "fqn": f"{owner}::{name}", "name": name, "owner": owner}
+        elif kind == "function" and symbol_id:
+            fqn = symbol_id.removeprefix("\\")
+            record = {"kind": "function", "fqn": fqn, "name": fqn}
+        elif kind == "class" and chunk.get("class_fqn"):
+            record = {"kind": "class", "fqn": chunk["class_fqn"], "name": chunk.get("name") or chunk["class_fqn"]}
+        else:
+            continue
+        if (record["kind"], record["fqn"]) in seen:
+            continue
+        seen.add((record["kind"], record["fqn"]))
+        definitions.append({**record, "file": file, "line": line, "end_line": end_line,
+                            "origin": chunk.get("origin") or "python-ast"})
+    return definitions
+
+
 class IndexingService:
     """Own status-file updates, PHP parsing, and graph/vector ingestion."""
 
@@ -30,6 +70,7 @@ class IndexingService:
         graph_relations: int = 0,
         graph_index_complete: bool = False,
         graph_status: str = "pending",
+        vector_stats: dict[str, int] | None = None,
     ) -> None:
         try:
             status_path = Path(settings.download_dir) / f"{download_id}.status.json"
@@ -44,6 +85,9 @@ class IndexingService:
                 "graph_relations": graph_relations,
                 "graph_index_complete": graph_index_complete,
                 "graph_status": graph_status,
+                # How many chunk vectors were embedded now vs copied from earlier revisions.
+                "embedded": (vector_stats or {}).get("embedded"),
+                "reused": (vector_stats or {}).get("reused"),
             }))
         except Exception:  # noqa: BLE001 — progress is best-effort
             pass
@@ -127,8 +171,9 @@ class IndexingService:
             symbol_index = result.get("symbol_index")
             ingested = int(result.get("ingested", 0) or 0)
             logger.info(
-                "Background indexing complete: collection=%s ingested=%s graph_nodes=%s relations=%s",
-                collection_name, ingested, result.get("graph_nodes", 0), result.get("graph_relations", 0),
+                "Background indexing complete: collection=%s ingested=%s embedded=%s reused=%s graph_nodes=%s relations=%s",
+                collection_name, ingested, result.get("embedded"), result.get("reused"),
+                result.get("graph_nodes", 0), result.get("graph_relations", 0),
             )
             self.write_status(
                 download_id,
@@ -145,6 +190,7 @@ class IndexingService:
                     and int(result.get("chunk_count", len(chunks)) or 0) > 0
                 ),
                 graph_status="ready",
+                vector_stats={"embedded": result.get("embedded"), "reused": result.get("reused")},
             )
         except Exception as exc:  # noqa: BLE001 — job failure is reported in status
             logger.error("Background indexing failed for '%s': %s", collection_name, exc, exc_info=True)
@@ -307,6 +353,10 @@ class IndexingService:
 
         result = produce_chunks(workdir, primary)
         index = result.get("symbol_index") or {"definitions": [], "references": []}
+        if not index.get("definitions"):
+            # Python and JS/TS index chunks only; derive definitions so the symbol graph is not empty.
+            index = {"definitions": definitions_from_chunks(result.get("chunks") or []),
+                     "references": index.get("references") or []}
         logger.info("Indexed %s with %s: %s chunks, coverage %s", filename, result.get("producer"),
                     len(result.get("chunks") or []), result.get("coverage"))
         error = result.get("error") and f"Project indexing failed for {primary}: {result['error']}"

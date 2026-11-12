@@ -181,3 +181,23 @@ def test_partly_qualified_names_resolve_to_the_matching_owner():
     assert fqns("User->isAdmin") == fqns("User.isAdmin") == ["App\\Models\\User::isAdmin"]
     assert fqns("isAdmin") == ["App\\Enums\\UserRole::isAdmin", "App\\Models\\User::isAdmin"]
     assert fqns("Nope::isAdmin") == []
+
+
+def test_python_definitions_derived_from_chunks_share_the_chunks_symbol_ids(tmp_path):
+    from index.indexing_service import definitions_from_chunks
+    from inspection.graph import canonical_definition
+    from projects.lang_index import produce_chunks
+    from telemetry.symbols import from_chunk
+
+    (tmp_path / "shop").mkdir()
+    (tmp_path / "shop" / "cart.py").write_text(
+        "class Cart:\n    def add(self, item):\n        return check(item)\n\n\ndef check(item):\n    return item\n")
+    chunks = produce_chunks(str(tmp_path), "python")["chunks"]
+    definitions = definitions_from_chunks(chunks)
+
+    assert {(d["kind"], d["fqn"]) for d in definitions} == {
+        ("class", "shop\\cart\\Cart"), ("method", "shop\\cart\\Cart::add"), ("function", "shop\\cart\\check")}
+    canonical = {canonical_definition(d) for d in definitions if d["kind"] != "class"}
+    assert canonical == {from_chunk(c) for c in chunks if from_chunk(c)}
+    method = next(d for d in definitions if d["kind"] == "method")
+    assert (method["file"], method["line"], method["end_line"]) == ("shop/cart.py", 2, 3)
