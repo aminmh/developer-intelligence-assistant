@@ -1,4 +1,4 @@
-"""Isolated HTTPS worker for fixed SonarScanner and Joern assessment jobs."""
+"""Isolated HTTPS worker for fixed SonarScanner, Joern, and SCIP jobs."""
 from __future__ import annotations
 
 import asyncio
@@ -21,6 +21,7 @@ from fastapi import FastAPI, HTTPException, Request
 from starlette.concurrency import run_in_threadpool
 
 from code_quality.external_analyzers import check_sonarqube_access, run_joern, run_sonarqube
+from code_quality.scip_index import run_scip
 from code_quality.service import MAX_ARCHIVE_BYTES, MAX_FILE_BYTES, MAX_FILES, MAX_SCAN_BYTES, _safe_archive_path
 
 logger = logging.getLogger("analyzer_worker")
@@ -29,7 +30,7 @@ MAX_ARCHIVE_B64_BYTES = (MAX_ARCHIVE_BYTES * 4 // 3) + 8
 MAX_JOB_FILES = min(MAX_FILES, 20_000)
 _SHA = re.compile(r"^[a-fA-F0-9]{40,64}$")
 _REVISION_ID = re.compile(r"^rev_[0-9a-f]{32}$")
-_ANALYZERS = {"sonarqube", "joern"}
+_ANALYZERS = {"sonarqube", "joern", "scip"}
 _ALLOWED_SONAR_HOSTS = {
     host.strip().lower().rstrip(".")
     for host in os.environ.get("ANALYZER_ALLOWED_SONAR_HOSTS", "sonarqube").split(",")
@@ -127,7 +128,7 @@ def _validate_job(payload: dict[str, Any]) -> tuple[str, bytes, list[str], dict[
                    for key, count in raw_languages.items())):
         raise HTTPException(422, "Analyzer language inventory is invalid.")
     requested = payload.get("analyzers")
-    if not isinstance(requested, list) or not requested or len(requested) > 2:
+    if not isinstance(requested, list) or not requested or len(requested) > len(_ANALYZERS):
         raise HTTPException(422, "Analyzer job selection is invalid.")
     if any(name not in _ANALYZERS for name in requested) or len(set(requested)) != len(requested):
         raise HTTPException(422, "Analyzer job selection contains an unsupported analyzer.")
@@ -189,6 +190,9 @@ def _run_job(payload: dict[str, Any]) -> dict[str, Any]:
             analyzers[name] = run_sonarqube(settings, archive, files, token)
         elif name == "joern":
             analyzers[name] = run_joern(settings, archive, files, languages)
+        elif name == "scip":
+            # Needs no settings: it reads only the bundled source and never builds the project.
+            analyzers[name] = run_scip(archive, files, languages)
     return {"schema_version": 1, "job_id": job_id,
             "revision_id": payload["revision_id"],
             "commit_sha": payload.get("commit_sha"), "bundle_sha256": payload["bundle_sha256"],

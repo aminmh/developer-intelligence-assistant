@@ -274,6 +274,16 @@ def _symbol_row(record: dict[str, Any], root: SourceRoot | None) -> dict[str, An
 _MAX_LOOKUP_DEFINITIONS = 5
 
 
+def _prefer_scip(items: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """One row per site: the `scip` row when SCIP and a parser report the same one, else the parser's."""
+    chosen: dict[tuple, dict[str, Any]] = {}
+    for item in items:
+        key = (item.get("path"), item.get("line"), item.get("symbol"))
+        if key not in chosen or (item.get("origin") == "scip" and chosen[key].get("origin") != "scip"):
+            chosen[key] = item
+    return list(chosen.values())
+
+
 def _symbol_lookup(args: dict[str, Any], context: ToolContext) -> dict[str, Any]:
     from inspection.service import inspection_service
 
@@ -310,7 +320,7 @@ def _symbol_lookup(args: dict[str, Any], context: ToolContext) -> dict[str, Any]
             else:
                 hierarchy = service.call_hierarchy(collection, fqn, name=name) or {}
                 rows += hierarchy.get(relation, []) if isinstance(hierarchy, dict) else []
-    items = [row for row in (_symbol_row(r, root) for r in rows if isinstance(r, dict)) if row]
+    items = _prefer_scip([row for row in (_symbol_row(r, root) for r in rows if isinstance(r, dict)) if row])
     items.sort(key=lambda i: (i.get("path") or "", i.get("line") or 0))
     return {"coverage": "complete", "relation": relation, "items": items[:limit], "truncated": len(items) > limit,
             "detail": "Static graph: dynamic calls, reflection, and container resolution may be missing; "

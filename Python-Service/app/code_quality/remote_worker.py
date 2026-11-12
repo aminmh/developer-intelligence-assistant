@@ -87,7 +87,8 @@ def get_worker_fingerprint(endpoint: str) -> dict[str, str]:
 
 
 def _request(target: dict[str, Any], method: str, path: str,
-             payload: dict[str, Any] | None = None, timeout: float = 12) -> dict[str, Any]:
+             payload: dict[str, Any] | None = None, timeout: float = 12,
+             max_bytes: int = MAX_WORKER_RESPONSE_BYTES) -> dict[str, Any]:
     connection, expected_pin = _connection(target, timeout)
     try:
         connection.connect()
@@ -103,8 +104,8 @@ def _request(target: dict[str, Any], method: str, path: str,
             headers["Content-Length"] = str(len(body))
         connection.request(method, path, body=body, headers=headers)
         response = connection.getresponse()
-        raw = response.read(MAX_WORKER_RESPONSE_BYTES + 1)
-        if len(raw) > MAX_WORKER_RESPONSE_BYTES:
+        raw = response.read(max_bytes + 1)
+        if len(raw) > max_bytes:
             raise RemoteWorkerError("The analyzer worker response exceeded its size limit.")
         if response.status < 200 or response.status >= 300:
             detail = ""
@@ -307,3 +308,91 @@ def _validate_result(name: str, value: Any, selected_files: set[str],
         if type(count) is not int or count < 0 or count > len(selected_files):
             raise RemoteWorkerError("The analyzer worker returned invalid coverage counts.")
     return result
+
+
+# --- SCIP (precise references for the symbol graph) -----------------------------------------------------
+
+MAX_SCIP_RESPONSE_BYTES = 24 * 1024 * 1024
+MAX_SCIP_DEFINITIONS = 20_000
+MAX_SCIP_REFERENCES = 50_000
+_SCIP_SUFFIXES = {".ts": "typescript", ".tsx": "typescript", ".js": "typescript", ".jsx": "typescript",
+                  ".mjs": "typescript", ".cjs": "typescript", ".py": "python"}
+_SCIP_DEFINITION_KINDS = {"class", "method", "function"}
+_SCIP_REFERENCE_KINDS = {"method_call", "function_call", "class_reference"}
+
+
+def scip_inventory(archive_data: bytes) -> tuple[list[str], dict[str, int]]:
+    """TypeScript/JavaScript and Python source files of a revision archive, and counts per language."""
+    from code_quality.service import MAX_FILE_BYTES, _is_excluded_source_path, _safe_archive_path
+
+    files: list[str] = []
+    languages: dict[str, int] = {}
+    with zipfile.ZipFile(io.BytesIO(archive_data)) as archive:
+        for member in sorted(archive.infolist(), key=lambda item: item.filename):
+            try:
+                path = _safe_archive_path(member.filename)
+            except (ValueError, TypeError):
+                continue
+            suffix = os.path.splitext(path)[1].lower()
+            language = _SCIP_SUFFIXES.get(suffix)
+            if (language is None or member.is_dir() or member.file_size > MAX_FILE_BYTES
+                    or path.endswith(".d.ts") or _is_excluded_source_path(path)):
+                continue
+            files.append(path)
+            languages[language] = languages.get(language, 0) + 1
+    return files, languages
+
+
+def _scip_record(record: Any, files: set[str], fields: dict[str, type], kinds: set[str]) -> dict[str, Any] | None:
+    """One worker record, keeping only known fields of the right type; None when it is unusable."""
+    if not isinstance(record, dict) or record.get("kind") not in kinds or record.get("file") not in files:
+        return None
+    clean: dict[str, Any] = {}
+    for name, kind in fields.items():
+        value = record.get(name)
+        if value is None:
+            continue
+        if not isinstance(value, kind) or (isinstance(value, str) and len(value) > 500):
+            return None
+        clean[name] = value
+    clean["origin"] = "scip"
+    return clean
+
+
+def run_scip_job(target: dict[str, Any], archive_data: bytes, files: list[str], languages: dict[str, int],
+                 revision_id: str, commit_sha: str | None) -> dict[str, Any]:
+    """Index a revision's TS/JS and Python with SCIP on the worker; returns a validated symbol export."""
+    if not target.get("source_transfer_consent"):
+        raise RemoteWorkerError("Explicit consent is required before transferring source to the analyzer worker.")
+    source_bundle, line_counts = _filtered_source_bundle(archive_data, files)
+    bundle_sha256 = hashlib.sha256(source_bundle).hexdigest()
+    payload = {
+        "schema_version": 1, "job_id": str(uuid4()), "revision_id": revision_id, "commit_sha": commit_sha,
+        "archive_base64": base64.b64encode(source_bundle).decode("ascii"), "bundle_sha256": bundle_sha256,
+        "files": files, "file_line_counts": line_counts, "languages": languages, "analyzers": ["scip"],
+        "settings": {"sonarqube": {"enabled": False}, "joern": {"enabled": False}}, "sonarqube_token": None,
+    }
+    result = _request(target, "POST", "/v1/jobs", payload, timeout=450, max_bytes=MAX_SCIP_RESPONSE_BYTES)
+    if (result.get("job_id") != payload["job_id"] or result.get("revision_id") != revision_id
+            or result.get("bundle_sha256") != bundle_sha256):
+        raise RemoteWorkerError("The analyzer worker returned a result for a different job.")
+    output = (result.get("analyzers") or {}).get("scip")
+    if not isinstance(output, dict) or not isinstance(output.get("definitions"), list) \
+            or not isinstance(output.get("references"), list):
+        raise RemoteWorkerError("The analyzer worker returned no SCIP result.")
+    selected = set(files)
+    definitions = [d for d in (
+        _scip_record(r, selected, {"kind": str, "fqn": str, "name": str, "owner": str, "file": str,
+                                   "line": int, "end_line": int}, _SCIP_DEFINITION_KINDS)
+        for r in output["definitions"][:MAX_SCIP_DEFINITIONS]) if d and d.get("fqn")]
+    references = [r for r in (
+        _scip_record(r, selected, {"scope": str, "kind": str, "to_fqn": str, "to_member": str, "file": str,
+                                   "line": int}, _SCIP_REFERENCE_KINDS)
+        for r in output["references"][:MAX_SCIP_REFERENCES]) if r and r.get("scope") and r.get("to_fqn")]
+    coverage = output.get("languages") if isinstance(output.get("languages"), dict) else {}
+    return {"definitions": definitions, "references": references,
+            "languages": {str(k)[:40]: {"status": str((v or {}).get("status"))[:20],
+                                        **({"reason": str(v["reason"])[:300]} if isinstance(v, dict) and v.get("reason") else {})}
+                          for k, v in list(coverage.items())[:8]},
+            "truncated": bool(output.get("truncated")) or len(output["definitions"]) > MAX_SCIP_DEFINITIONS
+            or len(output["references"]) > MAX_SCIP_REFERENCES}

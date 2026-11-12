@@ -175,6 +175,8 @@ class IndexingService:
             file_count = extract_zip_safely(zip_data, str(workdir))
             logger.info("Parse extracted %s files: %s", file_count, collection_name)
             chunks, index, parse_error = self._parse_source(str(workdir), filename)
+            if chunks and identity:
+                index = self._with_scip(index, zip_data, identity)
             snapshot = None
             if identity:
                 from telemetry.snapshot import Snapshot
@@ -231,6 +233,38 @@ class IndexingService:
             self.write_status(download_id, "error", 0, 0, collection_name, error=error)
         finally:
             shutil.rmtree(workdir, ignore_errors=True)
+
+    @staticmethod
+    def _with_scip(index: dict[str, Any], zip_data: bytes, identity: dict[str, Any]) -> dict[str, Any]:
+        """Add SCIP definitions and references for the revision's TS/JS and Python. Best-effort.
+
+        Runs on the analyzer worker only when the project has a consented worker target
+        (Developer Mode or the deployment-owned worker); otherwise the parser graph stands.
+        """
+        try:
+            from code_quality.external_analyzers import ExternalAnalyzerSettingsStore, effective_worker_target
+            from code_quality.remote_worker import run_scip_job, scip_inventory
+
+            files, languages = scip_inventory(zip_data)
+            if not files:
+                return index
+            target = effective_worker_target(ExternalAnalyzerSettingsStore().get(identity["project_id"]))
+            if not target:
+                logger.info("SCIP skipped for %s: no analyzer worker with source-transfer consent",
+                            identity["project_id"])
+                return index
+            export = run_scip_job(target, zip_data, files, languages, identity["revision_id"],
+                                  identity.get("commit_sha"))
+        except Exception as exc:  # noqa: BLE001 — precise references are an enhancement
+            logger.warning("SCIP indexing skipped for %s: %s", identity.get("project_id"), exc)
+            return index
+        logger.info("SCIP added %s definitions and %s references for %s (%s)", len(export["definitions"]),
+                    len(export["references"]), identity["project_id"], export["languages"])
+        definitions = list(index.get("definitions") or [])
+        known = {(d.get("kind"), d.get("fqn")) for d in definitions}
+        definitions += [d for d in export["definitions"] if (d.get("kind"), d.get("fqn")) not in known]
+        return {"definitions": definitions,
+                "references": [*(index.get("references") or []), *export["references"]]}
 
     @staticmethod
     def _store_repo_map(archive_sha256: str | None, chunks: list[dict[str, Any]]) -> None:

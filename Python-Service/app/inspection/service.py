@@ -209,6 +209,10 @@ class InspectionService:
         rows = self._query.resolve_by_name(collection, symbol.strip())
         if rows:
             return rows
+        if re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", fqn) and hasattr(self._query, "resolve_function_by_suffix"):
+            rows = self._query.resolve_function_by_suffix(collection, fqn)
+            if rows:
+                return rows
         return self._resolve_partial(collection, fqn)
 
     def _resolve_partial(self, collection: str, symbol: str) -> list[dict[str, Any]]:
@@ -221,8 +225,17 @@ class InspectionService:
         last = re.split(r"::|\\", partial)[-1]
         if not last or last == partial:
             return []
-        return [row for row in self._query.resolve_by_name(collection, last)
-                if (str(row.get("fqn") or "") == partial or str(row.get("fqn") or "").endswith("\\" + partial))]
+        candidates = list(self._query.resolve_by_name(collection, last))
+        if hasattr(self._query, "resolve_function_by_suffix") and re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", last):
+            candidates += self._query.resolve_function_by_suffix(collection, last)
+        seen: set[str] = set()
+        matches = []
+        for row in candidates:
+            fqn = str(row.get("fqn") or "")
+            if (fqn == partial or fqn.endswith("\\" + partial)) and fqn not in seen:
+                seen.add(fqn)
+                matches.append(row)
+        return matches
 
     def list_projects(self) -> list[dict[str, Any]]:
         return self._query.list_projects()

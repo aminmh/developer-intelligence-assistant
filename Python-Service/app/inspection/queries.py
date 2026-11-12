@@ -31,6 +31,14 @@ ORDER BY CASE s.kind WHEN 'class' THEN 0 WHEN 'interface' THEN 1
          WHEN 'function' THEN 5 ELSE 6 END, s.line
 """
 
+# Functions are stored with their full name as `name` (the inspector keys call scopes
+# by it), so a short function name matches the end of the full name instead.
+_MATCH_FUNCTION_BY_SUFFIX = """
+MATCH (s:PhpSymbol {collection: $collection, kind: 'function'})
+WHERE s.fqn ENDS WITH $suffix
+RETURN s AS n ORDER BY s.file, s.line LIMIT 20
+"""
+
 _MATCH_NODE_BY_NAME = """
 MATCH (s:PhpSymbol {collection: $collection, name: $name})
 RETURN s AS n
@@ -240,6 +248,11 @@ class SymbolGraphQuery:
 
     def resolve_by_name(self, collection: str, name: str) -> list[dict[str, Any]]:
         rows = self._run(_MATCH_NODE_BY_NAME, {"collection": collection, "name": name})
+        return [_node_row(row["n"]) for row in rows if row.get("n")]
+
+    def resolve_function_by_suffix(self, collection: str, name: str) -> list[dict[str, Any]]:
+        """Functions whose full name ends with ``\\name`` (Tree-sitter and SCIP store full names)."""
+        rows = self._run(_MATCH_FUNCTION_BY_SUFFIX, {"collection": collection, "suffix": "\\" + name})
         return [_node_row(row["n"]) for row in rows if row.get("n")]
 
     def find_implementations(
