@@ -53,7 +53,6 @@ class Settings(BaseModel):
     llm_remote_api_key: str = os.getenv("LLM_REMOTE_API_KEY", "")
     # Kill switch for model tool calls in chat (agent_tools/runtime.py).
     agent_tools_enabled: bool = os.getenv("AGENT_TOOLS_ENABLED", "true").strip().lower() not in {"0", "false", "no"}
-    runpod_api_key: str = os.getenv("RUNPOD_API_KEY", "")
 
     # Documentation retrieval (Context7 primary, GitMCP fallback). The doc
     # lookup key is read straight from CONTEXT7_API_KEY when present — never
@@ -151,7 +150,6 @@ class RuntimeSettings:
         "llm_remote_base_url": "llmRemoteBaseUrl",
         "llm_remote_model": "llmRemoteModel",
         "llm_remote_api_key": "llmRemoteApiKey",
-        "runpod_api_key": "runpodApiKey",
         "doc_retrieval_enabled": "docRetrievalEnabled",
         "doc_context7_enabled": "docContext7Enabled",
         "doc_gitmcp_enabled": "docGitmcpEnabled",

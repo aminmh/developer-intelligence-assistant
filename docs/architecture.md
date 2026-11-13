@@ -92,8 +92,8 @@ web/src/
   types.ts                # PascalCase types mirroring snake_case payloads
   components/             # RAGChat, RAGFiles, RAGConfig (thin parent), config/*
                           #   (one card per section), saved analyses, ...
-  components/config/*.vue # LlmProviders, GpuOffload, ExternalModel,
-                          #   VectorStore, ModelImport, DocRetrieval
+  components/config/*.vue # LlmProviders, ExternalModel,
+                          #   VectorStore, DocRetrieval
   ui/makeRequest.ts       # VITE_API_URL-aware fetch (multi-consumer)
 web/server.ts             # express: proxying + orchestration glue (route map header)
 ```

@@ -170,7 +170,6 @@ def test_health_llm_reports_reachable_providers(monkeypatch):
     monkeypatch.setattr(system.settings, "ollama_base_url", "http://localhost:11434/")
     monkeypatch.setattr(system.settings, "llm_remote_base_url", "http://localhost:8000/")
     monkeypatch.setattr(system.settings, "llm_remote_api_key", "sekret")
-    monkeypatch.setattr(system.settings, "runpod_api_key", "")
 
     result = system.health_llm()
 
@@ -199,7 +198,6 @@ def test_health_llm_sends_no_auth_when_key_unset(monkeypatch):
     monkeypatch.setattr(system.settings, "ollama_base_url", "http://localhost:11434/")
     monkeypatch.setattr(system.settings, "llm_remote_base_url", "http://localhost:8000/")
     monkeypatch.setattr(system.settings, "llm_remote_api_key", "")
-    monkeypatch.setattr(system.settings, "runpod_api_key", "")
 
     result = system.health_llm()
 

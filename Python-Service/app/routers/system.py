@@ -14,7 +14,6 @@ from infra.settings import settings
 from runtime.lmstudio import lmstudio_load, lmstudio_models
 
 router = APIRouter(tags=["Health & System"])
-_RUNPOD_API = "https://rest.runpod.io/v1"
 
 
 def _probe_local_llm() -> dict:
@@ -49,60 +48,9 @@ def _probe_remote_llm() -> dict:
         return {"configured": True, "reachable": False, "model": None, "error": str(exc)}
 
 
-def _probe_runpod() -> dict:
-    api_key = (settings.runpod_api_key or "").strip()
-    if not api_key:
-        return {"configured": False, "reachable": False, "endpoint_count": 0, "error": None}
-    try:
-        req = urllib.request.Request(
-            f"{_RUNPOD_API}/endpoints",
-            headers={"Authorization": f"Bearer {api_key}", "Accept": "application/json"},
-        )
-        with urllib.request.urlopen(req, timeout=5.0) as resp:
-            data = json.loads(resp.read().decode("utf-8"))
-        return {"configured": True, "reachable": True, "endpoint_count": len(data) if isinstance(data, list) else 0, "error": None}
-    except Exception as exc:  # noqa: BLE001 — health probes never raise
-        return {"configured": True, "reachable": False, "endpoint_count": 0, "error": str(exc)}
-
-
 @router.get("/health/llm", summary="LLM Provider Health")
 def health_llm():
-    return {"local": _probe_local_llm(), "remote": _probe_remote_llm(), "runpod": _probe_runpod()}
-
-
-@router.get("/api/runpod/endpoints", tags=["RunPod Serverless"], summary="List RunPod Endpoints")
-def runpod_list_endpoints():
-    api_key = (settings.runpod_api_key or "").strip()
-    if not api_key:
-        return {"ok": False, "endpoints": [], "error": "not configured (no RunPod API key)"}
-    try:
-        req = urllib.request.Request(
-            f"{_RUNPOD_API}/endpoints",
-            headers={"Authorization": f"Bearer {api_key}", "Accept": "application/json"},
-        )
-        with urllib.request.urlopen(req, timeout=8.0) as resp:
-            data = json.loads(resp.read().decode("utf-8"))
-        return {"ok": True, "endpoints": data if isinstance(data, list) else [], "error": None}
-    except Exception as exc:  # noqa: BLE001 — endpoint listing is best-effort
-        return {"ok": False, "endpoints": [], "error": str(exc)}
-
-
-@router.post("/health/test/runpod", tags=["RunPod Serverless"], summary="Test RunPod Connection")
-def runpod_test_connection():
-    api_key = (settings.runpod_api_key or "").strip()
-    started = time.monotonic()
-    if not api_key:
-        return {"ok": False, "latency_ms": 0, "detail": "not configured (no RunPod API key)"}
-    try:
-        req = urllib.request.Request(
-            f"{_RUNPOD_API}/endpoints",
-            headers={"Authorization": f"Bearer {api_key}", "Accept": "application/json"},
-        )
-        with urllib.request.urlopen(req, timeout=8.0) as resp:
-            data = json.loads(resp.read().decode("utf-8"))
-        return {"ok": True, "latency_ms": round((time.monotonic() - started) * 1000), "detail": f"authenticated · {len(data) if isinstance(data, list) else 0} endpoint(s) on account"}
-    except Exception as exc:  # noqa: BLE001 — connection test is best-effort
-        return {"ok": False, "latency_ms": round((time.monotonic() - started) * 1000), "detail": str(exc)[:300]}
+    return {"local": _probe_local_llm(), "remote": _probe_remote_llm()}
 
 
 @router.post("/health/test/remote", tags=["LLM Providers"], summary="Test External OpenAI-Compatible Connection")

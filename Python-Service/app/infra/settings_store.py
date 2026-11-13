@@ -31,7 +31,6 @@ RAG_CONFIG_DEFAULTS: Dict[str, Any] = {
     "llmRemoteBaseUrl": "",
     "llmRemoteModel": "",
     "llmRemoteApiKey": "",
-    "runpodApiKey": "",
     "docRetrievalEnabled": True,
     "docContext7Enabled": True,
     "docGitmcpEnabled": True,
@@ -53,7 +52,7 @@ RAG_CONFIG_DEFAULTS: Dict[str, Any] = {
 
 # Fields returned masked by GET /settings. They are write-only: a PUT only
 # overwrites them when a non-empty value is supplied.
-SECRET_KEYS = {"qdrantApiKey", "llmRemoteApiKey", "runpodApiKey", "cohereApiKey", "cloudflareApiToken"}
+SECRET_KEYS = {"qdrantApiKey", "llmRemoteApiKey", "cohereApiKey", "cloudflareApiToken"}
 
 MASKED_VALUE = ""
 

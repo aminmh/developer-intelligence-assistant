@@ -4,8 +4,8 @@ Every swappable external capability — LLM chat, embeddings, and library-doc
 retrieval — is behind a small Protocol here. Adapters are
 **thin wrappers**: they carry no logic and read settings at call time, so the
 existing env/dynamic settings keep working unchanged and existing tests
-continue to cover the real behavior. Swapping a provider (e.g. Ollama →
-RunPod for chat) means implementing the Protocol and registering it — call
+continue to cover the real behavior. Swapping a provider (e.g. Ollama → a
+hosted chat model) means implementing the Protocol and registering it — call
 sites stay on ``providers.llm()`` etc.
 """
 
