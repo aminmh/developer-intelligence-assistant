@@ -21,10 +21,12 @@ import {
   FolderSync,
 } from 'lucide-vue-next';
 import BrandLogo from './components/BrandLogo.vue';
+import ProjectSwitcher from './components/ProjectSwitcher.vue';
+import { useProjectScope } from './composables/useProjectScope';
 import ToggleCard from './components/ToggleCard.vue';
 import type { RAGConfig, SearchMatch, LLMUsage, ContextUsage, ChatBusinessRuleSource, ToolCallView, ToolAvailability, CitationPreview, ApprovalView } from './types';
 import { mergeToolCalls } from './utils/agentTools';
-import { describeRevision, parseRevisionOption, relativeAge, revisionOptionValue, type ChatProjectRevisions, type RevisionView } from './utils/chatRevisions';
+import { describeRevision, relativeAge, type ChatProjectRevisions, type RevisionView } from './utils/chatRevisions';
 import { makeRequest } from './ui/makeRequest';
 import { useProjectFiles } from './composables/useProjectFiles';
 import { validateUploadIdentity } from './services/uploadIdentity';
@@ -50,7 +52,9 @@ const tabFromUrl = (): AppTab => {
   return VALID_TABS.includes(value as AppTab) ? value as AppTab : 'chat';
 };
 const activeTab = ref<AppTab>(tabFromUrl());
-const uploadProjectId = ref('');
+// The app-wide project selection (header switcher); every page follows it.
+const scope = useProjectScope();
+const uploadProjectId = computed({ get: () => scope.projectId.value, set: (value: string) => scope.select(value) });
 const uploadCommitSha = ref('');
 const authChecked = ref(false);
 const developmentAuth = ref(false);
@@ -93,7 +97,11 @@ const syncTabFromHistory = () => {
 // Revision mode: chat reads a project's latest (or a pinned) indexed revision instead of an
 // uploaded file, so Git-synced and working-tree revisions are selectable too.
 const chatRevisions = ref<ChatProjectRevisions[]>([]);
-const activeRevision = ref<{ projectId: string; revision: string } | null>(null);
+// Chat answers from the selected project unless a ZIP is attached in the composer.
+const activeRevision = computed<{ projectId: string; revision: string } | null>(() =>
+  activeFileId.value || !scope.projectId.value || !scope.currentProject.value?.indexed
+    ? null
+    : { projectId: scope.projectId.value, revision: scope.revision.value });
 const fetchChatRevisions = async () => {
   try {
     const res = await makeRequest('/api/chat/revisions');
@@ -101,9 +109,6 @@ const fetchChatRevisions = async () => {
     if (res.ok && Array.isArray(data.projects)) chatRevisions.value = data.projects;
   } catch { /* the picker keeps uploaded files only */ }
 };
-const activeSourceValue = () => activeRevision.value
-  ? revisionOptionValue(activeRevision.value.projectId, activeRevision.value.revision)
-  : activeFileId.value;
 const activeSourceFields = () => {
   if (activeRevision.value) return { project_id: activeRevision.value.projectId, revision: activeRevision.value.revision };
   const file = files.value.find((item) => item.id === activeFileId.value);
@@ -363,7 +368,6 @@ const {
   rebuildCohereEmbeddings,
   attachZip,
   clearAttach,
-  selectAttachment,
 } = useProjectFiles({
   triggerToast,
   getUploadIdentity: () => validateUploadIdentity(uploadProjectId.value, uploadCommitSha.value).identity,
@@ -1138,19 +1142,18 @@ const submitFeedback = async (query: string, route: string) => {
   }
 };
 
-// Choosing a revision detaches any uploaded file, and choosing a file leaves revision mode.
-const selectSource = (value: string) => {
-  const parsed = parseRevisionOption(value);
-  if (parsed) {
-    activeRevision.value = parsed;
-    clearAttach();
-  } else {
-    activeRevision.value = null;
-    selectAttachment(value);
-  }
+watch(files, () => { void fetchChatRevisions(); void scope.load(); });
+// Switching project drops a ZIP attached for another project and refreshes the access panel.
+watch(() => scope.projectId.value, (projectId) => {
+  const attached = files.value.find((item) => item.id === activeFileId.value);
+  if (attached && attached.projectId && attached.projectId !== projectId) clearAttach();
+  members.value = [];
+  if (memberPanelOpen.value) void loadProjectMembers();
+});
+const openProjectAccess = () => {
+  memberPanelOpen.value = true;
+  void loadProjectMembers();
 };
-watch(activeFileId, (id) => { if (id) activeRevision.value = null; });
-watch(files, () => { void fetchChatRevisions(); });
 
 onMounted(async () => {
   window.addEventListener('popstate', syncTabFromHistory);
@@ -1204,6 +1207,13 @@ const pageMeta: Record<AppTab, { title: string; description: string }> = {
 };
 const currentPage = computed(() => pageMeta[activeTab.value]);
 const currentProjectId = computed(() => uploadProjectId.value.trim());
+const projectCardMeta = computed(() => {
+  const revisions = scope.currentProject.value?.revisions ?? [];
+  if (!currentProjectId.value) return `${scope.projects.value.length} ${scope.projects.value.length === 1 ? 'project' : 'projects'} available`;
+  if (!revisions.length) return 'No revisions yet';
+  const indexed = revisions.filter((rev) => rev.indexed).length;
+  return `${indexed} of ${revisions.length} ${revisions.length === 1 ? 'revision' : 'revisions'} indexed`;
+});
 const isProjectAdmin = computed(() => authProjects.value.some(
   (project) => (project.project_id === uploadProjectId.value || project.project_id === '*') && project.role === 'admin'));
 const userLabel = computed(() => authUser.value?.email || authUser.value?.name || authUser.value?.sub || '');
@@ -1274,7 +1284,7 @@ onUnmounted(() => narrowQuery?.removeEventListener('change', syncNarrow));
         <FolderGit2 class="h-[1.125rem] w-[1.125rem]" aria-hidden="true" />
         <div v-if="!sidebarIsCollapsed" class="min-w-0 flex-1">
           <span class="app-project-name">{{ currentProjectId || 'No project selected' }}</span>
-          <span class="app-project-meta">{{ files.length }} {{ files.length === 1 ? 'file' : 'files' }} indexed</span>
+          <span class="app-project-meta">{{ projectCardMeta }}</span>
         </div>
       </div>
 
@@ -1334,13 +1344,7 @@ onUnmounted(() => narrowQuery?.removeEventListener('change', syncNarrow));
           <p class="app-page-desc hidden truncate md:block">{{ currentPage.description }}</p>
         </div>
         <div class="ml-auto flex min-w-0 flex-wrap items-center justify-end gap-2">
-          <div v-if="activeTab !== 'files'" class="app-field-group">
-            <label for="upload-project-id">Project</label>
-            <input id="upload-project-id" v-model="uploadProjectId" class="w-28 xl:w-36" placeholder="project-id" />
-            <span class="app-field-sep hidden lg:block" aria-hidden="true"></span>
-            <GitCommitHorizontal class="hidden lg:block" aria-hidden="true" />
-            <input v-model="uploadCommitSha" aria-label="Commit SHA (optional)" class="hidden w-44 lg:block xl:w-60" placeholder="Commit SHA (optional)" />
-          </div>
+          <ProjectSwitcher :can-manage-access="isProjectAdmin" @open-access="openProjectAccess" />
           <button
             v-if="isProjectAdmin"
             type="button"
@@ -1483,8 +1487,6 @@ onUnmounted(() => narrowQuery?.removeEventListener('change', syncNarrow));
         :files="files"
         :activeFileName="activeFileName"
         :activeFileId="activeFileId"
-        :chatRevisions="chatRevisions"
-        :activeSourceValue="activeSourceValue()"
         :orchestrationSteps="orchestrationSteps"
         :generatingAnswer="generatingAnswer"
         :showSystemMonitor="appearance.preferences.showSystemMonitor"
@@ -1492,7 +1494,6 @@ onUnmounted(() => narrowQuery?.removeEventListener('change', syncNarrow));
         :lowPerformanceMode="appearance.preferences.lowPerformanceMode"
         @sendMessage="sendMessage"
         @attachZip="attachZip"
-        @selectAttachment="selectSource"
         @clearAttach="clearAttach"
         @feedback="submitFeedback"
         :useRemote="useRemote"

@@ -54,6 +54,7 @@ export function describeRevision(revision: RevisionView, now: number = Date.now(
     const base = revision.base_commit_sha ? ` (on ${revision.base_commit_sha.slice(0, 7)})` : '';
     return `working tree${when}${base}`;
   }
+  if (revision.commit_sha?.startsWith('upload_')) return `upload ${revision.commit_sha.slice(7, 14)}${when}`;
   if (revision.commit_sha) return `commit ${revision.commit_sha.slice(0, 7)}${when}`;
   return `upload${when}`;
 }

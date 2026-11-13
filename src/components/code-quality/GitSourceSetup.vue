@@ -37,10 +37,19 @@ const loadSource = async () => {
     credentialSaved.value = false;
   }
 };
-watch(() => props.defaultProjectId, async (value, previous) => {
-  if (!value || (projectId.value && projectId.value !== previous)) return;
-  projectId.value = value;
-  await loadSource();
+// Follows the project chosen in the header switcher.
+watch(() => props.defaultProjectId, async (value) => {
+  const next = (value || '').trim();
+  if (next === projectId.value) return;
+  projectId.value = next;
+  source.value = null;
+  repository.value = '';
+  branch.value = 'main';
+  token.value = '';
+  credentialSaved.value = false;
+  message.value = '';
+  error.value = '';
+  if (next) await loadSource().catch((cause: any) => { error.value = cause?.message || 'Git source operation failed.'; });
 }, { immediate: true });
 const saveSource = async () => {
   busy.value = true; error.value = ''; message.value = '';
@@ -91,7 +100,7 @@ const synchronize = async () => {
       <h2 id="git-source-heading" class="kb-panel-title"><GitBranch aria-hidden="true" />GitHub source</h2>
       <p class="kb-lead">Fetch a branch head into an immutable source revision. The read-only token lives in your OS credential store; the API never saves it.</p>
       <div class="kb-row3">
-        <label class="kb-field">Project ID<input v-model="projectId" autocomplete="off" class="kb-input" placeholder="pizza" /></label>
+        <label class="kb-field">Project ID<input :value="projectId" readonly class="kb-input" placeholder="Choose a project in the header" title="Change the project in the header" /></label>
         <label class="kb-field">Repository<input v-model="repository" autocomplete="off" class="kb-input" placeholder="owner/repository" /></label>
         <label class="kb-field">Branch<input v-model="branch" autocomplete="off" class="kb-input" placeholder="main" /></label>
       </div>

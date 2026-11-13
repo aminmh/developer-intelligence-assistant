@@ -3,7 +3,7 @@ import {
   Activity, AlertTriangle, BookOpen, Box, Check, CheckCircle2, ChevronDown, ChevronsUpDown, Container, Copy, Database, Eraser, EyeOff,
   FileCode, FileDiff, GitFork, LayoutDashboard, RadioTower, RefreshCw, Repeat, Scale, Send, Server, Sparkles, Trash2, WandSparkles, X,
 } from 'lucide-vue-next';
-import { computed, onMounted, onUnmounted, ref, watch } from 'vue';
+import { computed, nextTick, onMounted, onUnmounted, ref, watch } from 'vue';
 import ConfirmModal from './ConfirmModal.vue';
 import RemoteHostMonitor from './RemoteHostMonitor.vue';
 import RuntimeSetupWizard from './runtime/RuntimeSetupWizard.vue';
@@ -11,6 +11,7 @@ import ToggleCard from './ToggleCard.vue';
 import { makeRequest } from '../ui/makeRequest';
 import { subscribeRuntimeUpdates } from '../ui/runtimeEvents';
 import { useUrlTab } from '../composables/useUrlTab';
+import { useProjectScope } from '../composables/useProjectScope';
 import RuleLinksPanel from './code-quality/RuleLinksPanel.vue';
 import RuleImpactResults from './code-quality/RuleImpactResults.vue';
 import { ruleKnowledgePath, ruleRequest, type ImpactResult } from './code-quality/ruleKnowledge';
@@ -123,6 +124,43 @@ const options = computed(() => {
   return [...byKey.values()];
 });
 const selected = computed(() => options.value.find((item) => item.key === selectedKey.value) || null);
+// The header switcher picks the project; this page lists that project's revisions and deployments.
+const scope = useProjectScope();
+const scopedOptions = computed(() => scope.projectId.value
+  ? options.value.filter((item) => item.project_id === scope.projectId.value)
+  : options.value);
+const preferredKey = () => {
+  const list = scopedOptions.value;
+  const wanted = scope.revision.value === 'latest' ? scope.resolvedRevision.value?.revision_id : scope.revision.value;
+  return (wanted && list.find((item) => item.revision_id === wanted)?.key)
+    || list.find((item) => item.revision_id)?.key || list[0]?.key || '';
+};
+let syncingFromScope = false;
+const applyScope = (force: boolean) => {
+  if (!force && scopedOptions.value.some((item) => item.key === selectedKey.value)) return;
+  const next = preferredKey();
+  if (next === selectedKey.value) return;
+  syncingFromScope = true;
+  selectedKey.value = next;
+  void nextTick(() => { syncingFromScope = false; });
+};
+let keepLocalPick = false;
+watch(() => [scope.projectId.value, scope.revision.value, scope.resolvedRevision.value?.revision_id] as const, () => {
+  if (keepLocalPick) { keepLocalPick = false; return; }
+  applyScope(true);
+});
+watch(options, () => applyScope(false));
+// Picking a revision here becomes the app-wide choice; the newest indexed one stays "latest".
+watch(selectedKey, (key) => {
+  if (syncingFromScope || !key) return;
+  const picked = options.value.find((item) => item.key === key);
+  if (!picked) return;
+  const newest = scope.projects.value.find((item) => item.project_id === picked.project_id)?.revisions.find((rev) => rev.indexed)?.revision_id;
+  const nextRevision = !picked.revision_id || picked.revision_id === newest ? 'latest' : picked.revision_id;
+  // Keep this exact pick (e.g. a Docker-only deployment) rather than snapping to the newest revision.
+  if (picked.project_id !== scope.projectId.value || nextRevision !== scope.revision.value) keepLocalPick = true;
+  scope.select(picked.project_id, nextRevision);
+});
 const requestAnalysisKey = (traceId: string) => `${selected.value?.project_id || ''}:${selected.value?.revision_id || ''}:${traceId}`;
 const visibleRequests = computed(() => (requestList.value?.requests || []).filter((request) => !hiddenTraceIds.value.has(request.trace_id)));
 const requestPageCount = computed(() => Math.max(1, Math.ceil(visibleRequests.value.length / REQUESTS_PER_PAGE)));
@@ -141,9 +179,7 @@ const loadProjects = async () => {
     if (!response.ok) throw new Error(data.detail || 'Could not load runtime project inventory.');
     error.value = '';
     projects.value = data.projects || [];
-    if (!selectedKey.value || !options.value.some((item) => item.key === selectedKey.value)) {
-      selectedKey.value = options.value[0]?.key || '';
-    }
+    applyScope(false);
   } catch (cause: any) {
     error.value = cause?.message || 'Could not load runtime project inventory.';
   } finally {
@@ -786,8 +822,8 @@ const setupBannerTone = computed(() => (setupState.value === 'error' ? 'bad' : s
           <Box aria-hidden="true" />
           <span class="sr-only">Project and indexed revision</span>
           <select v-model="selectedKey" :disabled="setupBusy">
-            <option value="">Select project / indexed revision</option>
-            <option v-for="item in options" :key="item.key" :value="item.key">{{ item.project_id }} · {{ item.revision_id ? `Revision ${item.revision_id.slice(4, 12)}` : 'Docker only · no indexed revision' }}</option>
+            <option value="">{{ scope.projectId.value && !scopedOptions.length ? `No runtime data for ${scope.projectId.value}` : 'Select project / indexed revision' }}</option>
+            <option v-for="item in scopedOptions" :key="item.key" :value="item.key">{{ item.project_id }} · {{ item.revision_id ? `Revision ${item.revision_id.slice(4, 12)}` : 'Docker only · no indexed revision' }}</option>
           </select>
           <ChevronsUpDown aria-hidden="true" />
         </label>

@@ -4,9 +4,9 @@ import MarkdownIt from 'markdown-it';
 import {
   SendHorizontal,
   Info,
-  ChevronsUpDown,
   Paperclip,
   FolderGit2,
+  GitCommitHorizontal,
   Gauge,
   Eye,
   ShieldCheck,
@@ -38,8 +38,9 @@ import EvaluationModal from './EvaluationModal.vue';
 import RetrievalInsights from './RetrievalInsights.vue';
 import SysMonitor from './SysMonitor.vue';
 import BrandLogo from './BrandLogo.vue';
+import { useProjectScope } from '../composables/useProjectScope';
 import type { PipelineStep } from './PipelineProgress.vue';
-import { describeRevision, revisionOptionValue, type ChatProjectRevisions, type RevisionView } from '../utils/chatRevisions';
+import { describeRevision, type RevisionView } from '../utils/chatRevisions';
 
 interface CodeValidation {
   language?: string;
@@ -80,10 +81,6 @@ const props = defineProps<{
   files: UploadedFile[];
   activeFileName: string | null;
   activeFileId: string | null;
-  /** Projects with indexed revisions: "Latest" plus pinnable revisions. */
-  chatRevisions?: ChatProjectRevisions[];
-  /** Selected picker value: an uploaded file ID or a `rev:` revision option. */
-  activeSourceValue?: string | null;
   orchestrationSteps: PipelineStep[];
   generatingAnswer: boolean;
   showSystemMonitor: boolean;
@@ -97,7 +94,6 @@ const props = defineProps<{
 const emit = defineEmits<{
   (e: 'sendMessage', text: string): void;
   (e: 'attachZip', file: File): void;
-  (e: 'selectAttachment', fileId: string): void;
   (e: 'clearAttach'): void;
   (e: 'feedback', query: string, route: string): void;
   (e: 'update:useRemote', value: boolean): void;
@@ -267,7 +263,7 @@ const formatDuration = (ms?: number) => {
   return ms < 1000 ? `${ms} ms` : `${(ms / 1000).toFixed(1)} s`;
 };
 
-const projectName = computed(() => props.activeFileName || 'your codebase');
+const projectName = computed(() => props.activeFileName || scope.projectId.value || 'your codebase');
 const hasConversation = computed(() => props.messages.length > 0 || !!props.gatePreview || props.loading);
 
 // ---- Scrolling and composer ----------------------------------------------
@@ -325,10 +321,16 @@ const onAttachZip = (event: Event) => {
   }
 };
 
-const onSelectFile = (event: Event) => {
-  const value = (event.target as HTMLSelectElement).value;
-  if (value) emit('selectAttachment', value);
-};
+const scope = useProjectScope();
+// Where answers come from: an attached ZIP, or the project chosen in the header.
+const answerSource = computed(() => {
+  if (props.activeFileName) return null;
+  const project = scope.projectId.value;
+  if (!project) return { project: 'No project', detail: 'choose one in the header', tone: 'warn' };
+  const resolved = scope.resolvedRevision.value;
+  if (!scope.usable.value || !resolved) return { project, detail: 'not indexed', tone: 'warn' };
+  return { project, detail: scope.revision.value === 'latest' ? 'latest' : describeRevision({ ...resolved, created_at: null }), tone: scope.revision.value === 'latest' ? 'latest' : 'pinned' };
+});
 </script>
 
 <template>
@@ -355,9 +357,10 @@ const onSelectFile = (event: Event) => {
           </div>
         </div>
 
-        <div v-if="filesCount === 0 && !hasConversation" class="chat-notice">
+        <div v-if="!activeFileName && !scope.usable.value && scope.loaded.value && !hasConversation" class="chat-notice">
           <Info aria-hidden="true" />
-          <span>No project is indexed yet. Index a project before asking about its code.</span>
+          <span v-if="!scope.projectId.value">Choose a project in the header to ask about its code.</span>
+          <span v-else><b>{{ scope.projectId.value }}</b> has no indexed revision yet. Index it before asking about its code.</span>
           <button type="button" class="chat-btn" @click="emit('openKnowledgeBase')">Open knowledge base</button>
         </div>
 
@@ -559,33 +562,15 @@ const onSelectFile = (event: Event) => {
           v-model="chatInput"
           rows="1"
           aria-label="Message"
-          :placeholder="activeFileName ? `Ask about ${activeFileName}…` : 'Ask about APIs, code or configuration in your indexed projects…'"
+          :placeholder="activeFileName ? `Ask about ${activeFileName}…` : scope.projectId.value ? `Ask about APIs, code or configuration in ${scope.projectId.value}…` : 'Ask about APIs, code or configuration in your indexed projects…'"
           :disabled="chatLocked"
           @input="autoGrow"
           @keydown="onComposerKeydown"
         ></textarea>
         <div class="chat-composer-bar">
-          <label class="chat-pick" title="Answer from">
-            <FolderGit2 aria-hidden="true" />
-            <select
-              :value="activeSourceValue ?? activeFileId ?? ''"
-              aria-label="Answer from"
-              :disabled="files.length === 0 && !(chatRevisions && chatRevisions.length)"
-              @change="onSelectFile"
-            >
-              <option value="" disabled>Choose a project…</option>
-              <optgroup v-for="project in chatRevisions || []" :key="project.project_id" :label="`Project ${project.project_id}`">
-                <option :value="revisionOptionValue(project.project_id, 'latest')">{{ project.project_id }} · latest</option>
-                <option v-for="rev in project.revisions" :key="rev.revision_id" :value="revisionOptionValue(project.project_id, rev.revision_id)">
-                  {{ project.project_id }} · {{ describeRevision(rev) }}
-                </option>
-              </optgroup>
-              <optgroup v-if="files.length" label="Uploaded files">
-                <option v-for="f in files" :key="f.id" :value="f.id">{{ f.name }}<template v-if="f.projectId"> · {{ f.projectId }}</template></option>
-              </optgroup>
-            </select>
-            <ChevronsUpDown aria-hidden="true" />
-          </label>
+          <span v-if="answerSource" class="chat-from" :data-tone="answerSource.tone" title="Answers come from this project. Change it in the header.">
+            <GitCommitHorizontal aria-hidden="true" /><b>{{ answerSource.project }}</b><span>· {{ answerSource.detail }}</span>
+          </span>
           <div class="chat-seg" role="group" aria-label="Model">
             <button type="button" :aria-pressed="!useRemote" :disabled="chatLocked" title="Answer with the local model" @click="emit('update:useRemote', false)">
               <HardDrive aria-hidden="true" />Local

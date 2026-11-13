@@ -1187,6 +1187,23 @@ async function startServer() {
 
   // Get uploaded files list (local tracking + Python/MinIO rag-uploads merged)
   // Projects the user can access, each with its ready revisions newest first, for the chat picker.
+  // Every project and revision the user can reach, for the app-wide project switcher.
+  app.get('/api/projects/scope', async (_req, res) => {
+    try {
+      const pyRes = await fetch(`${PYTHON_API_URL}/telemetry/chat/scope`, {
+        headers: { 'X-Internal-Secret': INTERNAL_SECRET }, signal: AbortSignal.timeout(8000),
+      });
+      const data = await pyRes.json().catch(() => ({})) as { projects?: { project_id: string }[]; vectors_checked?: boolean };
+      if (!pyRes.ok) return res.status(pyRes.status).json({ success: false, error: 'Projects are unavailable.' });
+      const user = (res.locals as any).authUser;
+      const projects = (data.projects || []).filter((project) =>
+        Boolean(user && (authIsBootstrapAdmin(user) || authRoleFor(user, project.project_id))));
+      return res.json({ success: true, projects, vectors_checked: Boolean(data.vectors_checked) });
+    } catch {
+      return res.status(502).json({ success: false, error: 'Projects are unavailable.' });
+    }
+  });
+
   app.get('/api/chat/revisions', async (_req, res) => {
     try {
       const pyRes = await fetch(`${PYTHON_API_URL}/telemetry/chat/revisions`, {

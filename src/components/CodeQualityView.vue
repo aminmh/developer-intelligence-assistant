@@ -15,6 +15,7 @@ import DirectoryExclusionTree from './code-quality/DirectoryExclusionTree.vue';
 import BusinessRuleReviews from './code-quality/BusinessRuleReviews.vue';
 import ExternalAnalyzerSetup from './code-quality/ExternalAnalyzerSetup.vue';
 import { useUrlTab } from '../composables/useUrlTab';
+import { useProjectScope } from '../composables/useProjectScope';
 import type { UploadedFile } from '../types';
 import { assessmentRevisions, isWorkingTreeRevision, revisionKey, type ProjectRevision } from '../code-quality/projectRevisions';
 
@@ -58,6 +59,50 @@ const projects = computed(() => assessmentRevisions(props.files, registeredRevis
 type QualityTab = 'assessment' | 'compare' | 'performance' | 'rules' | 'external';
 const activeTab = useUrlTab<QualityTab>({ values: ['assessment', 'compare', 'performance', 'rules', 'external'], fallback: 'assessment' });
 const selectedRevision = ref('');
+// The header switcher picks the project; this page lists that project's revisions.
+const scope = useProjectScope();
+const scopedProjects = computed(() => scope.projectId.value
+  ? projects.value.filter((project) => project.project_id === scope.projectId.value)
+  : projects.value);
+const newestAssessable = (list: ProjectRevision[]) =>
+  list.find((project) => !isWorkingTreeRevision(project) && project.state !== 'not_indexed')
+  ?? list.find((project) => !isWorkingTreeRevision(project)) ?? list[0];
+const preferredRevisionKey = () => {
+  const list = scopedProjects.value;
+  if (!list.length) return '';
+  if (scope.revision.value !== 'latest') {
+    const pinned = list.find((project) => project.revision_id === scope.revision.value);
+    if (pinned) return revisionKey(pinned);
+  }
+  const first = newestAssessable(list);
+  return first ? revisionKey(first) : '';
+};
+let syncingFromScope = false;
+const applyScope = (force: boolean) => {
+  const inScope = scopedProjects.value.some((project) => revisionKey(project) === selectedRevision.value);
+  if (!force && inScope) return;
+  const next = preferredRevisionKey();
+  if (next === selectedRevision.value) return;
+  syncingFromScope = true;
+  selectedRevision.value = next;
+  void nextTick(() => { syncingFromScope = false; });
+};
+let keepLocalPick = false;
+watch(() => [scope.projectId.value, scope.revision.value] as const, () => {
+  if (keepLocalPick) { keepLocalPick = false; return; }
+  applyScope(true);
+});
+// Picking a revision here becomes the app-wide choice; the newest one stays "latest".
+watch(selectedRevision, (key) => {
+  if (syncingFromScope || !key) return;
+  const picked = projects.value.find((project) => revisionKey(project) === key);
+  if (!picked) return;
+  const isNewest = newestAssessable(projects.value.filter((project) => project.project_id === picked.project_id)) === picked;
+  const nextRevision = isNewest || !picked.revision_id ? 'latest' : picked.revision_id;
+  // Keep this exact pick (e.g. an upload not indexed yet) rather than snapping to the newest revision.
+  if (picked.project_id !== scope.projectId.value || nextRevision !== scope.revision.value) keepLocalPick = true;
+  scope.select(picked.project_id, nextRevision);
+});
 const weights = ref<Record<CategoryId, number>>({ security: 20, clean_code: 20, maintainability: 20, reliability: 20, performance: 20 });
 const savedWeights = ref<Record<CategoryId, number>>({ security: 20, clean_code: 20, maintainability: 20, reliability: 20, performance: 20 });
 const history = ref<HistoryRow[]>([]);
@@ -263,10 +308,7 @@ const loadProjectsAndPreferences = async () => {
     if (!preferenceResponse.ok) throw new Error(await readError(preferenceResponse, 'Assessment preferences are unavailable.'));
     const preference = await preferenceResponse.json();
     if (preference.weights) { weights.value = preference.weights; savedWeights.value = { ...preference.weights }; }
-    if (projects.value.length && !projects.value.some((project) => revisionKey(project) === selectedRevision.value)) {
-      const first = projects.value.find((project) => !isWorkingTreeRevision(project)) ?? projects.value[0];
-      selectedRevision.value = revisionKey(first);
-    }
+    applyScope(false);
   } catch (cause: any) {
     recoveryAction.value = 'projects';
     error.value = cause?.message || 'Code quality assessment is unavailable.';
@@ -581,12 +623,7 @@ watch(selectedProject, () => {
   void loadSourceDirectories();
   void checkIndex();
 });
-watch(projects, (revisions) => {
-  if (!revisions.some((project) => revisionKey(project) === selectedRevision.value)) {
-    const first = revisions.find((project) => !isWorkingTreeRevision(project)) ?? revisions[0];
-    selectedRevision.value = first ? revisionKey(first) : '';
-  }
-});
+watch(projects, () => applyScope(false));
 watch(() => selectedProject.value?.project_id, (projectId) => loadProjectExclusions(projectId), { immediate: true });
 watch([leftCompareId, rightCompareId], loadComparison);
 onMounted(loadProjectsAndPreferences);
@@ -689,10 +726,10 @@ const statusTone = (status?: string) => (status === 'complete' || status === 'av
         <label class="cq-rev" for="quality-revision">
           <GitBranch aria-hidden="true" />
           <span class="sr-only">Project revision</span>
-          <select id="quality-revision" v-model="selectedRevision" :disabled="loadingProjects || assessing || checkingIndex || !projects.length">
+          <select id="quality-revision" v-model="selectedRevision" :disabled="loadingProjects || assessing || checkingIndex || !scopedProjects.length">
             <option v-if="loadingProjects" value="">Loading project revisions…</option>
-            <option v-else-if="!projects.length" value="">No project revisions in Knowledge Base</option>
-            <option v-for="project in projects" :key="revisionKey(project)" :value="revisionKey(project)" :title="project.revision_id || project.commit_sha || 'Upload revision'" :disabled="isWorkingTreeRevision(project)">
+            <option v-else-if="!scopedProjects.length" value="">{{ scope.projectId.value ? `No ${scope.projectId.value} revisions in Knowledge Base` : 'No project revisions in Knowledge Base' }}</option>
+            <option v-for="project in scopedProjects" :key="revisionKey(project)" :value="revisionKey(project)" :title="project.revision_id || project.commit_sha || 'Upload revision'" :disabled="isWorkingTreeRevision(project)">
               {{ revisionLabel(project) }}
             </option>
           </select>
