@@ -14,7 +14,6 @@ export interface RAGConfig {
   llmRemoteBaseUrl: string;
   llmRemoteModel: string;
   llmRemoteApiKey: string;
-  runpodApiKey: string;
   docRetrievalEnabled: boolean;
   docContext7Enabled: boolean;
   docGitmcpEnabled: boolean;
@@ -60,20 +59,6 @@ export interface AppearancePreferences {
   showSystemMonitor: boolean;
   showWelcomeBanner: boolean;
   lowPerformanceMode: boolean;
-}
-
-export interface OllamaImportFile {
-  file: string;
-}
-
-export interface OllamaImportJob {
-  id: string;
-  modelName: string;
-  file: string;
-  status: 'pending' | 'running' | 'success' | 'failed';
-  message: string;
-  error?: string;
-  updatedAt: string;
 }
 
 export interface UploadedFile {

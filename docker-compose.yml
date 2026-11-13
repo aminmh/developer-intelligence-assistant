@@ -129,15 +129,12 @@ services:
       PYTHON_API_URL: http://python-api:9002
       RUNTIME_HELPER_URL: http://host.docker.internal:47831
       OIDC_INTERNAL_ISSUER: ${OIDC_LITE_INTERNAL_ISSUER:-${OIDC_ISSUER:-http://keycloak:8080/realms/developer-assistant}}
-      OLLAMA_IMPORT_ROOT: /ollama-imports
-      OLLAMA_IMPORT_HOST_ROOT: ${OLLAMA_IMPORT_HOST_ROOT:-./ollama-imports}
     ports:
       - "3000:3000"
     extra_hosts:
       - "host.docker.internal:host-gateway"
     volumes:
       - "./data:/app/data"
-      - "${OLLAMA_IMPORT_HOST_ROOT:-./ollama-imports}:/ollama-imports:ro"
     restart: unless-stopped
     networks:
       - default
@@ -172,15 +169,12 @@ services:
       PYTHON_API_URL: http://python-api:9002
       RUNTIME_HELPER_URL: http://host.docker.internal:47831
       OIDC_INTERNAL_ISSUER: ${OIDC_LITE_INTERNAL_ISSUER:-${OIDC_ISSUER:-http://keycloak:8080/realms/developer-assistant}}
-      OLLAMA_IMPORT_ROOT: /ollama-imports
-      OLLAMA_IMPORT_HOST_ROOT: ${OLLAMA_IMPORT_HOST_ROOT:-./ollama-imports}
     ports:
       - "127.0.0.1:3000:3000"
     extra_hosts:
       - "host.docker.internal:host-gateway"
     volumes:
       - ".:/workspace"
-      - "${OLLAMA_IMPORT_HOST_ROOT:-./ollama-imports}:/ollama-imports:ro"
       - type: volume
         source: web-dev-node-modules
         target: /workspace/node_modules

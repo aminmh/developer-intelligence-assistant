@@ -1,10 +1,11 @@
 <script setup lang="ts">
-import { ref } from 'vue';
+import { onMounted, ref } from 'vue';
 import { ChevronDown, ChevronUp, CircleAlert, CircleCheck, CircleX, Database, GitBranch, Loader2, Sparkles, Wrench } from 'lucide-vue-next';
 import type { RetrievalInsights } from '../types';
 import { describeAgentRun, describeToolCall, describeToolError, describeTraceRevision, traceArguments } from '../utils/agentTools';
 
-const props = defineProps<{ queryId: string }>();
+// `open` renders the details straight away, without the toggle (used inside the chat toolbar panel).
+const props = defineProps<{ queryId: string; open?: boolean }>();
 
 const expanded = ref(false);
 const loading = ref(false);
@@ -29,6 +30,13 @@ const load = async () => {
     loading.value = false;
   }
 };
+
+onMounted(() => {
+  if (props.open) {
+    expanded.value = true;
+    void load();
+  }
+});
 
 const toggle = () => {
   expanded.value = !expanded.value;
@@ -55,8 +63,9 @@ const modeClasses = (mode: RetrievalInsights['mode']) => {
 </script>
 
 <template>
-  <div class="mt-2 max-w-3xl w-full">
+  <div :class="open ? 'w-full' : 'mt-2 max-w-3xl w-full'">
     <button
+      v-if="!open"
       @click="toggle"
       class="group flex items-center gap-2 text-[10px] text-slate-400 hover:text-indigo-300 font-mono transition-colors"
     >
@@ -67,7 +76,7 @@ const modeClasses = (mode: RetrievalInsights['mode']) => {
       <ChevronDown v-else class="w-3 h-3" />
     </button>
 
-    <div v-if="expanded" class="mt-2 rounded-2xl border border-slate-800 bg-[#0c101f]/90 p-4 text-left shadow-lg">
+    <div v-if="expanded" :class="open ? 'text-left' : 'mt-2 rounded-2xl border border-slate-800 bg-[#0c101f]/90 p-4 text-left shadow-lg'">
       <div v-if="loading" class="flex items-center gap-2 py-3 text-[10px] text-indigo-300 font-mono">
         <Loader2 class="w-3.5 h-3.5 animate-spin" />
         Inspecting retrieval path…

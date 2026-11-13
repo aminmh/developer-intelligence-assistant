@@ -1,10 +1,7 @@
 <script setup lang="ts">
 import { computed, defineAsyncComponent, ref, watch, onMounted, onUnmounted } from 'vue';
-import { 
-  FileText, 
-  Settings, 
-  Terminal, 
-  BookOpen, 
+import {
+  Settings,
   X,
   CheckCircle,
   AlertTriangle,
@@ -14,8 +11,17 @@ import {
   Activity,
   PanelLeftClose,
   PanelLeftOpen,
-  ShieldCheck
+  ShieldCheck,
+  MessageSquareText,
+  Library,
+  LogOut,
+  Users,
+  FolderGit2,
+  GitCommitHorizontal,
+  FolderSync,
 } from 'lucide-vue-next';
+import BrandLogo from './components/BrandLogo.vue';
+import ToggleCard from './components/ToggleCard.vue';
 import type { RAGConfig, SearchMatch, LLMUsage, ContextUsage, ChatBusinessRuleSource, ToolCallView, ToolAvailability, CitationPreview, ApprovalView } from './types';
 import { mergeToolCalls } from './utils/agentTools';
 import { describeRevision, parseRevisionOption, relativeAge, revisionOptionValue, type ChatProjectRevisions, type RevisionView } from './utils/chatRevisions';
@@ -1168,21 +1174,77 @@ onMounted(async () => {
 });
 
 onUnmounted(() => window.removeEventListener('popstate', syncTabFromHistory));
+
+// ---- App shell: navigation, page headings, sidebar sizing ----
+const navGroups: Array<{ label: string; items: Array<{ id: AppTab; label: string; icon: unknown }> }> = [
+  { label: 'workspace', items: [
+    { id: 'chat', label: 'Chat', icon: MessageSquareText },
+    { id: 'files', label: 'Knowledge base', icon: Library },
+  ] },
+  { label: 'analyze', items: [
+    { id: 'code-quality', label: 'Code quality', icon: ShieldCheck },
+    { id: 'runtime', label: 'Runtime', icon: Activity },
+    { id: 'schema', label: 'Database schema', icon: Database },
+    { id: 'domain', label: 'Domain knowledge', icon: Network },
+  ] },
+  { label: 'system', items: [
+    { id: 'logs', label: 'Developer logs', icon: ScrollText },
+    { id: 'config', label: 'Settings', icon: Settings },
+  ] },
+];
+const pageMeta: Record<AppTab, { title: string; description: string }> = {
+  chat: { title: 'Codebase chat', description: 'Ask questions about the indexed code' },
+  files: { title: 'Knowledge base', description: 'Upload, version and index projects' },
+  'code-quality': { title: 'Code quality', description: 'Scores, analyzers and rule reviews' },
+  runtime: { title: 'Runtime', description: 'Traces and host telemetry' },
+  schema: { title: 'Database schema', description: 'Explore and edit the data model' },
+  domain: { title: 'Domain knowledge', description: 'Business entities and rules' },
+  logs: { title: 'Developer logs', description: 'Prompts and pipeline output' },
+  config: { title: 'Settings', description: 'Models, retrieval and appearance' },
+};
+const currentPage = computed(() => pageMeta[activeTab.value]);
+const currentProjectId = computed(() => uploadProjectId.value.trim());
+const isProjectAdmin = computed(() => authProjects.value.some(
+  (project) => (project.project_id === uploadProjectId.value || project.project_id === '*') && project.role === 'admin'));
+const userLabel = computed(() => authUser.value?.email || authUser.value?.name || authUser.value?.sub || '');
+const userInitials = computed(() => {
+  const source = (authUser.value?.name || authUser.value?.email || authUser.value?.sub || '?').replace(/@.*/, '');
+  const parts = source.split(/[\s._-]+/).filter(Boolean);
+  return ((parts[0]?.[0] ?? '?') + (parts[1]?.[0] ?? parts[0]?.[1] ?? '')).toUpperCase();
+});
+const toggleMemberPanel = () => {
+  memberPanelOpen.value = !memberPanelOpen.value;
+  if (memberPanelOpen.value) void loadProjectMembers();
+};
+
+// Narrow windows always show the compact sidebar.
+const isNarrow = ref(false);
+let narrowQuery: MediaQueryList | null = null;
+const syncNarrow = () => { isNarrow.value = narrowQuery?.matches === true; };
+const sidebarIsCollapsed = computed(() => sidebarCollapsed.value || isNarrow.value);
+onMounted(() => {
+  narrowQuery = window.matchMedia('(max-width: 900px)');
+  syncNarrow();
+  narrowQuery.addEventListener('change', syncNarrow);
+});
+onUnmounted(() => narrowQuery?.removeEventListener('change', syncNarrow));
 </script>
 
 <template>
-  <div v-if="!authChecked" class="flex h-screen items-center justify-center bg-slate-950 text-sm text-slate-400">Checking sign-in…</div>
-  <div v-else-if="!authUser" class="flex h-screen items-center justify-center bg-slate-950 p-6 text-center">
-    <div class="max-w-md rounded-2xl border border-slate-800 bg-slate-900/60 p-8">
-      <BookOpen class="mx-auto h-8 w-8 text-indigo-400" />
-      <h1 class="mt-4 text-lg font-semibold text-white">Sign in to Developer Assistant</h1>
-      <p class="mt-2 text-sm text-slate-400">Use your configured organization identity provider to continue.</p>
-      <a href="/api/auth/login" class="mt-6 inline-flex rounded-lg bg-indigo-600 px-4 py-2 text-sm font-semibold text-white hover:bg-indigo-500">Continue with SSO</a>
-      <p class="mt-4 text-xs text-slate-600">If sign-in is unavailable, the server administrator must configure OIDC and the bootstrap admin subject.</p>
+  <div v-if="!authChecked" class="app-shell app-gate" :data-theme="appearance.resolvedTheme.value">
+    <p class="app-panel-hint">Checking sign-in…</p>
+  </div>
+  <div v-else-if="!authUser" class="app-shell app-gate" :data-theme="appearance.resolvedTheme.value">
+    <div class="app-gate-card app-glass">
+      <span class="brand-logo mx-auto block"><BrandLogo /></span>
+      <h1 class="mt-5 text-lg font-semibold" style="color: var(--shell-text)">Sign in to <span class="font-mono">dev<span class="brand-title-dot">.</span>assistant</span></h1>
+      <p class="mt-2 text-sm" style="color: var(--shell-text-2)">Use your organization's identity provider to continue.</p>
+      <a href="/api/auth/login" class="app-btn-primary mt-6 h-10 px-5 text-sm">Continue with SSO</a>
+      <p class="mt-4 text-xs" style="color: var(--shell-text-3)">If sign-in isn't available, the server administrator needs to configure OIDC and the bootstrap admin subject.</p>
     </div>
   </div>
-  <div v-else class="app-shell flex h-screen w-screen overflow-hidden font-sans"
-    :data-theme="appearance.resolvedTheme"
+  <div v-else class="app-shell flex h-screen w-screen gap-3 overflow-hidden p-3 font-sans"
+    :data-theme="appearance.resolvedTheme.value"
     :data-palette="appearance.preferences.palette"
     :data-accent="appearance.preferences.accent"
     :data-neon="appearance.preferences.neonBorder"
@@ -1190,262 +1252,227 @@ onUnmounted(() => window.removeEventListener('popstate', syncTabFromHistory));
     :data-code-font="appearance.preferences.codeFontFamily"
     :data-low-performance="appearance.preferences.lowPerformanceMode"
   >
-    
-    <!-- Sidebar navigation & Quick Config -->
-    <aside
-      class="app-sidebar flex flex-col shrink-0 select-none transition-[width] duration-300 ease-in-out"
-      :class="sidebarCollapsed ? 'w-[5.25rem]' : 'w-80'"
-    >
-      <div
-        class="relative border-b border-slate-800 flex items-center"
-        :class="sidebarCollapsed ? 'justify-center p-4' : 'gap-3 p-5'"
-      >
-        <div class="brand-logo shrink-0" aria-hidden="true">
-          <svg class="brand-logo-svg" viewBox="0 0 48 48" fill="none" xmlns="http://www.w3.org/2000/svg">
-            <defs>
-              <linearGradient id="brandLogoGradient" x1="8" y1="7" x2="40" y2="42" gradientUnits="userSpaceOnUse">
-                <stop stop-color="#67E8F9" />
-                <stop offset="0.48" stop-color="#818CF8" />
-                <stop offset="1" stop-color="#C084FC" />
-              </linearGradient>
-            </defs>
-            <path class="brand-logo-ring brand-logo-ring-a" d="M24 4.5C35.3 4.5 44.5 13.2 44.5 24S35.3 43.5 24 43.5 3.5 34.8 3.5 24 12.7 4.5 24 4.5Z" stroke="url(#brandLogoGradient)" stroke-opacity=".28" />
-            <path class="brand-logo-ring brand-logo-ring-b" d="M24 9.5 37 17v14L24 38.5 11 31V17L24 9.5Z" stroke="url(#brandLogoGradient)" stroke-opacity=".55" />
-            <path class="brand-logo-network" d="m14 17 10-5 10 5v14l-10 5-10-5V17Z M14 17l10 7 10-7 M24 24v12" stroke="url(#brandLogoGradient)" stroke-width="1.35" stroke-linejoin="round" />
-            <circle class="brand-logo-node brand-logo-node-a" cx="14" cy="17" r="2.3" fill="#67E8F9" />
-            <circle class="brand-logo-node brand-logo-node-b" cx="34" cy="17" r="2.3" fill="#A5B4FC" />
-            <circle class="brand-logo-node brand-logo-node-c" cx="24" cy="36" r="2.3" fill="#C084FC" />
-            <circle class="brand-logo-core" cx="24" cy="24" r="3.2" fill="#F8FAFC" />
-          </svg>
-        </div>
-        <div v-if="!sidebarCollapsed" class="min-w-0">
-          <h1 class="brand-title text-base font-bold tracking-tight leading-tight text-left">DevAssistant RAG</h1>
-          <span class="brand-subtitle text-[10px] text-slate-400 font-mono block text-left mt-0.5">Codebase Intelligence Workspace</span>
+    <div class="app-orbs" aria-hidden="true">
+      <div class="app-orb app-orb-a"></div>
+      <div class="app-orb app-orb-b"></div>
+      <div class="app-orb app-orb-c"></div>
+    </div>
+
+    <!-- Sidebar: floating glass panel -->
+    <aside class="app-sidebar app-glass select-none" :data-collapsed="sidebarIsCollapsed" aria-label="Sidebar">
+      <div class="app-sidebar-edge" aria-hidden="true"></div>
+
+      <div class="app-brand">
+        <span class="brand-logo"><BrandLogo /></span>
+        <div v-if="!sidebarIsCollapsed" class="min-w-0">
+          <p class="brand-title">dev<span class="brand-title-dot">.</span>assistant</p>
+          <p class="brand-subtitle">codebase intelligence</p>
         </div>
       </div>
 
-      <!-- Quick stats/status dashboard -->
-      <div v-if="!sidebarCollapsed" class="px-5 py-4 bg-[#11162e] border-b border-slate-800">
-        <div class="flex items-center justify-between text-xs">
-          <span class="text-slate-400">Indexed Files</span>
-          <span class="font-semibold text-slate-300 font-mono">{{ files.length }} document(s)</span>
+      <div class="app-project-card" :title="currentProjectId ? `Project ${currentProjectId}` : 'No project selected'">
+        <FolderGit2 class="h-[1.125rem] w-[1.125rem]" aria-hidden="true" />
+        <div v-if="!sidebarIsCollapsed" class="min-w-0 flex-1">
+          <span class="app-project-name">{{ currentProjectId || 'No project selected' }}</span>
+          <span class="app-project-meta">{{ files.length }} {{ files.length === 1 ? 'file' : 'files' }} indexed</span>
         </div>
       </div>
 
-      <!-- Sidebar Tabs -->
-      <nav class="flex-1 p-4 space-y-1 overflow-y-auto">
-        <button 
-          @click="activeTab = 'chat'" 
-          class="w-full flex items-center gap-3 py-3 rounded-xl text-sm font-medium transition-all"
-          :class="[sidebarCollapsed ? 'justify-center px-2' : 'px-4', activeTab === 'chat' ? 'bg-indigo-600 text-white shadow-md shadow-indigo-600/20' : 'text-slate-400 hover:text-white hover:bg-slate-800/50']"
-          title="Interactive Chat"
-        >
-          <Terminal class="w-4 h-4" />
-          <span v-if="!sidebarCollapsed">Interactive Chat</span>
-        </button>
-
-        <button 
-          @click="activeTab = 'files'" 
-          class="w-full flex items-center gap-3 py-3 rounded-xl text-sm font-medium transition-all"
-          :class="[sidebarCollapsed ? 'justify-center px-2' : 'px-4', activeTab === 'files' ? 'bg-indigo-600 text-white shadow-md shadow-indigo-600/20' : 'text-slate-400 hover:text-white hover:bg-slate-800/50']"
-          title="Knowledge Base"
-        >
-          <FileText class="w-4 h-4" />
-          <span v-if="!sidebarCollapsed">Knowledge Base</span>
-          <span v-if="!sidebarCollapsed && files.length > 0" class="ml-auto bg-slate-900/60 text-slate-300 text-[10px] px-2 py-0.5 rounded-full font-mono">{{ files.length }}</span>
-        </button>
-
-        <button 
-          @click="activeTab = 'config'" 
-          class="w-full flex items-center gap-3 py-3 rounded-xl text-sm font-medium transition-all"
-          :class="[sidebarCollapsed ? 'justify-center px-2' : 'px-4', activeTab === 'config' ? 'bg-indigo-600 text-white shadow-md shadow-indigo-600/20' : 'text-slate-400 hover:text-white hover:bg-slate-800/50']"
-          title="Connection & Settings"
-        >
-          <Settings class="w-4 h-4" />
-          <span v-if="!sidebarCollapsed">Connection & Settings</span>
-        </button>
-
-        <button
-          @click="activeTab = 'logs'"
-          class="w-full flex items-center gap-3 py-3 rounded-xl text-sm font-medium transition-all"
-          :class="[sidebarCollapsed ? 'justify-center px-2' : 'px-4', activeTab === 'logs' ? 'bg-indigo-600 text-white shadow-md shadow-indigo-600/20' : 'text-slate-400 hover:text-white hover:bg-slate-800/50']"
-          title="Developer Logs"
-        >
-          <ScrollText class="w-4 h-4" />
-          <span v-if="!sidebarCollapsed">Developer Logs</span>
-        </button>
-
-        <button
-          @click="activeTab = 'schema'"
-          class="w-full flex items-center gap-3 py-3 rounded-xl text-sm font-medium transition-all"
-          :class="[sidebarCollapsed ? 'justify-center px-2' : 'px-4', activeTab === 'schema' ? 'bg-indigo-600 text-white shadow-md shadow-indigo-600/20' : 'text-slate-400 hover:text-white hover:bg-slate-800/50']"
-          title="Database Schema"
-        >
-          <Database class="w-4 h-4" />
-          <span v-if="!sidebarCollapsed">Database Schema</span>
-        </button>
-
-        <button
-          @click="activeTab = 'domain'"
-          class="w-full flex items-center gap-3 py-3 rounded-xl text-sm font-medium transition-all"
-          :class="[sidebarCollapsed ? 'justify-center px-2' : 'px-4', activeTab === 'domain' ? 'bg-indigo-600 text-white shadow-md shadow-indigo-600/20' : 'text-slate-400 hover:text-white hover:bg-slate-800/50']"
-          title="Domain Knowledge"
-        >
-          <Network class="w-4 h-4" />
-          <span v-if="!sidebarCollapsed">Domain Knowledge</span>
-        </button>
-
-        <button
-          @click="activeTab = 'runtime'"
-          class="w-full flex items-center gap-3 py-2.5 text-sm font-medium rounded-xl transition-all duration-200"
-          :class="[sidebarCollapsed ? 'justify-center px-2' : 'px-4', activeTab === 'runtime' ? 'bg-indigo-600 text-white shadow-md shadow-indigo-600/20' : 'text-slate-400 hover:text-white hover:bg-slate-800/50']"
-          title="Runtime telemetry"
-        >
-          <Activity class="w-4 h-4" />
-          <span v-if="!sidebarCollapsed">Runtime</span>
-        </button>
-        <button
-          @click="activeTab = 'code-quality'"
-          class="flex w-full items-center gap-3 rounded-xl py-2.5 text-sm font-medium transition-all"
-          :class="[sidebarCollapsed ? 'justify-center px-2' : 'px-4', activeTab === 'code-quality' ? 'bg-indigo-600 text-white shadow-md shadow-indigo-600/20' : 'text-slate-400 hover:text-white hover:bg-slate-800/50']"
-          :title="sidebarCollapsed ? 'Code quality' : undefined"
-          :aria-label="sidebarCollapsed ? 'Code quality' : undefined"
-        >
-          <ShieldCheck :size="18" />
-          <span v-if="!sidebarCollapsed">Code quality</span>
-        </button>
-
+      <nav class="app-nav" aria-label="Main">
+        <template v-for="group in navGroups" :key="group.label">
+          <p v-if="!sidebarIsCollapsed" class="app-nav-group">{{ group.label }}</p>
+          <div v-else class="app-nav-divider" aria-hidden="true"></div>
+          <button
+            v-for="item in group.items"
+            :key="item.id"
+            type="button"
+            class="app-nav-item"
+            :aria-current="activeTab === item.id ? 'page' : undefined"
+            :title="sidebarIsCollapsed ? item.label : undefined"
+            :aria-label="sidebarIsCollapsed ? item.label : undefined"
+            @click="activeTab = item.id"
+          >
+            <span v-if="activeTab === item.id" class="app-nav-indicator" aria-hidden="true"></span>
+            <component :is="item.icon" aria-hidden="true" />
+            <span v-if="!sidebarIsCollapsed">{{ item.label }}</span>
+            <span v-if="!sidebarIsCollapsed && item.id === 'files' && files.length > 0" class="app-nav-count">{{ files.length }}</span>
+          </button>
+        </template>
       </nav>
 
-      <!-- Footer developer banner -->
-      <div
-        class="p-4 border-t border-slate-800 text-[10px] text-slate-500 font-mono flex items-center"
-        :class="sidebarCollapsed ? 'justify-center' : 'justify-between gap-2'"
-      >
-        <span v-if="!sidebarCollapsed">Dev RAG Front-End Client</span>
+      <div class="app-sidebar-footer">
+        <span class="app-avatar" :title="userLabel" aria-hidden="true">{{ userInitials }}</span>
+        <p v-if="!sidebarIsCollapsed" class="app-user" :title="userLabel">
+          {{ userLabel }}
+          <small v-if="developmentAuth">Sign-in off (development)</small>
+        </p>
+        <button v-if="!developmentAuth" type="button" class="app-icon-btn" title="Sign out" aria-label="Sign out" @click="logout">
+          <LogOut aria-hidden="true" />
+        </button>
         <button
-          @click="toggleSidebar"
-          class="text-slate-400 hover:text-cyan-300 hover:bg-slate-800/60 rounded-lg p-1.5 transition-colors"
+          v-if="!isNarrow"
+          type="button"
+          class="app-icon-btn"
           :title="sidebarCollapsed ? 'Expand sidebar' : 'Collapse sidebar'"
           :aria-label="sidebarCollapsed ? 'Expand sidebar' : 'Collapse sidebar'"
+          :aria-expanded="!sidebarCollapsed"
+          @click="toggleSidebar"
         >
-          <PanelLeftOpen v-if="sidebarCollapsed" class="w-4 h-4" />
-          <PanelLeftClose v-else class="w-4 h-4" />
+          <PanelLeftOpen v-if="sidebarCollapsed" aria-hidden="true" />
+          <PanelLeftClose v-else aria-hidden="true" />
         </button>
       </div>
     </aside>
 
-    <!-- Main Content Panel -->
-    <main class="app-main flex-1 flex flex-col min-w-0 relative">
-      
-      <!-- Top navbar -->
-      <div class="flex flex-wrap items-center gap-2 border-b border-slate-800/70 bg-slate-950/40 px-4 py-2">
-        <label v-if="activeTab !== 'files'" class="text-[10px] text-slate-500" for="upload-project-id">Upload identity</label>
-        <input v-if="activeTab !== 'files'" id="upload-project-id" v-model="uploadProjectId" class="w-36 rounded-md border border-slate-800 bg-slate-900 px-2 py-1 text-xs text-slate-200" placeholder="project-id" />
-        <input v-if="activeTab !== 'files'" v-model="uploadCommitSha" aria-label="Upload commit SHA (optional)" class="min-w-64 flex-1 rounded-md border border-slate-800 bg-slate-900 px-2 py-1 font-mono text-[10px] text-slate-200" placeholder="Optional Git commit SHA" />
-        <button v-if="authProjects.some((project) => project.project_id === uploadProjectId && project.role === 'admin' || project.project_id === '*' && project.role === 'admin')" @click="memberPanelOpen = !memberPanelOpen; if (memberPanelOpen) loadProjectMembers()" class="rounded-md border border-slate-700 px-2 py-1 text-[10px] text-slate-300">Project access</button>
-        <span class="text-[10px] text-slate-500">{{ authUser.email || authUser.name || authUser.sub }}</span>
-        <span v-if="developmentAuth" class="text-[10px] text-amber-400">Authentication disabled in development</span>
-        <button v-else @click="logout" class="rounded-md px-2 py-1 text-[10px] text-slate-400 hover:text-white">Sign out</button>
-      </div>
-      <div v-if="memberPanelOpen" class="flex flex-wrap items-center gap-2 border-b border-slate-800 bg-slate-900/60 px-4 py-2">
-        <span class="text-[10px] text-slate-400">Project members</span>
-        <input v-model="memberSubject" class="w-48 rounded-md border border-slate-800 bg-slate-950 px-2 py-1 text-xs text-slate-200" placeholder="OIDC subject" />
-        <select v-model="memberRole" class="rounded-md border border-slate-800 bg-slate-950 px-2 py-1 text-xs text-slate-200"><option value="viewer">viewer</option><option value="operator">operator</option><option value="admin">admin</option></select>
-        <button @click="saveProjectMember" class="rounded-md bg-indigo-600 px-2 py-1 text-[10px] text-white">Add / update</button>
-        <span v-for="member in members" :key="member.subject" class="flex items-center gap-1 rounded border border-slate-800 px-2 py-1 text-[10px] text-slate-300">{{ member.subject }} · {{ member.role }}<button @click="deleteProjectMember(member.subject)" class="ml-1 text-rose-400">×</button></span>
-        <label
-          class="ml-auto flex items-center gap-2 rounded border border-slate-800 px-2 py-1 text-[10px] text-slate-300"
-          :title="'Retrieved code and code-tool results for ' + (uploadProjectId || 'this project') + ' are sent to the external model only when this is on.'"
-        >
-          <input
-            type="checkbox"
-            class="h-3.5 w-3.5 accent-indigo-400"
-            :checked="remoteSourceAllowed === true"
-            :disabled="remoteSourceAllowed === null || remoteSourceSaving"
-            @change="toggleRemoteSource"
-          />
-          Allow source to go to the external model
-          <span v-if="remoteSourceAllowed === null" class="text-slate-500">· loading</span>
-          <span v-else-if="!remoteSourceAllowed" class="text-amber-300/80">· chat is blocked for this project</span>
-        </label>
-        <div class="flex w-full flex-wrap items-center gap-2 text-[10px] text-slate-300">
-          <label
-            class="flex items-center gap-2 rounded border border-slate-800 px-2 py-1"
-            title="Older ready revisions are removed automatically. The latest revision, pinned ones, ones with Code Quality reports, a running deployment, or Git's last sync are always kept, so more may remain."
-          >
-            Keep latest
-            <input
-              type="number" min="1" max="100"
-              class="w-12 rounded border border-slate-800 bg-slate-950 px-1 py-0.5 text-xs text-slate-200"
-              :value="retention?.keep_latest ?? ''"
-              :disabled="!retention || retentionSaving"
-              @change="changeKeepLatest"
-            />
-            revisions
-            <span class="text-slate-500">· a minimum: protected revisions also stay</span>
-            <span v-if="!retention" class="text-slate-500">· loading</span>
-          </label>
-          <span v-if="retention && retentionRevisions.length" class="text-slate-500">Keep always:</span>
-          <label
-            v-for="revision in retentionRevisions" :key="revision.revision_id"
-            class="flex items-center gap-1 rounded border border-slate-800 px-2 py-1"
-          >
-            <input
-              type="checkbox" class="h-3 w-3 accent-indigo-400"
-              :checked="retention?.pinned.includes(revision.revision_id)"
-              :disabled="!retention || retentionSaving"
-              @change="toggleRevisionPin(revision.revision_id)"
-            />
-            {{ describeRevision(revision) }}
-            <span class="text-slate-500">{{ revision.revision_id.slice(4, 10) }}</span>
-          </label>
+    <!-- Main area -->
+    <main class="app-main flex min-w-0 flex-1 flex-col gap-3">
+      <header class="app-header app-glass">
+        <div class="min-w-[9rem] flex-1">
+          <h1 class="app-page-title truncate">
+            <span v-if="currentProjectId" class="app-page-crumb">{{ currentProjectId }} /</span>{{ currentPage.title }}
+          </h1>
+          <p class="app-page-desc hidden truncate md:block">{{ currentPage.description }}</p>
         </div>
-        <div class="flex w-full flex-wrap items-center gap-2 text-[10px] text-slate-300">
-          <button
-            type="button"
-            class="rounded border border-slate-700 px-2 py-1 hover:border-indigo-400 disabled:opacity-50"
-            :disabled="workingTreeBusy || !uploadProjectId.trim()"
-            title="The desktop helper asks you to choose a folder and approve it, then indexes your uncommitted edits a minute after they settle. Chat can use them; Code Quality can't."
-            @click="syncWorkingTree"
-          >{{ workingTreeBusy ? 'Waiting for the desktop helper…' : 'Sync a working-tree folder…' }}</button>
-          <span v-if="!workingTreeGrants.length" class="text-slate-500">No folder syncs to this project.</span>
-          <span
-            v-for="grant in workingTreeGrants" :key="grant.grant_id"
-            class="flex items-center gap-1 rounded border border-slate-800 px-2 py-1"
-          >
-            Folder sync by {{ grant.user.email || grant.user.name || grant.user.sub }}
-            <span class="text-slate-500">· {{ grant.last_upload_at ? `last upload ${relativeAge(grant.last_upload_at)} (${grant.last_status})` : 'no upload yet' }}</span>
-            <button type="button" class="ml-1 text-rose-400" title="Revoke: the helper stops uploading this folder" @click="revokeWorkingTreeGrant(uploadProjectId.trim(), grant.grant_id)">Revoke</button>
-          </span>
-        </div>
-      </div>
-      <header class="app-header h-16 px-6 flex items-center justify-between select-none backdrop-blur">
-        <div class="flex items-center gap-2">
-          <BookOpen class="w-4 h-4 text-indigo-400" />
-          <h2 class="text-sm font-semibold text-white">
-            <span v-if="activeTab === 'chat'">Codebase Chat</span>
-            <span v-else-if="activeTab === 'files'">Knowledge Base</span>
-            <span v-else-if="activeTab === 'config'">RAG Pipeline Configurations</span>
-            <span v-else-if="activeTab === 'logs'">Developer Logs</span>
-            <span v-else-if="activeTab === 'schema'">Database Schema</span>
-            <span v-else-if="activeTab === 'domain'">Domain Knowledge</span>
-            <span v-else-if="activeTab === 'runtime'">Runtime telemetry</span>
-            <span v-else-if="activeTab === 'code-quality'">Code quality assessment</span>
-          </h2>
-        </div>
-        
-        <!-- Status indicator -->
-        <div class="flex items-center gap-4">
-          <div class="flex items-center gap-2 text-xs text-slate-400 bg-slate-900 px-3 py-1.5 rounded-lg border border-slate-800">
-            <span class="w-2 h-2 rounded-full bg-emerald-500" :class="appearance.preferences.lowPerformanceMode ? '' : 'animate-pulse'"></span>
-            <span>RAG System:</span>
-            <span class="font-mono text-slate-200 uppercase">Ready</span>
+        <div class="ml-auto flex min-w-0 flex-wrap items-center justify-end gap-2">
+          <div v-if="activeTab !== 'files'" class="app-field-group">
+            <label for="upload-project-id">Project</label>
+            <input id="upload-project-id" v-model="uploadProjectId" class="w-28 xl:w-36" placeholder="project-id" />
+            <span class="app-field-sep hidden lg:block" aria-hidden="true"></span>
+            <GitCommitHorizontal class="hidden lg:block" aria-hidden="true" />
+            <input v-model="uploadCommitSha" aria-label="Commit SHA (optional)" class="hidden w-44 lg:block xl:w-60" placeholder="Commit SHA (optional)" />
           </div>
+          <button
+            v-if="isProjectAdmin"
+            type="button"
+            class="app-chip"
+            :aria-expanded="memberPanelOpen"
+            aria-controls="project-access-panel"
+            @click="toggleMemberPanel"
+          >
+            <Users aria-hidden="true" />
+            <span class="hidden md:inline">Project access</span>
+          </button>
+          <span class="app-chip app-chip-status" title="Assistant status">
+            <span class="app-status-dot" aria-hidden="true"></span>Ready
+          </span>
         </div>
       </header>
 
+      <!-- Project access: members, external model consent, retention, folder sync -->
+      <Transition name="app-panel">
+        <section
+          v-if="memberPanelOpen"
+          id="project-access-panel"
+          class="app-panel app-glass grid max-h-[45vh] shrink-0 gap-5 overflow-y-auto md:grid-cols-2 xl:grid-cols-4"
+          aria-label="Project access"
+        >
+          <div class="app-panel-section">
+            <div>
+              <h2 class="app-panel-title">Members</h2>
+              <p class="app-panel-hint">Who can open {{ currentProjectId || 'this project' }}.</p>
+            </div>
+            <div class="flex flex-wrap gap-2">
+              <div class="app-field-group w-full">
+                <input v-model="memberSubject" aria-label="OIDC subject" class="w-full" placeholder="OIDC subject" />
+              </div>
+              <select v-model="memberRole" class="app-select" aria-label="Role">
+                <option value="viewer">viewer</option>
+                <option value="operator">operator</option>
+                <option value="admin">admin</option>
+              </select>
+              <button type="button" class="app-btn-primary" @click="saveProjectMember">Add or update</button>
+            </div>
+            <div class="flex flex-wrap gap-1.5">
+              <span v-for="member in members" :key="member.subject" class="app-tag">
+                {{ member.subject }} · {{ member.role }}
+                <button type="button" class="app-icon-btn" :aria-label="`Remove ${member.subject}`" :title="`Remove ${member.subject}`" @click="deleteProjectMember(member.subject)">
+                  <X aria-hidden="true" />
+                </button>
+              </span>
+            </div>
+          </div>
+
+          <div class="app-panel-section">
+            <div>
+              <h2 class="app-panel-title">External model</h2>
+              <p class="app-panel-hint">Retrieved code and code-tool results are sent to the remote model only when this is on.</p>
+            </div>
+            <ToggleCard
+              :model-value="remoteSourceAllowed === true"
+              label="Send source to the external model"
+              :description="remoteSourceAllowed === null ? 'Loading…' : remoteSourceAllowed ? 'Chat can use this project.' : 'Chat is blocked for this project.'"
+              :disabled="remoteSourceAllowed === null || remoteSourceSaving"
+              @update:model-value="toggleRemoteSource"
+            />
+          </div>
+
+          <div class="app-panel-section">
+            <div>
+              <h2 class="app-panel-title">Revision retention</h2>
+              <p class="app-panel-hint">Older ready revisions are removed automatically. The latest, pinned ones, ones with Code Quality reports, a running deployment, and Git's last sync are always kept.</p>
+            </div>
+            <label class="app-field-group w-fit">
+              <span class="pl-2.5 text-xs" style="color: var(--shell-text-3)">Keep latest</span>
+              <input
+                type="number" min="1" max="100"
+                class="w-14"
+                :value="retention?.keep_latest ?? ''"
+                :disabled="!retention || retentionSaving"
+                @change="changeKeepLatest"
+              />
+              <span class="pr-2.5 text-xs" style="color: var(--shell-text-3)">{{ retention ? 'revisions' : 'loading…' }}</span>
+            </label>
+            <div v-if="retention && retentionRevisions.length" class="flex flex-wrap gap-1.5">
+              <span class="app-panel-hint w-full">Always keep:</span>
+              <label v-for="revision in retentionRevisions" :key="revision.revision_id" class="app-check">
+                <input
+                  type="checkbox"
+                  :checked="retention?.pinned.includes(revision.revision_id)"
+                  :disabled="!retention || retentionSaving"
+                  @change="toggleRevisionPin(revision.revision_id)"
+                />
+                {{ describeRevision(revision) }}
+                <span class="font-mono" style="color: var(--shell-text-3)">{{ revision.revision_id.slice(4, 10) }}</span>
+              </label>
+            </div>
+          </div>
+
+          <div class="app-panel-section">
+            <div>
+              <h2 class="app-panel-title">Working-tree sync</h2>
+              <p class="app-panel-hint">The desktop helper asks you to choose and approve a folder, then indexes your uncommitted edits a minute after they settle. Chat can use them; Code Quality can't.</p>
+            </div>
+            <button
+              type="button"
+              class="app-chip w-fit disabled:cursor-not-allowed disabled:opacity-50"
+              :disabled="workingTreeBusy || !currentProjectId"
+              @click="syncWorkingTree"
+            >
+              <FolderSync aria-hidden="true" />
+              {{ workingTreeBusy ? 'Waiting for the desktop helper…' : 'Sync a working-tree folder…' }}
+            </button>
+            <p v-if="!workingTreeGrants.length" class="app-panel-hint">No folder syncs to this project.</p>
+            <div v-for="grant in workingTreeGrants" :key="grant.grant_id" class="app-tag h-auto py-1">
+              <span class="min-w-0">
+                Folder sync by {{ grant.user.email || grant.user.name || grant.user.sub }}
+                <span class="block" style="color: var(--shell-text-3)">{{ grant.last_upload_at ? `Last upload ${relativeAge(grant.last_upload_at)} (${grant.last_status})` : 'No upload yet' }}</span>
+              </span>
+              <button
+                type="button"
+                class="app-icon-btn ml-auto"
+                aria-label="Revoke folder sync"
+                title="Revoke: the helper stops uploading this folder"
+                @click="revokeWorkingTreeGrant(currentProjectId, grant.grant_id)"
+              >
+                <X aria-hidden="true" />
+              </button>
+            </div>
+          </div>
+        </section>
+      </Transition>
+
       <!-- View components rendering -->
+      <div class="relative flex min-h-0 flex-1 flex-col overflow-hidden rounded-2xl">
       <Transition name="app-page" mode="out-in">
       <div :key="activeTab" class="flex min-h-0 flex-1 flex-col">
       <RAGChat
@@ -1476,6 +1503,7 @@ onUnmounted(() => window.removeEventListener('popstate', syncTabFromHistory));
         @cancelSend="cancelGateSend"
         @openCitation="openCitation"
         @decideApproval="decideApproval"
+        @openKnowledgeBase="activeTab = 'files'"
       />
       <CodeCitationModal
         v-if="activeTab === 'chat' && citationPreview"
@@ -1518,33 +1546,33 @@ onUnmounted(() => window.removeEventListener('popstate', syncTabFromHistory));
       <CodeQualityView v-else-if="activeTab === 'code-quality'" :files="files" @open-knowledge-base="activeTab = 'files'" @revision-removed="fetchFiles" />
       </div>
       </Transition>
-
+      </div>
     </main>
 
-    <!-- Success Toast Notification -->
+    <!-- Success toast -->
     <Transition name="app-toast">
-      <div v-if="showSuccessToast" class="fixed bottom-6 right-6 z-50 max-w-sm w-full bg-slate-900 border border-emerald-500/30 rounded-2xl shadow-xl shadow-slate-950/40 p-4 pointer-events-auto flex items-start gap-3">
-        <CheckCircle class="w-5 h-5 text-emerald-400 shrink-0" />
+      <div v-if="showSuccessToast" role="status" aria-live="polite" class="app-toast app-glass pointer-events-auto fixed bottom-6 right-6 z-50 flex w-full max-w-sm items-start gap-3 p-4">
+        <CheckCircle class="h-5 w-5 shrink-0 text-emerald-400" aria-hidden="true" />
         <div class="flex-1 text-left">
-          <p class="text-xs font-semibold text-white">Action Completed</p>
-          <p class="text-[11px] text-slate-400 mt-1 leading-normal">{{ successMessage }}</p>
+          <p class="app-toast-title">Done</p>
+          <p class="app-toast-body mt-1">{{ successMessage }}</p>
         </div>
-        <button @click="showSuccessToast = false" class="text-slate-500 hover:text-slate-300">
-          <X class="w-4 h-4" />
+        <button type="button" class="app-icon-btn -m-1.5" aria-label="Dismiss" @click="showSuccessToast = false">
+          <X aria-hidden="true" />
         </button>
       </div>
     </Transition>
 
-    <!-- Error Toast Notification -->
+    <!-- Error toast -->
     <Transition name="app-toast">
-      <div v-if="showErrorToast" class="fixed bottom-6 right-6 z-50 max-w-sm w-full bg-slate-900 border border-rose-500/30 rounded-2xl shadow-xl shadow-slate-950/40 p-4 pointer-events-auto flex items-start gap-3">
-        <AlertTriangle class="w-5 h-5 text-rose-400 shrink-0" />
+      <div v-if="showErrorToast" role="alert" class="app-toast app-glass pointer-events-auto fixed bottom-6 right-6 z-50 flex w-full max-w-sm items-start gap-3 p-4" style="border-color: rgb(251 113 133 / 0.35)">
+        <AlertTriangle class="h-5 w-5 shrink-0 text-rose-400" aria-hidden="true" />
         <div class="flex-1 text-left">
-          <p class="text-xs font-semibold text-white">Pipeline Error</p>
-          <p class="text-[11px] text-slate-400 mt-1 leading-normal">{{ errorMessage }}</p>
+          <p class="app-toast-title">Something went wrong</p>
+          <p class="app-toast-body mt-1">{{ errorMessage }}</p>
         </div>
-        <button @click="showErrorToast = false" class="text-slate-500 hover:text-slate-300">
-          <X class="w-4 h-4" />
+        <button type="button" class="app-icon-btn -m-1.5" aria-label="Dismiss" @click="showErrorToast = false">
+          <X aria-hidden="true" />
         </button>
       </div>
     </Transition>

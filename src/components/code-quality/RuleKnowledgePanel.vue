@@ -4,6 +4,7 @@ import { AlertTriangle, Check, ChevronDown, ChevronRight, ClipboardCopy, Downloa
   GitCompare, LoaderCircle, Link2, RefreshCw, ShieldCheck, Sparkles, X } from 'lucide-vue-next';
 import { makeRequest } from '../../ui/makeRequest';
 import ImpactResults from './RuleImpactResults.vue';
+import ToggleCard from '../ToggleCard.vue';
 import { outlineHref, ruleKnowledgePath, ruleRequest, symbolLabel, syncedAgo, type ImpactResult, type RuleDocument,
   type RuleLink, type RuleLinkState, type RuleRuntime, type RuleSync } from './ruleKnowledge';
 
@@ -171,10 +172,16 @@ watch(revisionId, (value, previous) => { if (previous && value !== previous) voi
           <option v-for="item in revisions" :key="item.revision_id" :value="item.revision_id">{{ (item.commit_sha || item.source_ref || item.revision_id).slice(0, 12) }} · {{ item.updated_at ? new Date(item.updated_at).toLocaleString() : 'ready' }}</option>
         </select>
       </label>
-      <label class="flex items-center gap-2 self-end rounded-lg border border-slate-800 px-3 py-2 text-xs text-slate-300">
-        <input type="checkbox" :checked="allowRemote" :disabled="!!busy" class="h-4 w-4 accent-indigo-400" @change="toggleRemote" />
-        <span><ShieldCheck :size="13" class="mr-1 inline" />Allow rule text to go to the remote model</span>
-      </label>
+      <ToggleCard
+        class="self-end"
+        density="compact"
+        :model-value="allowRemote"
+        :disabled="!!busy"
+        label="Allow rule text to go to the remote model"
+        @update:model-value="toggleRemote"
+      >
+        <template #icon><ShieldCheck :size="13" aria-hidden="true" /></template>
+      </ToggleCard>
     </div>
     <p v-if="!allowRemote" class="-mt-2 text-xs text-slate-500">Rule text stays with the local model and local embeddings. Chat answers using the remote model will not include rules.</p>
 

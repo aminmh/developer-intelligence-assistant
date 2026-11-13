@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ref, computed, onMounted, onUnmounted } from 'vue';
+import { ref, computed, onMounted } from 'vue';
 import { Server, Cpu, RefreshCw, Gauge, Zap, SlidersHorizontal } from 'lucide-vue-next';
 import { RAGConfig } from '../../types';
 import { makeRequest } from '../../ui/makeRequest';
@@ -99,25 +99,10 @@ const remoteServingModel = computed(() => {
   if (!h) return '';
   return String(h.model ?? h.serving_model ?? h.remote_model ?? '');
 });
-const runpodHealth = computed(() => {
-  const h = llmHealth.value;
-  if (!h) return null;
-  return h.runpod ?? null;
-});
-const runpodConfigured = computed(() => Boolean((config.runpodApiKey ?? '').trim()));
-const runpodReachable = computed(() => Boolean(runpodHealth.value?.reachable));
-const runpodEndpointCount = computed(() => {
-  const n = Number(runpodHealth.value?.endpoint_count ?? 0);
-  return Number.isFinite(n) ? n : 0;
-});
 
 onMounted(() => {
   fetchModels();
   fetchHealth();
-  window.addEventListener('ollama-models-changed', fetchModels);
-});
-onUnmounted(() => {
-  window.removeEventListener('ollama-models-changed', fetchModels);
 });
 </script>
 
@@ -271,30 +256,6 @@ onUnmounted(() => {
                 class="px-2 py-0.5 rounded-full border text-[10px] font-mono bg-amber-500/10 text-amber-400 border-amber-500/30"
               >
                 configured but unreachable — check URL, key and model
-              </span>
-            </div>
-            <div class="flex items-center justify-between gap-3">
-              <span class="text-xs text-slate-400 font-mono flex items-center gap-1.5">
-                <Zap class="w-3.5 h-3.5 text-amber-400" />
-                RunPod Serverless
-              </span>
-              <span
-                v-if="!runpodConfigured"
-                class="px-2 py-0.5 rounded-full border text-[10px] font-mono bg-slate-800/40 text-slate-400 border-slate-700"
-              >
-                not configured
-              </span>
-              <span
-                v-else-if="runpodReachable"
-                class="px-2 py-0.5 rounded-full border text-[10px] font-mono bg-emerald-500/10 text-emerald-400 border-emerald-500/30"
-              >
-                connected — {{ runpodEndpointCount }} endpoint{{ runpodEndpointCount === 1 ? '' : 's' }}
-              </span>
-              <span
-                v-else
-                class="px-2 py-0.5 rounded-full border text-[10px] font-mono bg-rose-500/10 text-rose-400 border-rose-500/30"
-              >
-                auth failed
               </span>
             </div>
           </div>

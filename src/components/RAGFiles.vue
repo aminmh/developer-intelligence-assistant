@@ -1,54 +1,70 @@
 <script setup lang="ts">
 import { computed, onMounted, ref } from 'vue';
-import { 
-  FileText, 
-  Upload, 
-  Trash2, 
-  FileCode, 
+import {
+  FolderGit2,
+  Trash2,
   Cpu,
-  CheckCircle2,
+  RefreshCw,
+  Sparkles,
+  Check,
+  CircleX,
+  LoaderCircle,
+  Upload,
+  GitCommitHorizontal,
+  Container,
+  TriangleAlert,
+  Library,
+  UploadCloud,
+  GitBranch,
+  Archive,
 } from 'lucide-vue-next';
-import { UploadedFile } from '../types';
-import type { RuntimeProjectRecord } from '../types';
+import type { UploadedFile, RuntimeProjectRecord } from '../types';
 import { makeRequest } from '../ui/makeRequest';
 import ConfirmModal from './ConfirmModal.vue';
 
 const props = defineProps<{
   files: UploadedFile[];
-  uploading: boolean;
-  uploadProgress: Record<string, number>;
   parsingFileId: string | null;
   indexingProgress: { total: number; indexed: number; status: string; stage?: string; error?: string; graph_status?: string; graph_index_complete?: boolean; graph_nodes?: number; graph_relations?: number };
   indexedFileIds: Set<string>;
   embeddingProvider: 'ollama' | 'openAICompatible' | 'cohere' | 'cloudflareWorkersAI';
-  canUpload: boolean;
 }>();
 
 const emit = defineEmits<{
-  (e: 'uploadFiles', files: FileList): void;
   (e: 'deleteFile', id: string, name: string): void;
   (e: 'indexFile', id: string, name: string): void;
   (e: 'rebuildCohereEmbeddings', id: string, name: string): void;
-  (e: 'requestUploadIdentity'): void;
+  (e: 'chooseUpload'): void;
+  (e: 'connectGit'): void;
 }>();
 
-const dragOver = ref(false);
 const showDeleteConfirm = ref(false);
 const selectedFile = ref<UploadedFile | null>(null);
-const activeFileId = ref<string | null>(null);
+// The last revision the user started indexing: its error message stays visible on that row.
+const lastIndexedId = ref<string | null>(null);
 const runtimeProjects = ref<RuntimeProjectRecord[]>([]);
 const runtimeLoadError = ref('');
+
 const progressStageMessage: Record<string, string> = {
-  queued: 'Queueing Cohere rebuild...',
-  extracting: 'Preparing source revision...',
-  embedding: 'Embedding project chunks...',
-  graph_indexing: 'Checking Neo4j and writing the project graph...',
-  upserting: 'Saving embeddings...',
-  activating: 'Activating new embeddings...',
+  queued: 'Queueing Cohere rebuild…',
+  extracting: 'Preparing source revision…',
+  embedding: 'Embedding project chunks…',
+  graph_indexing: 'Checking Neo4j and writing the project graph…',
+  upserting: 'Saving embeddings…',
+  activating: 'Activating new embeddings…',
 };
+
+// ---- Runtime deployment status -------------------------------------------
 const deploymentByScope = computed(() => new Map(runtimeProjects.value
   .filter((row) => row.commit_sha)
   .map((row) => [`${row.project_id}:${row.commit_sha}`, row])));
+const runningByProject = computed(() => {
+  const map = new Map<string, number>();
+  for (const row of runtimeProjects.value) {
+    if (row.running_project_containers) map.set(row.project_id, Math.max(map.get(row.project_id) ?? 0, row.running_project_containers));
+  }
+  return map;
+});
 const runtimeFor = (file: UploadedFile) => file.projectId && file.commitSha
   ? deploymentByScope.value.get(`${file.projectId}:${file.commitSha}`) || null
   : null;
@@ -64,289 +80,186 @@ const loadRuntimeProjects = async () => {
 };
 onMounted(loadRuntimeProjects);
 
-const handleFileUpload = (event: Event) => {
-  const target = event.target as HTMLInputElement;
-  if (!props.canUpload || props.uploading) {
-    target.value = '';
-    emit('requestUploadIdentity');
-    return;
+// ---- Grouping -------------------------------------------------------------
+const LEGACY = '__legacy';
+const groups = computed(() => {
+  const byProject = new Map<string, UploadedFile[]>();
+  for (const file of props.files) {
+    const key = file.projectId || LEGACY;
+    byProject.set(key, [...(byProject.get(key) ?? []), file]);
   }
-  if (target.files && target.files.length > 0) {
-    emit('uploadFiles', target.files);
-    target.value = '';
-  }
-};
+  return [...byProject.entries()]
+    .map(([key, files]) => ({
+      key,
+      name: key === LEGACY ? 'Legacy uploads' : key,
+      legacy: key === LEGACY,
+      files: [...files].sort((a, b) => Date.parse(b.uploadedAt) - Date.parse(a.uploadedAt)),
+      latest: Math.max(...files.map((file) => Date.parse(file.uploadedAt) || 0)),
+    }))
+    .sort((a, b) => (a.legacy ? 1 : b.legacy ? -1 : b.latest - a.latest));
+});
 
-const handleDrop = (event: DragEvent) => {
-  dragOver.value = false;
-  if (!props.canUpload || props.uploading) {
-    emit('requestUploadIdentity');
-    return;
-  }
-  if (event.dataTransfer?.files && event.dataTransfer.files.length > 0) {
-    emit('uploadFiles', event.dataTransfer.files);
-  }
+// ---- Row state -------------------------------------------------------------
+type RowState = 'indexing' | 'processing' | 'failed' | 'indexed' | 'pending';
+const stateOf = (file: UploadedFile): RowState => {
+  if (props.parsingFileId === file.id) return 'indexing';
+  if (file.status === 'processing') return 'processing';
+  if (file.status === 'failed') return 'failed';
+  if (file.chunkCount > 0) return 'indexed';
+  return 'pending';
 };
+const canRebuildCohere = (file: UploadedFile) => props.embeddingProvider === 'cohere' && !!file.projectId
+  && !!(file.commitSha || file.revisionId) && !!file.uploadSessionId && props.parsingFileId !== file.id;
 
-const triggerUpload = () => {
-  if (!props.canUpload || props.uploading) {
-    emit('requestUploadIdentity');
-    return;
+const relativeTime = (iso: string | number) => {
+  const time = typeof iso === 'number' ? iso : Date.parse(iso);
+  if (!Number.isFinite(time) || time <= 0) return '';
+  const minutes = Math.round((Date.now() - time) / 60000);
+  if (minutes < 1) return 'just now';
+  if (minutes < 60) return `${minutes} min ago`;
+  const hours = Math.round(minutes / 60);
+  if (hours < 24) return `${hours} h ago`;
+  const days = Math.round(hours / 24);
+  if (days === 1) return 'yesterday';
+  if (days < 14) return `${days} days ago`;
+  return new Date(time).toLocaleDateString();
+};
+const formatSize = (bytes: number) => (bytes >= 1048576 ? `${(bytes / 1048576).toFixed(1)} MB` : `${(bytes / 1024).toFixed(1)} KB`);
+
+const indexingPercent = computed(() => (props.indexingProgress.total > 0
+  ? Math.min(100, Math.round((props.indexingProgress.indexed / props.indexingProgress.total) * 100)) : 0));
+const indexingLabel = computed(() => {
+  const stage = props.indexingProgress.stage || props.indexingProgress.status;
+  if (props.indexingProgress.total > 0) {
+    if (stage === 'upserting') return 'Saving embeddings…';
+    if (stage === 'activating') return 'Activating Cohere embeddings…';
+    if (stage === 'domain_embedding') return `Embedding domain concepts: ${props.indexingProgress.indexed}/${props.indexingProgress.total}`;
+    return `Embedding chunks: ${props.indexingProgress.indexed.toLocaleString()} / ${props.indexingProgress.total.toLocaleString()}`;
   }
-  document.getElementById('file-upload-input')?.click();
+  return progressStageMessage[stage] || 'Extracting PHP code…';
+});
+
+const startIndex = (file: UploadedFile) => {
+  lastIndexedId.value = file.id;
+  emit('indexFile', file.id, file.name);
 };
 
 const confirmDelete = (file: UploadedFile) => {
   selectedFile.value = file;
   showDeleteConfirm.value = true;
 };
-
 const handleDeleteConfirm = () => {
-  if (selectedFile.value) {
-    emit('deleteFile', selectedFile.value.id, selectedFile.value.name);
-  }
+  if (selectedFile.value) emit('deleteFile', selectedFile.value.id, selectedFile.value.name);
   showDeleteConfirm.value = false;
   selectedFile.value = null;
 };
-
 const handleDeleteCancel = () => {
   showDeleteConfirm.value = false;
   selectedFile.value = null;
 };
-
-const toggleFileOptions = (file: UploadedFile, event: MouseEvent) => {
-  // Don't toggle on delete button clicks (handled by stop propagation)
-  const target = event.target as HTMLElement;
-  if (target.closest('button')) return;
-
-  activeFileId.value = activeFileId.value === file.id ? null : file.id;
-};
-
-const handleIndexFile = () => {
-  const file = props.files.find(f => f.id === activeFileId.value);
-  if (file) {
-    emit('indexFile', file.id, file.name);
-  }
-};
 </script>
 
 <template>
-  <div class="flex-1 overflow-y-auto p-6 space-y-6 text-left">
-    <div class="max-w-4xl mx-auto space-y-6">
-      
-      <!-- Upload zone card -->
-      <div 
-        class="bg-slate-900/30 border border-slate-800 rounded-2xl p-6"
-        @dragover.prevent="dragOver = true"
-        @dragleave="dragOver = false"
-        @drop.prevent="handleDrop"
-        :class="dragOver ? 'border-indigo-500 bg-indigo-500/5' : ''"
-      >
-        <div class="flex items-center justify-between mb-4">
-          <h4 class="text-xs font-bold tracking-wider uppercase text-slate-400 flex items-center gap-2">
-            <Upload class="w-4 h-4 text-indigo-400" />
-            Upload Project Archives
-          </h4>
-          <span class="text-[10px] text-slate-500">Accepted: ZIP</span>
-        </div>
-
-          <input
-            id="file-upload-input"
-            type="file"
-            multiple
-            accept=".zip"
-            class="hidden"
-            :disabled="!props.canUpload || props.uploading"
-            @change="handleFileUpload"
-          />
-        <button
-          type="button"
-          :disabled="!props.canUpload || props.uploading"
-          aria-describedby="knowledge-upload-help"
-          @click="triggerUpload"
-          class="w-full border-2 border-dashed border-slate-800 rounded-xl p-8 text-center enabled:cursor-pointer enabled:hover:border-indigo-500/50 disabled:cursor-not-allowed disabled:opacity-60 focus-visible:outline focus-visible:outline-2 focus-visible:outline-indigo-400 transition-all"
-        >
-          <FileText class="w-8 h-8 text-slate-600 mx-auto mb-3" />
-          <span class="block text-sm text-slate-400 font-medium">{{ props.canUpload ? 'Choose or drop project ZIP archives' : 'Complete the project details above to upload' }}</span>
-          <span class="block text-[10px] text-slate-500 mt-2">Source is parsed on demand — index a project to enable code search.</span>
-        </button>
-
-        <div v-if="uploading" class="mt-4 flex items-center gap-3 p-3 bg-emerald-950/10 border border-emerald-500/20 rounded-xl text-xs text-emerald-300">
-          <div class="w-4 h-4 border-2 border-emerald-400 border-t-transparent rounded-full animate-spin"></div>
-          <p class="text-[10px] text-indigo-400 mt-0.5">Storing project archive…</p>
-        </div>
-
-        <!-- Per-file resumable upload progress (large files, TUS path) -->
-        <div v-if="Object.keys(uploadProgress).length > 0" class="mt-4 space-y-2">
-          <div v-for="(progress, name) in uploadProgress" :key="name" class="p-3 bg-indigo-950/10 border border-indigo-500/20 rounded-xl">
-            <div class="flex items-center justify-between text-[10px] text-indigo-300 mb-1.5">
-              <span class="truncate font-mono">{{ name }}</span>
-              <span class="font-mono">{{ (progress * 100).toFixed(0) }}%</span>
-            </div>
-            <div class="h-1.5 bg-slate-800 rounded-full overflow-hidden">
-              <div class="h-full bg-indigo-500 rounded-full transition-all" :style="{ width: `${progress * 100}%` }"></div>
-            </div>
-          </div>
-        </div>
-      </div>
-
-      <!-- Uploaded files list card -->
-      <div class="bg-slate-900/30 border border-slate-800 rounded-2xl overflow-hidden">
-        <div class="px-6 py-4 border-b border-slate-800 bg-[#0c101f]/30 flex items-center justify-between">
-          <h4 class="text-xs font-bold tracking-wider uppercase text-slate-400">Indexed Files ({{ files.length }})</h4>
-          <span class="text-[10px] text-slate-500 font-mono">Storage: Node service</span>
-        </div>
-
-        <!-- Empty state -->
-        <div v-if="files.length === 0" class="p-10 text-center">
-          <FileCode class="w-10 h-10 text-slate-700 mx-auto mb-3" />
-          <p class="text-xs text-slate-500">No documents indexed in your vector store yet. Upload files to run RAG query generation.</p>
-        </div>
-
-        <!-- Table/List of files -->
-        <div v-else class="divide-y divide-slate-800">
-          <div
-            v-for="file in files"
-            :key="file.id"
-            class="cursor-pointer"
-          >
-            <div
-              class="px-6 py-4 flex items-center justify-between transition-all text-left"
-              :class="activeFileId === file.id ? 'bg-indigo-500/10 border-l-2 border-indigo-500' : 'hover:bg-slate-900/20 border-l-2 border-transparent'"
-              @click="toggleFileOptions(file, $event)"
-            >
-              <div class="flex items-center gap-3 min-w-0">
-                <FileText class="w-5 h-5 text-indigo-400 shrink-0" />
-                <div class="min-w-0">
-                  <p class="text-sm font-medium text-slate-200 truncate">{{ file.name }}</p>
-                  <p class="text-[10px] text-slate-500 font-mono">
-                    {{ file.chunkCount }} chunk<span v-if="file.chunkCount !== 1">s</span> • {{ file.type.toUpperCase() }} • {{ (file.size / 1024).toFixed(1) }} KB
-                  </p>
-                  <p class="text-[10px] text-slate-500 font-mono">
-                    <template v-if="file.projectId">{{ file.projectId }} · {{ file.revisionId || file.commitSha || 'Revision registration pending' }}</template>
-                    <template v-else>Legacy upload · no project attribution</template>
-                  </p>
-                  <p v-if="file.projectId && file.revisionId" class="text-[10px] text-slate-500 font-mono break-all" :title="file.archiveSha256">{{ file.commitSha ? `Git commit ${file.commitSha}` : 'Upload revision · no Git commit required' }}</p>
-                  <p v-if="file.projectId && file.commitSha" class="text-[10px] mt-0.5" :class="runtimeFor(file)?.deployment_mismatch ? 'text-amber-300' : runtimeFor(file)?.running_project_containers ? 'text-emerald-300' : 'text-slate-500'">
-                    {{ runtimeFor(file)?.deployment_mismatch ? 'Warning: running deployment uses a different commit' : runtimeFor(file)?.running_project_containers ? `Running in Docker · ${runtimeFor(file)?.running_project_containers} container(s)` : runtimeLoadError ? 'Runtime deployment status unavailable' : 'No running Docker deployment reported' }}
-                  </p>
-                  <p v-if="file.status === 'failed'" class="text-[10px] text-red-400 mt-0.5 truncate" :title="file.error">
-                    Failed: {{ file.error || 'Indexing failed.' }}
-                  </p>
-                </div>
-                <span
-                  v-if="file.status === 'processing'"
-                  class="shrink-0 text-[10px] font-mono px-2 py-0.5 rounded-full bg-amber-500/10 text-amber-400 border border-amber-500/20 flex items-center gap-1.5"
-                >
-                  <span class="w-1.5 h-1.5 rounded-full bg-amber-400 animate-pulse"></span>
-                  Processing…
-                </span>
-                <span
-                  v-else-if="file.status === 'failed'"
-                  class="shrink-0 text-[10px] font-mono px-2 py-0.5 rounded-full bg-red-500/10 text-red-400 border border-red-500/20"
-                >
-                  Failed
-                </span>
-                <span
-                  v-if="parsingFileId === file.id"
-                  class="shrink-0 text-[10px] font-mono px-2 py-0.5 rounded-full bg-indigo-500/10 text-indigo-400 border border-indigo-500/20 flex items-center gap-1.5"
-                >
-                  <span class="w-1.5 h-1.5 rounded-full bg-indigo-400 animate-pulse"></span>
-                  Indexing…
-                </span>
-              </div>
-              <button
-                @click.stop="confirmDelete(file)"
-                class="p-2 rounded-lg text-slate-500 hover:text-red-400 hover:bg-red-500/10 transition-all shrink-0"
-                title="Delete file"
-              >
-                <Trash2 class="w-4 h-4" />
-              </button>
-            </div>
-
-            <!-- Options panel for selected file -->
-            <div
-              v-if="activeFileId === file.id"
-              class="px-6 pb-4 pt-1 border-l-2 border-indigo-500/30 bg-indigo-500/5"
-            >
-              <p class="text-[10px] text-slate-500 mb-2 font-mono">
-                {{ file.type === 'zip' ? 'PHP project archive — index to enable code search' : file.chunkCount > 0 ? 'Indexed — ' + file.chunkCount + ' chunks' : 'Not yet indexed — click Index to process' }}
-              </p>
-              <div class="flex flex-wrap items-center gap-2">
-                <span
-                  v-if="indexedFileIds.has(file.id) && file.chunkCount > 0 && parsingFileId !== file.id"
-                  class="inline-flex items-center gap-1.5 text-[10px] font-mono px-2 py-1 rounded-full bg-emerald-500/10 text-emerald-400 border border-emerald-500/20"
-                >
-                  <CheckCircle2 class="w-3 h-3" />
-                  Indexed in Qdrant
-                </span>
-                <button
-                  v-else-if="parsingFileId !== file.id"
-                  @click="handleIndexFile"
-                  class="flex items-center gap-1.5 px-3 py-1.5 text-[11px] font-semibold text-white bg-indigo-600 hover:bg-indigo-500 rounded-lg transition-colors shadow-sm shadow-indigo-600/20"
-                >
-                  <Cpu class="w-3.5 h-3.5" />
-                  {{ file.chunkCount > 0 ? 'Re-index' : 'Index' }}
-                </button>
-                <button
-                  v-if="embeddingProvider === 'cohere' && file.projectId && (file.commitSha || file.revisionId) && file.uploadSessionId && parsingFileId !== file.id"
-                  type="button"
-                  @click="emit('rebuildCohereEmbeddings', file.id, file.name)"
-                  class="flex items-center gap-1.5 px-3 py-1.5 text-[11px] font-semibold text-cyan-100 bg-cyan-700 hover:bg-cyan-600 rounded-lg transition-colors"
-                >
-                  <Cpu class="w-3.5 h-3.5" />
-                  Rebuild Cohere embeddings
-                </button>
-              </div>
-              <div
-                v-if="parsingFileId === file.id && indexingProgress.total > 0"
-                class="space-y-2"
-              >
-                <div class="flex items-center justify-between text-[10px]">
-                  <span class="text-indigo-400 font-mono" aria-live="polite">
-                    {{ (indexingProgress.stage || indexingProgress.status) === 'upserting' ? 'Saving embeddings...' : (indexingProgress.stage === 'activating' ? 'Activating Cohere embeddings...' : (indexingProgress.stage === 'domain_embedding' ? `Embedding domain concepts: ${indexingProgress.indexed}/${indexingProgress.total}` : `Embedding chunks: ${indexingProgress.indexed}/${indexingProgress.total}`)) }}
-                  </span>
-                  <span class="text-indigo-400 tabular-nums" aria-hidden="true">
-                    {{ ((indexingProgress.indexed / indexingProgress.total) * 100).toFixed(0) }}%
-                  </span>
-                </div>
-                <div
-                  class="h-1.5 bg-slate-800 rounded-full overflow-hidden"
-                  role="progressbar"
-                  :aria-valuenow="Math.min(100, Math.round((indexingProgress.indexed / indexingProgress.total) * 100))"
-                  aria-valuemin="0"
-                  aria-valuemax="100"
-                  :aria-label="(indexingProgress.stage || indexingProgress.status) === 'upserting' ? 'Saving embeddings to the vector database' : (indexingProgress.stage === 'activating' ? 'Activating Cohere embeddings' : (indexingProgress.stage === 'domain_embedding' ? 'Embedding domain concepts' : 'Embedding project chunks'))"
-                >
-                  <div
-                    class="h-full bg-indigo-500 rounded-full transition-all duration-300"
-                    :style="{ width: `${(indexingProgress.indexed / indexingProgress.total) * 100}%` }"
-                  ></div>
-                </div>
-              </div>
-              <div
-                v-else-if="parsingFileId === file.id"
-                class="flex items-center gap-2 text-[11px] text-indigo-400"
-              >
-                <div class="w-3.5 h-3.5 border-2 border-indigo-400 border-t-transparent rounded-full animate-spin"></div>
-                {{ progressStageMessage[indexingProgress.stage || indexingProgress.status] || 'Extracting PHP code...' }}
-              </div>
-              <p v-if="indexingProgress.status === 'error' && activeFileId === file.id" role="alert" class="text-[10px] text-rose-300">
-                {{ indexingProgress.error || 'Embedding failed. Check the API service and retry.' }}
-              </p>
-              <p v-if="parsingFileId === file.id && indexingProgress.graph_status" class="text-[10px] text-slate-400" aria-live="polite">
-                Neo4j graph: {{ indexingProgress.graph_status === 'ready' && indexingProgress.graph_index_complete ? `complete (${indexingProgress.graph_nodes ?? 0} symbols, ${indexingProgress.graph_relations ?? 0} relationships)` : indexingProgress.graph_status }}
-              </p>
-            </div>
-          </div>
-        </div>
+  <div class="kb-projects">
+    <div v-if="files.length === 0" class="kb-empty">
+      <span class="kb-empty-icon"><Library aria-hidden="true" /></span>
+      <h3>Add your first project</h3>
+      <p>Upload a ZIP of your source code, or connect a GitHub branch. Once it's indexed, chat and code quality can answer questions about it.</p>
+      <div class="kb-empty-actions">
+        <button type="button" class="kb-btn" data-variant="primary" @click="emit('chooseUpload')"><UploadCloud aria-hidden="true" />Upload a ZIP</button>
+        <button type="button" class="kb-btn" @click="emit('connectGit')"><GitBranch aria-hidden="true" />Connect GitHub</button>
       </div>
     </div>
 
+    <article v-for="group in groups" :key="group.key" class="kb-project" :aria-label="`Project ${group.name}`">
+      <header class="kb-project-head">
+        <span class="kb-project-icon"><Archive v-if="group.legacy" aria-hidden="true" /><FolderGit2 v-else aria-hidden="true" /></span>
+        <div class="min-w-0">
+          <h3 class="kb-project-name">{{ group.name }}</h3>
+          <p class="kb-project-meta">
+            {{ group.files.length }} {{ group.files.length === 1 ? 'revision' : 'revisions' }}<template v-if="group.latest"> · latest {{ relativeTime(group.latest) }}</template>
+            <template v-if="group.legacy"> · no project attribution</template>
+          </p>
+        </div>
+        <span v-if="!group.legacy && runningByProject.get(group.key)" class="kb-tag" data-tone="ok">
+          <Container aria-hidden="true" />Running in Docker · {{ runningByProject.get(group.key) }} {{ runningByProject.get(group.key) === 1 ? 'container' : 'containers' }}
+        </span>
+      </header>
+
+      <div v-for="file in group.files" :key="file.id" class="kb-rev" :data-state="stateOf(file)">
+        <span class="kb-rev-dot" aria-hidden="true"></span>
+        <div class="min-w-0">
+          <div class="kb-rev-title">
+            <b class="truncate" :title="file.name">{{ file.name }}</b>
+            <span v-if="stateOf(file) === 'indexing'" class="kb-tag" data-tone="run"><LoaderCircle class="kb-spin" aria-hidden="true" />Indexing</span>
+            <span v-else-if="stateOf(file) === 'processing'" class="kb-tag" data-tone="run"><LoaderCircle class="kb-spin" aria-hidden="true" />Processing</span>
+            <span v-else-if="stateOf(file) === 'failed'" class="kb-tag" data-tone="bad"><CircleX aria-hidden="true" />Failed</span>
+            <span v-else-if="stateOf(file) === 'indexed'" class="kb-tag" data-tone="ok">
+              <Check aria-hidden="true" />{{ indexedFileIds.has(file.id) ? 'Indexed in Qdrant' : 'Indexed' }} · {{ file.chunkCount.toLocaleString() }} {{ file.chunkCount === 1 ? 'chunk' : 'chunks' }}
+            </span>
+            <span v-else class="kb-tag" data-tone="warn">Not indexed</span>
+            <span v-if="file.revisionId" class="kb-tag" :title="file.archiveSha256 ? `Archive SHA-256 ${file.archiveSha256}` : file.revisionId">{{ file.revisionId }}</span>
+            <span v-else-if="file.projectId" class="kb-tag" data-tone="dim">Revision registration pending</span>
+          </div>
+
+          <div class="kb-rev-sub">
+            <span v-if="file.commitSha"><GitCommitHorizontal aria-hidden="true" />Git commit {{ file.commitSha }}</span>
+            <span v-else-if="file.projectId"><Upload aria-hidden="true" />Upload revision · no Git commit required</span>
+            <span>{{ file.type.toUpperCase() }} · {{ formatSize(file.size) }}</span>
+            <span v-if="file.uploadedAt">uploaded {{ relativeTime(file.uploadedAt) }}</span>
+          </div>
+
+          <p v-if="file.projectId && file.commitSha" class="kb-rev-note" :data-tone="runtimeFor(file)?.deployment_mismatch ? 'warn' : runtimeFor(file)?.running_project_containers ? 'ok' : undefined">
+            <TriangleAlert v-if="runtimeFor(file)?.deployment_mismatch" aria-hidden="true" />
+            <Container v-else aria-hidden="true" />
+            {{ runtimeFor(file)?.deployment_mismatch ? 'The running deployment uses a different commit' : runtimeFor(file)?.running_project_containers ? `Matches the running deployment · ${runtimeFor(file)?.running_project_containers} ${runtimeFor(file)?.running_project_containers === 1 ? 'container' : 'containers'}` : runtimeLoadError ? 'Runtime deployment status unavailable' : 'No running Docker deployment reported' }}
+          </p>
+          <p v-if="file.status === 'failed'" class="kb-rev-note" data-tone="bad" :title="file.error">
+            <TriangleAlert aria-hidden="true" />{{ file.error || 'Indexing failed.' }}
+          </p>
+
+          <div v-if="parsingFileId === file.id" class="kb-progress">
+            <div class="kb-progress-top" aria-live="polite">
+              <span>{{ indexingLabel }}</span>
+              <span v-if="indexingProgress.total > 0">{{ indexingPercent }}%</span>
+            </div>
+            <div
+              v-if="indexingProgress.total > 0"
+              class="kb-track"
+              role="progressbar"
+              :aria-valuenow="indexingPercent"
+              aria-valuemin="0"
+              aria-valuemax="100"
+              :aria-label="indexingLabel"
+            ><i :style="{ transform: `scaleX(${indexingPercent / 100})` }"></i></div>
+            <div v-else class="kb-track" data-indeterminate="true"></div>
+            <p v-if="indexingProgress.graph_status" class="kb-graph" aria-live="polite">
+              Neo4j graph: {{ indexingProgress.graph_status === 'ready' && indexingProgress.graph_index_complete ? `complete (${indexingProgress.graph_nodes ?? 0} symbols, ${indexingProgress.graph_relations ?? 0} relationships)` : indexingProgress.graph_status }}
+            </p>
+          </div>
+          <p v-if="indexingProgress.status === 'error' && lastIndexedId === file.id && parsingFileId !== file.id" role="alert" class="kb-rev-note" data-tone="bad">
+            <TriangleAlert aria-hidden="true" />{{ indexingProgress.error || 'Embedding failed. Check the API service and retry.' }}
+          </p>
+        </div>
+
+        <div class="kb-actions">
+          <template v-if="parsingFileId !== file.id && file.status !== 'processing'">
+            <button v-if="stateOf(file) === 'failed'" type="button" class="kb-btn" data-variant="primary" @click="startIndex(file)"><Cpu aria-hidden="true" />Retry index</button>
+            <button v-else-if="stateOf(file) === 'pending'" type="button" class="kb-btn" data-variant="primary" @click="startIndex(file)"><Cpu aria-hidden="true" />Index</button>
+            <button v-else type="button" class="kb-btn" @click="startIndex(file)"><RefreshCw aria-hidden="true" />Re-index</button>
+          </template>
+          <button v-if="canRebuildCohere(file)" type="button" class="kb-btn" @click="emit('rebuildCohereEmbeddings', file.id, file.name)"><Sparkles aria-hidden="true" />Rebuild Cohere</button>
+          <button type="button" class="kb-btn kb-btn-icon" data-variant="danger" :aria-label="`Delete ${file.name}`" :title="`Delete ${file.name}`" @click="confirmDelete(file)">
+            <Trash2 aria-hidden="true" />
+          </button>
+        </div>
+      </div>
+    </article>
+
     <ConfirmModal
       :show="showDeleteConfirm"
-      title="Delete File"
-      :message="`Are you sure you want to delete ${selectedFile?.name ?? ''}? This action cannot be undone.`"
+      title="Delete revision"
+      :message="`Delete ${selectedFile?.name ?? ''}? This can't be undone.`"
       @confirm="handleDeleteConfirm"
       @cancel="handleDeleteCancel"
     />

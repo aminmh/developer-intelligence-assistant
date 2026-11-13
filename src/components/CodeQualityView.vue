@@ -1,6 +1,11 @@
 <script setup lang="ts">
 import { computed, nextTick, onMounted, ref, watch } from 'vue';
-import { AlertCircle, ArrowDownRight, ArrowUpRight, CheckCircle2, GitCompareArrows, LoaderCircle, Play, Save, ShieldCheck, Trash2 } from 'lucide-vue-next';
+import {
+  AlertCircle, ArrowDownRight, ArrowRight, ArrowUpRight, Boxes, Bug, Calendar, ChevronDown, ChevronsUpDown, CircleCheck, Code, Cpu,
+  Eye, Files, FileSearch, FlaskConical, Gauge, GitBranch, GitCommitHorizontal, GitCompareArrows, Library, LifeBuoy, ListChecks,
+  LoaderCircle, Play, Plug, Radar, RefreshCw, Save, SearchCode, ShieldAlert, SlidersHorizontal, Sparkles, Trash2, TriangleAlert,
+  Waypoints, Wrench, X, Zap,
+} from 'lucide-vue-next';
 import ConfirmModal from './ConfirmModal.vue';
 import { makeRequest } from '../ui/makeRequest';
 import PerformanceSetup from './code-quality/PerformanceSetup.vue';
@@ -585,346 +590,504 @@ watch(projects, (revisions) => {
 watch(() => selectedProject.value?.project_id, (projectId) => loadProjectExclusions(projectId), { immediate: true });
 watch([leftCompareId, rightCompareId], loadComparison);
 onMounted(loadProjectsAndPreferences);
+
+// ---- Page presentation helpers ----------------------------------------------
+const categoryMeta: Record<CategoryId, { color: string; icon: unknown }> = {
+  security: { color: '#fb7185', icon: ShieldAlert },
+  clean_code: { color: '#818cf8', icon: Sparkles },
+  maintainability: { color: '#22d3ee', icon: Wrench },
+  reliability: { color: '#34d399', icon: LifeBuoy },
+  performance: { color: '#fbbf24', icon: Zap },
+};
+const qualityTabs = [
+  { id: 'assessment' as const, label: 'Assessment', icon: Gauge, domId: 'quality-assessment-tab', panel: 'quality-assessment-panel' },
+  { id: 'compare' as const, label: 'Compare', icon: GitCompareArrows, domId: 'quality-compare-tab', panel: 'quality-compare-panel' },
+  { id: 'performance' as const, label: 'Performance', icon: Zap, domId: 'quality-performance-tab', panel: 'quality-performance-panel' },
+  { id: 'rules' as const, label: 'Custom rules', icon: ListChecks, domId: 'quality-rules-tab', panel: 'quality-rules-panel' },
+  { id: 'external' as const, label: 'External analyzers', icon: Plug, domId: 'quality-external-analyzers-tab', panel: 'quality-external-analyzers-panel' },
+];
+
+const revisionLabel = (project: ProjectRevision) => {
+  const identity = project.commit_sha ? project.commit_sha.slice(0, 12) : project.revision_id || 'upload revision';
+  return `${project.project_id} · ${identity}${isWorkingTreeRevision(project) ? ' · working tree (can’t assess uncommitted edits)' : ''}`;
+};
+
+const indexState = computed<'checking' | 'ready' | 'blocked' | 'loading'>(() => {
+  if (loadingProjects.value) return 'loading';
+  if (checkingIndex.value) return 'checking';
+  if (!selectedProject.value || indexReadiness.value?.ready === false) return 'blocked';
+  return indexReadiness.value?.ready === true ? 'ready' : 'checking';
+});
+const canAssess = computed(() => !(assessing.value || checkingIndex.value || indexReadiness.value?.ready !== true || savingWeights.value
+  || savingExclusions.value || loadingExclusions.value || exclusionSettingsUnavailable.value || !selectedProject.value || totalWeight.value !== 100));
+const startAssessment = () => {
+  activeTab.value = 'assessment';
+  void runAssessment();
+};
+
+const setupOpen = ref(false);
+const setupSummary = computed(() => {
+  const parts = categories.map((item) => Number(weights.value[item.id] || 0)).join(' · ');
+  const count = parsedExclusionPatterns.value.length;
+  return `weights ${parts} · ${count} ${count === 1 ? 'exclusion' : 'exclusions'}`;
+});
+
+// Score ring: circumference of r=50 is 2πr.
+const RING = 2 * Math.PI * 50;
+const ringOffset = computed(() => RING * (1 - Math.max(0, Math.min(100, currentReport.value?.overall_score ?? 0)) / 100));
+
+// Findings filter: by category, or only AI review findings.
+type FindingFilter = 'all' | 'ai' | CategoryId;
+const findingFilter = ref<FindingFilter>('all');
+const rowCategory = (row: ReportEvidenceRow) => (row.finding?.category || row.evidence?.category || 'security') as CategoryId | 'business_rule';
+const rowIsAi = (row: ReportEvidenceRow) => row.finding?.tool === 'ai-semantic-review';
+const findingFilters = computed(() => {
+  const rows = reportEvidenceRows.value;
+  const items: Array<{ id: FindingFilter; label: string; count: number }> = [{ id: 'all', label: 'All', count: rows.length }];
+  for (const category of categories) {
+    const count = rows.filter((row) => rowCategory(row) === category.id).length;
+    if (count) items.push({ id: category.id, label: category.label, count });
+  }
+  const ai = rows.filter(rowIsAi).length;
+  if (ai) items.push({ id: 'ai', label: 'AI review', count: ai });
+  return items;
+});
+const visibleEvidenceRows = computed(() => reportEvidenceRows.value.filter((row) => findingFilter.value === 'all'
+  || (findingFilter.value === 'ai' ? rowIsAi(row) : rowCategory(row) === findingFilter.value)));
+watch(() => currentReport.value?.report_id, () => { findingFilter.value = 'all'; });
+const severityColor = (row: ReportEvidenceRow) => {
+  const severity = (row.finding?.severity || '').toLowerCase();
+  if (['critical', 'high', 'error', 'blocker'].includes(severity)) return '#fb7185';
+  if (['medium', 'major', 'warning'].includes(severity)) return '#fbbf24';
+  if (rowIsAi(row)) return '#818cf8';
+  const category = rowCategory(row);
+  return category in categoryMeta ? categoryMeta[category as CategoryId].color : '#8591a8';
+};
+const severityTone = (severity?: string) => {
+  const value = (severity || '').toLowerCase();
+  if (['critical', 'high', 'error', 'blocker'].includes(value)) return 'bad';
+  if (['medium', 'major', 'warning'].includes(value)) return 'warn';
+  return undefined;
+};
+
+// History trend: oldest → newest, scored reports only.
+const trend = computed(() => [...history.value]
+  .sort((a, b) => Date.parse(a.created_at) - Date.parse(b.created_at))
+  .slice(-12)
+  .map((report) => ({ id: report.report_id, score: report.overall_score, date: report.created_at })));
+const shortDate = (value: string) => new Date(value).toLocaleDateString(undefined, { month: 'short', day: 'numeric' });
+
+const statusTone = (status?: string) => (status === 'complete' || status === 'available' || status === 'synchronized'
+  ? 'ok' : status === 'partial' || status === 'available_no_matches' ? 'warn' : status === 'unavailable' ? 'warn' : undefined);
 </script>
 
 <template>
-  <section role="region" aria-label="Code quality assessment" tabindex="0" class="mx-auto min-h-0 w-full max-w-7xl flex-1 space-y-6 overflow-y-auto overscroll-contain p-4 text-slate-100 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-indigo-400 sm:p-6">
-    <header class="flex flex-col gap-3 border-b border-slate-800 pb-5 sm:flex-row sm:items-end sm:justify-between">
-      <div>
-        <div class="mb-2 flex items-center gap-2 text-indigo-300"><ShieldCheck :size="18" /><span class="text-xs font-semibold uppercase tracking-[0.18em]">Codebase health</span></div>
-        <h1 class="text-2xl font-semibold tracking-tight sm:text-3xl">Quality assessment</h1>
-        <p class="mt-1 text-sm text-slate-400">Review evidence-based scores for an indexed revision and compare saved reports.</p>
-      </div>
-      <div class="flex flex-col gap-2 sm:min-w-[24rem]">
-        <label for="quality-revision" class="text-xs font-medium text-slate-400">Project revision</label>
-        <div class="flex flex-wrap items-center gap-2">
-          <select id="quality-revision" v-model="selectedRevision" :disabled="loadingProjects || assessing || checkingIndex || !projects.length" class="min-w-0 flex-1 rounded-lg border border-slate-700 bg-slate-900 px-3 py-2.5 text-sm outline-none focus:border-indigo-400 focus:ring-2 focus:ring-indigo-400/20">
+  <section role="region" aria-label="Code quality assessment" tabindex="0" class="cq-page">
+    <div class="cq-wrap">
+      <!-- Control bar: revision, index status, sections, actions -->
+      <div class="cq-bar">
+        <label class="cq-rev" for="quality-revision">
+          <GitBranch aria-hidden="true" />
+          <span class="sr-only">Project revision</span>
+          <select id="quality-revision" v-model="selectedRevision" :disabled="loadingProjects || assessing || checkingIndex || !projects.length">
             <option v-if="loadingProjects" value="">Loading project revisions…</option>
             <option v-else-if="!projects.length" value="">No project revisions in Knowledge Base</option>
             <option v-for="project in projects" :key="revisionKey(project)" :value="revisionKey(project)" :title="project.revision_id || project.commit_sha || 'Upload revision'" :disabled="isWorkingTreeRevision(project)">
-              {{ project.project_id }}{{ isWorkingTreeRevision(project) ? ' · working tree (can’t assess uncommitted edits)' : '' }}
+              {{ revisionLabel(project) }}
             </option>
           </select>
-          <button v-if="selectedProject?.revision_id" type="button" class="shrink-0 rounded-lg border border-rose-500/40 px-3 py-2 text-sm text-rose-300 hover:bg-rose-500/10 disabled:opacity-50" :disabled="assessing || deletingRevision" @click="revisionDeleteTarget = selectedProject; revisionDeleteError = ''">Remove revision</button>
+          <ChevronsUpDown aria-hidden="true" />
+        </label>
+        <span class="cq-state" :data-tone="indexState === 'ready' ? 'ok' : indexState === 'blocked' ? 'warn' : undefined" role="status">
+          <LoaderCircle v-if="indexState === 'checking' || indexState === 'loading'" class="cq-spin" aria-hidden="true" />
+          <CircleCheck v-else-if="indexState === 'ready'" aria-hidden="true" />
+          <TriangleAlert v-else aria-hidden="true" />
+          {{ indexState === 'ready' ? 'Index ready' : indexState === 'blocked' ? 'Not ready' : indexState === 'loading' ? 'Loading…' : 'Checking index…' }}
+        </span>
+
+        <nav class="cq-tabs" role="tablist" aria-label="Code Quality sections">
+          <button
+            v-for="tab in qualityTabs"
+            :id="tab.domId"
+            :key="tab.id"
+            type="button"
+            role="tab"
+            :aria-selected="activeTab === tab.id"
+            :aria-controls="tab.panel"
+            @click="activeTab = tab.id"
+          ><component :is="tab.icon" aria-hidden="true" />{{ tab.label }}</button>
+        </nav>
+
+        <div class="cq-bar-actions">
+          <button v-if="selectedProject?.revision_id" type="button" class="cq-btn cq-btn-sm" data-variant="danger" :disabled="assessing || deletingRevision" @click="revisionDeleteTarget = selectedProject; revisionDeleteError = ''">
+            <Trash2 aria-hidden="true" />Remove revision
+          </button>
+          <button type="button" class="cq-btn cq-btn-lg" data-variant="primary" :disabled="!canAssess" @click="startAssessment">
+            <LoaderCircle v-if="assessing" class="cq-spin" aria-hidden="true" /><Play v-else aria-hidden="true" />
+            {{ assessing ? 'Assessing revision…' : weightsChanged ? 'Save weights and assess' : 'Assess this revision' }}
+          </button>
         </div>
       </div>
-    </header>
 
-    <div v-if="checkingIndex" role="status" class="flex items-center gap-2 rounded-xl border border-slate-700 p-4 text-sm text-slate-300"><LoaderCircle :size="16" class="motion-safe:animate-spin" />Checking the selected revision's index…</div>
-    <div v-else-if="!loadingProjects && (!selectedProject || indexReadiness?.ready === false)" role="status" class="rounded-xl border border-amber-400/30 bg-amber-400/10 p-4 text-sm text-amber-100">
-      <p>{{ indexReadiness?.reason || 'Add a project revision to Knowledge Base and index it before running an assessment.' }}</p>
-      <div class="mt-3 flex flex-wrap gap-3">
-        <button type="button" class="min-h-9 rounded-lg border border-amber-300/30 px-3 font-medium hover:bg-amber-300/10" @click="emit('openKnowledgeBase')">Open Knowledge Base</button>
-        <button v-if="selectedProject" type="button" class="min-h-9 rounded-lg px-3 underline underline-offset-2" @click="loadProjectsAndPreferences().then(checkIndex)">Check again</button>
+      <!-- Precheck: blocked revision -->
+      <div v-if="!loadingProjects && !checkingIndex && (!selectedProject || indexReadiness?.ready === false)" role="status" class="cq-banner" data-tone="warn">
+        <TriangleAlert aria-hidden="true" />
+        <span class="cq-banner-text">{{ indexReadiness?.reason || 'Add a project revision to Knowledge Base and index it before running an assessment.' }}</span>
+        <button type="button" class="cq-btn" @click="emit('openKnowledgeBase')"><Library aria-hidden="true" />Open Knowledge Base</button>
+        <button v-if="selectedProject" type="button" class="cq-btn" @click="loadProjectsAndPreferences().then(checkIndex)"><RefreshCw aria-hidden="true" />Check again</button>
       </div>
-    </div>
 
-    <nav role="tablist" aria-label="Code Quality sections" class="flex flex-wrap gap-2 border-b border-slate-800 pb-3">
-      <button id="quality-assessment-tab" role="tab" :aria-selected="activeTab === 'assessment'" aria-controls="quality-assessment-panel" class="min-h-10 rounded-lg px-4 text-sm font-medium transition" :class="activeTab === 'assessment' ? 'bg-indigo-500/15 text-indigo-100 ring-1 ring-indigo-400/30' : 'text-slate-400 hover:bg-slate-800 hover:text-slate-100'" @click="activeTab = 'assessment'">Static assessment</button>
-      <button id="quality-compare-tab" role="tab" :aria-selected="activeTab === 'compare'" aria-controls="quality-compare-panel" class="min-h-10 rounded-lg px-4 text-sm font-medium transition" :class="activeTab === 'compare' ? 'bg-indigo-500/15 text-indigo-100 ring-1 ring-indigo-400/30' : 'text-slate-400 hover:bg-slate-800 hover:text-slate-100'" @click="activeTab = 'compare'">Compare reports</button>
-      <button id="quality-performance-tab" role="tab" :aria-selected="activeTab === 'performance'" aria-controls="quality-performance-panel" class="min-h-10 rounded-lg px-4 text-sm font-medium transition" :class="activeTab === 'performance' ? 'bg-indigo-500/15 text-indigo-100 ring-1 ring-indigo-400/30' : 'text-slate-400 hover:bg-slate-800 hover:text-slate-100'" @click="activeTab = 'performance'">Setup Performance</button>
-      <button id="quality-rules-tab" role="tab" :aria-selected="activeTab === 'rules'" aria-controls="quality-rules-panel" class="min-h-10 rounded-lg px-4 text-sm font-medium transition" :class="activeTab === 'rules' ? 'bg-indigo-500/15 text-indigo-100 ring-1 ring-indigo-400/30' : 'text-slate-400 hover:bg-slate-800 hover:text-slate-100'" @click="activeTab = 'rules'">Custom rules</button>
-      <button id="quality-external-analyzers-tab" role="tab" :aria-selected="activeTab === 'external'" aria-controls="quality-external-analyzers-panel" class="min-h-10 rounded-lg px-4 text-sm font-medium transition" :class="activeTab === 'external' ? 'bg-indigo-500/15 text-indigo-100 ring-1 ring-indigo-400/30' : 'text-slate-400 hover:bg-slate-800 hover:text-slate-100'" @click="activeTab = 'external'">External analyzers</button>
-    </nav>
-
-    <div v-if="activeTab === 'assessment'" id="quality-assessment-panel" role="tabpanel" aria-labelledby="quality-assessment-tab" class="space-y-6">
-    <div v-if="error" role="alert" class="flex items-start gap-3 rounded-xl border border-rose-500/30 bg-rose-500/10 p-4 text-sm text-rose-200">
-      <AlertCircle class="mt-0.5 shrink-0" :size="18" /><span class="min-w-0 flex-1">{{ error }}</span>
-      <button class="shrink-0 rounded-md px-2 py-1 font-medium hover:bg-rose-400/10" @click="retryLastAction">Retry</button>
-    </div>
-
-    <section class="grid gap-5 xl:grid-cols-[minmax(0,1fr)_20rem]">
-      <div class="space-y-5">
-        <div class="rounded-2xl border border-slate-800 bg-slate-900/65 p-5 sm:p-6">
-          <div class="flex flex-col gap-4 sm:flex-row sm:items-center sm:justify-between">
-            <div><h2 class="text-lg font-semibold">Category weights</h2><p class="mt-1 text-sm text-slate-400">The weighted total appears only when all five categories are assessed.</p></div>
-            <button :disabled="assessing || checkingIndex || indexReadiness?.ready !== true || savingWeights || savingExclusions || loadingExclusions || exclusionSettingsUnavailable || !selectedProject || totalWeight !== 100" class="inline-flex min-h-10 items-center justify-center gap-2 rounded-lg bg-indigo-500 px-4 text-sm font-semibold text-white transition hover:bg-indigo-400 disabled:cursor-not-allowed disabled:opacity-50" @click="runAssessment">
-              <LoaderCircle v-if="assessing" class="motion-safe:animate-spin" :size="16" /><Play v-else :size="16" />
-              {{ assessing ? 'Assessing revision…' : weightsChanged ? 'Save weights and assess' : 'Assess this revision' }}
-            </button>
+      <!-- ================= Assessment ================= -->
+      <div v-if="activeTab === 'assessment'" id="quality-assessment-panel" role="tabpanel" aria-labelledby="quality-assessment-tab" class="cq-layout">
+        <div class="cq-main">
+          <div v-if="error" role="alert" class="cq-banner" data-tone="bad">
+            <AlertCircle aria-hidden="true" /><span class="cq-banner-text">{{ error }}</span>
+            <button type="button" class="cq-btn" @click="retryLastAction"><RefreshCw aria-hidden="true" />Retry</button>
           </div>
-          <p class="mt-3 text-xs leading-relaxed text-slate-500">Scoring uses a fixed rubric, temperature 0, and top_p 1. Model providers can still change behavior; report comparisons flag known differences in model, rubric, analyzers, coverage, weights, and scoring settings.</p>
-          <div v-if="assessing" class="mt-5 rounded-xl border border-indigo-400/20 bg-indigo-400/5 p-4" role="status" aria-live="polite">
-            <div class="flex items-center justify-between gap-3">
-              <p class="text-sm font-medium text-indigo-100">Assessing {{ selectedProject?.project_id }}…</p>
-              <span class="text-xs text-slate-400">In progress</span>
+
+          <!-- Setup: weights and exclusions -->
+          <details class="cq-setup" :open="setupOpen || totalWeight !== 100 || weightsChanged || exclusionsChanged" @toggle="setupOpen = ($event.target as HTMLDetailsElement).open">
+            <summary>
+              <SlidersHorizontal aria-hidden="true" /><b>Assessment setup</b>
+              <span class="cq-setup-sum">{{ setupSummary }}</span>
+              <span v-if="totalWeight !== 100" class="cq-tag" data-tone="warn">Weights total {{ totalWeight }}%</span>
+              <span v-else-if="weightsChanged || exclusionsChanged" class="cq-tag" data-tone="warn">Unsaved changes</span>
+              <ChevronDown class="cq-chev" aria-hidden="true" />
+            </summary>
+            <div class="cq-setup-body">
+              <div>
+                <h3 class="cq-h4">Category weights</h3>
+                <p class="cq-hint">The weighted total appears only when all five categories are assessed. Scoring uses a fixed rubric, temperature 0 and top_p 1. Providers can still change behaviour; comparisons flag known differences in model, rubric, analyzers, coverage, weights and scoring settings.</p>
+                <div class="cq-weights">
+                  <label v-for="category in categories" :key="category.id" class="cq-weight" :style="{ '--c': categoryMeta[category.id].color }">
+                    <span>{{ category.label }}</span>
+                    <span class="cq-weight-input"><input v-model.number="weights[category.id]" type="number" min="0" max="100" :aria-label="`${category.label} weight`" /><i>%</i></span>
+                  </label>
+                </div>
+                <div class="cq-total">
+                  <span class="cq-total-bar" aria-hidden="true">
+                    <i v-for="category in categories" :key="category.id" :style="{ width: `${Math.max(0, Number(weights[category.id] || 0)) / Math.max(totalWeight, 100) * 100}%`, background: categoryMeta[category.id].color }"></i>
+                  </span>
+                  <span :data-tone="totalWeight === 100 ? 'ok' : 'warn'">Total <strong>{{ totalWeight }}%</strong><template v-if="totalWeight !== 100"> · weights must total 100%</template></span>
+                  <button type="button" class="cq-btn cq-btn-sm" :disabled="totalWeight !== 100 || savingWeights" @click="saveWeights"><Save aria-hidden="true" />{{ savingWeights ? 'Saving…' : 'Save weights' }}</button>
+                </div>
+                <p v-if="weightsChanged && totalWeight === 100" class="cq-hint">Changes apply when you save or start an assessment.</p>
+                <p v-if="preferenceMessage" class="cq-hint" data-tone="ok">{{ preferenceMessage }}</p>
+              </div>
+
+              <div>
+                <h3 class="cq-h4">Excluded files and folders</h3>
+                <p class="cq-hint">Saved for {{ selectedProject?.project_id || 'this project' }} and applied to future assessments. Built-in artifact exclusions still apply.</p>
+                <div v-if="loadingSourceDirectories" class="cq-hint cq-inline"><LoaderCircle class="cq-spin" aria-hidden="true" />Loading revision folders…</div>
+                <div v-else-if="sourceDirectoryError" class="cq-hint cq-inline" data-tone="bad" role="alert">
+                  {{ sourceDirectoryError }}
+                  <button type="button" class="cq-link" @click="loadSourceDirectories">Retry folder loading</button>
+                </div>
+                <DirectoryExclusionTree v-else :directories="sourceDirectories" :patterns="parsedExclusionPatterns" :disabled="loadingExclusions || exclusionSettingsUnavailable || savingExclusions || assessing" class="cq-tree" @toggle="toggleFolderExclusion" />
+                <form class="cq-addrow" @submit.prevent="addCustomExclusion">
+                  <label for="quality-custom-exclusion" class="sr-only">Add a file path or exclusion glob</label>
+                  <input id="quality-custom-exclusion" v-model="customExclusionInput" class="cq-input" :disabled="loadingExclusions || exclusionSettingsUnavailable || savingExclusions || assessing" type="text" maxlength="300" placeholder="Add a file path or glob, e.g. src/LegacyReport.php" />
+                  <button type="submit" class="cq-btn cq-btn-sm" :disabled="!customExclusionInput.trim() || loadingExclusions || exclusionSettingsUnavailable || savingExclusions || assessing">Add</button>
+                </form>
+                <ul v-if="parsedExclusionPatterns.length" class="cq-pats" :aria-label="`Excluded patterns (${parsedExclusionPatterns.length})`">
+                  <li v-for="pattern in parsedExclusionPatterns" :key="pattern" class="cq-pat">
+                    <span>{{ pattern }}</span>
+                    <button type="button" :disabled="loadingExclusions || exclusionSettingsUnavailable || savingExclusions || assessing" :aria-label="`Remove exclusion ${pattern}`" @click="exclusionPatterns = exclusionPatterns.filter((item) => item !== pattern)"><X aria-hidden="true" /></button>
+                  </li>
+                </ul>
+                <p class="cq-hint">The tree shows folders only; selecting one excludes everything inside it. Patterns use `/`; `*` and `?` match within a path segment, and `**` can match across folders.</p>
+                <div class="cq-inline">
+                  <button type="button" class="cq-btn cq-btn-sm" :disabled="!selectedProject || loadingExclusions || exclusionSettingsUnavailable || savingExclusions || !exclusionsChanged" @click="saveProjectExclusions">
+                    <LoaderCircle v-if="savingExclusions" class="cq-spin" aria-hidden="true" /><Save v-else aria-hidden="true" />{{ savingExclusions ? 'Saving…' : 'Save exclusions' }}
+                  </button>
+                  <span v-if="exclusionMessage" class="cq-hint" data-tone="ok" role="status">{{ exclusionMessage }}</span>
+                </div>
+              </div>
             </div>
-            <div role="progressbar" aria-label="Project assessment progress" aria-valuetext="Assessment is running" class="mt-3 h-2 overflow-hidden rounded-full bg-slate-800">
-              <div class="quality-assessment-progress h-full w-1/3 rounded-full bg-indigo-400"></div>
-            </div>
-            <p class="mt-2 text-xs text-slate-400">Running source checks and evidence-based scoring. The result will appear here when complete.</p>
+          </details>
+
+          <!-- Running -->
+          <div v-if="assessing" class="cq-running" role="status" aria-live="polite">
+            <div class="cq-running-top"><LoaderCircle class="cq-spin" aria-hidden="true" />Assessing {{ selectedProject ? revisionLabel(selectedProject) : '' }}<span class="cq-tag">in progress</span></div>
+            <div role="progressbar" aria-label="Project assessment progress" aria-valuetext="Assessment is running" class="cq-track" data-indeterminate="true"></div>
+            <p>Running source checks and evidence-based scoring. The report appears here when it's done; you can keep using the app.</p>
           </div>
-          <div class="mt-5 grid gap-3 sm:grid-cols-2 lg:grid-cols-5">
-            <label v-for="category in categories" :key="category.id" class="rounded-xl border border-slate-800 bg-slate-950/60 p-3">
-              <span class="block text-xs font-medium text-slate-400">{{ category.label }}</span>
-              <span class="mt-2 flex items-center gap-2"><input v-model.number="weights[category.id]" type="number" min="0" max="100" class="w-full bg-transparent text-xl font-semibold outline-none" :aria-label="`${category.label} weight`" /><span class="text-sm text-slate-500">%</span></span>
+
+          <!-- Report -->
+          <template v-if="currentReport">
+            <section class="cq-card cq-hero" aria-labelledby="cq-report-title">
+              <div class="cq-ring" :aria-label="currentReport.overall_score == null ? 'Overall score unavailable' : `Overall score ${currentReport.overall_score} out of 100`" role="img">
+                <svg viewBox="0 0 120 120" aria-hidden="true">
+                  <defs><linearGradient id="cq-ring-gradient" x1="0" y1="0" x2="1" y2="1"><stop style="stop-color: rgb(var(--shell-grad-a-rgb))" /><stop offset="1" style="stop-color: var(--accent-primary)" /></linearGradient></defs>
+                  <circle cx="60" cy="60" r="50" class="cq-ring-track" />
+                  <circle v-if="currentReport.overall_score != null" cx="60" cy="60" r="50" class="cq-ring-value" :stroke-dasharray="RING" :stroke-dashoffset="ringOffset" />
+                </svg>
+                <div class="cq-ring-label"><b>{{ currentReport.overall_score ?? '—' }}</b><span>{{ currentReport.overall_score == null ? 'no overall score' : 'out of 100' }}</span></div>
+              </div>
+              <div class="min-w-0">
+                <p class="cq-eyebrow">Assessment report</p>
+                <h2 id="cq-report-title" class="cq-hero-title">{{ currentReport.overall_score == null ? 'Overall score unavailable' : `${currentReport.overall_score} / 100` }}</h2>
+                <p v-if="currentReport.overall_score == null && unassessedCategories.length" class="cq-hint" data-tone="warn">Not assessed: {{ unassessedCategories.join(', ') }}. Each category card explains why.</p>
+                <div class="cq-meta">
+                  <span class="cq-tag"><Calendar aria-hidden="true" />{{ formatDate(currentReport.created_at) }}</span>
+                  <span class="cq-tag"><GitCommitHorizontal aria-hidden="true" />{{ currentReport.commit_sha?.slice(0, 12) || currentReport.revision_id }}</span>
+                  <span class="cq-tag"><Files aria-hidden="true" />{{ currentReport.coverage.scanned_files }} / {{ currentReport.coverage.files }} files scanned</span>
+                  <span class="cq-tag"><Code aria-hidden="true" />{{ Object.keys(currentReport.coverage.languages).join(', ') || 'No detected languages' }}</span>
+                  <span class="cq-tag" :data-tone="currentReport.token_usage?.estimated ? 'warn' : undefined"><Cpu aria-hidden="true" />
+                    <template v-if="currentReport.token_usage">{{ formatTokenUsage(currentReport.token_usage) }} · {{ currentReport.token_usage.estimated ? 'estimated' : 'provider-reported' }}</template>
+                    <template v-else>{{ formatTokenUsage(null, currentReport.provider) }}</template>
+                  </span>
+                </div>
+                <p v-if="currentReport.token_usage" class="cq-hint">Evaluator input {{ currentReport.token_usage.prompt_tokens?.toLocaleString() ?? 'unavailable' }} · output {{ currentReport.token_usage.completion_tokens?.toLocaleString() ?? 'unavailable' }}<template v-if="currentReport.token_usage.batch_count"> · {{ currentReport.token_usage.summarized_evidence_count }} evidence items summarized across {{ currentReport.token_usage.batch_count }} requests before scoring; summaries may omit details</template>.</p>
+                <p class="cq-hint">
+                  <template v-if="currentReport.coverage.skipped_files">{{ currentReport.coverage.skipped_files }} over scan limits · </template>
+                  <template v-if="currentReport.coverage.excluded_files">{{ currentReport.coverage.excluded_files }} artifacts excluded · </template>
+                  <template v-if="currentReport.coverage.user_excluded_files">{{ currentReport.coverage.user_excluded_files }} excluded by project settings · </template>
+                  {{ currentReport.model }} · rubric {{ currentReport.rubric_version }}
+                </p>
+              </div>
+            </section>
+
+            <div class="cq-cats">
+              <article v-for="category in categories" :key="category.id" class="cq-cat" :style="{ '--c': categoryMeta[category.id].color }" :data-assessed="currentReport.categories[category.id].assessed">
+                <div class="cq-cat-top"><component :is="categoryMeta[category.id].icon" aria-hidden="true" />{{ category.label }}</div>
+                <div class="cq-cat-score">{{ formatScore(currentReport.categories[category.id].score) }}<small v-if="currentReport.categories[category.id].assessed"> /100</small></div>
+                <div class="cq-cat-bar" aria-hidden="true"><i :style="{ transform: `scaleX(${(currentReport.categories[category.id].score ?? 0) / 100})` }"></i></div>
+                <p>{{ currentReport.categories[category.id].reason }}</p>
+                <p class="cq-cat-foot">{{ currentReport.coverage.categories[category.id].status || (currentReport.coverage.categories[category.id].supported ? 'covered' : 'unavailable') }} · {{ currentReport.coverage.categories[category.id].evidence_count }} signals · weight {{ currentReport.weights[category.id] }}%</p>
+                <p v-if="currentReport.shadow_scoring" class="cq-cat-foot" data-tone="ai">Experimental: {{ formatScore(currentReport.shadow_scoring.categories[category.id].score) }} · {{ confidenceLabel(currentReport.shadow_scoring.categories[category.id]) }} · {{ currentReport.shadow_scoring.categories[category.id].finding_count ?? 0 }} findings</p>
+              </article>
+            </div>
+
+            <BusinessRuleReviews v-if="currentReport.business_rules?.length" :rules="currentReport.business_rules" :reviews="currentReport.business_rule_reviews || []" :evidence="currentReport.evidence" @view-source="openFindingSource" />
+            <div v-if="currentReport.coverage.business_rule_review && !currentReport.business_rules?.length" class="cq-banner" :data-tone="currentReport.coverage.business_rule_review.status === 'unavailable' ? 'warn' : undefined">
+              <Radar aria-hidden="true" />
+              <span v-if="currentReport.coverage.business_rule_review.status === 'not_configured'" class="cq-banner-text">Business rule review isn't configured for this project. Connect an Outline collection in Knowledge Base → Business rules.</span>
+              <span v-else-if="currentReport.coverage.business_rule_review.status === 'unavailable'" class="cq-banner-text">Business rule review couldn't sync Outline: {{ currentReport.coverage.business_rule_review.reason }}</span>
+              <span v-else class="cq-banner-text">Outline synced, but the selected collection has no usable business rule documents.</span>
+            </div>
+            <p v-else-if="currentReport.coverage.business_rule_review && currentReport.business_rules?.length" class="cq-hint">Outline snapshot: {{ currentReport.coverage.business_rule_review.imported_count }} documents reviewed from collection {{ currentReport.coverage.business_rule_review.collection_id }}.</p>
+
+            <!-- Coverage and diagnostics -->
+            <section class="cq-card" aria-labelledby="cq-diag-title">
+              <div class="cq-sec-head"><h3 id="cq-diag-title" class="cq-sec-title"><Radar aria-hidden="true" />Coverage and diagnostics</h3><span class="cq-hint cq-push">How the scores were produced</span></div>
+
+              <details v-if="currentReport.coverage.user_exclusion_patterns?.length" class="cq-diag">
+                <summary><Files aria-hidden="true" />Project exclusions used<span class="cq-tag">{{ currentReport.coverage.user_exclusion_patterns.length }}</span><ChevronDown class="cq-chev" aria-hidden="true" /></summary>
+                <ul class="cq-diag-body cq-mono"><li v-for="pattern in currentReport.coverage.user_exclusion_patterns" :key="pattern">{{ pattern }}</li></ul>
+              </details>
+
+              <details v-if="currentReport.coverage.semantic_context" class="cq-diag">
+                <summary><SearchCode aria-hidden="true" />Revision-matched code context<span class="cq-tag" :data-tone="statusTone(currentReport.coverage.semantic_context.status)">{{ currentReport.coverage.semantic_context.status === 'available' ? 'Retrieved' : currentReport.coverage.semantic_context.status === 'available_no_matches' ? 'No matches' : 'Unavailable' }}</span><ChevronDown class="cq-chev" aria-hidden="true" /></summary>
+                <div class="cq-diag-body" aria-live="polite">
+                  <p>{{ currentReport.coverage.semantic_context.evidence_count }} code excerpts from {{ currentReport.coverage.semantic_context.query_count }} bounded searches for this revision<span v-if="currentReport.coverage.semantic_context.business_rule_query_count">, including {{ currentReport.coverage.semantic_context.business_rule_query_count }} business rule searches</span>. {{ currentReport.coverage.semantic_context.reason || "Retrieved snippets provide context; they don't prove complete control-flow coverage." }}</p>
+                  <p v-if="currentReport.coverage.semantic_context.failure_code" class="cq-hint">Diagnostic: {{ currentReport.coverage.semantic_context.failure_code.replaceAll('_', ' ') }}<span v-if="currentReport.coverage.semantic_context.diagnostic_detail"> · {{ currentReport.coverage.semantic_context.diagnostic_detail }}</span> · {{ currentReport.coverage.semantic_context.candidate_count ?? 0 }} candidates · {{ currentReport.coverage.semantic_context.searched_collection_count ?? 0 }} collections searched<span v-if="currentReport.coverage.semantic_context.rejected_revision_count"> · {{ currentReport.coverage.semantic_context.rejected_revision_count }} revision-mismatched candidates discarded</span><span v-if="currentReport.coverage.semantic_context.rejected_source_count"> · {{ currentReport.coverage.semantic_context.rejected_source_count }} out-of-scope candidates discarded</span></p>
+                  <div v-if="currentReport.coverage.semantic_context.category_search" class="cq-mini-grid" aria-label="Semantic retrieval by assessment category">
+                    <div v-for="category in categories" :key="category.id" class="cq-mini">
+                      <b>{{ category.label }}</b>
+                      <span>{{ currentReport.coverage.semantic_context.category_search[category.id]?.attempted_queries ?? 0 }} queries · {{ currentReport.coverage.semantic_context.category_search[category.id]?.accepted_count ?? 0 }} accepted</span>
+                      <span v-if="(currentReport.coverage.semantic_context.category_search[category.id]?.rejected_revision_count ?? 0) + (currentReport.coverage.semantic_context.category_search[category.id]?.rejected_source_count ?? 0) > 0" data-tone="warn">{{ currentReport.coverage.semantic_context.category_search[category.id]?.rejected_revision_count ?? 0 }} revision mismatch · {{ currentReport.coverage.semantic_context.category_search[category.id]?.rejected_source_count ?? 0 }} out of scope</span>
+                    </div>
+                  </div>
+                  <p v-if="currentReport.coverage.semantic_context.omitted_business_rule_ids?.length" class="cq-hint" data-tone="warn">{{ currentReport.coverage.semantic_context.omitted_business_rule_ids.length }} business rules exceeded the retrieval limit; their reviews remain unknown.</p>
+                </div>
+              </details>
+
+              <details v-if="currentReport.coverage.category_review_context && currentReport.coverage.category_review_context.status !== 'not_needed'" class="cq-diag">
+                <summary><FileSearch aria-hidden="true" />Source samples used for category scores<span class="cq-tag">{{ currentReport.coverage.category_review_context.excerpt_count }} excerpts</span><ChevronDown class="cq-chev" aria-hidden="true" /></summary>
+                <div class="cq-diag-body">
+                  <p>{{ currentReport.coverage.category_review_context.excerpt_count }} bounded source excerpts from {{ currentReport.coverage.category_review_context.scanned_files }} files were taken from this revision to fill categories without other evidence. They're review context, not findings. {{ currentReport.coverage.category_review_context.reason }}</p>
+                  <div class="cq-mini-grid">
+                    <div v-for="category in categories" :key="category.id" class="cq-mini"><b>{{ category.label }}</b><span>{{ currentReport.coverage.category_review_context.categories[category.id] || 0 }} excerpts</span></div>
+                  </div>
+                </div>
+              </details>
+
+              <details v-if="currentReport.coverage.semantic_flow_tracing" class="cq-diag">
+                <summary><Waypoints aria-hidden="true" />Semantic flow tracing<span class="cq-tag" :data-tone="statusTone(currentReport.coverage.semantic_flow_tracing.status)">{{ currentReport.coverage.semantic_flow_tracing.status === 'complete' ? 'Complete within scope' : currentReport.coverage.semantic_flow_tracing.status === 'partial' ? 'Partial' : 'Unavailable' }}</span><ChevronDown class="cq-chev" aria-hidden="true" /></summary>
+                <div class="cq-diag-body" aria-live="polite">
+                  <p>{{ currentReport.coverage.semantic_flow_tracing.trace_count }} request-to-sensitive-operation paths · {{ currentReport.coverage.semantic_flow_tracing.node_count }} symbols · {{ currentReport.coverage.semantic_flow_tracing.edge_count }} resolved calls · {{ currentReport.coverage.semantic_flow_tracing.unresolved_edge_count }} unresolved. {{ currentReport.coverage.semantic_flow_tracing.reason }}</p>
+                  <ul v-if="currentReport.coverage.semantic_flow_tracing.unresolved_edges?.length" class="cq-mono" data-tone="warn">
+                    <li v-for="(edge, index) in currentReport.coverage.semantic_flow_tracing.unresolved_edges.slice(0, 8)" :key="`${edge.file}:${edge.line}:${edge.source_symbol}:${index}`">{{ edge.file }}:{{ edge.line }} · {{ edge.source_symbol }} → {{ edge.target_symbol || 'unresolved reference' }} ({{ edge.reason }})</li>
+                  </ul>
+                  <p v-if="currentReport.coverage.semantic_flow_tracing.limits_reached?.length" class="cq-hint" data-tone="warn">Limits reached: {{ currentReport.coverage.semantic_flow_tracing.limits_reached.join(', ') }}</p>
+                </div>
+              </details>
+
+              <details v-if="currentReport.coverage.php_design_signals" class="cq-diag">
+                <summary><Boxes aria-hidden="true" />PHP design review signals<span class="cq-tag" :data-tone="statusTone(currentReport.coverage.php_design_signals.status)">{{ currentReport.coverage.php_design_signals.status === 'complete' ? 'Indexed scope complete' : currentReport.coverage.php_design_signals.status === 'partial' ? 'Partial' : 'Unavailable' }}</span><ChevronDown class="cq-chev" aria-hidden="true" /></summary>
+                <div class="cq-diag-body" aria-live="polite">
+                  <p v-if="currentReport.coverage.php_design_signals.status !== 'unavailable'">{{ currentReport.coverage.php_design_signals.class_count }} classes · {{ currentReport.coverage.php_design_signals.method_count }} methods · {{ currentReport.coverage.php_design_signals.signal_count }} review signals. Static checks cover {{ currentReport.coverage.php_design_signals.principles_with_static_signals.join(', ') }} within the indexed PHP scope. {{ currentReport.coverage.php_design_signals.reason }}</p>
+                  <p v-else>{{ currentReport.coverage.php_design_signals.reason }}</p>
+                  <p v-if="currentReport.coverage.php_design_signals.signals_truncated" class="cq-hint" data-tone="warn">The signal limit was reached; more candidates may be omitted.</p>
+                </div>
+              </details>
+
+              <details v-if="currentReport.coverage.analyzer_failures.length || Object.keys(currentReport.coverage.unsupported_extensions).length || currentReport.coverage.skipped_files || currentReport.coverage.excluded_files" class="cq-diag">
+                <summary><TriangleAlert aria-hidden="true" />Analyzer warnings<span class="cq-tag" :data-tone="currentReport.coverage.analyzer_failures.length ? 'warn' : undefined">{{ currentReport.coverage.analyzer_failures.length ? `${currentReport.coverage.analyzer_failures.length} ${currentReport.coverage.analyzer_failures.length === 1 ? 'pass' : 'passes'} incomplete` : 'Coverage notes' }}</span><ChevronDown class="cq-chev" aria-hidden="true" /></summary>
+                <div class="cq-diag-body">
+                  <p v-if="currentReport.coverage.analyzer_failures.length" data-tone="warn">Some analyzer passes couldn't complete: {{ currentReport.coverage.analyzer_failures.map((item) => `${item.name}: ${item.reason}`).join(' · ') }}</p>
+                  <p v-if="Object.keys(currentReport.coverage.unsupported_extensions).length">Source-like file types without an analyzer: {{ Object.entries(currentReport.coverage.unsupported_extensions).map(([extension, count]) => `${extension} (${count})`).join(', ') }}</p>
+                  <p v-if="currentReport.coverage.skipped_files">{{ currentReport.coverage.skipped_files }} files exceeded source scan limits and weren't analyzed.</p>
+                  <p v-if="currentReport.coverage.excluded_files">{{ currentReport.coverage.excluded_files }} source-like files in dependency, build, cache, log, generated or temporary paths were excluded.</p>
+                </div>
+              </details>
+
+              <details v-if="currentReport.custom_rules?.length" class="cq-diag">
+                <summary><ListChecks aria-hidden="true" />Custom rule snapshots used<span class="cq-tag">{{ currentReport.custom_rules.length }}</span><ChevronDown class="cq-chev" aria-hidden="true" /></summary>
+                <ul class="cq-diag-body cq-mono"><li v-for="rule in currentReport.custom_rules" :key="rule.rule_id">{{ rule.title }} · {{ rule.content_hash }}</li></ul>
+              </details>
+
+              <details v-if="currentReport.shadow_scoring" class="cq-diag">
+                <summary><FlaskConical aria-hidden="true" />Experimental analyzer baseline<span class="cq-tag" data-tone="ai">Not used for scores</span><ChevronDown class="cq-chev" aria-hidden="true" /></summary>
+                <div class="cq-diag-body"><p>These experimental scores are being evaluated and don't determine the report's official scores. Coverage and rule weights still need calibration. Each category card shows its experimental value.</p></div>
+              </details>
+            </section>
+
+            <SourcePreview v-if="selectedSource && !selectedEvidenceId" :key="`${currentReport.report_id}:${selectedSource.file}:${selectedSource.line}`" :project-id="currentReport.project_id" :revision-id="currentReport.revision_id" :commit-sha="currentReport.commit_sha" :file-path="selectedSource.file" :line="selectedSource.line" @close="closeSourcePreview" />
+
+            <!-- Findings -->
+            <section id="assessment-evidence" class="cq-card" aria-labelledby="cq-findings-title">
+              <div class="cq-sec-head">
+                <h3 id="cq-findings-title" class="cq-sec-title"><Bug aria-hidden="true" />Findings and evidence</h3>
+                <span class="cq-tag">{{ reportEvidenceRows.length }}</span>
+                <div v-if="findingFilters.length > 2" class="cq-filters cq-push" role="group" aria-label="Filter findings">
+                  <button v-for="item in findingFilters" :key="item.id" type="button" class="cq-fchip" :aria-pressed="findingFilter === item.id" @click="findingFilter = item.id">{{ item.label }} <span>{{ item.count }}</span></button>
+                </div>
+              </div>
+              <p v-if="reportEvidenceRows.length" class="cq-hint">Each finding appears once with its source evidence and any available trace.</p>
+              <p v-if="cleanCodeReviewWithoutFinding" class="cq-note">The AI reviewed revision-matched Clean Code excerpts but didn't substantiate a specific Clean Code problem. The excerpts are review context, not findings.</p>
+              <p v-if="!reportEvidenceRows.length" class="cq-note">No findings or source-level evidence were emitted. This doesn't establish that the code has no issues.</p>
+
+              <article v-for="(row, evidenceIndex) in visibleEvidenceRows" :id="row.evidenceId" :key="row.evidenceId" class="cq-finding" :style="{ '--s': severityColor(row) }">
+                <span class="cq-finding-bar" aria-hidden="true"></span>
+                <div class="min-w-0">
+                  <div class="cq-finding-top">
+                    <b>{{ row.finding ? findingSummary(row.finding).title : evidenceLabel(row.evidenceId, evidenceIndex) }}</b>
+                    <span v-if="row.finding?.tool === 'ai-semantic-review'" class="cq-tag" data-tone="ai">AI review</span>
+                    <span v-else class="cq-tag" :data-tone="severityTone(row.finding?.severity)">{{ row.finding?.severity || row.evidence?.kind || 'evidence' }}</span>
+                    <span class="cq-tag">{{ categoryLabel(row.finding?.category || row.evidence?.category || 'security') }}</span>
+                  </div>
+                  <p v-if="row.finding" class="cq-finding-text">{{ findingSummary(row.finding).detail }}</p>
+                  <p v-else-if="row.evidence" class="cq-finding-text">{{ row.evidence.message }}</p>
+                  <details v-if="row.finding && row.evidence" class="cq-finding-more">
+                    <summary>{{ row.finding.tool === 'ai-semantic-review' ? 'Cited code context' : 'Analyzer evidence' }} · {{ ruleLabel(row.evidence.rule) }}</summary>
+                    <p>{{ row.evidence.message }}</p>
+                  </details>
+                  <p v-else-if="row.finding" class="cq-finding-text">{{ row.finding.message }}</p>
+                  <div v-if="row.finding?.file || row.evidence?.file" class="cq-finding-loc">
+                    <span class="cq-file">{{ row.finding?.file || row.evidence?.file }}<template v-if="row.finding?.line || row.evidence?.line">:{{ row.finding?.line || row.evidence?.line }}</template></span>
+                    <span v-if="row.finding?.line === 1">· file-level anchor</span>
+                    <button v-if="(row.finding?.file || row.evidence?.file) && (row.finding?.line || row.evidence?.line)" type="button" class="cq-btn cq-btn-sm" @click="openFindingSource(row.finding?.file || row.evidence?.file || '', row.finding?.line || row.evidence?.line, row.evidenceId)"><Eye aria-hidden="true" />View source</button>
+                  </div>
+                  <ol v-if="row.evidence?.trace?.nodes?.length" class="cq-trace">
+                    <li v-for="(node, index) in row.evidence.trace.nodes" :key="`${node.file}:${node.start_line}:${node.symbol}`">
+                      <span class="cq-trace-sym">{{ node.symbol }}</span>
+                      <span> · {{ node.file }}:{{ node.start_line }}–{{ node.end_line }}</span>
+                      <span v-if="index < (row.evidence?.trace?.edges.length || 0)"> · calls →</span>
+                    </li>
+                  </ol>
+                  <p v-if="row.evidence?.trace?.nodes?.length" class="cq-hint">Call reachability only; this trace doesn't prove that a specific input value reaches the operation.</p>
+                  <SourcePreview v-if="selectedSource && selectedEvidenceId === row.evidenceId" :key="`${currentReport.report_id}:${selectedSource.file}:${selectedSource.line}`" class="cq-finding-source" :project-id="currentReport.project_id" :revision-id="currentReport.revision_id" :commit-sha="currentReport.commit_sha" :file-path="selectedSource.file" :line="selectedSource.line" @close="closeSourcePreview" />
+                </div>
+              </article>
+              <p v-if="reportEvidenceRows.length && !visibleEvidenceRows.length" class="cq-note">No findings match this filter.</p>
+            </section>
+          </template>
+
+          <div v-else-if="loadingReport" class="cq-card cq-inline" role="status"><LoaderCircle class="cq-spin" aria-hidden="true" />Loading report…</div>
+          <div v-else-if="!loadingHistory && !history.length" class="cq-empty">
+            <span class="cq-empty-icon"><Gauge aria-hidden="true" /></span>
+            <h2>No assessment reports yet</h2>
+            <p>Pick weights in Assessment setup, or keep the equal-weight default, then assess this indexed revision.</p>
+            <button type="button" class="cq-btn cq-btn-lg" data-variant="primary" :disabled="!canAssess" @click="startAssessment"><Play aria-hidden="true" />Assess this revision</button>
+          </div>
+        </div>
+
+        <!-- History rail -->
+        <aside class="cq-rail" aria-labelledby="cq-history-title">
+          <div class="cq-card">
+            <div class="cq-sec-head">
+              <h2 id="cq-history-title" class="cq-sec-title">Report history</h2>
+              <LoaderCircle v-if="loadingHistory" class="cq-spin cq-push" aria-hidden="true" />
+            </div>
+            <p class="cq-hint">{{ history.length }} saved for this project</p>
+            <div v-if="trend.length > 1" class="cq-spark" role="img" :aria-label="`Overall score trend across ${trend.length} reports`">
+              <i v-for="item in trend" :key="item.id" :class="{ 'is-on': item.id === selectedReportId, 'is-empty': item.score == null }" :style="{ height: `${Math.max(6, item.score ?? 6)}%` }" :title="`${shortDate(item.date)} · ${item.score ?? 'no overall score'}`"></i>
+            </div>
+            <div v-if="trend.length > 1" class="cq-spark-labels"><span>{{ shortDate(trend[0].date) }}</span><span>{{ shortDate(trend[trend.length - 1].date) }}</span></div>
+
+            <div v-if="history.length" class="cq-history">
+              <div v-for="report in history" :key="report.report_id" class="cq-hist" :aria-current="selectedReportId === report.report_id ? 'true' : undefined">
+                <button type="button" class="cq-hist-main" :aria-label="`Show assessment report from ${formatDate(report.created_at)}`" :aria-pressed="selectedReportId === report.report_id" :aria-busy="selectedReportId === report.report_id && loadingReport" @click="chooseReport(report.report_id)">
+                  <span class="cq-hist-score">{{ report.overall_score ?? '—' }}</span>
+                  <span class="cq-hist-meta">
+                    <b>{{ formatDate(report.created_at) }}</b>
+                    <span>{{ report.commit_sha?.slice(0, 12) || report.revision_id }} · {{ report.coverage }} files</span>
+                    <span>{{ formatTokenUsage(report.token_usage, report.provider) }}</span>
+                  </span>
+                </button>
+                <button type="button" class="cq-hist-del" :aria-label="`Delete assessment from ${formatDate(report.created_at)}`" :title="deletingReportId === report.report_id ? 'Deleting report' : 'Delete report'" :disabled="!!deletingReportId" @click="deleteTarget = report; deleteReportError = ''">
+                  <LoaderCircle v-if="deletingReportId === report.report_id" class="cq-spin" aria-hidden="true" /><Trash2 v-else aria-hidden="true" />
+                </button>
+              </div>
+            </div>
+            <p v-else-if="!loadingHistory" class="cq-hint">Reports from every indexed revision in this project will appear here.</p>
+          </div>
+        </aside>
+      </div>
+
+      <!-- ================= Compare ================= -->
+      <div v-else-if="activeTab === 'compare'" id="quality-compare-panel" role="tabpanel" aria-labelledby="quality-compare-tab">
+        <section class="cq-card">
+          <div class="cq-sec-head"><h2 class="cq-sec-title"><GitCompareArrows aria-hidden="true" />Compare saved reports</h2></div>
+          <p class="cq-hint">Choose two reports from {{ selectedProject?.project_id || 'this project' }} to compare their scores and findings.</p>
+          <div class="cq-cmp-pick">
+            <label class="cq-field">Earlier report
+              <select v-model="leftCompareId" class="cq-input"><option value="">Select a report</option><option v-for="report in history" :key="report.report_id" :value="report.report_id">{{ formatDate(report.created_at) }} · {{ report.overall_score ?? 'Unscored' }}</option></select>
+            </label>
+            <span class="cq-cmp-arrow" aria-hidden="true"><ArrowRight /></span>
+            <label class="cq-field">Later report
+              <select v-model="rightCompareId" class="cq-input"><option value="">Select a report</option><option v-for="report in history" :key="report.report_id" :value="report.report_id">{{ formatDate(report.created_at) }} · {{ report.overall_score ?? 'Unscored' }}</option></select>
             </label>
           </div>
-          <div class="mt-4 flex flex-wrap items-center justify-between gap-3 border-t border-slate-800 pt-4">
-            <p class="text-sm" :class="totalWeight === 100 ? 'text-slate-400' : 'text-amber-300'">Total <strong>{{ totalWeight }}%</strong><span v-if="totalWeight !== 100"> · Weights must total 100%.</span><span v-else-if="weightsChanged"> · Changes apply when you save or start an assessment.</span></p>
-            <div class="flex items-center gap-3"><span v-if="preferenceMessage" class="text-xs text-emerald-300">{{ preferenceMessage }}</span>
-              <button :disabled="totalWeight !== 100 || savingWeights" class="inline-flex min-h-9 items-center gap-2 rounded-lg border border-slate-700 px-3 text-sm font-medium text-slate-200 hover:bg-slate-800 disabled:cursor-not-allowed disabled:opacity-40" @click="saveWeights"><Save :size="15" />{{ savingWeights ? 'Saving…' : 'Save weights' }}</button>
-            </div>
-          </div>
-        </div>
-
-        <div class="rounded-2xl border border-slate-800 bg-slate-900/65 p-5 sm:p-6">
-          <div class="flex flex-wrap items-start justify-between gap-3">
-            <div>
-              <h2 class="text-lg font-semibold">Excluded files and directories</h2>
-              <p class="mt-1 text-sm text-slate-400">Saved for {{ selectedProject?.project_id || 'this project' }} and applied to future assessments.</p>
-            </div>
-            <button type="button" :disabled="!selectedProject || loadingExclusions || exclusionSettingsUnavailable || savingExclusions || !exclusionsChanged" class="inline-flex min-h-9 items-center gap-2 rounded-lg border border-slate-700 px-3 text-sm font-medium text-slate-200 hover:bg-slate-800 disabled:cursor-not-allowed disabled:opacity-40" @click="saveProjectExclusions">
-              <LoaderCircle v-if="savingExclusions" class="motion-safe:animate-spin" :size="15" />
-              <Save v-else :size="15" />{{ savingExclusions ? 'Saving…' : 'Save exclusions' }}
-            </button>
-          </div>
-          <p class="mt-4 text-xs font-medium text-slate-400">Select folders to exclude</p>
-          <div v-if="loadingSourceDirectories" class="mt-2 flex items-center gap-2 text-sm text-slate-500"><LoaderCircle class="motion-safe:animate-spin" :size="14" />Loading revision folders…</div>
-          <div v-else-if="sourceDirectoryError" class="mt-2 flex flex-wrap items-center gap-3 text-sm" role="alert">
-            <span class="text-rose-300">{{ sourceDirectoryError }}</span>
-            <button type="button" class="font-medium text-indigo-300 underline-offset-2 hover:underline focus-visible:outline focus-visible:outline-2 focus-visible:outline-indigo-300" @click="loadSourceDirectories">Retry folder loading</button>
-          </div>
-          <DirectoryExclusionTree v-else :directories="sourceDirectories" :patterns="parsedExclusionPatterns" :disabled="loadingExclusions || exclusionSettingsUnavailable || savingExclusions || assessing" class="mt-2" @toggle="toggleFolderExclusion" />
-          <form class="mt-3 flex flex-wrap gap-2" @submit.prevent="addCustomExclusion">
-            <label for="quality-custom-exclusion" class="sr-only">Add a file path or exclusion glob</label>
-            <input id="quality-custom-exclusion" v-model="customExclusionInput" :disabled="loadingExclusions || exclusionSettingsUnavailable || savingExclusions || assessing" type="text" maxlength="300" placeholder="Add file path or custom glob, e.g. src/LegacyReport.php" class="min-h-9 min-w-0 flex-1 rounded-lg border border-slate-700 bg-slate-950 px-3 font-mono text-xs text-slate-200 outline-none placeholder:text-slate-600 focus:border-indigo-400 disabled:opacity-50" />
-            <button type="submit" :disabled="!customExclusionInput.trim() || loadingExclusions || exclusionSettingsUnavailable || savingExclusions || assessing" class="min-h-9 rounded-lg border border-slate-700 px-3 text-xs font-medium text-slate-300 hover:bg-slate-800 disabled:cursor-not-allowed disabled:opacity-40">Add path or glob</button>
-          </form>
-          <div v-if="parsedExclusionPatterns.length" class="mt-3">
-            <p class="text-xs font-medium text-slate-400">Excluded patterns ({{ parsedExclusionPatterns.length }})</p>
-            <ul class="mt-2 flex flex-wrap gap-2">
-              <li v-for="pattern in parsedExclusionPatterns" :key="pattern" class="inline-flex max-w-full items-center gap-1 rounded-md border border-indigo-400/20 bg-indigo-400/5 pl-2 font-mono text-[11px] text-indigo-100">
-                <span class="break-all py-1">{{ pattern }}</span>
-                <button type="button" :disabled="loadingExclusions || exclusionSettingsUnavailable || savingExclusions || assessing" :aria-label="`Remove exclusion ${pattern}`" class="grid h-7 w-7 shrink-0 place-items-center rounded text-slate-400 hover:bg-slate-800 hover:text-white disabled:opacity-40" @click="exclusionPatterns = exclusionPatterns.filter((item) => item !== pattern)"><Trash2 :size="12" /></button>
-              </li>
-            </ul>
-          </div>
-          <p class="mt-2 text-xs leading-relaxed text-slate-500">The tree shows folders only. Selecting a folder excludes all its descendants. File paths and custom globs can be added above. Patterns use `/`; `*` and `?` match within a path segment, and `**` can match across directories. Built-in artifact exclusions still apply.</p>
-          <p v-if="exclusionMessage" class="mt-2 text-xs text-emerald-300" role="status">{{ exclusionMessage }}</p>
-        </div>
-
-        <section v-if="currentReport" class="rounded-2xl border border-slate-800 bg-slate-900/65 p-5 sm:p-6">
-          <div class="flex flex-wrap items-start justify-between gap-4">
-            <div><div class="text-xs font-medium uppercase tracking-wider text-slate-500">Assessment report</div><h2 class="mt-1 text-xl font-semibold">{{ currentReport.overall_score == null ? 'Overall score unavailable' : `${currentReport.overall_score} / 100` }}</h2><p v-if="currentReport.overall_score == null && unassessedCategories.length" class="mt-1 text-sm text-amber-200">Not assessed: {{ unassessedCategories.join(', ') }}. See each category for its evidence reason.</p><p class="mt-1 text-xs text-slate-400">{{ formatDate(currentReport.created_at) }} · {{ currentReport.commit_sha?.slice(0, 12) || currentReport.revision_id }}</p></div>
-            <span class="rounded-lg border border-slate-700 bg-slate-950 px-3 py-2 text-xs text-slate-400">{{ currentReport.coverage.scanned_files }} / {{ currentReport.coverage.files }} scanned<span v-if="currentReport.coverage.skipped_files"> · {{ currentReport.coverage.skipped_files }} over limits</span><span v-if="currentReport.coverage.excluded_files"> · {{ currentReport.coverage.excluded_files }} artifacts excluded</span><span v-if="currentReport.coverage.user_excluded_files"> · {{ currentReport.coverage.user_excluded_files }} excluded by project settings</span> · {{ Object.keys(currentReport.coverage.languages).join(', ') || 'No detected languages' }}</span>
-          </div>
-          <details v-if="currentReport.coverage.user_exclusion_patterns?.length" class="mt-4 rounded-lg border border-slate-800 bg-slate-950/40 px-4 py-3 text-xs">
-            <summary class="cursor-pointer font-medium text-slate-300">Project exclusions used ({{ currentReport.coverage.user_exclusion_patterns.length }})</summary>
-            <ul class="mt-2 space-y-1 font-mono text-slate-400"><li v-for="pattern in currentReport.coverage.user_exclusion_patterns" :key="pattern" class="break-all">{{ pattern }}</li></ul>
-          </details>
-          <div class="mt-4 rounded-xl border border-slate-800 bg-slate-950/40 px-4 py-3 text-xs"><div class="font-semibold text-slate-300">Evaluator token usage</div><p v-if="currentReport.token_usage" class="mt-1 text-slate-400">{{ formatTokenUsage(currentReport.token_usage) }} · input {{ currentReport.token_usage.prompt_tokens?.toLocaleString() ?? 'unavailable' }} · output {{ currentReport.token_usage.completion_tokens?.toLocaleString() ?? 'unavailable' }} · {{ currentReport.token_usage.estimated ? 'estimated' : 'provider-reported' }}</p><p v-else class="mt-1 text-slate-500">{{ formatTokenUsage(null, currentReport.provider) }}.</p></div>
-          <p v-if="currentReport.token_usage?.batch_count" class="mt-2 text-xs text-slate-400">{{ currentReport.token_usage.summarized_evidence_count }} evidence items were summarized across {{ currentReport.token_usage.batch_count }} model requests before final scoring; summaries may omit details.</p>
-          <div v-if="currentReport.shadow_scoring" class="mt-3 rounded-xl border border-indigo-500/20 bg-indigo-500/5 px-4 py-3 text-xs"><div class="font-semibold text-indigo-100">Experimental analyzer baseline</div><p class="mt-1 text-indigo-200/80">These experimental scores are being evaluated and do not determine the report's official scores. Coverage and rule weights still require calibration.</p></div>
-          <div class="mt-5 grid gap-3 sm:grid-cols-2 lg:grid-cols-5">
-            <article v-for="category in categories" :key="category.id" class="rounded-xl border border-slate-800 bg-slate-950/60 p-4">
-              <div class="text-xs font-medium text-slate-400">{{ category.label }}</div>
-              <div class="mt-2 text-2xl font-semibold" :class="currentReport.categories[category.id].assessed ? 'text-slate-100' : 'text-slate-500'">{{ formatScore(currentReport.categories[category.id].score) }}<span v-if="currentReport.categories[category.id].assessed" class="ml-1 text-xs font-normal text-slate-500">/ 100</span></div>
-              <p class="mt-2 text-xs leading-relaxed text-slate-400">{{ currentReport.categories[category.id].reason }}</p>
-              <p class="mt-3 text-[11px] text-slate-500">{{ currentReport.coverage.categories[category.id].status || (currentReport.coverage.categories[category.id].supported ? 'covered' : 'unavailable') }} · {{ currentReport.coverage.categories[category.id].evidence_count }} evidence signals · weight {{ currentReport.weights[category.id] }}%</p>
-              <p v-if="currentReport.shadow_scoring" class="mt-2 text-[11px] text-indigo-200">Experimental baseline: {{ formatScore(currentReport.shadow_scoring.categories[category.id].score) }} · {{ confidenceLabel(currentReport.shadow_scoring.categories[category.id]) }} · {{ currentReport.shadow_scoring.categories[category.id].finding_count ?? 0 }} findings</p>
-            </article>
-          </div>
-          <BusinessRuleReviews v-if="currentReport.business_rules?.length" :rules="currentReport.business_rules" :reviews="currentReport.business_rule_reviews || []" :evidence="currentReport.evidence" @view-source="openFindingSource" />
-          <div v-if="currentReport.coverage.business_rule_review" class="mt-4 rounded-xl border border-slate-800 bg-slate-900/50 p-4 text-sm text-slate-300">
-            <p v-if="currentReport.coverage.business_rule_review.status === 'not_configured'">Business rule review is not configured for this project. Connect an Outline collection in Knowledge Base → Business rules.</p>
-            <p v-else-if="currentReport.coverage.business_rule_review.status === 'unavailable'">Business rule review could not synchronize Outline: {{ currentReport.coverage.business_rule_review.reason }}</p>
-            <p v-else-if="!currentReport.business_rules?.length">Outline synchronized successfully; the selected collection has no usable business-rule documents.</p>
-            <p v-else>Outline snapshot: {{ currentReport.coverage.business_rule_review.imported_count }} documents reviewed from collection {{ currentReport.coverage.business_rule_review.collection_id }}.</p>
-          </div>
-          <div v-if="currentReport.coverage.semantic_context" class="mt-4 rounded-xl border border-slate-800 bg-slate-950/40 p-4" aria-live="polite">
-            <div class="flex flex-wrap items-center justify-between gap-2">
-              <h3 class="text-sm font-semibold text-slate-200">Revision-matched code context</h3>
-              <span class="rounded-full px-2.5 py-1 text-xs" :class="currentReport.coverage.semantic_context.status === 'unavailable' ? 'bg-amber-500/10 text-amber-200' : 'bg-emerald-500/10 text-emerald-200'">
-                {{ currentReport.coverage.semantic_context.status === 'available' ? 'Retrieved' : currentReport.coverage.semantic_context.status === 'available_no_matches' ? 'No matches' : 'Unavailable' }}
-              </span>
-            </div>
-            <p class="mt-2 text-sm leading-relaxed text-slate-400">
-              {{ currentReport.coverage.semantic_context.evidence_count }} code excerpts from {{ currentReport.coverage.semantic_context.query_count }} bounded searches for this revision<span v-if="currentReport.coverage.semantic_context.business_rule_query_count">, including {{ currentReport.coverage.semantic_context.business_rule_query_count }} business-rule searches</span>.
-              {{ currentReport.coverage.semantic_context.reason || 'Retrieved snippets provide context; they do not prove complete control-flow coverage.' }}
-            </p>
-            <p v-if="currentReport.coverage.semantic_context.failure_code" class="mt-2 text-xs text-slate-500">
-              Diagnostic: {{ currentReport.coverage.semantic_context.failure_code.replaceAll('_', ' ') }}<span v-if="currentReport.coverage.semantic_context.diagnostic_detail"> · {{ currentReport.coverage.semantic_context.diagnostic_detail }}</span> · {{ currentReport.coverage.semantic_context.candidate_count ?? 0 }} candidates · {{ currentReport.coverage.semantic_context.searched_collection_count ?? 0 }} collections searched<span v-if="currentReport.coverage.semantic_context.rejected_revision_count"> · {{ currentReport.coverage.semantic_context.rejected_revision_count }} revision-mismatched candidates discarded</span><span v-if="currentReport.coverage.semantic_context.rejected_source_count"> · {{ currentReport.coverage.semantic_context.rejected_source_count }} out-of-scope candidates discarded</span>
-            </p>
-            <div v-if="currentReport.coverage.semantic_context.category_search" class="mt-3 grid gap-2 sm:grid-cols-2 xl:grid-cols-5" aria-label="Semantic retrieval by assessment category">
-              <div v-for="category in categories" :key="category.id" class="rounded-lg border border-slate-800/80 bg-slate-900/50 px-3 py-2">
-                <p class="text-xs font-medium text-slate-300">{{ category.label }}</p>
-                <p class="mt-1 text-[11px] text-slate-500">
-                  {{ currentReport.coverage.semantic_context.category_search[category.id]?.attempted_queries ?? 0 }} queries · {{ currentReport.coverage.semantic_context.category_search[category.id]?.accepted_count ?? 0 }} snippets accepted
-                </p>
-                <p v-if="(currentReport.coverage.semantic_context.category_search[category.id]?.rejected_revision_count ?? 0) + (currentReport.coverage.semantic_context.category_search[category.id]?.rejected_source_count ?? 0) > 0" class="mt-1 text-[11px] text-amber-300">
-                  {{ currentReport.coverage.semantic_context.category_search[category.id]?.rejected_revision_count ?? 0 }} revision mismatch · {{ currentReport.coverage.semantic_context.category_search[category.id]?.rejected_source_count ?? 0 }} out of source scope
-                </p>
+          <template v-if="compareReports[0] && compareReports[1]">
+            <div v-if="!compareIsEquivalent" class="cq-banner" data-tone="warn"><AlertCircle aria-hidden="true" /><span class="cq-banner-text">Scoring inputs, coverage, weights or provenance differ. Treat score deltas as non-equivalent.</span></div>
+            <div class="cq-cmp-rows">
+              <div v-for="category in categories" :key="category.id" class="cq-cmp-row" :style="{ '--c': categoryMeta[category.id].color }">
+                <span>{{ category.label }}</span>
+                <div class="cq-cmp-bars">
+                  <div><span class="cq-cmp-val">{{ formatScore(reportCategoryScore(compareReports[0], category.id)) }}</span><span class="cq-cmp-bar" data-old><i :style="{ transform: `scaleX(${(reportCategoryScore(compareReports[0], category.id) ?? 0) / 100})` }"></i></span></div>
+                  <div><span class="cq-cmp-val">{{ formatScore(reportCategoryScore(compareReports[1], category.id)) }}</span><span class="cq-cmp-bar"><i :style="{ transform: `scaleX(${(reportCategoryScore(compareReports[1], category.id) ?? 0) / 100})` }"></i></span></div>
+                </div>
+                <span v-if="scoreDelta(category.id) != null" class="cq-delta" :data-dir="(scoreDelta(category.id) || 0) >= 0 ? 'up' : 'down'">
+                  <ArrowUpRight v-if="(scoreDelta(category.id) || 0) >= 0" aria-hidden="true" /><ArrowDownRight v-else aria-hidden="true" />{{ Math.abs(scoreDelta(category.id) || 0) }}
+                </span>
+                <span v-else class="cq-delta">—</span>
               </div>
             </div>
-            <p v-if="currentReport.coverage.semantic_context.omitted_business_rule_ids?.length" class="mt-2 text-xs text-amber-200">{{ currentReport.coverage.semantic_context.omitted_business_rule_ids.length }} business rules exceeded the retrieval limit; their reviews remain unknown.</p>
-          </div>
-          <div v-if="currentReport.coverage.category_review_context && currentReport.coverage.category_review_context.status !== 'not_needed'" class="mt-4 rounded-xl border border-slate-800 bg-slate-950/40 p-4">
-            <h3 class="text-sm font-semibold text-slate-200">Revision source samples used for category scores</h3>
-            <p class="mt-2 text-sm leading-relaxed text-slate-400">{{ currentReport.coverage.category_review_context.excerpt_count }} bounded source excerpts from {{ currentReport.coverage.category_review_context.scanned_files }} files were selected from this revision's archive to fill categories without other category-specific evidence. These samples are review context, not findings. {{ currentReport.coverage.category_review_context.reason }}</p>
-            <div class="mt-3 grid gap-2 sm:grid-cols-2 xl:grid-cols-5">
-              <div v-for="category in categories" :key="category.id" class="rounded-lg border border-slate-800/80 bg-slate-900/50 px-3 py-2">
-                <p class="text-xs font-medium text-slate-300">{{ category.label }}</p>
-                <p class="mt-1 text-[11px] text-slate-500">{{ currentReport.coverage.category_review_context.categories[category.id] || 0 }} local excerpts</p>
-              </div>
+            <p class="cq-hint">Evaluator tokens: <strong>{{ formatTokenUsage(compareReports[0].token_usage, compareReports[0].provider) }} → {{ formatTokenUsage(compareReports[1].token_usage, compareReports[1].provider) }}</strong></p>
+            <div class="cq-diff">
+              <div class="cq-diff-col"><h3 data-tone="ok">New findings · {{ findingChanges.added.length }}</h3><p v-for="item in findingChanges.added.slice(0, 12)" :key="item.evidence_id"><span class="cq-file">{{ item.file }}:{{ item.line }}</span> · {{ item.message }}</p></div>
+              <div class="cq-diff-col"><h3>No longer present · {{ findingChanges.removed.length }}</h3><p v-for="item in findingChanges.removed.slice(0, 12)" :key="item.evidence_id"><span class="cq-file">{{ item.file }}:{{ item.line }}</span> · {{ item.message }}</p></div>
             </div>
-          </div>
-          <div v-if="currentReport.coverage.semantic_flow_tracing" class="mt-4 rounded-xl border border-slate-800 bg-slate-950/40 p-4" aria-live="polite">
-            <div class="flex flex-wrap items-center justify-between gap-2">
-              <h3 class="text-sm font-semibold text-slate-200">Semantic flow tracing</h3>
-              <span class="rounded-full px-2.5 py-1 text-xs" :class="currentReport.coverage.semantic_flow_tracing.status === 'complete' ? 'bg-emerald-500/10 text-emerald-200' : currentReport.coverage.semantic_flow_tracing.status === 'partial' ? 'bg-amber-500/10 text-amber-200' : 'bg-slate-800 text-slate-300'">
-                {{ currentReport.coverage.semantic_flow_tracing.status === 'complete' ? 'Complete within scope' : currentReport.coverage.semantic_flow_tracing.status === 'partial' ? 'Partial' : 'Unavailable' }}
-              </span>
-            </div>
-            <p class="mt-2 text-sm leading-relaxed text-slate-400">
-              {{ currentReport.coverage.semantic_flow_tracing.trace_count }} request-to-sensitive-operation call paths · {{ currentReport.coverage.semantic_flow_tracing.node_count }} symbols · {{ currentReport.coverage.semantic_flow_tracing.edge_count }} resolved calls · {{ currentReport.coverage.semantic_flow_tracing.unresolved_edge_count }} unresolved calls.
-              {{ currentReport.coverage.semantic_flow_tracing.reason }}
-            </p>
-            <ul v-if="currentReport.coverage.semantic_flow_tracing.unresolved_edges?.length" class="mt-3 space-y-1 text-xs text-amber-200">
-              <li v-for="(edge, index) in currentReport.coverage.semantic_flow_tracing.unresolved_edges.slice(0, 8)" :key="`${edge.file}:${edge.line}:${edge.source_symbol}:${index}`">
-                {{ edge.file }}:{{ edge.line }} · {{ edge.source_symbol }} → {{ edge.target_symbol || 'unresolved reference' }} ({{ edge.reason }})
-              </li>
-            </ul>
-            <p v-if="currentReport.coverage.semantic_flow_tracing.limits_reached?.length" class="mt-2 text-xs text-amber-200">Limits reached: {{ currentReport.coverage.semantic_flow_tracing.limits_reached.join(', ') }}</p>
-          </div>
-          <div v-if="currentReport.coverage.php_design_signals" class="mt-4 rounded-xl border border-slate-800 bg-slate-950/40 p-4" aria-live="polite">
-            <div class="flex flex-wrap items-center justify-between gap-2">
-              <h3 class="text-sm font-semibold text-slate-200">PHP design review signals</h3>
-              <span class="rounded-full px-2.5 py-1 text-xs" :class="currentReport.coverage.php_design_signals.status === 'complete' ? 'bg-emerald-500/10 text-emerald-200' : currentReport.coverage.php_design_signals.status === 'partial' ? 'bg-amber-500/10 text-amber-200' : 'bg-slate-800 text-slate-300'">
-                {{ currentReport.coverage.php_design_signals.status === 'complete' ? 'Indexed scope complete' : currentReport.coverage.php_design_signals.status === 'partial' ? 'Partial' : 'Unavailable' }}
-              </span>
-            </div>
-            <p v-if="currentReport.coverage.php_design_signals.status !== 'unavailable'" class="mt-2 text-sm leading-relaxed text-slate-400">
-              {{ currentReport.coverage.php_design_signals.class_count }} classes · {{ currentReport.coverage.php_design_signals.method_count }} methods · {{ currentReport.coverage.php_design_signals.signal_count }} review signals. Static checks cover {{ currentReport.coverage.php_design_signals.principles_with_static_signals.join(', ') }} within the indexed PHP scope. {{ currentReport.coverage.php_design_signals.reason }}
-            </p>
-            <p v-else class="mt-2 text-sm leading-relaxed text-slate-400">{{ currentReport.coverage.php_design_signals.reason }}</p>
-            <p v-if="currentReport.coverage.php_design_signals.signals_truncated" class="mt-2 text-xs text-amber-200">The signal limit was reached; additional candidates may be omitted.</p>
-          </div>
-          <div v-if="currentReport.coverage.analyzer_failures.length || Object.keys(currentReport.coverage.unsupported_extensions).length || currentReport.coverage.skipped_files || currentReport.coverage.excluded_files" class="mt-4 rounded-lg border border-amber-500/25 bg-amber-500/5 p-3 text-xs text-amber-200">
-            <p v-if="currentReport.coverage.analyzer_failures.length" class="font-medium">Some analyzer passes could not complete: {{ currentReport.coverage.analyzer_failures.map((item) => `${item.name}: ${item.reason}`).join(' · ') }}</p>
-            <p v-if="Object.keys(currentReport.coverage.unsupported_extensions).length" :class="currentReport.coverage.analyzer_failures.length ? 'mt-1' : ''">Source-like file types without a configured analyzer: {{ Object.entries(currentReport.coverage.unsupported_extensions).map(([extension, count]) => `${extension} (${count})`).join(', ') }}</p>
-            <p v-if="currentReport.coverage.skipped_files" class="mt-1">{{ currentReport.coverage.skipped_files }} files exceeded source scan limits and were not analyzed.</p>
-            <p v-if="currentReport.coverage.excluded_files" class="mt-1">{{ currentReport.coverage.excluded_files }} source-like files in dependency, build, cache, log, generated, or temporary paths were excluded.</p>
-          </div>
-          <div v-if="currentReport.custom_rules?.length" class="mt-4 rounded-xl border border-slate-800 bg-slate-950/40 p-4">
-            <h3 class="text-sm font-semibold text-slate-200">Custom rule snapshots used</h3>
-            <p v-for="rule in currentReport.custom_rules" :key="rule.rule_id" class="mt-2 break-all text-xs text-slate-400">{{ rule.title }} · {{ rule.content_hash }}</p>
-          </div>
-          <SourcePreview v-if="selectedSource && currentReport && !selectedEvidenceId" :key="`${currentReport.report_id}:${selectedSource.file}:${selectedSource.line}`" class="mt-4" :project-id="currentReport.project_id" :revision-id="currentReport.revision_id" :commit-sha="currentReport.commit_sha" :file-path="selectedSource.file" :line="selectedSource.line" @close="closeSourcePreview" />
-          <div id="assessment-evidence" class="mt-5 space-y-2">
-            <h3 class="text-sm font-semibold text-slate-200">Findings and evidence</h3>
-            <p v-if="reportEvidenceRows.length" class="text-xs text-slate-500">Each finding appears once with its source evidence and any available trace.</p>
-            <p v-if="cleanCodeReviewWithoutFinding" class="rounded-lg border border-slate-800 bg-slate-950/40 p-3 text-sm text-slate-400">The AI reviewed revision-matched Clean Code excerpts, but did not substantiate a specific Clean Code problem. The excerpts are review context, not findings.</p>
-            <p v-if="!reportEvidenceRows.length" class="rounded-lg border border-slate-800 bg-slate-950/40 p-3 text-sm text-slate-500">No findings or source-level evidence were emitted. This does not establish that the code has no issues.</p>
-            <article v-for="(row, evidenceIndex) in reportEvidenceRows" :id="row.evidenceId" :key="row.evidenceId" class="scroll-mt-24 rounded-lg border border-slate-800/80 bg-slate-950/40 px-3 py-2.5">
-              <div class="flex flex-wrap items-center justify-between gap-2">
-                <span class="text-sm font-semibold text-slate-200">{{ row.finding ? findingSummary(row.finding).title : evidenceLabel(row.evidenceId, evidenceIndex) }}</span>
-                <span class="text-[10px] uppercase tracking-wider text-slate-500">{{ row.finding?.tool === 'ai-semantic-review' ? 'AI review' : row.finding?.severity || row.evidence?.kind || 'evidence' }} · {{ categoryLabel(row.finding?.category || row.evidence?.category || 'security') }}</span>
-              </div>
-              <p v-if="row.finding" class="mt-1.5 text-xs leading-relaxed text-slate-400">{{ findingSummary(row.finding).detail }}</p>
-              <p v-else-if="row.evidence" class="mt-1.5 text-xs leading-relaxed text-slate-300">{{ row.evidence.message }}</p>
-              <details v-if="row.finding && row.evidence" class="mt-2 rounded-md bg-slate-950/50 px-2.5 py-2">
-                <summary class="cursor-pointer text-xs font-medium text-slate-400">{{ row.finding.tool === 'ai-semantic-review' ? 'Cited code context' : 'Analyzer evidence' }} · {{ ruleLabel(row.evidence.rule) }}</summary>
-                <p class="mt-2 text-xs leading-relaxed text-slate-300">{{ row.evidence.message }}</p>
-              </details>
-              <p v-else-if="row.finding" class="mt-1.5 text-xs text-slate-400">{{ row.finding.message }}</p>
-              <p v-if="row.finding?.file || row.evidence?.file" class="mt-1 font-mono text-[10px] text-slate-500">{{ row.finding?.file || row.evidence?.file }}<span v-if="row.finding?.line || row.evidence?.line">:{{ row.finding?.line || row.evidence?.line }}</span><span v-if="row.finding?.line === 1" class="ml-2 font-sans text-slate-500">· file-level anchor</span></p>
-              <button v-if="(row.finding?.file || row.evidence?.file) && (row.finding?.line || row.evidence?.line)" type="button" class="mt-2 inline-flex min-h-8 items-center rounded-md border border-slate-700 px-2.5 text-xs font-medium text-indigo-200 hover:bg-indigo-400/10 focus-visible:outline focus-visible:outline-2 focus-visible:outline-indigo-400" @click="openFindingSource(row.finding?.file || row.evidence?.file || '', row.finding?.line || row.evidence?.line, row.evidenceId)">View source</button>
-              <ol v-if="row.evidence?.trace?.nodes?.length" class="mt-3 space-y-1 border-l border-indigo-400/25 pl-3">
-                <li v-for="(node, index) in row.evidence.trace.nodes" :key="`${node.file}:${node.start_line}:${node.symbol}`" class="text-xs text-slate-300">
-                  <span class="font-mono text-indigo-200">{{ node.symbol }}</span>
-                  <span class="text-slate-500"> · {{ node.file }}:{{ node.start_line }}–{{ node.end_line }}</span>
-                  <span v-if="index < (row.evidence?.trace?.edges.length || 0)" class="ml-1 text-slate-500">calls →</span>
-                </li>
-              </ol>
-              <p v-if="row.evidence?.trace?.nodes?.length" class="mt-2 text-[11px] text-slate-500">Call reachability only; this trace does not prove that a specific input value reaches the operation.</p>
-              <SourcePreview v-if="selectedSource && selectedEvidenceId === row.evidenceId && currentReport" :key="`${currentReport.report_id}:${selectedSource.file}:${selectedSource.line}`" class="mt-4" :project-id="currentReport.project_id" :revision-id="currentReport.revision_id" :commit-sha="currentReport.commit_sha" :file-path="selectedSource.file" :line="selectedSource.line" @close="closeSourcePreview" />
-            </article>
-          </div>
+          </template>
+          <p v-else-if="history.length < 2" class="cq-note">You need at least two saved reports to compare results.</p>
+          <p v-else class="cq-note">Choose two saved reports to compare their category scores and findings.</p>
         </section>
-        <div v-else-if="loadingReport" class="flex items-center gap-2 rounded-xl border border-slate-800 bg-slate-900/50 p-5 text-sm text-slate-400"><LoaderCircle class="animate-spin" :size="16" />Loading report…</div>
-        <div v-else-if="!loadingHistory && !history.length" class="rounded-2xl border border-dashed border-slate-700 bg-slate-900/30 p-8 text-center">
-          <CheckCircle2 class="mx-auto text-slate-500" :size="26" /><h2 class="mt-3 text-lg font-semibold">No assessment reports yet</h2><p class="mx-auto mt-1 max-w-lg text-sm text-slate-400">Choose a saved weight preset or use the equal-weight default, then assess this indexed revision.</p>
-        </div>
-
       </div>
 
-      <aside class="rounded-2xl border border-slate-800 bg-slate-900/65 p-5">
-          <div class="flex items-center justify-between gap-2"><div><h2 class="text-lg font-semibold">Report history</h2><p class="mt-1 text-xs text-slate-500">{{ history.length }} saved for this project</p></div><LoaderCircle v-if="loadingHistory" class="motion-safe:animate-spin text-slate-500" :size="16" /></div>
-        <div v-if="history.length" class="mt-4 space-y-2">
-          <div v-for="report in history" :key="report.report_id" class="relative rounded-xl border p-0 transition-colors" :class="selectedReportId === report.report_id ? 'border-indigo-400/60 bg-indigo-500/10' : 'border-slate-800 bg-slate-950/40 hover:border-slate-700 hover:bg-slate-900/70'">
-            <button type="button" class="block min-h-28 w-full rounded-xl p-3 pr-12 text-left focus-visible:outline focus-visible:outline-2 focus-visible:outline-indigo-400" :aria-label="`Show assessment report from ${formatDate(report.created_at)}`" :aria-pressed="selectedReportId === report.report_id" :aria-busy="selectedReportId === report.report_id && loadingReport" @click="chooseReport(report.report_id)">
-              <span class="flex items-center justify-between gap-2"><span class="text-sm font-semibold">{{ report.overall_score == null ? 'No overall score' : `${report.overall_score} / 100` }}</span><span class="text-[11px] text-slate-500">{{ report.coverage }} files</span></span>
-              <span class="mt-1.5 block text-xs text-slate-400">{{ formatDate(report.created_at) }}</span>
-              <span class="mt-1 block text-xs text-slate-500">Evaluator: {{ formatTokenUsage(report.token_usage, report.provider) }}</span>
-              <span class="mt-1 block truncate font-mono text-[10px] text-slate-600">{{ report.commit_sha || report.revision_id }}</span>
-            </button>
-            <button type="button" class="absolute right-1 top-1 z-10 rounded-lg p-2 text-slate-500 transition hover:bg-rose-500/10 hover:text-rose-300 focus-visible:outline focus-visible:outline-2 focus-visible:outline-rose-400 disabled:opacity-50" :aria-label="`Delete assessment from ${formatDate(report.created_at)}`" :title="deletingReportId === report.report_id ? 'Deleting report' : 'Delete report'" :disabled="!!deletingReportId" @click="deleteTarget = report; deleteReportError = ''">
-              <LoaderCircle v-if="deletingReportId === report.report_id" class="motion-safe:animate-spin" :size="16" />
-              <Trash2 v-else :size="16" />
-            </button>
-          </div>
-        </div>
-        <p v-else-if="!loadingHistory" class="mt-5 text-sm leading-relaxed text-slate-500">Reports from every indexed revision in the selected project will appear here.</p>
-      </aside>
-    </section>
-    </div>
-    <div v-else-if="activeTab === 'compare'" id="quality-compare-panel" role="tabpanel" aria-labelledby="quality-compare-tab" class="space-y-5">
-      <section class="rounded-2xl border border-slate-800 bg-slate-900/65 p-5 sm:p-6">
-        <div class="flex items-center gap-2"><GitCompareArrows class="text-indigo-300" :size="18" /><h2 class="text-lg font-semibold">Compare saved reports</h2></div>
-        <p class="mt-1 text-sm text-slate-400">Choose two reports from {{ selectedProject?.project_id || 'this project' }} to compare their scores and findings.</p>
-        <div class="mt-4 grid gap-3 sm:grid-cols-2">
-          <label class="text-xs font-medium text-slate-400">Earlier report
-            <select v-model="leftCompareId" class="mt-1.5 block w-full rounded-lg border border-slate-700 bg-slate-950 px-3 py-2.5 text-sm text-slate-200"><option value="">Select a report</option><option v-for="report in history" :key="report.report_id" :value="report.report_id">{{ formatDate(report.created_at) }} · {{ report.overall_score ?? 'Unscored' }}</option></select>
-          </label>
-          <label class="text-xs font-medium text-slate-400">Later report
-            <select v-model="rightCompareId" class="mt-1.5 block w-full rounded-lg border border-slate-700 bg-slate-950 px-3 py-2.5 text-sm text-slate-200"><option value="">Select a report</option><option v-for="report in history" :key="report.report_id" :value="report.report_id">{{ formatDate(report.created_at) }} · {{ report.overall_score ?? 'Unscored' }}</option></select>
-          </label>
-        </div>
-        <template v-if="compareReports[0] && compareReports[1]">
-          <div v-if="!compareIsEquivalent" class="mt-4 flex items-start gap-2 rounded-lg border border-amber-500/30 bg-amber-500/10 p-3 text-sm text-amber-200"><AlertCircle class="mt-0.5 shrink-0" :size="16" /><span>Scoring inputs, coverage, weights, or provenance differ. Treat score deltas as non-equivalent.</span></div>
-          <div class="mt-4 divide-y divide-slate-800 rounded-xl border border-slate-800">
-            <div v-for="category in categories" :key="category.id" class="flex items-center justify-between gap-4 px-4 py-3 text-sm"><span class="text-slate-300">{{ category.label }}</span><span class="flex items-center gap-3 font-medium"><span class="text-slate-500">{{ formatScore(reportCategoryScore(compareReports[0], category.id)) }}</span><span class="text-slate-600">→</span><span>{{ formatScore(reportCategoryScore(compareReports[1], category.id)) }}</span><span v-if="scoreDelta(category.id) != null" class="inline-flex items-center gap-1 text-xs" :class="(scoreDelta(category.id) || 0) >= 0 ? 'text-emerald-300' : 'text-rose-300'"><ArrowUpRight v-if="(scoreDelta(category.id) || 0) >= 0" :size="13" /><ArrowDownRight v-else :size="13" />{{ Math.abs(scoreDelta(category.id) || 0) }}</span></span></div>
-          </div>
-          <div class="mt-3 rounded-xl border border-slate-800 bg-slate-950/40 px-4 py-3 text-sm"><span class="text-slate-400">Evaluator tokens:</span><span class="ml-2 font-medium text-slate-200">{{ formatTokenUsage(compareReports[0].token_usage, compareReports[0].provider) }} → {{ formatTokenUsage(compareReports[1].token_usage, compareReports[1].provider) }}</span></div>
-          <div class="mt-4 grid gap-3 sm:grid-cols-2">
-            <div class="rounded-xl border border-slate-800 bg-slate-950/40 p-3"><div class="text-xs font-semibold text-emerald-300">New findings · {{ findingChanges.added.length }}</div><p v-for="item in findingChanges.added.slice(0, 12)" :key="item.evidence_id" class="mt-2 text-xs text-slate-300">{{ item.file }}:{{ item.line }} · {{ item.message }}</p></div>
-            <div class="rounded-xl border border-slate-800 bg-slate-950/40 p-3"><div class="text-xs font-semibold text-slate-400">Findings no longer present · {{ findingChanges.removed.length }}</div><p v-for="item in findingChanges.removed.slice(0, 12)" :key="item.evidence_id" class="mt-2 text-xs text-slate-400">{{ item.file }}:{{ item.line }} · {{ item.message }}</p></div>
-          </div>
-        </template>
-        <p v-else-if="history.length < 2" class="mt-4 rounded-lg border border-dashed border-slate-700 p-4 text-sm text-slate-500">At least two saved reports are needed to compare results.</p>
-        <p v-else class="mt-4 text-sm text-slate-500">Choose two saved reports to compare their category scores and findings.</p>
-      </section>
-    </div>
-    <div v-else-if="activeTab === 'performance'" id="quality-performance-panel" role="tabpanel" aria-labelledby="quality-performance-tab">
-      <PerformanceSetup :project-id="selectedProject?.project_id || ''" :revision-id="selectedProject?.revision_id || ''" />
-    </div>
-    <div v-else-if="activeTab === 'rules'" id="quality-rules-panel" role="tabpanel" aria-labelledby="quality-rules-tab">
-      <RuleManager :project-id="selectedProject?.project_id || ''" :revision-id="selectedProject?.revision_id || ''" />
-    </div>
-    <div v-else-if="activeTab === 'external'" id="quality-external-analyzers-panel" role="tabpanel" aria-labelledby="quality-external-analyzers-tab">
-      <ExternalAnalyzerSetup :project-id="selectedProject?.project_id || ''" />
+      <div v-else-if="activeTab === 'performance'" id="quality-performance-panel" role="tabpanel" aria-labelledby="quality-performance-tab" class="cq-legacy">
+        <PerformanceSetup :project-id="selectedProject?.project_id || ''" :revision-id="selectedProject?.revision_id || ''" />
+      </div>
+      <div v-else-if="activeTab === 'rules'" id="quality-rules-panel" role="tabpanel" aria-labelledby="quality-rules-tab" class="cq-legacy">
+        <RuleManager :project-id="selectedProject?.project_id || ''" :revision-id="selectedProject?.revision_id || ''" />
+      </div>
+      <div v-else-if="activeTab === 'external'" id="quality-external-analyzers-panel" role="tabpanel" aria-labelledby="quality-external-analyzers-tab" class="cq-legacy">
+        <ExternalAnalyzerSetup :project-id="selectedProject?.project_id || ''" />
+      </div>
     </div>
   </section>
   <ConfirmModal :show="!!deleteTarget" title="Delete assessment report?" :message="deleteTarget ? `This permanently removes the report from ${formatDate(deleteTarget.created_at)} and comparison history. This cannot be undone.` : ''" confirm-label="Delete report" :busy="!!deletingReportId" :error="deleteReportError" @confirm="removeReport" @cancel="deleteTarget = null; deleteReportError = ''" />
   <ConfirmModal :show="!!revisionDeleteTarget" title="Remove project revision?" :message="revisionDeleteTarget ? `Permanently remove ${revisionDeleteTarget.project_id} (${revisionDeleteTarget.revision_id}), its uploaded source, graph, vectors, assessment reports and configured runtime telemetry. Other revisions and shared project settings remain. This cannot be undone.` : ''" confirm-label="Remove revision" :busy="deletingRevision" :error="revisionDeleteError" @confirm="removeRevision" @cancel="revisionDeleteTarget = null; revisionDeleteError = ''" />
 </template>
-
-<style scoped>
-.quality-assessment-progress {
-  animation: quality-assessment-progress-slide 1.2s ease-in-out infinite;
-}
-
-@keyframes quality-assessment-progress-slide {
-  from { transform: translateX(-110%); }
-  to { transform: translateX(310%); }
-}
-
-@media (prefers-reduced-motion: reduce) {
-  .quality-assessment-progress {
-    animation: none;
-    transform: translateX(0);
-    opacity: 0.6;
-  }
-}
-</style>

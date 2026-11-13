@@ -1,21 +1,11 @@
 <script setup lang="ts">
 import { ref, watch, onMounted, onUnmounted } from 'vue';
-import {
-  Activity,
-  Cpu,
-  Thermometer,
-  Gauge,
-  MemoryStick,
-  ChevronDown,
-  ChevronUp,
-  Server,
-} from 'lucide-vue-next';
+import { Cpu, Thermometer, Gauge, MemoryStick, Server } from 'lucide-vue-next';
 import { makeRequest } from '../ui/makeRequest';
 
 const props = defineProps<{ lowPerformanceMode: boolean }>();
 
 const stats = ref<any>({ online: false });
-const expanded = ref(true);
 
 const NORMAL_POLL_INTERVAL_MS = 2000;
 const LOW_PERFORMANCE_POLL_INTERVAL_MS = 10000;
@@ -27,16 +17,6 @@ const pct = (v: unknown): number => {
   const n = Number(v);
   if (!Number.isFinite(n)) return 0;
   return Math.min(100, Math.max(0, n));
-};
-
-const waveTone = (v: unknown): string => {
-  const n = Number(v);
-  if (!Number.isFinite(n)) return 'monitor-wave-neutral';
-  const value = pct(n);
-  if (value < 25) return 'monitor-wave-green';
-  if (value < 50) return 'monitor-wave-yellow';
-  if (value < 75) return 'monitor-wave-orange';
-  return 'monitor-wave-red';
 };
 
 const gb = (bytes: unknown): string => {
@@ -86,118 +66,36 @@ onUnmounted(() => {
 </script>
 
 <template>
-  <div class="bg-slate-900/40 border border-slate-800 rounded-2xl overflow-hidden">
-    <!-- Header -->
-    <div class="flex items-center gap-2 px-4 py-3 border-b border-slate-800">
-      <Activity class="w-4 h-4 text-indigo-400" />
-      <span class="text-xs font-bold text-slate-200 uppercase tracking-wider font-mono">System Monitor</span>
-      <span
-        class="w-2 h-2 rounded-full ml-auto"
-        :class="[stats.online ? 'bg-emerald-500' : 'bg-rose-500', props.lowPerformanceMode ? '' : 'animate-pulse']"
-      ></span>
-      <button
-        type="button"
-        @click="expanded = !expanded"
-        class="text-slate-500 hover:text-slate-300 transition-colors"
-        aria-label="Toggle system monitor"
-      >
-        <ChevronDown v-if="expanded" class="w-4 h-4" />
-        <ChevronUp v-else class="w-4 h-4" />
-      </button>
-    </div>
-
-    <!-- Body -->
-    <div v-if="expanded" class="p-4">
-      <!-- Offline state -->
-      <div
-        v-if="!stats.online"
-        class="flex items-center gap-3 py-6 text-center justify-center"
-      >
-        <Server class="w-4 h-4 text-slate-600 shrink-0" />
-        <span class="text-[10px] text-slate-500 font-mono leading-relaxed">
-          System monitor offline — start the host agent:
-          <code class="text-slate-400">node docs/gpu-offload/scripts/sysmon-agent.mjs</code>
-        </span>
-      </div>
-
-      <!-- Gauges -->
-      <div v-else class="grid grid-cols-2 md:grid-cols-4 gap-3">
-        <!-- CPU -->
-        <div class="monitor-wave-card bg-[#11162d] border border-slate-800 rounded-xl p-3">
-          <div
-            class="monitor-wave"
-            :class="[waveTone(stats.cpuPercent), stats.cpuPercent == null ? 'monitor-wave-idle' : '']"
-            :style="{ '--wave-level': `${stats.cpuPercent != null ? 100 - pct(stats.cpuPercent) : 82}%` }"
-          ></div>
-          <div class="relative z-10">
-            <div class="flex items-center gap-1 text-[11px] text-slate-500 font-mono mb-1.5">
-              <Cpu class="w-3 h-3 text-indigo-400" />
-              CPU
-            </div>
-            <span :key="pct(stats.cpuPercent)" class="text-lg font-bold text-slate-100 font-mono transition-opacity duration-500">
-              {{ pct(stats.cpuPercent).toFixed(0) }}%
-            </span>
-          </div>
-        </div>
-
-        <!-- Memory -->
-        <div class="monitor-wave-card bg-[#11162d] border border-slate-800 rounded-xl p-3">
-          <div
-            class="monitor-wave"
-            :class="[waveTone(stats.ramPercent), stats.ramPercent == null ? 'monitor-wave-idle' : '']"
-            :style="{ '--wave-level': `${stats.ramPercent != null ? 100 - pct(stats.ramPercent) : 82}%` }"
-          ></div>
-          <div class="relative z-10">
-            <div class="flex items-center gap-1 text-[11px] text-slate-500 font-mono mb-1.5">
-              <MemoryStick class="w-3 h-3 text-indigo-400" />
-              RAM
-            </div>
-            <span :key="`${gb(stats.ramUsedBytes)}-${gb(stats.ramTotalBytes)}`" class="text-lg font-bold text-slate-100 font-mono transition-opacity duration-500">
-              {{ gb(stats.ramUsedBytes) }} / {{ gb(stats.ramTotalBytes) }} GB
-            </span>
-          </div>
-        </div>
-
-        <!-- Temperature -->
-        <div class="monitor-wave-card bg-[#11162d] border border-slate-800 rounded-xl p-3">
-          <div
-            class="monitor-wave"
-            :class="[waveTone(stats.tempC), stats.tempC == null ? 'monitor-wave-idle' : '']"
-            :style="{ '--wave-level': `${stats.tempC != null ? 100 - pct(stats.tempC) : 82}%` }"
-          ></div>
-          <div class="relative z-10">
-            <div class="flex items-center gap-1 text-[11px] text-slate-500 font-mono mb-1.5">
-              <Thermometer class="w-3 h-3 text-indigo-400" />
-              Temp
-            </div>
-            <span v-if="stats.tempC != null" :key="stats.tempC" class="text-lg font-bold text-slate-100 font-mono transition-opacity duration-500">
-              {{ Number(stats.tempC).toFixed(0) }}°C
-            </span>
-            <span v-else class="text-lg font-bold text-slate-600 font-mono">—</span>
-            <div v-if="stats.tempC == null" class="mt-2 text-[9px] text-slate-600 font-mono">n/a</div>
-          </div>
-        </div>
-
-        <!-- GPU -->
-        <div class="monitor-wave-card bg-[#11162d] border border-slate-800 rounded-xl p-3">
-          <div
-            class="monitor-wave"
-            :class="[waveTone(stats.gpuPercent), stats.gpuPercent == null ? 'monitor-wave-idle' : '']"
-            :style="{ '--wave-level': `${stats.gpuPercent != null ? 100 - pct(stats.gpuPercent) : 82}%` }"
-          ></div>
-          <div class="relative z-10">
-            <div class="flex items-center gap-1 text-[11px] text-slate-500 font-mono mb-1.5">
-              <Gauge class="w-3 h-3 text-indigo-400" />
-              GPU
-            </div>
-            <span v-if="stats.gpuPercent != null" :key="stats.gpuPercent" class="text-lg font-bold text-slate-100 font-mono transition-opacity duration-500">
-              {{ pct(stats.gpuPercent).toFixed(0) }}%
-            </span>
-            <span v-else class="text-lg font-bold text-slate-600 font-mono">n/a</span>
-            <div v-if="stats.gpuPercent == null" class="mt-2 text-[9px] text-slate-600 font-mono">not available (needs sudo)</div>
-          </div>
-        </div>
-      </div>
-    </div>
+  <!-- Compact strip: one small meter per resource, no animated waves. -->
+  <div class="chat-monitor" role="group" aria-label="System monitor">
+    <span class="chat-meter" :title="stats.online ? 'Host agent connected' : 'Start the host agent: node scripts/sysmon-agent.mjs'">
+      <span class="chat-meter-dot" :data-online="stats.online" aria-hidden="true"></span>
+      <Server aria-hidden="true" />
+      {{ stats.online ? 'host agent' : 'host agent offline' }}
+    </span>
+    <template v-if="stats.online">
+      <span class="chat-meter" :title="`CPU ${pct(stats.cpuPercent).toFixed(0)}%`">
+        <Cpu aria-hidden="true" />CPU
+        <span class="chat-bar"><i :style="{ transform: `scaleX(${pct(stats.cpuPercent) / 100})` }"></i></span>
+        {{ pct(stats.cpuPercent).toFixed(0) }}%
+      </span>
+      <span class="chat-meter" :title="`${gb(stats.ramUsedBytes)} of ${gb(stats.ramTotalBytes)} GB`">
+        <MemoryStick aria-hidden="true" />RAM
+        <span class="chat-bar"><i :style="{ transform: `scaleX(${pct(stats.ramPercent) / 100})` }"></i></span>
+        {{ gb(stats.ramUsedBytes) }}/{{ gb(stats.ramTotalBytes) }} GB
+      </span>
+      <span class="chat-meter" :title="stats.gpuPercent == null ? 'GPU usage needs sudo on this host' : `GPU ${pct(stats.gpuPercent).toFixed(0)}%`">
+        <Gauge aria-hidden="true" />GPU
+        <template v-if="stats.gpuPercent != null">
+          <span class="chat-bar"><i :style="{ transform: `scaleX(${pct(stats.gpuPercent) / 100})` }"></i></span>
+          {{ pct(stats.gpuPercent).toFixed(0) }}%
+        </template>
+        <template v-else>n/a</template>
+      </span>
+      <span v-if="stats.tempC != null" class="chat-meter">
+        <Thermometer aria-hidden="true" />{{ Number(stats.tempC).toFixed(0) }}°C
+      </span>
+    </template>
+    <code v-else class="chat-monitor-hint">node scripts/sysmon-agent.mjs</code>
   </div>
 </template>

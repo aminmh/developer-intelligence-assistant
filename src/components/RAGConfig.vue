@@ -1,13 +1,12 @@
 <script setup lang="ts">
-import { Activity, Database, Layers3, Palette, Sliders, Wrench } from 'lucide-vue-next';
+import { computed } from 'vue';
+import { Activity, Check, Database, Layers3, Palette, Save, Wrench } from 'lucide-vue-next';
 import type { AppearancePreferences, RAGConfig } from '../types';
 import { useUrlTab } from '../composables/useUrlTab';
 import AppearanceCard from './config/AppearanceCard.vue';
 import LlmProvidersCard from './config/LlmProvidersCard.vue';
-import GpuOffloadCard from './config/GpuOffloadCard.vue';
 import ExternalModelCard from './config/ExternalModelCard.vue';
 import VectorStoreCard from './config/VectorStoreCard.vue';
-import ModelImportCard from './config/ModelImportCard.vue';
 import DocRetrievalCard from './config/DocRetrievalCard.vue';
 import DomainConceptsCard from './config/DomainConceptsCard.vue';
 import PreviewCard from './config/PreviewCard.vue';
@@ -28,6 +27,18 @@ const emit = defineEmits<{
   (e: 'updateAppearance', key: keyof AppearancePreferences, value: AppearancePreferences[keyof AppearancePreferences]): void;
 }>();
 
+const sections: Array<{ value: ConfigSection; label: string; description: string; summary: string; icon: typeof Palette }> = [
+  { value: 'appearance', label: 'Appearance', description: 'Theme, colours, fonts, panels', summary: 'Changes apply instantly and are saved in this browser only.', icon: Palette },
+  { value: 'models', label: 'Models and providers', description: 'Chat, embedding and external models', summary: 'Local providers, sampling, and the external OpenAI-compatible model.', icon: Layers3 },
+  { value: 'retrieval', label: 'Retrieval and context', description: 'Vector store, reranker, preview', summary: 'Where code is stored and how context is found, ranked and previewed.', icon: Database },
+  { value: 'tools', label: 'LLM tools', description: 'Tool access and approvals', summary: '', icon: Wrench },
+  { value: 'runtime', label: 'Runtime telemetry', description: 'ClickHouse and collectors', summary: '', icon: Activity },
+];
+
+const current = computed(() => sections.find((section) => section.value === activeSection.value) ?? sections[0]);
+// Only these sections edit the server config that the page-level save writes.
+const needsSave = computed(() => activeSection.value === 'models' || activeSection.value === 'retrieval');
+
 // Shared field setter passed to every card — cards mutate the parent-owned
 // reactive config object in place, exactly like the old single-file version.
 const updateField = <K extends keyof RAGConfig>(key: K, value: RAGConfig[K]) => {
@@ -43,87 +54,67 @@ const updateAppearance = <K extends keyof AppearancePreferences>(
 </script>
 
 <template>
-  <div class="flex-1 overflow-y-auto p-6 space-y-8 text-left">
-    <div class="max-w-4xl mx-auto space-y-8">
+  <div class="st-page">
+    <nav class="st-nav" aria-label="Settings sections">
+      <p class="st-nav-title">settings</p>
+      <button
+        v-for="section in sections"
+        :key="section.value"
+        type="button"
+        class="st-nav-item"
+        :title="section.label"
+        :aria-label="section.label"
+        :aria-current="activeSection === section.value ? 'page' : undefined"
+        @click="activeSection = section.value"
+      >
+        <span class="st-nav-icon"><component :is="section.icon" /></span>
+        <span class="st-nav-text">
+          <b>{{ section.label }}</b>
+          <span>{{ section.description }}</span>
+        </span>
+      </button>
+    </nav>
 
-      <div class="bg-slate-900/40 rounded-2xl border border-slate-800/80 p-6">
-        <h3 class="text-lg font-bold text-white flex items-center gap-2">
-          <Sliders class="w-5 h-5 text-indigo-400" />
-          RAG Pipeline Configuration
-        </h3>
-        <p class="text-xs text-slate-400 mt-1">Configure LLM providers, GPU offload, the vector store and model import.</p>
-      </div>
-
-      <div class="grid grid-cols-2 lg:grid-cols-5 gap-2 rounded-2xl border border-slate-800 bg-slate-900/30 p-2">
-        <button
-          type="button"
-          class="flex items-center justify-center gap-2 rounded-xl px-3 py-2.5 text-xs font-semibold transition-all"
-          :class="activeSection === 'appearance' ? 'bg-indigo-600 text-white shadow-md shadow-indigo-600/20' : 'text-slate-400 hover:bg-slate-800/60 hover:text-white'"
-          @click="activeSection = 'appearance'"
-        >
-          <Palette class="w-4 h-4" />
-          Appearance
-        </button>
-        <button type="button" class="flex items-center justify-center gap-2 rounded-xl px-3 py-2.5 text-xs font-semibold transition-all" :class="activeSection === 'tools' ? 'bg-indigo-600 text-white shadow-md shadow-indigo-600/20' : 'text-slate-400 hover:bg-slate-800/60 hover:text-white'" @click="activeSection = 'tools'"><Wrench class="w-4 h-4" />LLM Tools</button>
-        <button type="button" class="flex items-center justify-center gap-2 rounded-xl px-3 py-2.5 text-xs font-semibold transition-all" :class="activeSection === 'runtime' ? 'bg-indigo-600 text-white shadow-md shadow-indigo-600/20' : 'text-slate-400 hover:bg-slate-800/60 hover:text-white'" @click="activeSection = 'runtime'"><Activity class="w-4 h-4" />Runtime telemetry</button>
-        <button
-          type="button"
-          class="flex items-center justify-center gap-2 rounded-xl px-3 py-2.5 text-xs font-semibold transition-all"
-          :class="activeSection === 'models' ? 'bg-indigo-600 text-white shadow-md shadow-indigo-600/20' : 'text-slate-400 hover:bg-slate-800/60 hover:text-white'"
-          @click="activeSection = 'models'"
-        >
-          <Layers3 class="w-4 h-4" />
-          Models & Providers
-        </button>
-        <button
-          type="button"
-          class="flex items-center justify-center gap-2 rounded-xl px-3 py-2.5 text-xs font-semibold transition-all"
-          :class="activeSection === 'retrieval' ? 'bg-indigo-600 text-white shadow-md shadow-indigo-600/20' : 'text-slate-400 hover:bg-slate-800/60 hover:text-white'"
-          @click="activeSection = 'retrieval'"
-        >
-          <Database class="w-4 h-4" />
-          Retrieval & Context
-        </button>
-      </div>
-
+    <div class="st-content">
       <Transition name="app-panel" mode="out-in">
-        <div :key="activeSection" class="space-y-8">
+        <div :key="activeSection" class="st-section">
+          <header class="st-head">
+            <h2><component :is="current.icon" />{{ current.label }}</h2>
+            <p v-if="current.summary">{{ current.summary }}</p>
+          </header>
+
           <AppearanceCard
             v-if="activeSection === 'appearance'"
             :appearance="appearance"
             @update="updateAppearance"
           />
 
-          <template v-else-if="activeSection === 'models'">
+          <div v-else-if="activeSection === 'models'" class="st-legacy">
             <LlmProvidersCard :config="config" :update-field="updateField" />
-            <GpuOffloadCard :config="config" :update-field="updateField" />
             <ExternalModelCard :config="config" :update-field="updateField" />
-            <ModelImportCard :config="config" :update-field="updateField" />
-          </template>
+          </div>
 
-          <template v-else-if="activeSection === 'retrieval'">
+          <div v-else-if="activeSection === 'retrieval'" class="st-legacy">
             <VectorStoreCard :config="config" :update-field="updateField" />
             <DocRetrievalCard :config="config" :update-field="updateField" />
             <DomainConceptsCard :config="config" :update-field="updateField" />
             <RerankerCard :config="config" :update-field="updateField" />
             <PreviewCard :config="config" :update-field="updateField" />
-          </template>
+          </div>
 
-          <LlmToolsCard v-else-if="activeSection === 'tools'" />
-          <RuntimeTelemetryCard v-else-if="activeSection === 'runtime'" />
+          <div v-else-if="activeSection === 'tools'" class="st-legacy" data-own-head><LlmToolsCard /></div>
+          <div v-else-if="activeSection === 'runtime'" class="st-legacy" data-own-head><RuntimeTelemetryCard /></div>
+
+          <div v-if="needsSave" class="st-savebar">
+            <Save class="st-savebar-icon" />
+            <span>Model and retrieval settings are saved to the server.</span>
+            <button type="button" class="st-btn" data-variant="primary" @click="emit('saveConfig')">
+              <Check />
+              Apply and save
+            </button>
+          </div>
         </div>
       </Transition>
-
-      <!-- Action Footer -->
-      <div class="pt-4 border-t border-slate-800 flex justify-start">
-        <button
-          type="button"
-          @click="emit('saveConfig')"
-          class="bg-indigo-600 hover:bg-indigo-700 text-white font-semibold text-xs px-6 py-3 rounded-xl transition-all shadow-md shadow-indigo-600/10"
-        >
-          Apply & Save Configurations
-        </button>
-      </div>
     </div>
   </div>
 </template>

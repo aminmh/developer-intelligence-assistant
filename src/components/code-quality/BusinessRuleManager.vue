@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { computed, ref, watch } from 'vue';
-import { AlertCircle, CheckCircle2, Download, ExternalLink, LoaderCircle, RefreshCw, Unplug } from 'lucide-vue-next';
+import { AlertCircle, CheckCircle2, Download, ExternalLink, LoaderCircle, RefreshCw, Unplug, Scale, KeyRound, PlugZap, Link2, FileText } from 'lucide-vue-next';
 import { makeRequest } from '../../ui/makeRequest';
 import RuleKnowledgePanel from './RuleKnowledgePanel.vue';
 
@@ -206,80 +206,107 @@ watch(() => props.projectId, () => { documentsRequest += 1; documentsLoading.val
 </script>
 
 <template>
-  <section class="space-y-5" aria-label="Outline business rules">
-    <div class="rounded-2xl border border-slate-800 bg-slate-900/65 p-5 sm:p-6">
-      <div class="flex flex-wrap items-start justify-between gap-3">
-        <div>
-          <h2 class="text-xl font-semibold">Business rules in Outline</h2>
-          <p class="mt-1 max-w-3xl text-sm leading-relaxed text-slate-400">Outline is the source for plain-language rules. Each project reads one dedicated collection before an assessment; Code Quality never edits Outline documents.</p>
+  <section class="kb-rules" aria-label="Outline business rules">
+    <div v-if="!hasProject" class="kb-panel kb-notice">Choose a project ID in Files and indexing to configure its Outline collection.</div>
+    <div v-else-if="loading" class="kb-panel kb-notice"><LoaderCircle class="kb-spin" aria-hidden="true" />Loading the project's connection…</div>
+
+    <div v-else class="kb-two">
+      <div class="kb-panel">
+        <div class="kb-panel-head">
+          <h2 class="kb-panel-title"><Scale aria-hidden="true" />Business rules in Outline</h2>
+          <a :href="hostedOutlineUrl" target="_blank" rel="noreferrer" class="kb-btn"><ExternalLink aria-hidden="true" />Open Outline</a>
         </div>
-        <a :href="hostedOutlineUrl" target="_blank" rel="noreferrer" class="inline-flex min-h-9 items-center gap-2 rounded-lg border border-slate-700 px-3 text-sm text-slate-300 hover:bg-slate-800"><ExternalLink :size="14" />Open Outline</a>
-      </div>
-      <div v-if="!hasProject" class="mt-5 rounded-lg border border-slate-800 p-3 text-sm text-slate-400">Select a project revision to configure its Outline collection.</div>
-      <div v-else-if="loading" class="mt-5 flex items-center gap-2 text-sm text-slate-400"><LoaderCircle class="motion-safe:animate-spin" :size="16" />Loading project connection…</div>
-      <div v-else class="mt-5 space-y-5">
-        <div class="grid gap-4 lg:grid-cols-2">
-          <label class="block text-sm font-medium text-slate-300">Outline instance URL
-            <input v-model="instanceUrl" :disabled="saving || testing" type="url" maxlength="2048" placeholder="http://outline:3000" class="mt-1.5 min-h-10 w-full rounded-lg border border-slate-700 bg-slate-950 px-3 text-sm text-slate-100 outline-none focus:border-indigo-400 disabled:opacity-50" />
-            <span class="mt-1 block text-xs font-normal text-slate-500">Use <code>http://outline:3000</code> from this app’s Docker network, or an HTTPS Outline address.</span>
-          </label>
-          <label class="block text-sm font-medium text-slate-300">Outline API token
-            <input v-model="token" :disabled="saving || testing" type="password" autocomplete="new-password" class="mt-1.5 min-h-10 w-full rounded-lg border border-slate-700 bg-slate-950 px-3 text-sm text-slate-100 outline-none focus:border-indigo-400 disabled:opacity-50" :placeholder="credentialSaved ? 'Saved in the OS credential store; leave blank to keep it' : 'Paste a read-only Outline API token'" />
-            <span class="mt-1 block text-xs font-normal text-slate-500">The token is stored in the host OS credential store and sent only for Outline API calls.</span>
-          </label>
-        </div>
-        <div class="flex flex-wrap items-center gap-2">
-          <button type="button" :disabled="!hasProject || testing || saving || !instanceUrl.trim() || (!token.trim() && (!credentialSaved || !savedInstanceMatches))" class="inline-flex min-h-10 items-center gap-2 rounded-lg border border-slate-700 px-4 text-sm font-medium text-slate-200 hover:bg-slate-800 disabled:cursor-not-allowed disabled:opacity-45" @click="loadCollections">
-            <LoaderCircle v-if="testing" class="motion-safe:animate-spin" :size="15" /><RefreshCw v-else :size="15" />{{ testing ? 'Checking Outline…' : 'Load collections' }}
-          </button>
-          <button type="button" :disabled="!canSave" class="inline-flex min-h-10 items-center gap-2 rounded-lg bg-indigo-500 px-4 text-sm font-semibold text-white hover:bg-indigo-400 disabled:cursor-not-allowed disabled:opacity-45" @click="save">
-            <LoaderCircle v-if="saving" class="motion-safe:animate-spin" :size="15" />{{ saving ? 'Saving…' : connected ? 'Save connection' : 'Connect collection' }}
-          </button>
-          <button v-if="connected && token.trim() && savedInstanceMatches" type="button" :disabled="saving" class="min-h-10 rounded-lg border border-slate-700 px-3 text-sm text-slate-300 hover:bg-slate-800 disabled:opacity-50" @click="saveToken">Save token only</button>
-          <button v-if="connected" type="button" :disabled="saving" class="inline-flex min-h-10 items-center gap-2 rounded-lg border border-rose-500/30 px-3 text-sm text-rose-200 hover:bg-rose-500/10 disabled:opacity-50" @click="disconnect"><Unplug :size="14" />Disconnect</button>
-        </div>
-        <label v-if="collections.length" class="block max-w-2xl text-sm font-medium text-slate-300">Dedicated project collection
-          <select v-model="collectionId" :disabled="saving" class="mt-1.5 min-h-10 w-full rounded-lg border border-slate-700 bg-slate-950 px-3 text-sm text-slate-100">
+        <p class="kb-lead">Outline holds the plain-language rules. Each project reads one dedicated collection before an assessment; this app never edits Outline documents.</p>
+
+        <label class="kb-field">Outline instance URL
+          <input v-model="instanceUrl" :disabled="saving || testing" type="url" maxlength="2048" placeholder="http://outline:3000" class="kb-input" />
+          <span class="kb-help">Use <code>http://outline:3000</code> from this app's Docker network, or an HTTPS Outline address.</span>
+        </label>
+        <label class="kb-field">Outline API token
+          <input v-model="token" :disabled="saving || testing" type="password" autocomplete="new-password" class="kb-input" :placeholder="credentialSaved ? 'Saved in the OS credential store; leave blank to keep it' : 'Paste a read-only Outline API token'" />
+          <span class="kb-help">Stored in the host OS credential store and sent only for Outline API calls.</span>
+        </label>
+        <label v-if="collections.length" class="kb-field">Dedicated project collection
+          <select v-model="collectionId" :disabled="saving" class="kb-input">
             <option value="" disabled>Choose a collection</option>
             <option v-for="item in collections" :key="item.id" :value="item.id">{{ item.name }}</option>
           </select>
-          <span class="mt-1 block text-xs font-normal text-slate-500">Use a collection that contains only this project’s business rules.</span>
+          <span class="kb-help">Use a collection that contains only this project's business rules.</span>
         </label>
-        <div v-if="connected" class="rounded-xl border border-slate-800 bg-slate-950/60 p-4">
-          <div class="flex flex-wrap items-center justify-between gap-3">
-            <div><p class="font-medium text-slate-100">{{ credentialSaved ? 'Connected' : 'Connection needs a token' }}</p><p class="mt-1 text-xs text-slate-400">{{ connection?.instance_url }} · collection {{ connection?.collection_id }}</p><p v-if="credentialError" class="mt-1 text-xs text-amber-200">{{ credentialError }}</p></div>
-            <span class="rounded-full px-3 py-1 text-xs" :class="credentialSaved ? 'bg-emerald-500/10 text-emerald-200' : 'bg-amber-500/10 text-amber-200'">{{ credentialSaved ? 'OS token saved' : 'Token not saved' }}</span>
+
+        <div class="kb-btns">
+          <button type="button" :disabled="!hasProject || testing || saving || !instanceUrl.trim() || (!token.trim() && (!credentialSaved || !savedInstanceMatches))" class="kb-btn" @click="loadCollections">
+            <LoaderCircle v-if="testing" class="kb-spin" aria-hidden="true" /><RefreshCw v-else aria-hidden="true" />{{ testing ? 'Checking Outline…' : 'Load collections' }}
+          </button>
+          <button type="button" :disabled="!canSave" class="kb-btn" data-variant="primary" @click="save">
+            <LoaderCircle v-if="saving" class="kb-spin" aria-hidden="true" /><Link2 v-else aria-hidden="true" />{{ saving ? 'Saving…' : connected ? 'Save connection' : 'Connect collection' }}
+          </button>
+          <button v-if="connected && token.trim() && savedInstanceMatches" type="button" :disabled="saving" class="kb-btn" @click="saveToken"><KeyRound aria-hidden="true" />Save token only</button>
+          <button v-if="connected" type="button" :disabled="saving" class="kb-btn" data-variant="danger" @click="disconnect"><Unplug aria-hidden="true" />Disconnect</button>
+        </div>
+
+        <div v-if="error" role="alert" class="kb-rev-note" data-tone="bad"><AlertCircle aria-hidden="true" />{{ error }}</div>
+        <div v-if="notice" role="status" class="kb-rev-note" data-tone="ok"><CheckCircle2 aria-hidden="true" />{{ notice }}</div>
+      </div>
+
+      <div class="kb-panel">
+        <template v-if="connected">
+          <div class="kb-status">
+            <span class="kb-project-icon"><PlugZap aria-hidden="true" /></span>
+            <div class="min-w-0">
+              <p class="kb-status-name">{{ credentialSaved ? 'Connected' : 'Connection needs a token' }}</p>
+              <p class="kb-project-meta truncate">{{ connection?.instance_url }} · collection {{ connection?.collection_id }}</p>
+            </div>
+            <span class="kb-tag" :data-tone="credentialSaved ? 'ok' : 'warn'"><KeyRound aria-hidden="true" />{{ credentialSaved ? 'Token saved' : 'Token not saved' }}</span>
           </div>
-          <div class="mt-3 border-t border-slate-800 pt-3 text-xs text-slate-400">
-            <template v-if="latestSync?.status === 'synchronized'">Latest assessment sync: {{ latestSync.imported_count }} rules read from {{ latestSync.document_count }} documents · {{ formatDate(latestSync.synchronized_at) }}<span v-if="latestSync.omitted_count"> · {{ latestSync.omitted_count }} documents omitted</span><span v-if="latestSync.oversized_count"> · {{ latestSync.oversized_count }} documents exceeded the 12,000 character limit</span>.</template>
-            <template v-else-if="latestSync?.status === 'unavailable'">Latest assessment could not synchronize rules: {{ latestSync.reason }}</template>
+          <p v-if="credentialError" class="kb-rev-note" data-tone="warn"><AlertCircle aria-hidden="true" />{{ credentialError }}</p>
+          <div class="kb-sync" :data-tone="latestSync?.status === 'unavailable' ? 'warn' : latestSync?.status === 'synchronized' ? 'ok' : undefined">
+            <template v-if="latestSync?.status === 'synchronized'"><b>Last assessment sync:</b> {{ latestSync.imported_count }} rules from {{ latestSync.document_count }} documents · {{ formatDate(latestSync.synchronized_at) }}<span v-if="latestSync.omitted_count"> · {{ latestSync.omitted_count }} documents omitted</span><span v-if="latestSync.oversized_count"> · {{ latestSync.oversized_count }} over the 12,000 character limit</span></template>
+            <template v-else-if="latestSync?.status === 'unavailable'"><b>The last assessment couldn't sync rules:</b> {{ latestSync.reason }}</template>
             <template v-else>No assessment has synchronized this collection yet.</template>
           </div>
-          <section class="mt-4 border-t border-slate-800 pt-4" aria-labelledby="outline-business-rule-documents">
-            <div class="flex flex-wrap items-center justify-between gap-2">
-              <div><h3 id="outline-business-rule-documents" class="text-sm font-semibold text-slate-200">Business rule documents</h3><p class="mt-1 text-xs text-slate-500">Open a document in Outline to read or edit it using your Outline permissions.</p></div>
-              <button type="button" :disabled="documentsLoading || !credentialSaved" class="inline-flex min-h-9 items-center gap-2 rounded-lg border border-slate-700 px-3 text-xs text-slate-300 disabled:opacity-50" @click="loadDocuments"><LoaderCircle v-if="documentsLoading" class="motion-safe:animate-spin" :size="13" /><RefreshCw v-else :size="13" />Refresh documents</button>
+
+          <section class="kb-docs-section" aria-labelledby="outline-business-rule-documents">
+            <div class="kb-panel-head">
+              <div>
+                <h3 id="outline-business-rule-documents" class="kb-panel-title kb-panel-title-sm">Rule documents</h3>
+                <p class="kb-help">Open one in Outline to read or edit it with your Outline permissions.</p>
+              </div>
+              <button type="button" :disabled="documentsLoading || !credentialSaved" class="kb-btn" @click="loadDocuments"><LoaderCircle v-if="documentsLoading" class="kb-spin" aria-hidden="true" /><RefreshCw v-else aria-hidden="true" />Refresh</button>
             </div>
-            <p v-if="!credentialSaved" class="mt-3 text-xs text-amber-200">Save the Outline API token to load the collection’s documents.</p>
-            <p v-else-if="documentsLoading && !documents.length" class="mt-3 text-xs text-slate-400">Loading Outline documents…</p>
-            <p v-else-if="documentsError" role="alert" class="mt-3 text-xs text-rose-200">{{ documentsError }}</p>
-            <p v-else-if="!documents.length" class="mt-3 text-xs text-slate-500">No business rule documents were found in this collection.</p>
-            <ul v-else class="mt-3 grid gap-2 sm:grid-cols-2">
-              <li v-for="item in documents" :key="item.id"><a :href="documentHref(item)" target="_blank" rel="noopener noreferrer" class="group flex min-h-12 items-center justify-between gap-3 rounded-lg border border-slate-700 bg-slate-950/40 px-3 py-2 text-sm text-slate-200 transition hover:border-indigo-400/50 hover:bg-indigo-500/5 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-indigo-400"><span class="min-w-0 truncate">{{ item.title }}</span><ExternalLink class="shrink-0 text-slate-500 group-hover:text-indigo-200" :size="14" /><span class="sr-only">Open in Outline in a new tab</span></a></li>
+            <p v-if="!credentialSaved" class="kb-rev-note" data-tone="warn">Save the Outline API token to load the collection's documents.</p>
+            <p v-else-if="documentsLoading && !documents.length" class="kb-help">Loading Outline documents…</p>
+            <p v-else-if="documentsError" role="alert" class="kb-rev-note" data-tone="bad">{{ documentsError }}</p>
+            <p v-else-if="!documents.length" class="kb-help">No business rule documents were found in this collection.</p>
+            <ul v-else class="kb-docs">
+              <li v-for="item in documents" :key="item.id">
+                <a :href="documentHref(item)" target="_blank" rel="noopener noreferrer" class="kb-doc">
+                  <FileText aria-hidden="true" /><span class="truncate">{{ item.title }}</span><ExternalLink aria-hidden="true" /><span class="sr-only">Open in Outline in a new tab</span>
+                </a>
+              </li>
             </ul>
           </section>
+        </template>
+        <div v-else class="kb-howto">
+          <h3 class="kb-panel-title kb-panel-title-sm">Connect a collection</h3>
+          <ol>
+            <li>Create a dedicated Outline collection for this project.</li>
+            <li>Create a read-only Outline API token and paste it here.</li>
+            <li>Load the collections, pick this project's one, and connect it.</li>
+          </ol>
+          <p class="kb-help">Each document becomes one rule; documents without a title or body are skipped. Up to 50 documents are synchronized and up to 20 are reviewed per assessment.</p>
         </div>
-        <div v-if="!connected" class="rounded-xl border border-indigo-400/20 bg-indigo-400/5 p-4 text-sm leading-relaxed text-indigo-100">
-          Create a dedicated Outline collection for this project, create a read-only API token, load the collection list, then save the connection. Each document becomes one rule; documents without a title or body are skipped. Up to 50 documents are synchronized and up to 20 are reviewed per assessment.
-        </div>
-        <div class="flex flex-wrap items-center justify-between gap-3 border-t border-slate-800 pt-4">
-          <div><h3 class="text-sm font-medium text-slate-200">Migrate existing local rules</h3><p class="mt-1 text-xs text-slate-500">Export existing rules for manual copy into Outline. Saved reports retain their original snapshots.</p></div>
-          <button type="button" :disabled="exporting" class="inline-flex min-h-9 items-center gap-2 rounded-lg border border-slate-700 px-3 text-sm text-slate-300 hover:bg-slate-800 disabled:opacity-50" @click="exportLocalRules"><LoaderCircle v-if="exporting" class="motion-safe:animate-spin" :size="14" /><Download v-else :size="14" />{{ exporting ? 'Exporting…' : 'Export local rules' }}</button>
+
+        <div class="kb-migrate">
+          <div>
+            <h3 class="kb-panel-title kb-panel-title-sm">Migrate local rules</h3>
+            <p class="kb-help">Export existing rules to copy into Outline. Saved reports keep their original snapshots.</p>
+          </div>
+          <button type="button" :disabled="exporting" class="kb-btn" @click="exportLocalRules"><LoaderCircle v-if="exporting" class="kb-spin" aria-hidden="true" /><Download v-else aria-hidden="true" />{{ exporting ? 'Exporting…' : 'Export' }}</button>
         </div>
       </div>
-      <div v-if="error" role="alert" class="mt-4 flex items-start gap-2 rounded-lg border border-rose-500/30 bg-rose-500/10 p-3 text-sm text-rose-200"><AlertCircle :size="16" class="mt-0.5 shrink-0" /><span>{{ error }}</span></div>
-      <div v-if="notice" role="status" class="mt-4 flex items-start gap-2 rounded-lg border border-emerald-500/20 bg-emerald-500/5 p-3 text-sm text-emerald-200"><CheckCircle2 :size="16" class="mt-0.5 shrink-0" /><span>{{ notice }}</span></div>
     </div>
+
     <RuleKnowledgePanel v-if="hasProject && connected && !loading" :project-id="props.projectId" :credential-saved="credentialSaved" />
   </section>
 </template>

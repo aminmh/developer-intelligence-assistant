@@ -1,5 +1,6 @@
 <script setup lang="ts">
-import { Activity, Gauge, Monitor, Moon, Palette, Sparkles, Sun, Type } from 'lucide-vue-next';
+import { computed } from 'vue';
+import { Activity, Check, Code, Gauge, Monitor, Moon, PanelsTopLeft, Sparkles, SwatchBook, Sun, Type } from 'lucide-vue-next';
 import type {
   AppearanceAccent,
   AppearanceMode,
@@ -11,7 +12,7 @@ import type {
 } from '../../types';
 import ToggleCard from '../ToggleCard.vue';
 
-defineProps<{
+const props = defineProps<{
   appearance: AppearancePreferences;
 }>();
 
@@ -65,6 +66,9 @@ const paletteOptions: Array<{
   { value: 'black-coffee', label: 'Black Coffee', colors: ['#090909', '#151412', '#1d1a17', '#100005', '#120604'], accent: 'orange', neon: 'rose' },
 ];
 
+const glowLabel = computed(() => neonOptions.find((option) => option.value === props.appearance.neonBorder)?.label ?? '');
+const accentLabel = computed(() => accentOptions.find((option) => option.value === props.appearance.accent)?.label ?? '');
+
 const update = <K extends keyof AppearancePreferences>(key: K, value: AppearancePreferences[K]) => {
   emit('update', key, value);
 };
@@ -77,133 +81,128 @@ const selectPalette = (option: (typeof paletteOptions)[number]) => {
 </script>
 
 <template>
-  <section class="bg-slate-900/40 border border-slate-800 rounded-2xl p-6 space-y-5">
-    <div>
-      <h3 class="text-lg font-bold text-white flex items-center gap-2">
-        <Palette class="w-5 h-5 text-cyan-400" />
-        Appearance
-      </h3>
-      <p class="text-xs text-slate-400 mt-1">Customize the workspace look and choose which chat panels stay visible. These preferences are saved only in this browser.</p>
-    </div>
+  <div class="st-appearance">
+    <section class="st-card">
+      <h3><SwatchBook />Theme</h3>
+      <p class="st-label">Mode</p>
+      <div class="st-seg" role="group" aria-label="Theme mode">
+        <button
+          v-for="option in modeOptions"
+          :key="option.value"
+          type="button"
+          :aria-pressed="appearance.mode === option.value"
+          @click="update('mode', option.value)"
+        >
+          <component :is="option.icon" />
+          {{ option.label }}
+        </button>
+      </div>
 
-    <div>
-      <p class="text-[10px] uppercase tracking-wider text-slate-500 font-mono mb-2">Color palette</p>
-      <div class="grid grid-cols-2 md:grid-cols-3 xl:grid-cols-5 gap-2">
+      <p class="st-label">Background palette</p>
+      <p class="st-hint st-m0">Choosing a palette also sets its matching glow and accent colours.</p>
+      <div class="st-palettes">
         <button
           v-for="option in paletteOptions"
           :key="option.value"
           type="button"
-          class="rounded-xl border p-2 text-left transition-all"
-          :class="appearance.palette === option.value ? 'border-white/80 bg-white/10 shadow-lg' : 'border-slate-700 bg-slate-900/20 hover:border-slate-500'"
+          class="st-palette"
           :aria-pressed="appearance.palette === option.value"
           @click="selectPalette(option)"
         >
-          <span class="block h-8 rounded-lg" :style="{ background: `linear-gradient(120deg, ${option.colors.join(', ')})` }"></span>
-          <span class="block mt-2 text-[10px] font-semibold" :class="appearance.palette === option.value ? 'text-white' : 'text-slate-300'">{{ option.label }}</span>
-          <span class="flex gap-1 mt-1.5">
-            <span v-for="color in option.colors" :key="color" class="w-2 h-2 rounded-full" :style="{ backgroundColor: color }"></span>
+          <span class="st-palette-swatch" :style="{ background: `linear-gradient(120deg, ${option.colors.join(', ')})` }"></span>
+          <span class="st-palette-name">
+            {{ option.label }}
+            <Check v-if="appearance.palette === option.value" />
           </span>
         </button>
       </div>
-    </div>
+    </section>
 
-    <div class="grid grid-cols-1 md:grid-cols-3 gap-4">
-      <div>
-        <p class="text-[10px] uppercase tracking-wider text-slate-500 font-mono mb-2">Theme mode</p>
-        <div class="grid grid-cols-3 gap-2">
-          <button
-            v-for="option in modeOptions"
-            :key="option.value"
-            type="button"
-            class="flex flex-col items-center gap-1.5 rounded-xl border px-2 py-2 text-[10px] transition-colors"
-            :class="appearance.mode === option.value ? 'border-cyan-400/70 bg-cyan-500/10 text-cyan-200' : 'border-slate-700 text-slate-400 hover:border-slate-500 hover:text-slate-200'"
-            :aria-pressed="appearance.mode === option.value"
-            @click="update('mode', option.value)"
-          >
-            <component :is="option.icon" class="w-4 h-4" />
-            {{ option.label }}
-          </button>
+    <section class="st-card">
+      <h3><Sparkles />Neon gradient</h3>
+      <p class="st-hint">Your two colours make the gradient used for buttons, highlights and glows.</p>
+      <div class="st-colors">
+        <div>
+          <p class="st-label">Glow · gradient start</p>
+          <div class="st-dots" role="group" aria-label="Glow colour">
+            <button
+              v-for="option in neonOptions"
+              :key="option.value"
+              type="button"
+              class="st-dot"
+              :title="option.label"
+              :aria-label="option.label"
+              :aria-pressed="appearance.neonBorder === option.value"
+              :style="{ '--st-dot': option.color }"
+              @click="update('neonBorder', option.value)"
+            ><i></i></button>
+          </div>
+        </div>
+        <div>
+          <p class="st-label">Accent · gradient end</p>
+          <div class="st-dots" role="group" aria-label="Accent colour">
+            <button
+              v-for="option in accentOptions"
+              :key="option.value"
+              type="button"
+              class="st-dot"
+              :title="option.label"
+              :aria-label="option.label"
+              :aria-pressed="appearance.accent === option.value"
+              :style="{ '--st-dot': option.color }"
+              @click="update('accent', option.value)"
+            ><i></i></button>
+          </div>
         </div>
       </div>
-
-      <div>
-        <p class="text-[10px] uppercase tracking-wider text-slate-500 font-mono mb-2">Accent color</p>
-        <div class="flex flex-wrap gap-2">
-          <button
-            v-for="option in accentOptions"
-            :key="option.value"
-            type="button"
-            class="inline-flex items-center gap-2 rounded-xl border px-2.5 py-2 text-[10px] transition-colors"
-            :class="appearance.accent === option.value ? 'border-white/70 bg-white/10 text-white' : 'border-slate-700 text-slate-400 hover:border-slate-500 hover:text-slate-200'"
-            :aria-pressed="appearance.accent === option.value"
-            @click="update('accent', option.value)"
-          >
-            <span class="w-2.5 h-2.5 rounded-full" :style="{ backgroundColor: option.color, boxShadow: `0 0 8px ${option.color}` }"></span>
-            {{ option.label }}
-          </button>
-        </div>
+      <div class="st-gradbar" aria-hidden="true">
+        <span>{{ glowLabel }}</span>
+        <i></i>
+        <span>{{ accentLabel }}</span>
       </div>
+    </section>
 
-      <div>
-        <p class="text-[10px] uppercase tracking-wider text-slate-500 font-mono mb-2">Neon borders</p>
-        <div class="flex flex-wrap gap-2">
-          <button
-            v-for="option in neonOptions"
-            :key="option.value"
-            type="button"
-            class="inline-flex items-center gap-2 rounded-xl border px-2.5 py-2 text-[10px] transition-colors"
-            :class="appearance.neonBorder === option.value ? 'border-white/70 bg-white/10 text-white' : 'border-slate-700 text-slate-400 hover:border-slate-500 hover:text-slate-200'"
-            :aria-pressed="appearance.neonBorder === option.value"
-            @click="update('neonBorder', option.value)"
-          >
-            <span class="w-2.5 h-2.5 rounded-full" :style="{ backgroundColor: option.color, boxShadow: `0 0 8px ${option.color}` }"></span>
-            {{ option.label }}
-          </button>
-        </div>
-      </div>
-    </div>
-
-    <div class="border-t border-slate-800 pt-4">
-      <p class="text-[10px] uppercase tracking-wider text-slate-500 font-mono mb-2">Fonts</p>
-      <div class="grid grid-cols-1 sm:grid-cols-2 gap-3">
-        <label class="rounded-xl border border-slate-700 bg-slate-900/30 px-3 py-3 space-y-1.5">
-          <span class="flex items-center gap-2 text-xs font-semibold text-slate-200"><Type class="w-4 h-4 text-cyan-300" />App UI</span>
+    <section class="st-card">
+      <h3><Type />Fonts</h3>
+      <div class="st-fonts">
+        <label class="st-font">
+          <span class="st-font-name"><Type />App UI</span>
           <select
             :value="appearance.uiFontFamily"
-            class="w-full h-[34px] rounded-lg border border-slate-700 bg-[#11162d] px-3 text-xs text-slate-200 focus:outline-none focus:border-cyan-400"
+            class="st-input"
             @change="update('uiFontFamily', ($event.target as HTMLSelectElement).value as UiFontFamily)"
           >
             <option v-for="font in uiFontOptions" :key="font" :value="font">{{ font }}</option>
           </select>
-          <span class="block text-[10px] text-slate-500">Panels, menus, and general text</span>
+          <span class="st-font-sample" :style="{ fontFamily: `'${appearance.uiFontFamily}', sans-serif` }">Panels, menus and general text.</span>
         </label>
-
-        <label class="rounded-xl border border-slate-700 bg-slate-900/30 px-3 py-3 space-y-1.5">
-          <span class="flex items-center gap-2 text-xs font-semibold text-slate-200"><Type class="w-4 h-4 text-violet-300" />Code</span>
+        <label class="st-font">
+          <span class="st-font-name"><Code />Code</span>
           <select
             :value="appearance.codeFontFamily"
-            class="w-full h-[34px] rounded-lg border border-slate-700 bg-[#11162d] px-3 text-xs font-mono text-slate-200 focus:outline-none focus:border-cyan-400"
+            class="st-input"
             @change="update('codeFontFamily', ($event.target as HTMLSelectElement).value as CodeFontFamily)"
           >
             <option v-for="font in codeFontOptions" :key="font" :value="font">{{ font }}</option>
           </select>
-          <span class="block text-[10px] text-slate-500">Code snippets, diffs, JSON, and data views</span>
+          <span class="st-font-sample" :style="{ fontFamily: `'${appearance.codeFontFamily}', monospace` }">const total = items.sum('price');</span>
         </label>
       </div>
-    </div>
+    </section>
 
-    <div class="border-t border-slate-800 pt-4 grid grid-cols-1 md:grid-cols-3 gap-3">
-      <ToggleCard :model-value="appearance.showWelcomeBanner" label="Welcome banner" description="Animated terminal introduction" @update:model-value="update('showWelcomeBanner', $event)">
-        <template #icon><Sparkles class="h-4 w-4 shrink-0 text-cyan-300" /></template>
-      </ToggleCard>
-
-      <ToggleCard :model-value="appearance.showSystemMonitor" label="System monitor" description="CPU, RAM, temperature, and GPU" @update:model-value="update('showSystemMonitor', $event)">
-        <template #icon><Activity class="h-4 w-4 shrink-0 text-emerald-300" /></template>
-      </ToggleCard>
-
-      <ToggleCard :model-value="appearance.lowPerformanceMode" label="Low-performance mode" description="Reduce decorative motion and refresh system metrics every 10 seconds" @update:model-value="update('lowPerformanceMode', $event)">
-        <template #icon><Gauge class="h-4 w-4 shrink-0 text-amber-300" /></template>
-      </ToggleCard>
-    </div>
-  </section>
+    <section class="st-card">
+      <h3><PanelsTopLeft />Panels and performance</h3>
+      <div class="st-toggles">
+        <ToggleCard :model-value="appearance.showWelcomeBanner" label="Welcome screen" description="Greeting and starter prompts in a new chat" @update:model-value="update('showWelcomeBanner', $event)">
+          <template #icon><Sparkles class="st-toggle-icon" /></template>
+        </ToggleCard>
+        <ToggleCard :model-value="appearance.showSystemMonitor" label="System monitor" description="CPU, RAM, temperature and GPU above chat" @update:model-value="update('showSystemMonitor', $event)">
+          <template #icon><Activity class="st-toggle-icon" /></template>
+        </ToggleCard>
+        <ToggleCard :model-value="appearance.lowPerformanceMode" label="Low-power mode" description="Stops looping animations and glass blur; refreshes metrics every 10 seconds" @update:model-value="update('lowPerformanceMode', $event)">
+          <template #icon><Gauge class="st-toggle-icon" /></template>
+        </ToggleCard>
+      </div>
+    </section>
+  </div>
 </template>

@@ -6,5 +6,3 @@ dist
 .env*
 ._*
 data
-# GGUF models are mounted at runtime via OLLAMA_IMPORT_HOST_ROOT — never baked in.
-ollama-imports

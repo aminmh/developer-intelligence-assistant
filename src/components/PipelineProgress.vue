@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { computed } from 'vue';
-import { CheckCircle2, AlertTriangle, Loader2, FileSearch } from 'lucide-vue-next';
+import { CheckCircle2, AlertTriangle, Loader2, Circle, Cpu } from 'lucide-vue-next';
 
 export interface PipelineStep {
   id: string;
@@ -69,142 +69,38 @@ const overallLabel = computed(() => {
   return label || 'Working…';
 });
 
-// The overall run-progress header is only meaningful when the caller actually
-// supplies live per-step progress. Legacy consumers (e.g. RAGChat) pass steps
-// only and keep the plain timeline — render nothing extra for them.
-const hasOverallProgress = computed(() => {
-  const map = props.progress;
-  if (!map) return false;
-  return Object.values(map).some((entry) => Number.isFinite(entry?.percent));
+// Card header: "step N of M" and a single overall bar for every consumer.
+const doneCount = computed(() => props.steps.filter((s) => s.status === 'done').length);
+const currentIndex = computed(() => {
+  const running = props.steps.findIndex((s) => s.status === 'running');
+  return running >= 0 ? running + 1 : Math.min(doneCount.value + 1, props.steps.length);
 });
-
-// --- template helpers (kept deterministic) ----------------------------------
-
-const showBar = (step: PipelineStep) => step.status === 'running' || step.status === 'done';
-// Only called when the step is determinate: done → 100, or a running step that
-// reported a percent (isIndeterminate guards the template), so no fallback is
-// needed for a missing percent here.
-const barPercent = (step: PipelineStep): number => (step.status === 'done' ? 100 : percentFor(step)!);
-const isIndeterminate = (step: PipelineStep) => step.status === 'running' && percentFor(step) == null;
+const barFraction = computed<number | null>(() => (overallPercent.value == null ? null : overallPercent.value / 100));
 </script>
 
 <template>
-  <div class="rounded-2xl px-5 py-4 max-w-3xl bg-slate-900/60 border border-slate-800 rounded-tl-none">
-    <!-- Header -->
-    <div class="flex items-center gap-2.5 mb-3">
-      <div class="relative shrink-0 w-7 h-7 flex items-center justify-center">
-        <span class="absolute inset-0 rounded-full bg-indigo-500/20 animate-ping"></span>
-        <span class="relative w-7 h-7 rounded-full bg-indigo-600/20 border border-indigo-500/30 flex items-center justify-center">
-          <FileSearch class="w-3.5 h-3.5 text-indigo-400" />
-        </span>
-      </div>
-      <span class="text-xs font-semibold text-slate-200 font-mono truncate">Processing {{ fileName }}</span>
+  <div class="chat-progress" role="status" aria-live="polite">
+    <div class="chat-progress-top">
+      <Cpu aria-hidden="true" />
+      <span class="truncate">Working on {{ fileName }}</span>
+      <span class="chat-progress-step">step {{ currentIndex }} of {{ steps.length }}</span>
+    </div>
+    <div class="chat-progress-label">{{ overallLabel }}</div>
+
+    <div class="chat-track" :data-indeterminate="barFraction == null">
+      <i v-if="barFraction != null" :style="{ transform: `scaleX(${barFraction})` }"></i>
     </div>
 
-    <!-- Overall run progress (equal-weight over steps) — only when the caller
-         supplies live per-step progress; otherwise omit to keep the legacy
-         per-step timeline behavior for step-only consumers. -->
-    <div v-if="hasOverallProgress" class="mb-4">
-      <div class="flex items-center justify-between gap-2 mb-1">
-        <span class="text-[10px] font-mono text-slate-500 truncate">{{ overallLabel }}</span>
-        <span v-if="overallPercent != null" class="text-[10px] font-mono text-slate-400 tabular-nums shrink-0">{{ overallPercent }}%</span>
-        <span v-else class="text-[10px] font-mono text-slate-600 shrink-0">working…</span>
-      </div>
-      <div class="h-1.5 rounded-full bg-slate-800/80 overflow-hidden">
-        <div
-          v-if="overallPercent != null"
-          class="h-full rounded-full bg-gradient-to-r from-indigo-500/80 to-violet-500/80 transition-all duration-500"
-          :style="{ width: `${overallPercent}%` }"
-        ></div>
-        <div v-else class="h-full w-1/3 rounded-full progress-indeterminate"></div>
-      </div>
-    </div>
-
-    <!-- Timeline steps -->
-    <div class="relative space-y-1.5">
-      <div
-        v-for="(step, i) in steps"
-        :key="step.id"
-        class="relative flex items-start gap-3 py-1.5"
-      >
-        <!-- Connector line -->
-        <div
-          v-if="i < steps.length - 1"
-          class="absolute left-[9px] top-7 bottom-[-6px] w-px"
-          :class="step.status === 'done' ? 'bg-emerald-500/40' : 'bg-slate-700/50'"
-        ></div>
-
-        <!-- Status icon -->
-        <div class="relative shrink-0 w-[18px] h-[18px] flex items-center justify-center z-10 mt-px">
-          <CheckCircle2
-            v-if="step.status === 'done'"
-            class="w-[18px] h-[18px] text-emerald-400 transition-all duration-300"
-          />
-          <span v-else-if="step.status === 'running'" class="relative flex w-[18px] h-[18px] items-center justify-center">
-            <span class="absolute inline-flex w-full h-full rounded-full bg-indigo-500/30 animate-ping"></span>
-            <Loader2 class="relative w-4 h-4 text-indigo-400 animate-spin" />
-          </span>
-          <AlertTriangle
-            v-else-if="step.status === 'error'"
-            class="w-[18px] h-[18px] text-red-400"
-          />
-          <span v-else class="w-[9px] h-[9px] rounded-full bg-slate-600"></span>
-        </div>
-
-        <!-- Label + detail + step bar -->
-        <div class="flex-1 min-w-0">
-          <div class="flex items-center justify-between gap-2">
-            <span
-              class="text-[11px] font-mono truncate transition-colors duration-300"
-              :class="{
-                'text-slate-500': step.status === 'pending',
-                'text-indigo-300': step.status === 'running',
-                'text-emerald-400': step.status === 'done',
-                'text-red-400': step.status === 'error',
-              }"
-            >{{ step.label }}</span>
-            <span
-              v-if="step.status === 'running' && percentFor(step) != null"
-              class="text-[10px] font-mono text-indigo-300/90 tabular-nums shrink-0"
-            >{{ percentFor(step) }}%</span>
-            <span
-              v-else-if="step.detail"
-              class="text-[10px] text-slate-500 font-mono shrink-0"
-            >{{ step.detail }}</span>
-          </div>
-
-          <!-- Thin per-step progress track -->
-          <div
-            v-if="showBar(step)"
-            class="relative mt-1.5 h-1 rounded-full bg-slate-800/70 overflow-hidden"
-          >
-            <div
-              v-if="!isIndeterminate(step)"
-              class="absolute inset-y-0 left-0 rounded-full transition-all duration-500"
-              :class="step.status === 'done' ? 'bg-emerald-500/60' : 'bg-gradient-to-r from-indigo-500/70 to-violet-500/70'"
-              :style="{ width: `${barPercent(step)}%` }"
-            ></div>
-            <div v-else class="absolute inset-y-0 w-1/3 rounded-full progress-indeterminate"></div>
-          </div>
-        </div>
-      </div>
-    </div>
+    <ol class="chat-progress-steps">
+      <li v-for="step in steps" :key="step.id" :data-status="step.status">
+        <CheckCircle2 v-if="step.status === 'done'" aria-hidden="true" />
+        <Loader2 v-else-if="step.status === 'running'" class="chat-spin" aria-hidden="true" />
+        <AlertTriangle v-else-if="step.status === 'error'" aria-hidden="true" />
+        <Circle v-else aria-hidden="true" />
+        <span class="truncate">{{ step.label }}</span>
+        <span v-if="step.status === 'running' && percentFor(step) != null" class="chat-progress-pct">{{ percentFor(step) }}%</span>
+        <span v-else-if="step.detail" class="chat-progress-pct">{{ step.detail }}</span>
+      </li>
+    </ol>
   </div>
 </template>
-
-<style scoped>
-/* Indeterminate shimmer used when a running step has no numeric progress yet. */
-.progress-indeterminate {
-  background: linear-gradient(90deg, transparent, rgba(129, 140, 248, 0.55), transparent);
-  animation: progress-slide 1.2s ease-in-out infinite;
-}
-
-@keyframes progress-slide {
-  0% {
-    transform: translateX(-100%);
-  }
-  100% {
-    transform: translateX(300%);
-  }
-}
-</style>

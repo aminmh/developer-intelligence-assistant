@@ -1,0 +1,11 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="48" height="48" viewBox="0 0 48 48" fill="none" role="img" aria-label="dev.assistant">
+  <defs>
+    <linearGradient id="spark-gradient" x1="6" y1="6" x2="42" y2="42" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#22d3ee"/>
+      <stop offset="1" stop-color="#a78bfa"/>
+    </linearGradient>
+  </defs>
+  <rect x="1.5" y="1.5" width="45" height="45" rx="13" fill="#0d1226" stroke="url(#spark-gradient)" stroke-opacity=".55"/>
+  <path d="M17 14 8.5 24 17 34M31 14 39.5 24 31 34" stroke="url(#spark-gradient)" stroke-width="3.4" stroke-linecap="round" stroke-linejoin="round"/>
+  <path d="M24 15.5c.9 4.6 2.9 6.6 7.5 7.5-4.6.9-6.6 2.9-7.5 7.5-.9-4.6-2.9-6.6-7.5-7.5 4.6-.9 6.6-2.9 7.5-7.5Z" fill="url(#spark-gradient)"/>
+</svg>

@@ -1,19 +1,31 @@
 <script setup lang="ts">
-import { ref, computed, onMounted } from 'vue';
+import { ref, computed, onMounted, nextTick } from 'vue';
 import MarkdownIt from 'markdown-it';
 import {
-  Send,
-  Cpu,
-  Database,
+  SendHorizontal,
   Info,
-  ChevronDown,
-  ChevronUp,
+  ChevronsUpDown,
   Paperclip,
-  FolderOpen,
+  FolderGit2,
   Gauge,
   Eye,
   ShieldCheck,
   X,
+  Copy,
+  Check,
+  Route,
+  GitBranch,
+  FileCode2,
+  Scale,
+  FlaskConical,
+  ChartNoAxesColumn,
+  HardDrive,
+  Cloud,
+  BookOpenText,
+  SearchCode,
+  Bug,
+  WandSparkles,
+  Boxes,
 } from 'lucide-vue-next';
 import { SearchMatch, UploadedFile, LLMUsage, ContextUsage, type ChatBusinessRuleSource, type ToolCallView, type ToolAvailability, type ApprovalView } from '../types';
 import { linkCitations } from '../utils/agentTools';
@@ -25,9 +37,17 @@ import ChatLoading from './ChatLoading.vue';
 import EvaluationModal from './EvaluationModal.vue';
 import RetrievalInsights from './RetrievalInsights.vue';
 import SysMonitor from './SysMonitor.vue';
-import WelcomeTerminal from './WelcomeTerminal.vue';
+import BrandLogo from './BrandLogo.vue';
 import type { PipelineStep } from './PipelineProgress.vue';
 import { describeRevision, revisionOptionValue, type ChatProjectRevisions, type RevisionView } from '../utils/chatRevisions';
+
+interface CodeValidation {
+  language?: string;
+  index?: number;
+  status?: string;
+  errors?: unknown[];
+  warnings?: unknown[];
+}
 
 interface Message {
   id: string;
@@ -45,7 +65,7 @@ interface Message {
   queryId?: string;
   routeName?: string;
   streaming?: boolean;
-  code_validation?: any[];
+  code_validation?: CodeValidation[];
   contextPreview?: string;
   toolCalls?: ToolCallView[];
   tools?: ToolAvailability | null;
@@ -85,25 +105,82 @@ const emit = defineEmits<{
   (e: 'cancelSend'): void;
   (e: 'openCitation', path: string, line: number, messageId?: string): void;
   (e: 'decideApproval', messageId: string, decision: 'approve' | 'deny'): void;
+  (e: 'openKnowledgeBase'): void;
 }>();
 
 const ROUTES = ['code_explain', 'code_refactor', 'debug', 'search', 'knowledge', 'chat'];
 
-const chatInput = ref('');
+const STARTERS = [
+  { label: 'Explain', icon: BookOpenText, text: 'Explain how the main request flow works, step by step.' },
+  { label: 'Find', icon: SearchCode, text: 'Where is the payment or checkout logic handled?' },
+  { label: 'Debug', icon: Bug, text: 'What could cause this error, and where should I look first?' },
+  { label: 'Refactor', icon: WandSparkles, text: 'Which class is doing too much, and how would you split it?' },
+];
 
-// Render assistant answers as GitHub-flavoured markdown. `html: false` keeps
-// raw HTML in model output inert (XSS-safe); linkify turns bare URLs clickable.
-const md = new MarkdownIt({
-  html: false,
-  linkify: true,
-  breaks: true,
-});
+const chatInput = ref('');
+const inputEl = ref<HTMLTextAreaElement | null>(null);
+
+// ---- Markdown -------------------------------------------------------------
+// `html: false` keeps raw HTML in model output inert (XSS-safe); linkify turns bare URLs clickable.
+const md = new MarkdownIt({ html: false, linkify: true, breaks: true });
+
+const escapeHtml = (value: string) => value
+  .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+
+const validationTone = (status: string | undefined) => {
+  const s = (status || '').toLowerCase();
+  if (s.includes('fail') || s.includes('error') || s.includes('invalid')) return 'bad';
+  if (s.includes('warn')) return 'warn';
+  return 'ok';
+};
+
+// Code blocks get a header: language, the validator's verdict for that block, and Copy.
+// The validator numbers blocks per language in order, so the renderer counts the same way.
+const defaultFence = md.renderer.rules.fence!;
+md.renderer.rules.fence = (tokens, idx, options, env, self) => {
+  const token = tokens[idx];
+  const lang = (token.info || '').trim().split(/\s+/)[0].toLowerCase();
+  const inner = defaultFence(tokens, idx, options, env, self);
+  const counters: Record<string, number> = (env.fenceCounters ??= {});
+  const ordinal = counters[lang] ?? 0;
+  counters[lang] = ordinal + 1;
+  const result = (env.validations as CodeValidation[] | undefined)?.find(
+    (v) => (v.language || '').toLowerCase() === lang && v.index === ordinal,
+  );
+  const badge = result?.status
+    ? `<span class="chat-code-badge" data-tone="${validationTone(result.status)}">${escapeHtml(result.status)}</span>`
+    : '';
+  return `<div class="chat-code"><div class="chat-code-head"><span>${escapeHtml(lang || 'text')}</span>${badge}`
+    + `<button type="button" class="chat-code-copy" data-copy-code aria-label="Copy code">Copy</button></div>${inner}</div>`;
+};
 
 // `path:line` code spans become citation links that open the cited source.
-const renderMarkdown = (content: string): string => linkCitations(md.render(content || ''));
+const renderMarkdown = (content: string, validations?: CodeValidation[]): string =>
+  linkCitations(md.render(content || '', { validations }));
+
+// ---- Clipboard ------------------------------------------------------------
+const copiedKey = ref<string | null>(null);
+let copiedTimer: ReturnType<typeof setTimeout> | null = null;
+const copyText = async (text: string, key: string) => {
+  try {
+    await navigator.clipboard.writeText(text);
+    copiedKey.value = key;
+    if (copiedTimer) clearTimeout(copiedTimer);
+    copiedTimer = setTimeout(() => { copiedKey.value = null; }, 1600);
+  } catch { /* clipboard blocked: nothing to confirm */ }
+};
 
 const onAnswerClick = (event: MouseEvent, messageId?: string) => {
-  const link = (event.target as HTMLElement | null)?.closest<HTMLElement>('[data-cite-path]');
+  const target = event.target as HTMLElement | null;
+  const copyButton = target?.closest<HTMLElement>('[data-copy-code]');
+  if (copyButton) {
+    const code = copyButton.closest('.chat-code')?.querySelector('pre')?.textContent ?? '';
+    void copyText(code, `code-${messageId}`);
+    copyButton.textContent = 'Copied';
+    setTimeout(() => { copyButton.textContent = 'Copy'; }, 1600);
+    return;
+  }
+  const link = target?.closest<HTMLElement>('[data-cite-path]');
   if (!link) return;
   event.preventDefault();
   const line = Number(link.dataset.citeLine);
@@ -111,29 +188,41 @@ const onAnswerClick = (event: MouseEvent, messageId?: string) => {
   if (link.dataset.citePath && Number.isFinite(line)) emit('openCitation', link.dataset.citePath, line, messageId);
 };
 
-// Feedback UI state: which message's route picker is open / already submitted
-const feedbackOpenId = ref<string | null>(null);
+// ---- Per-answer detail panels (one open at a time per answer) -------------
+type PanelName = 'sources' | 'rules' | 'usage' | 'context' | 'route' | 'insights';
+const openPanels = ref<Record<string, PanelName | null>>({});
+const panelOf = (id: string) => openPanels.value[id] ?? null;
+const togglePanel = (id: string, panel: PanelName) => {
+  const opening = panelOf(id) !== panel;
+  openPanels.value = { ...openPanels.value, [id]: opening ? panel : null };
+  // An answer near the bottom would open its panel out of sight, so bring it into view.
+  if (opening) {
+    void nextTick(() => {
+      const panel = document.getElementById(`chat-panel-${id}`);
+      const thread = document.getElementById('chat-scroll-container');
+      if (!panel || !thread) return;
+      const overflow = panel.getBoundingClientRect().bottom - thread.getBoundingClientRect().bottom;
+      if (overflow > 0) thread.scrollTop += overflow + 12;
+    });
+  }
+};
+
+// Routing feedback
 const feedbackDoneId = ref<string | null>(null);
+const onFeedback = (query: string | undefined, route: string, id: string) => {
+  if (!query) return;
+  emit('feedback', query, route);
+  feedbackDoneId.value = id;
+  openPanels.value = { ...openPanels.value, [id]: null };
+};
 
 // Evaluation modal state
 const showEvaluation = ref(false);
 const evalQueryId = ref<string | null>(null);
-
 const openEvaluation = (queryId: string | undefined) => {
   if (!queryId) return;
   evalQueryId.value = queryId;
   showEvaluation.value = true;
-};
-
-const toggleFeedback = (id: string) => {
-  feedbackOpenId.value = feedbackOpenId.value === id ? null : id;
-};
-
-const onFeedback = (query: string | undefined, route: string, id: string) => {
-  if (!query) return;
-  emit('feedback', query, route);
-  feedbackOpenId.value = null;
-  feedbackDoneId.value = id;
 };
 
 // One-line project knowledge chip from an orchestration status payload.
@@ -155,6 +244,9 @@ const profileSummary = (orch: any): string | null => {
   return bits.length ? bits.join(' · ') : null;
 };
 
+const orchestrationOutputs = (orch: any): Array<{ tool: string; exit?: number }> =>
+  Object.entries(orch?.outputs ?? {}).map(([tool, out]: [string, any]) => ({ tool, exit: out?.exit_code }));
+
 // Steps shown during loading: orchestration steps + a trailing "Generating answer"
 // step while the web server runs the final LLM call.
 const displaySteps = computed<PipelineStep[]>(() => {
@@ -165,8 +257,20 @@ const displaySteps = computed<PipelineStep[]>(() => {
   return steps;
 });
 
-const messagesContainer = ref<HTMLElement | null>(null);
+const formatTokens = (value: number | null | undefined, estimated = false): string => {
+  if (value === null || value === undefined) return '—';
+  return `${estimated ? '~' : ''}${value.toLocaleString()}`;
+};
 
+const formatDuration = (ms?: number) => {
+  if (!ms) return '';
+  return ms < 1000 ? `${ms} ms` : `${(ms / 1000).toFixed(1)} s`;
+};
+
+const projectName = computed(() => props.activeFileName || 'your codebase');
+const hasConversation = computed(() => props.messages.length > 0 || !!props.gatePreview || props.loading);
+
+// ---- Scrolling and composer ----------------------------------------------
 const scrollToBottom = () => {
   setTimeout(() => {
     const el = document.getElementById('chat-scroll-container');
@@ -178,12 +282,39 @@ onMounted(() => {
   scrollToBottom();
 });
 
+// While a gate preview awaits confirmation the model must NOT run, so further
+// sends are locked (same visual state as loading).
+const chatLocked = computed(() => props.loading || !!props.gatePreview);
+
+const autoGrow = () => {
+  const el = inputEl.value;
+  if (!el) return;
+  el.style.height = 'auto';
+  el.style.height = `${Math.min(el.scrollHeight, 200)}px`;
+};
+
 const onSubmit = () => {
   if (chatInput.value.trim() && !chatLocked.value) {
     emit('sendMessage', chatInput.value.trim());
     chatInput.value = '';
+    void nextTick(autoGrow);
     scrollToBottom();
   }
+};
+
+const onComposerKeydown = (event: KeyboardEvent) => {
+  if (event.key === 'Enter' && !event.shiftKey && !event.isComposing) {
+    event.preventDefault();
+    onSubmit();
+  }
+};
+
+const useStarter = (text: string) => {
+  chatInput.value = text;
+  void nextTick(() => {
+    autoGrow();
+    inputEl.value?.focus();
+  });
 };
 
 const onAttachZip = (event: Event) => {
@@ -196,410 +327,290 @@ const onAttachZip = (event: Event) => {
 
 const onSelectFile = (event: Event) => {
   const value = (event.target as HTMLSelectElement).value;
-  if (value) {
-    emit('selectAttachment', value);
-  }
+  if (value) emit('selectAttachment', value);
 };
-
-// Toggle for showing match details
-const expandedMessageId = ref<string | null>(null);
-const toggleMatchExpansion = (id: string) => {
-  expandedMessageId.value = expandedMessageId.value === id ? null : id;
-};
-
-// Toggle for showing the "context window sent to model" disclosure on answers.
-const expandedPreviewId = ref<string | null>(null);
-const togglePreviewExpansion = (id: string) => {
-  expandedPreviewId.value = expandedPreviewId.value === id ? null : id;
-};
-
-const expandedUsageId = ref<string | null>(null);
-const toggleUsageExpansion = (id: string) => {
-  expandedUsageId.value = expandedUsageId.value === id ? null : id;
-};
-
-const formatTokens = (value: number | null | undefined, estimated = false): string => {
-  if (value === null || value === undefined) return '—';
-  return `${estimated ? '~' : ''}${value.toLocaleString()}`;
-};
-
-// While a gate preview awaits confirmation the model must NOT run, so further
-// sends are locked (same visual state as loading).
-const chatLocked = computed(() => props.loading || !!props.gatePreview);
 </script>
 
 <template>
-  <div class="flex-1 flex flex-col min-h-0">
-    <!-- Messages area -->
-    <div id="chat-scroll-container" class="flex-1 overflow-y-auto p-6 space-y-4 scroll-smooth">
-      
-      <!-- Messages list -->
-      <div class="max-w-4xl mx-auto w-full space-y-4">
-        <WelcomeTerminal v-if="showWelcomeBanner" :generatingAnswer="generatingAnswer" :lowPerformanceMode="lowPerformanceMode" />
-        <SysMonitor v-if="showSystemMonitor" :lowPerformanceMode="lowPerformanceMode" />
-        <div 
-          v-for="msg in messages" 
-          :key="msg.id" 
-          class="flex flex-col"
-          :class="msg.role === 'user' ? 'items-end' : 'items-start'"
-        >
-          <!-- Message bubble -->
-          <div 
-            class="rounded-2xl px-5 py-4 max-w-3xl"
-            :class="msg.role === 'user' 
-              ? 'bg-indigo-600/10 border border-indigo-500/20 text-slate-100 rounded-br-none'
-              : 'bg-slate-900/60 border border-slate-800 text-slate-300 rounded-tl-none'"
-          >
-            <p v-if="msg.role === 'assistant' && msg.revision"
-              class="mb-2 text-[10px] font-mono text-slate-500"
-              :title="msg.revision.revision_id">
-              Answered from {{ describeRevision(msg.revision) }}<span v-if="msg.revision.requested === 'latest'"> (latest)</span>
-            </p>
-            <ToolActivity
-              v-if="msg.role === 'assistant'"
-              :calls="msg.toolCalls"
-              :tools="msg.tools"
-              :streaming="msg.streaming"
-            />
-            <ToolApprovalCard
-              v-if="msg.role === 'assistant' && msg.approval"
-              :approval="msg.approval"
-              @decide="(decision) => emit('decideApproval', msg.id, decision)"
-            />
-            <div class="prose prose-invert prose-sm max-w-none text-left" v-if="msg.role === 'assistant'" v-html="renderMarkdown(msg.content)" @click="onAnswerClick($event, msg.id)"></div>
-            <span v-if="msg.role === 'assistant' && msg.streaming" class="inline-block w-2 h-4 bg-indigo-400 animate-pulse ml-0.5 align-text-bottom"></span>
-            <div class="text-sm text-left font-mono leading-relaxed text-slate-100 whitespace-pre-wrap break-words" v-if="msg.role !== 'assistant'">{{ msg.content }}</div>
-            
-            <!-- Assistant message metadata -->
-            <div v-if="msg.role === 'assistant'" class="mt-3 pt-3 border-t border-slate-800 flex flex-wrap items-center justify-between gap-x-3 gap-y-1 text-[10px] text-slate-500 font-mono">
-              <span>{{ msg.timestamp }}</span>
-              <span v-if="msg.llmUsed" class="flex items-center gap-1">
-                <Cpu class="w-3 h-3" />
-                {{ msg.llmUsed }}
-              </span>
-              <span v-if="msg.durationMs">{{ msg.durationMs }}ms</span>
-            </div>
-
+  <section class="chat-page" aria-label="Chat">
+    <div id="chat-scroll-container" class="chat-thread">
+      <div class="chat-column">
+        <!-- New chat -->
+        <div v-if="!hasConversation && showWelcomeBanner" class="chat-hero">
+          <span class="chat-hero-logo"><BrandLogo /></span>
+          <h2>Ask about <span class="chat-hero-name">{{ projectName }}</span></h2>
+          <p>Answers come from the indexed code, its call graph and your business rules, with links to the exact lines they used.</p>
+          <div class="chat-starters">
             <button
-              v-if="msg.role === 'assistant' && (msg.usage || msg.context_usage)"
-              @click="toggleUsageExpansion(msg.id)"
-              class="mt-2 text-[10px] text-cyan-400/80 hover:text-cyan-300 flex items-center gap-1 font-mono transition-colors"
+              v-for="(starter, i) in STARTERS"
+              :key="starter.label"
+              type="button"
+              class="chat-starter"
+              :style="{ animationDelay: `${40 * (i + 1)}ms` }"
+              @click="useStarter(starter.text)"
             >
-              <Gauge class="w-3 h-3" />
-              <span>{{ expandedUsageId === msg.id ? 'Hide' : 'Show' }} token usage</span>
-              <span v-if="msg.usage">· {{ formatTokens(msg.usage.total_tokens, msg.usage.estimated) }} total</span>
-              <ChevronDown v-if="expandedUsageId !== msg.id" class="w-3 h-3" />
-              <ChevronUp v-else class="w-3 h-3" />
+              <b><component :is="starter.icon" aria-hidden="true" />{{ starter.label }}</b>
+              <span>{{ starter.text }}</span>
             </button>
-
-            <div
-              v-if="expandedUsageId === msg.id && (msg.usage || msg.context_usage)"
-              class="mt-2 rounded-lg border border-cyan-500/15 bg-cyan-950/10 px-3 py-2 text-[10px] font-mono text-slate-400"
-            >
-              <div v-if="msg.usage" class="grid grid-cols-3 gap-2">
-                <span>Input {{ formatTokens(msg.usage.prompt_tokens, msg.usage.estimated) }}</span>
-                <span>Output {{ formatTokens(msg.usage.completion_tokens, msg.usage.estimated) }}</span>
-                <span>Total {{ formatTokens(msg.usage.total_tokens, msg.usage.estimated) }}</span>
-              </div>
-              <div v-if="msg.context_usage" class="mt-1 text-cyan-300/80">
-                Context {{ msg.context_usage.percent.toLocaleString() }}%
-                ({{ formatTokens(msg.context_usage.input_tokens, msg.context_usage.estimated) }} /
-                {{ msg.context_usage.limit_tokens.toLocaleString() }})
-              </div>
-              <div v-if="msg.usage?.estimated || msg.context_usage?.estimated" class="mt-1 text-slate-500">
-                ~ estimated; provider usage was unavailable
-              </div>
-            </div>
-
-            <!-- Orchestration info -->
-            <div v-if="msg.orchestration" class="mt-3 pt-3 border-t border-slate-800 text-left">
-              <div class="text-[10px] text-emerald-400 font-mono flex items-center gap-1 mb-1">
-                <Database class="w-3 h-3" />
-                Orchestration — {{ msg.orchestration.route || 'tools' }}
-              </div>
-              <div v-if="profileSummary(msg.orchestration)" class="text-[10px] font-mono mt-1 inline-flex items-center gap-1.5 flex-wrap">
-                <span class="text-amber-300/90 bg-amber-400/5 border border-amber-400/20 rounded px-1.5 py-0.5">
-                  {{ profileSummary(msg.orchestration) }}
-                </span>
-              </div>
-              <div v-for="(out, tool) in msg.orchestration.outputs" :key="tool"
-                class="text-[10px] text-slate-500 font-mono mt-1">
-                <span class="text-slate-400">{{ tool }}:</span>
-                <span v-if="out && out.exit_code !== undefined"> exit {{ out.exit_code }}</span>
-              </div>
-            </div>
-
-            <!-- Routing feedback -->
-            <div v-if="msg.role === 'assistant' && msg.routeName && msg.query" class="mt-3 pt-3 border-t border-slate-800 text-left">
-              <div class="flex items-center gap-2 flex-wrap">
-                <span class="text-[10px] text-slate-500 font-mono">
-                  Routed as <span class="text-indigo-400 font-semibold">{{ msg.routeName }}</span>
-                </span>
-                <button
-                  @click="toggleFeedback(msg.id)"
-                  class="text-[10px] text-slate-400 hover:text-indigo-300 underline underline-offset-2 font-mono transition-colors"
-                >
-                  wrong route?
-                </button>
-                <span v-if="feedbackDoneId === msg.id" class="text-[10px] text-emerald-400 font-mono">Feedback saved ✓</span>
-              </div>
-              <div v-if="feedbackOpenId === msg.id" class="mt-2 flex flex-wrap gap-1.5">
-                <button
-                  v-for="r in ROUTES"
-                  :key="r"
-                  @click="onFeedback(msg.query, r, msg.id)"
-                  class="px-2.5 py-1 rounded-lg border text-[10px] font-mono transition-all"
-                  :class="r === msg.routeName
-                    ? 'border-indigo-500 bg-indigo-500/10 text-indigo-300'
-                    : 'border-slate-800 bg-[#11162d] text-slate-400 hover:text-white hover:border-indigo-500'"
-                >
-                  {{ r }}
-                </button>
-              </div>
-            </div>
-
-            <!-- Evaluate response -->
-            <div v-if="msg.role === 'assistant' && msg.queryId" class="mt-2 pt-2 border-t border-slate-800 text-left">
-              <button
-                @click="openEvaluation(msg.queryId)"
-                class="text-[10px] text-slate-400 hover:text-indigo-300 flex items-center gap-1 font-mono transition-colors"
-              >
-                <Gauge class="w-3 h-3" />
-                View evaluation
-              </button>
-            </div>
-          </div>
-
-          <!-- Context window disclosure (inline/gate: what the model saw) -->
-          <button
-            v-if="msg.role === 'assistant' && msg.contextPreview"
-            @click="togglePreviewExpansion(msg.id)"
-            class="mt-1 text-[10px] text-violet-400 hover:text-violet-300 flex items-center gap-1 font-mono transition-all"
-          >
-            <Eye class="w-3 h-3" />
-            <span>{{ expandedPreviewId === msg.id ? 'Hide' : 'Show' }} Context Window (sent to model)</span>
-            <ChevronDown v-if="expandedPreviewId !== msg.id" class="w-3 h-3" />
-            <ChevronUp v-else class="w-3 h-3" />
-          </button>
-
-          <div
-            v-if="expandedPreviewId === msg.id && msg.contextPreview"
-            class="mt-2 max-w-3xl w-full"
-          >
-            <div class="bg-[#0a0e1a] border border-violet-500/20 rounded-xl max-h-[60vh] overflow-y-auto">
-              <div class="prose prose-invert prose-sm max-w-none text-left p-3" v-html="renderMarkdown(msg.contextPreview)"></div>
-            </div>
-          </div>
-
-          <RetrievalInsights
-            v-if="msg.role === 'assistant' && msg.queryId"
-            :queryId="msg.queryId"
-          />
-
-          <!-- Business rules that grounded this answer -->
-          <div v-if="msg.role === 'assistant' && msg.businessRules?.length" class="mt-2 max-w-3xl w-full rounded-xl border border-indigo-500/20 bg-indigo-500/5 p-2.5 text-left" aria-label="Business rules used for this answer">
-            <p class="text-[10px] font-semibold uppercase tracking-wide text-indigo-300">Business rules</p>
-            <ul class="mt-1.5 space-y-1">
-              <li v-for="rule in msg.businessRules" :key="rule.doc_id" class="text-[11px] text-slate-300">
-                <span class="font-mono text-indigo-300">[{{ rule.label }}]</span>
-                <a :href="outlineHref(rule.instance_url, rule.url)" target="_blank" rel="noopener noreferrer" class="ml-1 text-indigo-200 hover:underline">{{ rule.title }}<template v-if="rule.heading"> · {{ rule.heading }}</template></a>
-                <span class="ml-1 text-slate-500">{{ syncedAgo(rule.synced_at) }}</span>
-                <span v-if="rule.symbol_ids.length" class="ml-1 text-slate-500">· implemented by <code class="text-slate-400">{{ rule.symbol_ids.slice(0, 3).map(symbolLabel).join(', ') }}</code><template v-if="rule.symbol_ids.length > 3"> +{{ rule.symbol_ids.length - 3 }}</template></span>
-              </li>
-            </ul>
-          </div>
-
-          <!-- Expand matches toggle -->
-          <button 
-            v-if="msg.role === 'assistant' && msg.matches && msg.matches.length > 0"
-            @click="toggleMatchExpansion(msg.id)"
-            class="mt-1 text-[10px] text-indigo-400 hover:text-indigo-300 flex items-center gap-1 font-mono transition-all"
-          >
-            <Database class="w-3 h-3" />
-            <span>{{ expandedMessageId === msg.id ? 'Hide' : 'Show' }} Context Matches ({{ msg.matches.length }})</span>
-            <ChevronDown v-if="expandedMessageId !== msg.id" class="w-3 h-3" />
-            <ChevronUp v-else class="w-3 h-3" />
-          </button>
-
-          <!-- Expandable match details -->
-          <div 
-            v-if="expandedMessageId === msg.id && msg.matches" 
-            class="mt-2 space-y-2 max-w-3xl w-full"
-          >
-            <div 
-              v-for="(match, i) in msg.matches" 
-              :key="i"
-              class="bg-[#11162d] border border-slate-800 rounded-xl p-3 text-left"
-            >
-              <div class="flex items-center justify-between text-[10px] font-mono text-slate-400 mb-2">
-                <span class="flex items-center gap-1">
-                  <Database class="w-3 h-3" />
-                  Chunk #{{ match.chunk.index }}
-                </span>
-                <span class="bg-indigo-600/20 text-indigo-400 px-2 py-0.5 rounded-full">
-                  Score: {{ (match.score * 100).toFixed(0) }}%
-                </span>
-              </div>
-              <p class="text-[11px] text-slate-400 line-clamp-4 leading-relaxed font-mono">
-                {{ match.chunk.text }}
-              </p>
-              <p v-if="match.runtime_usage" class="mt-2 border-t border-slate-800 pt-2 text-[10px] text-cyan-300">
-                Runtime: {{ Number(match.runtime_usage.runs).toLocaleString() }} calls · p95 {{ Number(match.runtime_usage.p95_ms).toFixed(1) }} ms · {{ Number(match.runtime_usage.failures).toLocaleString() }} failures · last seen {{ match.runtime_usage.last_seen ? new Date(match.runtime_usage.last_seen).toLocaleString() : 'unknown' }}
-              </p>
-            </div>
           </div>
         </div>
-      </div>
 
-      <!-- Gate preview awaiting confirmation: the model has NOT been called -->
-      <div v-if="gatePreview" class="flex flex-col items-start max-w-4xl mx-auto">
-        <div class="rounded-2xl px-5 py-4 max-w-3xl bg-slate-900/60 border border-amber-500/25 text-slate-300 rounded-tl-none w-full">
-          <div class="flex items-center gap-2 text-[10px] text-amber-300 font-mono uppercase tracking-wider border-b border-slate-800 pb-2 mb-3">
-            <ShieldCheck class="w-3.5 h-3.5" />
-            Context window preview
-            <span class="ml-auto normal-case tracking-normal text-[9px] bg-amber-500/10 border border-amber-500/25 rounded px-1.5 py-0.5">
-              model not called yet
-            </span>
-          </div>
-
-          <div class="bg-[#0a0e1a] border border-slate-800 rounded-xl max-h-[60vh] overflow-y-auto">
-            <div class="prose prose-invert prose-sm max-w-none text-left p-3" v-html="renderMarkdown(gatePreview.markdown)"></div>
-          </div>
-
-          <div class="mt-3 pt-3 border-t border-slate-800 flex items-center justify-end gap-2">
-            <button
-              type="button"
-              @click="emit('cancelSend')"
-              class="px-3.5 py-1.5 rounded-lg border border-slate-700 text-[11px] font-mono text-slate-400 hover:text-white hover:border-slate-500 transition-all"
-            >
-              Cancel
-            </button>
-            <button
-              type="button"
-              @click="emit('confirmSend')"
-              class="px-3.5 py-1.5 rounded-lg bg-indigo-600 hover:bg-indigo-700 text-white text-[11px] font-mono inline-flex items-center gap-1.5 transition-all shadow-md shadow-indigo-600/20"
-            >
-              <Send class="w-3 h-3" />
-              Send to model
-            </button>
-          </div>
-          <p class="text-[9px] text-slate-500 mt-2">
-            This is the exact markdown that will be sent to the model. Nothing has been generated yet.
-          </p>
+        <div v-if="filesCount === 0 && !hasConversation" class="chat-notice">
+          <Info aria-hidden="true" />
+          <span>No project is indexed yet. Index a project before asking about its code.</span>
+          <button type="button" class="chat-btn" @click="emit('openKnowledgeBase')">Open knowledge base</button>
         </div>
-      </div>
 
-      <!-- Pipeline progress (orchestration with steps) -->
-      <div
-        v-if="loading && displaySteps.length > 0"
-        class="flex flex-col items-start max-w-4xl mx-auto"
-      >
-        <PipelineProgress
-          :fileName="activeFileName || 'project'"
-          :steps="displaySteps"
-        />
-      </div>
+        <!-- Conversation -->
+        <template v-for="msg in messages" :key="msg.id">
+          <template v-if="msg.role !== 'assistant'">
+            <div class="chat-user">{{ msg.content }}</div>
+            <div class="chat-user-meta">{{ msg.timestamp }}</div>
+          </template>
 
-      <!-- Loader while computing answer (simple RAG) -->
-      <div
-        v-else-if="loading"
-        class="flex flex-col items-start max-w-4xl mx-auto"
-      >
-        <ChatLoading :label="generatingAnswer ? 'Generating answer' : 'Thinking'" />
+          <article v-else class="chat-ai">
+            <span class="chat-ai-avatar"><BrandLogo /></span>
+            <div class="min-w-0">
+              <div class="chat-ai-head">
+                <b>dev.assistant</b>
+                <span v-if="msg.routeName" class="chat-tag" data-tone="route"><Route aria-hidden="true" />{{ msg.routeName }}</span>
+                <span v-if="msg.revision" class="chat-tag" :title="msg.revision.revision_id">
+                  <GitBranch aria-hidden="true" />{{ describeRevision(msg.revision) }}<template v-if="msg.revision.requested === 'latest'"> · latest</template>
+                </span>
+                <span v-if="profileSummary(msg.orchestration)" class="chat-tag" data-tone="warn"><Boxes aria-hidden="true" />{{ profileSummary(msg.orchestration) }}</span>
+                <span class="chat-ai-meta">
+                  <template v-if="msg.llmUsed">{{ msg.llmUsed }} · </template>
+                  <template v-if="msg.durationMs">{{ formatDuration(msg.durationMs) }} · </template>
+                  {{ msg.timestamp }}
+                </span>
+              </div>
+
+              <ToolActivity :calls="msg.toolCalls" :tools="msg.tools" :streaming="msg.streaming" />
+              <ToolApprovalCard
+                v-if="msg.approval"
+                :approval="msg.approval"
+                @decide="(decision) => emit('decideApproval', msg.id, decision)"
+              />
+              <div v-if="msg.orchestration && orchestrationOutputs(msg.orchestration).length" class="chat-outputs">
+                <span v-for="out in orchestrationOutputs(msg.orchestration)" :key="out.tool" class="chat-tag" :data-tone="out.exit && out.exit !== 0 ? 'bad' : undefined">
+                  {{ out.tool }}<template v-if="out.exit !== undefined"> · exit {{ out.exit }}</template>
+                </span>
+              </div>
+
+              <div class="chat-answer" :class="{ 'is-streaming': msg.streaming }">
+                <div class="prose prose-invert prose-sm max-w-none text-left" v-html="renderMarkdown(msg.content, msg.code_validation)" @click="onAnswerClick($event, msg.id)"></div>
+                <span v-if="msg.streaming" class="chat-caret" aria-hidden="true"></span>
+              </div>
+
+              <!-- One toolbar replaces the separate disclosure links -->
+              <div v-if="!msg.streaming" class="chat-toolbar" role="toolbar" :aria-label="`Details for the answer at ${msg.timestamp}`">
+                <button v-if="msg.matches?.length" type="button" class="chat-tb" :aria-expanded="panelOf(msg.id) === 'sources'" @click="togglePanel(msg.id, 'sources')">
+                  <FileCode2 aria-hidden="true" />Sources<span class="chat-tb-count">{{ msg.matches.length }}</span>
+                </button>
+                <button v-if="msg.businessRules?.length" type="button" class="chat-tb" :aria-expanded="panelOf(msg.id) === 'rules'" @click="togglePanel(msg.id, 'rules')">
+                  <Scale aria-hidden="true" />Rules<span class="chat-tb-count">{{ msg.businessRules.length }}</span>
+                </button>
+                <button v-if="msg.usage || msg.context_usage" type="button" class="chat-tb" :aria-expanded="panelOf(msg.id) === 'usage'" @click="togglePanel(msg.id, 'usage')">
+                  <Gauge aria-hidden="true" />
+                  <template v-if="msg.usage">{{ formatTokens(msg.usage.total_tokens, msg.usage.estimated) }} tokens</template>
+                  <template v-else>Usage</template>
+                </button>
+                <button v-if="msg.contextPreview" type="button" class="chat-tb" :aria-expanded="panelOf(msg.id) === 'context'" @click="togglePanel(msg.id, 'context')">
+                  <Eye aria-hidden="true" />Context
+                </button>
+                <template v-if="msg.routeName && msg.query">
+                  <span class="chat-tb-sep" aria-hidden="true"></span>
+                  <button type="button" class="chat-tb" :aria-expanded="panelOf(msg.id) === 'route'" @click="togglePanel(msg.id, 'route')">
+                    <Route aria-hidden="true" />{{ feedbackDoneId === msg.id ? 'Route feedback saved' : 'Wrong route?' }}
+                  </button>
+                </template>
+                <span class="chat-tb-end">
+                  <button type="button" class="chat-tb chat-tb-icon" :title="copiedKey === `answer-${msg.id}` ? 'Copied' : 'Copy answer'" aria-label="Copy answer" @click="copyText(msg.content, `answer-${msg.id}`)">
+                    <Check v-if="copiedKey === `answer-${msg.id}`" aria-hidden="true" />
+                    <Copy v-else aria-hidden="true" />
+                  </button>
+                  <template v-if="msg.queryId">
+                    <button type="button" class="chat-tb chat-tb-icon" title="View evaluation" aria-label="View evaluation" @click="openEvaluation(msg.queryId)">
+                      <FlaskConical aria-hidden="true" />
+                    </button>
+                    <button type="button" class="chat-tb chat-tb-icon" title="Retrieval insights" aria-label="Retrieval insights" :aria-expanded="panelOf(msg.id) === 'insights'" @click="togglePanel(msg.id, 'insights')">
+                      <ChartNoAxesColumn aria-hidden="true" />
+                    </button>
+                  </template>
+                </span>
+              </div>
+
+              <div :id="`chat-panel-${msg.id}`">
+              <Transition name="app-panel">
+                <div v-if="panelOf(msg.id) === 'sources' && msg.matches" class="chat-panel">
+                  <div class="chat-sources">
+                    <div v-for="(match, i) in msg.matches" :key="i" class="chat-source">
+                      <div class="chat-source-top">
+                        <FileCode2 aria-hidden="true" />
+                        <span>Chunk #{{ match.chunk.index }}</span>
+                        <span class="chat-score" :title="`Match score ${(match.score * 100).toFixed(0)}%`">
+                          <span class="chat-bar"><i :style="{ transform: `scaleX(${Math.max(0, Math.min(1, match.score))})` }"></i></span>
+                          {{ (match.score * 100).toFixed(0) }}%
+                        </span>
+                      </div>
+                      <p>{{ match.chunk.text }}</p>
+                      <p v-if="match.runtime_usage" class="chat-runtime">
+                        Runtime: {{ Number(match.runtime_usage.runs).toLocaleString() }} calls · p95 {{ Number(match.runtime_usage.p95_ms).toFixed(1) }} ms · {{ Number(match.runtime_usage.failures).toLocaleString() }} failures · last seen {{ match.runtime_usage.last_seen ? new Date(match.runtime_usage.last_seen).toLocaleString() : 'unknown' }}
+                      </p>
+                    </div>
+                  </div>
+                </div>
+
+                <div v-else-if="panelOf(msg.id) === 'rules' && msg.businessRules" class="chat-panel" aria-label="Business rules used for this answer">
+                  <ul class="chat-rules">
+                    <li v-for="rule in msg.businessRules" :key="rule.doc_id">
+                      <span class="font-mono">[{{ rule.label }}]</span>
+                      <a :href="outlineHref(rule.instance_url, rule.url)" target="_blank" rel="noopener noreferrer">{{ rule.title }}<template v-if="rule.heading"> · {{ rule.heading }}</template></a>
+                      <span class="chat-muted"> · {{ syncedAgo(rule.synced_at) }}</span>
+                      <span v-if="rule.symbol_ids.length" class="chat-muted"> · implemented by <code>{{ rule.symbol_ids.slice(0, 3).map(symbolLabel).join(', ') }}</code><template v-if="rule.symbol_ids.length > 3"> +{{ rule.symbol_ids.length - 3 }}</template></span>
+                    </li>
+                  </ul>
+                </div>
+
+                <div v-else-if="panelOf(msg.id) === 'usage'" class="chat-panel">
+                  <div class="chat-usage">
+                    <template v-if="msg.usage">
+                      <div class="chat-stat"><span>Input</span><b>{{ formatTokens(msg.usage.prompt_tokens, msg.usage.estimated) }}</b></div>
+                      <div class="chat-stat"><span>Output</span><b>{{ formatTokens(msg.usage.completion_tokens, msg.usage.estimated) }}</b></div>
+                      <div class="chat-stat"><span>Total</span><b>{{ formatTokens(msg.usage.total_tokens, msg.usage.estimated) }}</b></div>
+                    </template>
+                    <div v-if="msg.context_usage" class="chat-context-use">
+                      Context
+                      <span class="chat-bar"><i :style="{ transform: `scaleX(${Math.min(1, msg.context_usage.percent / 100)})` }"></i></span>
+                      {{ msg.context_usage.percent.toLocaleString() }}% · {{ formatTokens(msg.context_usage.input_tokens, msg.context_usage.estimated) }} of {{ msg.context_usage.limit_tokens.toLocaleString() }}
+                    </div>
+                    <p v-if="msg.usage?.estimated || msg.context_usage?.estimated" class="chat-muted chat-usage-note">~ estimated; the provider didn't report usage.</p>
+                  </div>
+                </div>
+
+                <div v-else-if="panelOf(msg.id) === 'context' && msg.contextPreview" class="chat-panel">
+                  <p class="chat-muted mb-2 text-xs">What the model received for this answer.</p>
+                  <div class="chat-context-box prose prose-invert prose-sm max-w-none text-left" v-html="renderMarkdown(msg.contextPreview)"></div>
+                </div>
+
+                <div v-else-if="panelOf(msg.id) === 'route'" class="chat-panel">
+                  <p class="chat-muted mb-2 text-xs">Pick how this question should have been routed. The router learns from it.</p>
+                  <div class="chat-routes">
+                    <button
+                      v-for="r in ROUTES"
+                      :key="r"
+                      type="button"
+                      class="chat-tag"
+                      :data-tone="r === msg.routeName ? 'route' : undefined"
+                      :aria-pressed="r === msg.routeName"
+                      @click="onFeedback(msg.query, r, msg.id)"
+                    >{{ r }}</button>
+                  </div>
+                </div>
+
+                <div v-else-if="panelOf(msg.id) === 'insights' && msg.queryId" class="chat-panel">
+                  <RetrievalInsights :queryId="msg.queryId" open />
+                </div>
+              </Transition>
+              </div>
+            </div>
+          </article>
+        </template>
+
+        <!-- Gate preview awaiting confirmation: the model has NOT been called -->
+        <article v-if="gatePreview" class="chat-ai">
+          <span class="chat-ai-avatar"><BrandLogo /></span>
+          <div class="chat-gate min-w-0">
+            <h3><ShieldCheck aria-hidden="true" />Review the context before it's sent<span class="chat-tag" data-tone="warn">model not called yet</span></h3>
+            <div class="chat-context-box prose prose-invert prose-sm max-w-none text-left" v-html="renderMarkdown(gatePreview.markdown)"></div>
+            <p class="chat-muted text-xs">This is the exact markdown the model will receive. Nothing has been generated yet.</p>
+            <div class="chat-gate-actions">
+              <button type="button" class="chat-btn" @click="emit('cancelSend')"><X aria-hidden="true" />Cancel</button>
+              <button type="button" class="chat-btn" data-variant="primary" @click="emit('confirmSend')"><SendHorizontal aria-hidden="true" />Send to model</button>
+            </div>
+          </div>
+        </article>
+
+        <!-- Working -->
+        <article v-if="loading" class="chat-ai">
+          <span class="chat-ai-avatar"><BrandLogo /></span>
+          <div class="min-w-0">
+            <PipelineProgress v-if="displaySteps.length > 0" :fileName="activeFileName || 'project'" :steps="displaySteps" />
+            <ChatLoading v-else :label="generatingAnswer ? 'Generating answer' : 'Thinking'" />
+          </div>
+        </article>
       </div>
     </div>
 
-    <!-- Chat Input Bar -->
-    <div class="p-6 border-t border-slate-800 bg-[#0c101f]/30">
-      <div class="max-w-4xl mx-auto">
-        
-        <!-- File warning if knowledge base is empty -->
-        <div v-if="filesCount === 0" class="mb-4 p-3 bg-indigo-950/20 border border-indigo-500/20 rounded-xl text-xs flex items-center gap-3 text-indigo-300 text-left">
-          <Info class="w-4 h-4 shrink-0 text-indigo-400" />
-          <span>Your active knowledge base has no document references indexed yet. Upload reference material under the **Files** tab first!</span>
-        </div>
-
-        <!-- Active project file -->
-        <div v-if="activeFileName" class="mb-3 text-left">
-          <span class="text-[10px] font-mono px-2 py-1 rounded-full bg-emerald-500/10 text-emerald-400 border border-emerald-500/20 inline-flex items-center gap-1">
-            <Database class="w-3 h-3" />
-            Project: {{ activeFileName }}
-            <button @click="emit('clearAttach')" class="ml-1 text-emerald-500 hover:text-emerald-300">
-              <X class="w-3 h-3" />
-            </button>
+    <!-- Composer -->
+    <div class="chat-dock">
+      <div v-if="showSystemMonitor" class="chat-monitor-row">
+        <SysMonitor :lowPerformanceMode="lowPerformanceMode" />
+      </div>
+      <form class="chat-composer" @submit.prevent="onSubmit">
+        <div v-if="activeFileName" class="chat-attached">
+          <span class="chat-tag" data-tone="ok">
+            <FolderGit2 aria-hidden="true" />{{ activeFileName }}
+            <button type="button" class="chat-tag-x" aria-label="Stop using this project" title="Stop using this project" @click="emit('clearAttach')"><X aria-hidden="true" /></button>
           </span>
         </div>
-
-        <!-- Input area -->
-        <form @submit.prevent="onSubmit" class="relative">
-          <input
-            v-model="chatInput"
-            type="text"
-            :placeholder="activeFileName ? 'Ask about your project code...' : 'Ask me about APIs, code snippets, or configurations of your indexed files...'"
-            class="w-full bg-[#11162d] border border-slate-800 rounded-xl py-4 pl-5 pr-14 text-sm focus:outline-none focus:border-indigo-500 focus:ring-1 focus:ring-indigo-500 transition-all font-mono placeholder-slate-500 text-slate-100"
-            :disabled="chatLocked"
-          />
-          <button
-            type="submit"
-            class="absolute right-3.5 top-3.5 p-1.5 rounded-lg bg-indigo-600 hover:bg-indigo-700 text-white transition-all disabled:opacity-50 disabled:cursor-not-allowed"
-            :disabled="!chatInput.trim() || chatLocked"
-          >
-            <Send class="w-4 h-4" />
-          </button>
-        </form>
-        <div class="mt-2 flex items-center justify-between gap-3 text-[10px] text-slate-500">
-          <div class="flex items-center gap-3 flex-wrap">
-            <button
-              type="button"
-              @click="emit('update:useRemote', !useRemote)"
-              :class="useRemote ? 'bg-indigo-600/20 border-indigo-500/40 text-indigo-300' : 'bg-[#11162d] border-slate-800 text-slate-400 hover:text-white'"
-              class="px-2.5 py-1 rounded-lg border text-[10px] font-mono inline-flex items-center gap-1 transition-all"
-              :disabled="chatLocked"
-              title="Route this answer to the external OpenAI-compatible model"
-              aria-label="Toggle external model"
+        <textarea
+          ref="inputEl"
+          v-model="chatInput"
+          rows="1"
+          aria-label="Message"
+          :placeholder="activeFileName ? `Ask about ${activeFileName}…` : 'Ask about APIs, code or configuration in your indexed projects…'"
+          :disabled="chatLocked"
+          @input="autoGrow"
+          @keydown="onComposerKeydown"
+        ></textarea>
+        <div class="chat-composer-bar">
+          <label class="chat-pick" title="Answer from">
+            <FolderGit2 aria-hidden="true" />
+            <select
+              :value="activeSourceValue ?? activeFileId ?? ''"
+              aria-label="Answer from"
+              :disabled="files.length === 0 && !(chatRevisions && chatRevisions.length)"
+              @change="onSelectFile"
             >
-              <Cpu class="w-3.5 h-3.5" />
-              {{ useRemote ? 'External Model' : 'Local Model' }}
+              <option value="" disabled>Choose a project…</option>
+              <optgroup v-for="project in chatRevisions || []" :key="project.project_id" :label="`Project ${project.project_id}`">
+                <option :value="revisionOptionValue(project.project_id, 'latest')">{{ project.project_id }} · latest</option>
+                <option v-for="rev in project.revisions" :key="rev.revision_id" :value="revisionOptionValue(project.project_id, rev.revision_id)">
+                  {{ project.project_id }} · {{ describeRevision(rev) }}
+                </option>
+              </optgroup>
+              <optgroup v-if="files.length" label="Uploaded files">
+                <option v-for="f in files" :key="f.id" :value="f.id">{{ f.name }}<template v-if="f.projectId"> · {{ f.projectId }}</template></option>
+              </optgroup>
+            </select>
+            <ChevronsUpDown aria-hidden="true" />
+          </label>
+          <div class="chat-seg" role="group" aria-label="Model">
+            <button type="button" :aria-pressed="!useRemote" :disabled="chatLocked" title="Answer with the local model" @click="emit('update:useRemote', false)">
+              <HardDrive aria-hidden="true" />Local
             </button>
-            <label class="cursor-pointer hover:text-indigo-400 transition-colors flex items-center gap-1">
-              <input type="file" accept=".zip" hidden @change="onAttachZip" />
-              <Paperclip class="w-3.5 h-3.5" />
-              <span class="font-mono">Attach .zip</span>
-            </label>
-            <div class="flex items-center gap-1.5">
-              <FolderOpen class="w-3.5 h-3.5 text-slate-500" />
-              <select
-                :value="activeSourceValue ?? activeFileId ?? ''"
-                @change="onSelectFile"
-                :disabled="files.length === 0 && !(chatRevisions && chatRevisions.length)"
-                class="bg-[#11162d] border border-slate-800 rounded-lg px-2 py-1 text-[10px] font-mono text-slate-300 focus:outline-none focus:border-indigo-500 disabled:opacity-50 max-w-[200px]"
-              >
-                <option value="" disabled>Choose from knowledge base…</option>
-                <optgroup v-for="project in chatRevisions || []" :key="project.project_id" :label="`Project ${project.project_id}`">
-                  <option :value="revisionOptionValue(project.project_id, 'latest')">{{ project.project_id }} · latest</option>
-                  <option v-for="rev in project.revisions" :key="rev.revision_id"
-                    :value="revisionOptionValue(project.project_id, rev.revision_id)">
-                    {{ project.project_id }} · {{ describeRevision(rev) }}
-                  </option>
-                </optgroup>
-                <optgroup v-if="files.length" label="Uploaded files">
-                  <option v-for="f in files" :key="f.id" :value="f.id">{{ f.name }}<template v-if="f.projectId"> · {{ f.projectId }}</template></option>
-                </optgroup>
-              </select>
-            </div>
+            <button type="button" :aria-pressed="useRemote" :disabled="chatLocked" title="Answer with the external OpenAI-compatible model" @click="emit('update:useRemote', true)">
+              <Cloud aria-hidden="true" />External
+            </button>
           </div>
-          <span v-if="gatePreview" class="font-mono shrink-0 text-amber-400/90">Confirm or cancel the preview above.</span>
-          <span v-else-if="previewMode === 'gate'" class="font-mono shrink-0 text-amber-400/70">Gate mode — you review the context window before the model runs.</span>
-          <span v-else-if="previewMode === 'inline'" class="font-mono shrink-0 text-violet-400/70">Inline — each answer carries a “Context Window” disclosure.</span>
-          <span v-else class="font-mono shrink-0">Press Enter to send.</span>
+          <label class="chat-pick chat-pick-icon" title="Attach a .zip" aria-label="Attach a .zip">
+            <input type="file" accept=".zip" hidden @change="onAttachZip" />
+            <Paperclip aria-hidden="true" />
+          </label>
+          <button type="submit" class="chat-send" :disabled="!chatInput.trim() || chatLocked">
+            <SendHorizontal aria-hidden="true" />Send
+          </button>
         </div>
+      </form>
+      <div class="chat-hint">
+        <span><kbd>Enter</kbd> to send · <kbd>Shift</kbd>+<kbd>Enter</kbd> for a new line</span>
+        <span v-if="gatePreview" data-tone="warn">Confirm or cancel the preview above.</span>
+        <span v-else-if="previewMode === 'gate'" data-tone="warn">Gate mode: you review the context before the model runs.</span>
+        <span v-else-if="previewMode === 'inline'">Inline: each answer includes the context it used.</span>
       </div>
     </div>
 
-    <EvaluationModal
-      :show="showEvaluation"
-      :queryId="evalQueryId"
-      @close="showEvaluation = false"
-    />
-  </div>
+    <EvaluationModal :show="showEvaluation" :queryId="evalQueryId" @close="showEvaluation = false" />
+  </section>
 </template>
