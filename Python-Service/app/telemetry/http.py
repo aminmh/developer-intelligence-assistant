@@ -617,6 +617,46 @@ def chat_revisions(request: Request) -> dict:
                          for project_id, rows in sorted(get_registry().ready_revisions_by_project().items())]}
 
 
+def _existing_collections() -> set[str] | None:
+    """Qdrant collection names, or None when Qdrant cannot be reached."""
+    try:
+        from qdrant_client import QdrantClient
+
+        from infra.settings import settings
+        kwargs = {"url": settings.qdrant_url, "timeout": 5}
+        if settings.qdrant_api_key:
+            kwargs["api_key"] = settings.qdrant_api_key
+        return {item.name for item in QdrantClient(**kwargs).get_collections().collections}
+    except Exception:  # noqa: BLE001 — the switcher falls back to registry state
+        return None
+
+
+def project_scope(registry: SnapshotRegistry, collections: set[str] | None) -> list[dict]:
+    """Projects with their revisions; a ready revision whose vectors are gone is not indexed."""
+    from rag.revision_source import revision_label
+
+    projects = []
+    for project_id, rows in sorted(registry.revisions_by_project().items()):
+        revisions = []
+        for row in rows:
+            collection = row.get("collection_name")
+            ready = row.get("state") == "ready"
+            indexed = ready and (collections is None or (bool(collection) and collection in collections))
+            revisions.append({**revision_label(row, "pinned"), "state": row.get("state"), "indexed": indexed,
+                              "vectors_missing": ready and not indexed})
+        projects.append({"project_id": project_id, "revisions": revisions,
+                         "indexed": any(item["indexed"] for item in revisions)})
+    return projects
+
+
+@chat_router.get("/scope")
+def chat_scope(request: Request) -> dict:
+    """Every project and revision for the app-wide switcher; the web server filters by access."""
+    authorize_internal(request)
+    collections = _existing_collections()
+    return {"projects": project_scope(get_registry(), collections), "vectors_checked": collections is not None}
+
+
 working_tree_router = APIRouter(prefix="/telemetry/working-tree", tags=["Working-tree sync"])
 
 

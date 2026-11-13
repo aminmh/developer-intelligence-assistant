@@ -202,6 +202,17 @@ class SnapshotRegistry:
                 items.append(self._row_result(row))
         return result
 
+    def revisions_by_project(self, per_project: int = 20) -> dict[str, list[dict]]:
+        """Each project's revisions in any state, newest first, for the app-wide project switcher."""
+        with self._connect() as db:
+            rows = db.execute("SELECT * FROM snapshots ORDER BY project_id, created_at DESC, rowid DESC").fetchall()
+        result: dict[str, list[dict]] = {}
+        for row in rows:
+            items = result.setdefault(row["project_id"], [])
+            if len(items) < per_project:
+                items.append(self._row_result(row))
+        return result
+
     def project_revisions(self, project_id: str) -> list[dict]:
         """All revisions of a project, newest first."""
         validate_project_id(project_id)
