@@ -13,7 +13,7 @@ from typing import Any
 
 from telemetry.snapshot import Snapshot, source_filter, validate_project_id, validate_revision_id
 
-TRACER_VERSION = "php-call-reachability-1"
+TRACER_VERSION = "php-call-reachability-2"
 MAX_GRAPH_NODES = 20_000
 MAX_GRAPH_EDGES = 60_000
 MAX_TRACES = 3
@@ -22,18 +22,45 @@ MAX_TRAVERSAL_STEPS = 50_000
 MAX_EXCERPT_CHARS = 900
 MAX_UNRESOLVED_DETAILS = 100
 
-_FLOW_TYPES = ({
+# A request object: $request / $req, $this->request, or Laravel's request() helper.
+_REQUEST_OBJECT = r"(?:\$(?:request|req)\b|\$this\s*->\s*request\b|\brequest\s*\(\s*\))"
+_REQUEST_READERS = (r"(?:input|get|post|query|only|all|except|cookie|header|file|json|string|integer|float|"
+                    r"boolean|date|enum|collect|validated|safe|route|getContent)")
+# Source: values that come from the HTTP request. Method names alone (for example Eloquent's
+# ->get() that runs a query) are not request input; the receiver must be a request object.
+_SOURCE = re.compile(
+    r"\$_(?:GET|POST|REQUEST|COOKIE|FILES|SERVER)\b"
+    rf"|{_REQUEST_OBJECT}\s*->\s*{_REQUEST_READERS}\s*\("
+    # Symfony: $request->query->get(...), $request->request->all(), ...
+    rf"|{_REQUEST_OBJECT}\s*->\s*(?:query|request|attributes|cookies|files|headers)\s*->\s*\w+\s*\("
+    r"|\brequest\s*\(\s*['\"]"
+    r"|\bRequest::(?:input|get|post|query|only|all|except|cookie|header|file|json)\s*\("
+    r"|php://input",
+    re.IGNORECASE,
+)
+# Sink: operations that are dangerous when they receive request data. Query-builder calls with
+# bound values (Model::query(), ->where(), ->select('column')) are not sinks; raw SQL is.
+_SINK = re.compile(
+    # Global PHP functions only: not ->exec() / ::system() methods or "function exec(" declarations.
+    r"(?<![\w>:$])(?<!function )(?:eval|exec|shell_exec|system|passthru|proc_open|popen|pcntl_exec|"
+    r"unserialize|assert|create_function)\s*\("
+    r"|\bDB::(?:select|selectOne|selectResultSets|cursor|insert|update|delete|statement|unprepared|"
+    r"affectingStatement|raw)\s*\("
+    r"|\bDB::connection\s*\([^)]*\)\s*->\s*(?:select|selectOne|cursor|insert|update|delete|statement|"
+    r"unprepared|affectingStatement|raw)\s*\("
+    r"|->\s*(?:whereRaw|orWhereRaw|havingRaw|orHavingRaw|orderByRaw|groupByRaw|selectRaw|fromRaw|joinRaw)\s*\("
+    # PDO / mysqli handles; $this, $request and query-builder variables are excluded.
+    r"|\$(?!this\b|request\b|req\b|query\b|builder\b)\w+\s*->\s*(?:query|exec|prepare|multi_query|real_query)\s*\("
+    r"|\b(?:mysqli_query|mysqli_multi_query|mysqli_real_query|pg_query|pg_send_query)\s*\("
+    # Doctrine DBAL / ORM statements built from strings.
+    r"|->\s*(?:executeQuery|executeStatement|executeUpdate|createNativeQuery|createQuery)\s*\(",
+    re.IGNORECASE,
+)
+_FLOW_TYPES = {
     "id": "php.request_input_to_sensitive_sink",
-    "source": re.compile(
-        r"\$_(?:GET|POST|REQUEST|COOKIE|FILES)\b|->(?:input|get|post|only)\s*\(",
-        re.IGNORECASE,
-    ),
-    "sink": re.compile(
-        r"\b(?:eval|exec|shell_exec|system|passthru|unserialize)\s*\(|"
-        r"(?:->|::)(?:query|select|statement|exec)\s*\(",
-        re.IGNORECASE,
-    ),
-})
+    "source": _SOURCE,
+    "sink": _SINK,
+}
 _CALLABLE_TYPES = {"method", "function", "class_method", "classmethod"}
 
 

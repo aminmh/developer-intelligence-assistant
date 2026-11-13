@@ -142,7 +142,7 @@ def test_assessment_sends_trace_excerpts_but_persists_only_citations(monkeypatch
          "query_count": 0, "evidence_count": 0, "reason": "not indexed"}, []))
     private_snippet = "$_POST['value']; $db->query($value);"
     trace_summary = {"status": "complete", "revision_id": REVISION,
-                     "tracer_version": "php-call-reachability-1", "flow_types": ["php.request_input_to_sensitive_sink"],
+                     "tracer_version": "php-call-reachability-2", "flow_types": ["php.request_input_to_sensitive_sink"],
                      "node_count": 2, "edge_count": 1, "trace_count": 1,
                      "unresolved_edge_count": 0, "limits": {}, "limits_reached": [],
                      "reason": "Call reachability only.",
@@ -150,7 +150,7 @@ def test_assessment_sends_trace_excerpts_but_persists_only_citations(monkeypatch
                                             "chunk_count": 0, "signal_count": 0,
                                             "principles_with_static_signals": []}}
     trace_evidence = [{"evidence_id": "ev_flow", "kind": "semantic_trace", "category": "security",
-                       "rule": "php-call-reachability-1", "file": "src/Controller.php", "line": 10,
+                       "rule": "php-call-reachability-2", "file": "src/Controller.php", "line": 10,
                        "message": "PHP request-input to sensitive-operation call path.",
                        "context_snippet": private_snippet,
                        "trace": {"nodes": [{"symbol": "App\\Controller::create", "file": "src/Controller.php",
@@ -215,3 +215,47 @@ def test_assessment_sends_trace_excerpts_but_persists_only_citations(monkeypatch
     assert "context_snippet" not in saved_design
     saved_context = next(row for row in report["evidence"] if row.get("evidence_id") == "ev_php_context")
     assert "context_snippet" not in saved_context
+
+
+# Laravel code from the pizza project that version 1 reported: Eloquent's ->get() was taken as
+# request input and Model::query() / ->select() as raw SQL.
+PIZZA_FALSE_POSITIVES = [
+    """$cartItems = CartItem::query()->with('cart')->where('pizza_id', $pizza->id)
+        ->whereHas('cart', fn ($query) => $query->whereNull('user_id'))->get();""",
+    """$size = PizzaSize::find($data['size_id']);
+    $options = PizzaOption::query()->with(['prices' => fn ($query) => $query->where('pizza_size_id', $data['size_id'])])
+        ->whereIn('id', $optionIds)->get()->keyBy('id');""",
+    """return QueryBuilder::for(PizzaOptionPrice::class)->allowedSorts(...$sorts)
+        ->where('pizza_option_id', $pizzaOptionId)->with('size')->get();
+    $query->orderBy(PizzaSize::query()->select('sort_order')->whereColumn('a', 'b'), $descending ? 'desc' : 'asc');""",
+    """$perPage = (int) request()->query('per_page', 20); return $this->query($pizzaOptionId)->paginate($perPage);""",
+    """public function system(): string { return $this->exec('status'); }""",
+]
+
+
+def test_eloquent_queries_are_neither_request_input_nor_sinks():
+    for code in PIZZA_FALSE_POSITIVES:
+        chunks = [_chunk("App\\Controller::create", "src/Controller.php", 10, code)]
+        summary, evidence = build_call_traces(PROJECT, REVISION, _snapshot(), chunks, BUSINESS_FILES)
+        assert evidence == [], code
+        assert summary["trace_count"] == 0
+
+
+def test_request_input_reaching_raw_sql_or_commands_is_still_traced():
+    risky = [
+        ("$sort = $request->input('sort');", "$query->orderByRaw($sort);"),
+        ("$term = request('q');", "return DB::select(\"select * from pizzas where name like '%$term%'\");"),
+        ("$id = $request->query->get('id');", "$this->connection->executeQuery('select ' . $id);"),
+        ("$name = $_GET['name'];", "exec('convert ' . $name);"),
+        ("$data = $request->getContent();", "return unserialize($data);"),
+        ("$value = request()->input('v');", "$pdo->query(\"delete from t where id = $value\");"),
+    ]
+    for source, sink in risky:
+        chunks = [
+            _chunk("App\\Controller::create", "src/Controller.php", 10, source + " $this->save($x);",
+                   ["App\\Service::save"]),
+            _chunk("App\\Service::save", "src/Service.php", 20, sink),
+        ]
+        _, evidence = build_call_traces(PROJECT, REVISION, _snapshot(), chunks, BUSINESS_FILES)
+        assert len(evidence) == 1, (source, sink)
+        assert [node["symbol"] for node in evidence[0]["trace"]["nodes"]] == ["App\\Controller::create", "App\\Service::save"]
