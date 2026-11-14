@@ -9,6 +9,7 @@ import RemoteHostMonitor from './RemoteHostMonitor.vue';
 import RuntimeSetupWizard from './runtime/RuntimeSetupWizard.vue';
 import ToggleCard from './ToggleCard.vue';
 import { makeRequest } from '../ui/makeRequest';
+import { runtimeProjectOptions } from '../utils/runtimeProjects';
 import { subscribeRuntimeUpdates } from '../ui/runtimeEvents';
 import { useUrlTab } from '../composables/useUrlTab';
 import { useProjectScope } from '../composables/useProjectScope';
@@ -66,6 +67,7 @@ const setupState = ref<'idle' | 'starting' | 'running' | 'complete' | 'cancelled
 const setupMessage = ref('');
 const activeOperation = ref<'setup' | 'cleanup' | 'remove' | ''>('');
 const savedSetup = ref<any>(null);
+const loadingSetup = ref(true);
 const showSetupWizard = ref(false);
 const showGuide = ref(false);
 const autoRefresh = ref(false);
@@ -99,30 +101,7 @@ const spanAttributesSnippet = [
 ].join('\n');
 let stopRuntimeUpdates: (() => void) | undefined;
 
-const options = computed(() => {
-  const byKey = new Map<string, RuntimeProjectRecord & { key: string; commit_sha: string }>();
-  for (const project of projects.value) {
-    const commits = [...new Set([project.commit_sha, ...(project.running_commit_shas || [])]
-      .filter((commit): commit is string => typeof commit === 'string' && commit.length > 0))];
-    for (const commit_sha of commits) {
-      const isSnapshot = project.commit_sha === commit_sha;
-      const revision_id = isSnapshot ? project.revision_id : null;
-      const key = revision_id ? `${project.project_id}:${revision_id}` : `${project.project_id}:docker-only`;
-      const current = byKey.get(key);
-      const option = {
-        ...project,
-        key,
-        commit_sha,
-        revision_id,
-        state: isSnapshot ? project.state : 'awaiting_source',
-      };
-      // Prefer the real snapshot row when it exists; otherwise make active
-      // deployments selectable even before their source snapshot is uploaded.
-      if (!current || isSnapshot) byKey.set(key, option);
-    }
-  }
-  return [...byKey.values()];
-});
+const options = computed(() => runtimeProjectOptions(projects.value));
 const selected = computed(() => options.value.find((item) => item.key === selectedKey.value) || null);
 // The header switcher picks the project; this page lists that project's revisions and deployments.
 const scope = useProjectScope();
@@ -188,7 +167,7 @@ const loadProjects = async () => {
 };
 
 const loadDetail = async () => {
-  if (!selected.value?.commit_sha) {
+  if (!selected.value || (!selected.value.revision_id && !selected.value.commit_sha)) {
     loadedDetailKey.value = '';
     detail.value = null;
     requestList.value = null;
@@ -567,13 +546,15 @@ const loadSavedSetup = async (showExistingNotice = true) => {
     const data = await response.json().catch(() => ({}));
     if (response.ok) {
       savedSetup.value = data.configured ? data : null;
-      if (data.configured && showExistingNotice) {
-        setupState.value = 'complete';
+      if (data.configured && showExistingNotice && !setupBusy.value) {
+        setupState.value = data.phase === 'active' ? 'complete' : 'error';
         setupMessage.value = `Existing setup: ${data.project_id} · ${data.environment} (${data.phase}).`;
       }
     }
   } catch {
     // Runtime inventory remains available to users who cannot run host setup.
+  } finally {
+    loadingSetup.value = false;
   }
 };
 const startRuntimeSetup = async () => {
@@ -834,8 +815,8 @@ const setupBannerTone = computed(() => (setupState.value === 'error' ? 'bad' : s
 
         <div class="rt-bar-end">
           <div class="rt-group" role="group" aria-label="Runtime setup">
-            <button type="button" class="rt-btn" :disabled="!!savedSetup || showSetupWizard || setupBusy" @click="startRuntimeSetup">
-              <WandSparkles :class="{ 'rt-pulse': setupBusy && activeOperation === 'setup' }" aria-hidden="true" />{{ setupBusy && activeOperation === 'setup' ? 'Setting up…' : 'Set up Runtime' }}
+            <button type="button" class="rt-btn" :disabled="loadingSetup || !!savedSetup || showSetupWizard || setupBusy" @click="startRuntimeSetup">
+              <RefreshCw v-if="loadingSetup || (setupBusy && activeOperation === 'setup')" class="rt-spin" aria-hidden="true" /><WandSparkles v-else aria-hidden="true" />{{ loadingSetup ? 'Checking setup…' : setupBusy && activeOperation === 'setup' ? 'Setting up…' : 'Set up Runtime' }}
             </button>
             <button type="button" class="rt-btn" :aria-expanded="showGuide" @click="showGuide = !showGuide">
               <BookOpen aria-hidden="true" />{{ showGuide ? 'Hide guide' : 'Get started' }}
@@ -850,13 +831,13 @@ const setupBannerTone = computed(() => (setupState.value === 'error' ? 'bad' : s
         </div>
       </div>
 
-      <div v-if="setupState !== 'idle'" class="rt-banner" :data-tone="setupBannerTone" role="status">
+      <div v-if="setupState !== 'idle'" class="rt-banner" :data-tone="setupBannerTone" :aria-busy="setupBusy" role="status">
         <CheckCircle2 v-if="setupState === 'complete'" aria-hidden="true" />
         <AlertTriangle v-else-if="setupState === 'error' || setupState === 'cancelled'" aria-hidden="true" />
-        <Activity v-else class="rt-pulse" aria-hidden="true" />
+        <RefreshCw v-else class="rt-spin" aria-hidden="true" />
         <div class="rt-banner-text">
-          <b>{{ setupState === 'complete' ? (activeOperation === 'cleanup' ? 'Cleanup complete' : activeOperation === 'remove' ? 'Local container removal complete' : savedSetup ? 'Existing setup record' : 'Setup complete') : setupState === 'cancelled' ? (activeOperation === 'cleanup' ? 'Cleanup cancelled' : activeOperation === 'remove' ? 'Local container removal cancelled' : 'Setup cancelled') : setupState === 'error' ? (activeOperation === 'cleanup' ? 'Cleanup needs attention' : activeOperation === 'remove' ? 'Local container removal needs attention' : 'Setup failed') : activeOperation === 'cleanup' ? 'Runtime cleanup' : activeOperation === 'remove' ? 'Local container removal' : 'Runtime setup' }}</b>
-          <span> {{ setupMessage }}</span>
+          <b>{{ setupState === 'complete' ? (activeOperation === 'cleanup' ? 'Cleanup complete' : activeOperation === 'remove' ? 'Local container removal complete' : activeOperation === 'setup' ? 'Setup complete' : savedSetup ? 'Existing setup record' : 'Setup complete') : setupState === 'cancelled' ? (activeOperation === 'cleanup' ? 'Cleanup cancelled' : activeOperation === 'remove' ? 'Local container removal cancelled' : 'Setup cancelled') : setupState === 'error' ? (activeOperation === 'cleanup' ? 'Cleanup needs attention' : activeOperation === 'remove' ? 'Local container removal needs attention' : 'Setup failed') : activeOperation === 'cleanup' ? 'Runtime cleanup' : activeOperation === 'remove' ? 'Local container removal' : 'Runtime setup' }}</b>
+          <span class="rt-block">{{ setupMessage }}</span>
           <span v-if="savedSetup" class="rt-block">Compose project: {{ savedSetup.compose_project || 'unknown' }} · Services: {{ (savedSetup.services || []).join(', ') || 'none recorded' }}. Available containers are listed below.</span>
         </div>
       </div>
@@ -871,7 +852,7 @@ const setupBannerTone = computed(() => (setupState.value === 'error' ? 'bad' : s
         <h2>No Docker containers are reporting yet</h2>
         <p>Start the local host agent and opt in your Compose services. You don't need to upload source code to see containers.</p>
         <div class="rt-empty-actions">
-          <button type="button" class="rt-btn" data-variant="primary" :disabled="!!savedSetup || showSetupWizard || setupBusy" @click="startRuntimeSetup"><WandSparkles aria-hidden="true" />Set up Runtime</button>
+          <button type="button" class="rt-btn" data-variant="primary" :disabled="loadingSetup || !!savedSetup || showSetupWizard || setupBusy" @click="startRuntimeSetup"><WandSparkles aria-hidden="true" />Set up Runtime</button>
           <button v-if="!showGuide" type="button" class="rt-btn" @click="showGuide = true"><BookOpen aria-hidden="true" />Open the guide</button>
         </div>
       </div>
@@ -980,7 +961,10 @@ const setupBannerTone = computed(() => (setupState.value === 'error' ? 'bad' : s
             <p v-if="requestList?.available !== false && requestOutcome === 'slow' && requestList?.slow_threshold_ms != null" class="rt-hint">Showing requests at or above their route's p95 server duration in this window. Routes with fewer than 20 requests use the revision p95 of {{ formatMilliseconds(requestList.slow_threshold_ms) }}.</p>
             <p v-else-if="requestList?.available !== false && requestOutcome === 'errors'" class="rt-hint">Showing failed requests and 5xx responses.</p>
             <p v-if="requestList?.available === false" class="rt-note" data-tone="warn"><AlertTriangle aria-hidden="true" />{{ requestList.reason || 'Request data is unavailable.' }}</p>
-            <p v-else-if="requestList && !requestList.requests.length" class="rt-hint">{{ requestOutcome === 'errors' ? 'No failed requests were observed in this window.' : requestOutcome === 'slow' ? 'No slow requests were observed in this window.' : 'No sampled request spans were observed in this window.' }}</p>
+            <template v-else-if="requestList && !requestList.requests.length">
+              <p class="rt-hint">{{ requestOutcome === 'errors' ? 'No failed requests were observed in this window.' : requestOutcome === 'slow' ? 'No slow requests were observed in this window.' : 'No sampled request spans were observed in this window.' }}</p>
+              <p v-if="requestOutcome === 'all'" class="rt-hint">Check that the PHP app's <code>INDEXER_PROJECT_ID</code> and <code>INDEXER_REVISION_ID</code> match this project and revision. Container setup alone does not enable PHP request tracing.</p>
+            </template>
             <div v-else-if="requestList && !visibleRequests.length" class="rt-note"><span>All loaded request rows are hidden in this view.</span><button type="button" class="rt-link" @click="restoreHiddenRequestRows">Show hidden requests ({{ requestList.requests.length }})</button></div>
 
             <div v-else-if="visibleRequests.length" class="rt-requests">
