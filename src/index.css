@@ -2510,7 +2510,7 @@ details[open] > summary > .sc-chev { transform: rotate(180deg); }
   box-shadow: 0 10px 22px rgb(0 0 0 / 0.22), 0 0 18px rgb(var(--shell-grad-a-rgb) / 0.12);
 }
 .st-nav-item[aria-current="page"] .st-nav-icon { border-color: transparent; background: var(--shell-grad); color: #0b0f1e; box-shadow: 0 0 14px rgb(var(--shell-grad-a-rgb) / 0.4); }
-.st-content { min-width: 0; min-height: 0; overflow-y: auto; margin-left: 1rem; padding: 0.5rem; }
+.st-content { min-width: 0; min-height: 0; overflow-y: auto; padding-right: 0.25rem; }
 .st-section { display: flex; flex-direction: column; gap: 0.875rem; max-width: 60rem; }
 .st-head h2 { display: flex; align-items: center; gap: 0.625rem; margin: 0; font-size: 1.125rem; font-weight: 600; }
 .st-head h2 svg { width: 1.25rem; height: 1.25rem; color: rgb(var(--shell-grad-a-rgb)); }
@@ -2565,7 +2565,7 @@ details[open] > summary > .sc-chev { transform: rotate(180deg); }
 .st-toggle-icon { width: 1rem; height: 1rem; flex-shrink: 0; color: rgb(var(--shell-grad-a-rgb)); }
 
 /* Save bar: only on sections that write the server config */
-.st-savebar { position: sticky; bottom: 0; z-index: 2; display: flex; flex-wrap: wrap; align-items: center; gap: 0.75rem; padding: 0.75rem 0.875rem; border: 1px solid rgb(var(--shell-grad-a-rgb) / 0.3); border-radius: 0.875rem; background: color-mix(in srgb, var(--st-solid) 94%, transparent); box-shadow: 0 -10px 30px rgb(0 0 0 / 0.25); }
+.st-savebar { position: sticky; bottom: 0; z-index: 2; display: flex; flex-wrap: wrap; align-items: center; gap: 0.75rem; margin-left: 1rem; padding: 0.75rem 0.875rem; border: 1px solid rgb(var(--shell-grad-a-rgb) / 0.3); border-radius: 0.875rem; background: color-mix(in srgb, var(--st-solid) 94%, transparent); box-shadow: 0 -10px 30px rgb(0 0 0 / 0.25); }
 .st-savebar span { flex: 1 1 14rem; font-size: 0.8125rem; color: var(--shell-text-2); }
 .st-savebar-icon { width: 1rem; height: 1rem; color: rgb(var(--shell-grad-a-rgb)); }
 .st-btn { display: inline-flex; align-items: center; justify-content: center; gap: 0.4375rem; height: 2.5rem; padding: 0 1rem; border: 1px solid var(--shell-line-strong); border-radius: 0.6875rem; background: var(--shell-field); color: var(--shell-text); font-size: 0.8125rem; font-weight: 500; white-space: nowrap; cursor: pointer; }
