@@ -237,32 +237,26 @@ select:not([multiple]) {
 }
 .app-sidebar[data-collapsed="true"] { width: 4.5rem; }
 
-/* Neon edge: a static gradient line with one light travelling along it (transform only). */
-.app-sidebar-edge {
-  position: absolute;
-  top: 1.5rem;
-  right: 0;
-  width: 1px;
-  height: calc(100% - 3rem);
-  overflow: hidden;
-  pointer-events: none;
-  background: linear-gradient(180deg, transparent, rgb(var(--shell-grad-a-rgb) / 0.55), rgb(var(--shell-grad-b-rgb) / 0.55), transparent);
-}
-.app-sidebar-edge::after {
+/* Full perimeter glow: only opacity animates; the masked center stays transparent. */
+.app-sidebar-edge,
+.app-header::after {
   content: "";
   position: absolute;
-  left: 0;
-  top: 0;
-  width: 1px;
-  height: 120px;
-  opacity: 0.7;
-  background: linear-gradient(180deg, transparent, #fff, transparent);
-  animation: app-edge-travel 7s linear infinite;
-  will-change: transform;
+  inset: 0;
+  padding: 1px;
+  border-radius: inherit;
+  pointer-events: none;
+  background: linear-gradient(135deg, rgb(var(--shell-grad-a-rgb) / 0.75), rgb(var(--shell-grad-b-rgb) / 0.6));
+  -webkit-mask: linear-gradient(#fff 0 0) content-box, linear-gradient(#fff 0 0);
+  -webkit-mask-composite: xor;
+  mask: linear-gradient(#fff 0 0) content-box, linear-gradient(#fff 0 0);
+  mask-composite: exclude;
+  animation: app-edge-pulse 7s ease-in-out infinite;
+  will-change: opacity;
 }
-@keyframes app-edge-travel {
-  from { transform: translateY(-120px); }
-  to { transform: translateY(100vh); }
+@keyframes app-edge-pulse {
+  0%, 100% { opacity: 0.45; }
+  50% { opacity: 1; }
 }
 
 .app-brand {
@@ -453,15 +447,6 @@ select:not([multiple]) {
   min-height: 3.75rem;
   padding: 0.5rem 1.25rem;
   border-radius: 1rem;
-}
-.app-header::after {
-  content: "";
-  position: absolute;
-  left: 1.25rem;
-  right: 1.25rem;
-  bottom: -1px;
-  height: 1px;
-  background: linear-gradient(90deg, rgb(var(--shell-grad-a-rgb) / 0.6), rgb(var(--shell-grad-b-rgb) / 0.4) 40%, transparent 80%);
 }
 .app-page-title { font-size: 0.9375rem; font-weight: 600; color: var(--shell-text); }
 .app-page-crumb { margin-right: 0.25rem; font-family: var(--font-mono); font-size: 0.75rem; font-weight: 400; color: var(--shell-text-3); }
@@ -2879,7 +2864,8 @@ details[open] > summary > .sc-chev { transform: rotate(180deg); }
    Low performance mode: stop every looping animation, drop the glass blur
    and hover glows. Reduced motion (OS setting) turns all motion off.
    ========================================================================== */
-.app-shell[data-low-performance="true"] .app-sidebar-edge::after,
+.app-shell[data-low-performance="true"] .app-sidebar-edge,
+.app-shell[data-low-performance="true"] .app-header::after,
 .app-shell[data-low-performance="true"] .app-status-dot::after,
 .app-shell[data-low-performance="true"] .chat-caret,
 .app-shell[data-low-performance="true"] .chat-track::after,
@@ -2935,7 +2921,8 @@ details[open] > summary > .sc-chev { transform: rotate(180deg); }
     transform: none;
   }
 
-  .app-sidebar-edge::after,
+  .app-sidebar-edge,
+  .app-header::after,
   .app-status-dot::after,
   .chat-hero,
   .chat-starter,
