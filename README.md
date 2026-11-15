@@ -428,7 +428,8 @@ last successful verification.
 
 #### Installing PHP telemetry manually
 
-Install the adapter in your PHP application directory. Each adapter brings in the shared core package.
+Install the adapter in your PHP application directory. Both adapters automatically install
+`aminmh/developer-assistant-otel-core`, so you do not need to require it separately.
 
 **Laravel** (PHP 8.1+, Illuminate 10–12):
 
@@ -446,6 +447,16 @@ composer require aminmh/developer-assistant-otel-symfony
 ```
 
 See the [Symfony installation and configuration guide](https://github.com/aminmh/developer-assistant-otel-symfony/blob/main/docs/installation.md) for setup.
+
+**Core** (PHP 8.1+):
+
+For a PHP application without a Laravel or Symfony adapter, install and integrate the core directly:
+
+```sh
+composer require aminmh/developer-assistant-otel-core
+```
+
+See the [core installation and configuration guide](https://github.com/aminmh/developer-assistant-otel-core/blob/main/docs/installation.md) for setup.
 
 #### Setting up a PHP project in one step
 
