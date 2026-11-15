@@ -426,6 +426,27 @@ flow.
 Runtime storage settings now check ClickHouse connectivity and show the active target's health and
 last successful verification.
 
+#### Installing PHP telemetry manually
+
+Install the adapter in your PHP application directory. Each adapter brings in the shared core package.
+
+**Laravel** (PHP 8.1+, Illuminate 10–12):
+
+```sh
+composer require aminmh/developer-assistant-otel-laravel
+```
+
+The Laravel package has been submitted to Packagist, but its first release is still awaiting indexing.
+See the [Laravel installation and configuration guide](https://github.com/aminmh/developer-assistant-otel-laravel/blob/main/docs/installation.md) for setup.
+
+**Symfony** (PHP 8.1+, Symfony 6.4 or 7):
+
+```sh
+composer require aminmh/developer-assistant-otel-symfony
+```
+
+See the [Symfony installation and configuration guide](https://github.com/aminmh/developer-assistant-otel-symfony/blob/main/docs/installation.md) for setup.
+
 #### Setting up a PHP project in one step
 
 For a PHP project that runs in Docker Compose, one command installs, indexes, and deploys telemetry:
