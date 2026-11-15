@@ -1,8 +1,24 @@
+<p align="center">
+  <img src="design-system/developer-assistant/logo.svg" alt="Developer Intelligence Assistant logo" width="96">
+</p>
+
 # Developer Intelligence Assistant
 
 A developer assistant for exploring source code, assessing code quality, and investigating runtime
 behavior. Upload a project, index its code, and ask questions in natural language. The application
 retrieves relevant context and uses a locally configured language model to help answer.
+
+## Screenshots
+
+The examples below show the frontend with a fictional project and simulated service responses.
+
+**Codebase chat**
+
+![Codebase chat with example prompts](docs/screenshots/chat.png)
+
+**Knowledge base**
+
+![Knowledge base for uploading and indexing a project](docs/screenshots/knowledge-base.png)
 
 ## Installation and first use
 
