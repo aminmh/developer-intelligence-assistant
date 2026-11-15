@@ -39,6 +39,10 @@ in, upload a source project through the app, index a revision, and use chat to a
 Explore **Code Quality** for source assessments and **Runtime** for configured telemetry.
 Keep the generated credentials private.
 
+For an AI-guided setup, use the [installation agent skill](agent/skills/install-developer-assistant/SKILL.md).
+It covers prerequisites, installer configuration and verification, plus optional Laravel, Symfony,
+or standalone PHP telemetry setup.
+
 
 ## What this project does
 
