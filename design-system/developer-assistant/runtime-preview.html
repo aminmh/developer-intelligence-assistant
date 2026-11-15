@@ -1,0 +1,423 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Runtime Preview</title>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+<style>
+:root {
+  --a: 34 211 238; --b: 129 140 248;
+  --grad: linear-gradient(135deg, rgb(var(--a)), rgb(var(--b)));
+  --text: #e6ebf5; --text-2: #a3aec4; --text-3: #8591a8;
+  --line: rgb(148 163 255 / .12); --line-2: rgb(148 163 255 / .22);
+  --solid: #10152a; --sunk: #0c1122; --field: rgb(8 11 22 / .55);
+  --ok: #34d399; --warn: #fcd34d; --bad: #fb7185; --ai: #a78bfa; --est: #fbbf24;
+  --ease: cubic-bezier(.2,.7,.2,1);
+  --sans: Inter, system-ui, sans-serif; --mono: "JetBrains Mono", ui-monospace, monospace;
+}
+* { box-sizing: border-box; }
+html, body { height: 100%; margin: 0; }
+body { font-family: var(--sans); color: var(--text); overflow: hidden;
+  background: radial-gradient(1200px 600px at 85% -10%, rgb(var(--b) / .16), transparent 60%), radial-gradient(900px 500px at -10% 110%, rgb(var(--a) / .1), transparent 60%), linear-gradient(160deg, #070912, #0b0f1e 52%, #0b1825); }
+button, input, select { font: inherit; color: inherit; }
+button { cursor: pointer; }
+:focus-visible { outline: 2px solid rgb(var(--a)); outline-offset: 2px; }
+svg.lucide { width: 16px; height: 16px; flex-shrink: 0; }
+.shell { position: relative; display: flex; gap: 12px; height: 100vh; padding: 12px; overflow: clip; }
+.orbs { position: absolute; inset: 0; overflow: clip; pointer-events: none; }
+.orb { position: absolute; border-radius: 50%; }
+.orb-a { width: 520px; height: 520px; left: -160px; top: 18%; background: radial-gradient(circle, rgb(var(--a) / .22), transparent 65%); }
+.orb-b { width: 460px; height: 460px; left: 120px; top: -180px; background: radial-gradient(circle, rgb(var(--b) / .24), transparent 65%); }
+.glass { background: linear-gradient(160deg, rgb(255 255 255 / .07), rgb(255 255 255 / .02)), rgb(14 18 36 / .42); backdrop-filter: blur(16px) saturate(150%); -webkit-backdrop-filter: blur(16px) saturate(150%); border: 1px solid rgb(255 255 255 / .08); box-shadow: inset 0 1px 0 rgb(255 255 255 / .08), 0 18px 48px rgb(0 0 0 / .45); }
+.sidebar { position: relative; z-index: 1; width: 72px; border-radius: 20px; display: flex; flex-direction: column; align-items: center; gap: 6px; padding: 14px 0; }
+.sidebar .logo { width: 38px; height: 38px; margin-bottom: 10px; border-radius: 11px; box-shadow: 0 0 20px rgb(var(--b) / .28); }
+.side-ico { position: relative; display: grid; place-items: center; width: 44px; height: 40px; border-radius: 12px; color: var(--text-2); }
+.side-ico.on { color: var(--text); background: linear-gradient(90deg, rgb(var(--a) / .16), rgb(var(--b) / .06)); box-shadow: inset 0 0 0 1px rgb(var(--a) / .25); }
+.side-ico.on svg { color: rgb(var(--a)); }
+.side-ico.on::before { content: ""; position: absolute; left: 3px; top: 11px; bottom: 11px; width: 3px; border-radius: 3px; background: var(--grad); box-shadow: 0 0 10px rgb(var(--a) / .9); }
+main { position: relative; z-index: 1; flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 12px; }
+header.top { display: flex; align-items: center; gap: 10px; min-height: 60px; padding: 8px 20px; border-radius: 16px; }
+.ptitle { font-size: 15px; font-weight: 600; } .crumb { font: 12px var(--mono); color: var(--text-3); margin-right: 4px; }
+.pdesc { font-size: 12px; color: var(--text-3); }
+.chip { display: inline-flex; align-items: center; gap: 7px; height: 32px; padding: 0 10px; border-radius: 8px; border: 1px solid var(--line-2); background: var(--field); color: var(--text-2); font-size: 12px; white-space: nowrap; }
+.chip.ok { color: var(--ok); border-color: rgb(52 211 153 / .3); background: rgb(52 211 153 / .08); }
+.page { flex: 1; min-height: 0; overflow-y: auto; border-radius: 16px; padding: 18px 20px 28px; border: 1px solid rgb(255 255 255 / .08); background: linear-gradient(160deg, rgb(255 255 255 / .05), rgb(255 255 255 / .015)), rgb(14 18 36 / .42); }
+.wrap { max-width: 1160px; margin: 0 auto; display: flex; flex-direction: column; gap: 16px; }
+.rise { animation: rise 260ms var(--ease) both; }
+@keyframes rise { from { opacity: 0; transform: translateY(8px); } to { opacity: 1; transform: none; } }
+
+/* toolbar: every control 40px */
+.bar { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; padding: 10px; border-radius: 14px; border: 1px solid var(--line); background: rgb(16 21 42 / .55); }
+.h40 { height: 40px; }
+.sel { display: inline-flex; align-items: center; gap: 8px; height: 40px; flex: 1 1 260px; max-width: 400px; padding: 0 12px; border-radius: 11px; border: 1px solid transparent; background: linear-gradient(var(--solid), var(--solid)) padding-box, linear-gradient(135deg, rgb(var(--a) / .5), rgb(var(--b) / .4)) border-box; font: 13px var(--mono); }
+.sel svg:first-child { color: rgb(var(--a)); }
+.sel select { flex: 1; min-width: 0; border: 0; outline: none; background: none; color: var(--text); font: inherit; appearance: none; }
+.btn { display: inline-flex; align-items: center; gap: 7px; height: 40px; padding: 0 13px; border-radius: 11px; border: 1px solid var(--line-2); background: var(--field); color: var(--text); font-size: 12.5px; font-weight: 500; white-space: nowrap; }
+.btn:hover { border-color: rgb(var(--a) / .5); }
+.btn.primary { border: 0; background: var(--grad); color: #0b0f1e; font-weight: 600; box-shadow: 0 0 18px rgb(var(--a) / .35); }
+.btn.danger { color: var(--bad); border-color: rgb(251 113 133 / .3); }
+.btn.danger:hover { background: rgb(251 113 133 / .08); }
+.btn.sm { height: 30px; padding: 0 10px; font-size: 12px; border-radius: 9px; }
+.btn.icon { width: 40px; padding: 0; justify-content: center; }
+.btn svg { width: 15px; height: 15px; }
+.group { display: inline-flex; border-radius: 11px; border: 1px solid var(--line-2); overflow: hidden; }
+.group .btn { border: 0; border-radius: 0; }
+.group .btn + .btn { border-left: 1px solid var(--line-2); }
+.toggle { display: inline-flex; align-items: center; gap: 10px; height: 40px; padding: 0 12px; border-radius: 11px; border: 1px solid var(--line-2); background: var(--field); font-size: 12px; }
+.toggle .sw { position: relative; width: 30px; height: 18px; border-radius: 999px; background: rgb(148 163 255 / .2); }
+.toggle .sw::after { content: ""; position: absolute; top: 3px; left: 3px; width: 12px; height: 12px; border-radius: 50%; background: var(--text-3); transition: transform 180ms var(--ease); }
+.toggle[aria-pressed="true"] .sw { background: var(--grad); }
+.toggle[aria-pressed="true"] .sw::after { transform: translateX(12px); background: #0b0f1e; }
+.toggle b { font: 600 11px var(--mono); color: var(--text-3); }
+.toggle[aria-pressed="true"] b { color: var(--ok); }
+.push { margin-left: auto; display: flex; gap: 8px; flex-wrap: wrap; align-items: center; }
+
+.card { border-radius: 16px; border: 1px solid var(--line); background: rgb(16 21 42 / .55); padding: 16px; }
+.sec-h { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; }
+.sec-h h3 { margin: 0; display: flex; align-items: center; gap: 8px; font-size: 14.5px; font-weight: 600; }
+.sec-h h3 svg { color: rgb(var(--a)); }
+.hint { margin: 4px 0 0; font-size: 12px; color: var(--text-3); line-height: 1.55; }
+.tag { display: inline-flex; align-items: center; gap: 5px; height: 24px; padding: 0 8px; border-radius: 7px; border: 1px solid var(--line-2); font: 11.5px var(--mono); color: var(--text-2); white-space: nowrap; }
+.tag svg { width: 12px; height: 12px; }
+.tag.ok { color: var(--ok); border-color: rgb(52 211 153 / .3); background: rgb(52 211 153 / .07); }
+.tag.warn { color: var(--warn); border-color: rgb(251 191 36 / .3); background: rgb(251 191 36 / .06); }
+.tag.bad { color: var(--bad); border-color: rgb(251 113 133 / .35); background: rgb(251 113 133 / .06); }
+.tag.ai { color: var(--ai); border-color: rgb(167 139 250 / .4); background: rgb(167 139 250 / .08); }
+.tag.obs { color: rgb(var(--a)); border-color: rgb(var(--a) / .35); background: rgb(var(--a) / .07); }
+.tag.est { color: var(--est); border-color: rgb(251 191 36 / .35); background: rgb(251 191 36 / .06); }
+.banner { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; padding: 12px 14px; border-radius: 12px; font-size: 13px; color: var(--text-2); }
+.banner.ok { border: 1px solid rgb(52 211 153 / .3); background: rgb(52 211 153 / .06); }
+.banner.ok svg:first-child { color: var(--ok); }
+.banner.warn { border: 1px solid rgb(251 191 36 / .35); background: rgb(251 191 36 / .06); }
+.banner.warn svg:first-child { color: var(--warn); }
+
+/* host monitor */
+.host { display: grid; grid-template-columns: auto 1fr repeat(3, minmax(110px, 160px)); gap: 14px; align-items: center; }
+@media (max-width: 900px) { .host { grid-template-columns: 1fr 1fr; } }
+.host .name { display: flex; align-items: center; gap: 8px; font-weight: 600; font-size: 13.5px; }
+.dot { width: 8px; height: 8px; border-radius: 50%; background: var(--ok); box-shadow: 0 0 8px var(--ok); }
+.meter { display: flex; flex-direction: column; gap: 6px; font-size: 11px; color: var(--text-3); }
+.meter b { font: 600 15px var(--mono); color: var(--text); }
+.mbar { height: 4px; border-radius: 4px; background: rgb(148 163 255 / .12); overflow: hidden; }
+.mbar i { display: block; height: 100%; width: 100%; transform-origin: left; background: var(--grad); }
+
+/* containers */
+.containers { display: grid; grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)); gap: 8px; margin-top: 12px; }
+.ctr { position: relative; display: grid; grid-template-columns: 34px minmax(0, 1fr); gap: 10px; align-items: center; padding: 12px; border-radius: 12px; border: 1px solid var(--line); background: var(--sunk); }
+.ctr .ico { display: grid; place-items: center; width: 34px; height: 34px; border-radius: 10px; background: linear-gradient(135deg, rgb(var(--a) / .18), rgb(var(--b) / .18)); border: 1px solid rgb(var(--a) / .3); color: rgb(var(--a)); }
+.ctr b { font-size: 13.5px; }
+.ctr .sub { margin-top: 2px; font: 11px var(--mono); color: var(--text-3); }
+.ctr .st { position: absolute; top: 10px; right: 10px; }
+.ctr.mis { border-color: rgb(251 191 36 / .35); }
+
+/* requests */
+.seg { display: inline-flex; padding: 2px; border-radius: 10px; border: 1px solid var(--line-2); background: var(--field); }
+.seg button { height: 28px; padding: 0 12px; border: 0; border-radius: 8px; background: transparent; color: var(--text-3); font: 12px var(--mono); }
+.seg button[aria-checked="true"] { background: var(--grad); color: #0b0f1e; font-weight: 600; }
+.req-head, .req { display: grid; grid-template-columns: 70px minmax(0, 1fr) 64px 160px 90px 20px; gap: 12px; align-items: center; }
+.req-head { padding: 8px 14px; font: 11px var(--mono); color: var(--text-3); text-transform: lowercase; }
+.reqs { margin-top: 8px; display: flex; flex-direction: column; gap: 6px; }
+.rq { border-radius: 12px; border: 1px solid var(--line); background: var(--sunk); overflow: hidden; transition: border-color 160ms; }
+.rq:hover { border-color: var(--line-2); }
+.rq.open { border-color: rgb(var(--a) / .45); box-shadow: 0 0 0 1px rgb(var(--a) / .12), 0 0 24px rgb(var(--a) / .08); }
+.req { width: 100%; padding: 11px 14px; border: 0; background: none; color: inherit; text-align: left; }
+.meth { justify-self: start; padding: 3px 8px; border-radius: 6px; font: 600 11px var(--mono); }
+.meth.get { color: #22d3ee; background: rgb(34 211 238 / .1); }
+.meth.post { color: #34d399; background: rgb(52 211 153 / .1); }
+.meth.put { color: #fbbf24; background: rgb(251 191 36 / .1); }
+.meth.delete { color: #fb7185; background: rgb(251 113 133 / .1); }
+.route { font: 13px var(--mono); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.code { font: 600 12px var(--mono); }
+.code.c2 { color: var(--ok); } .code.c4 { color: var(--warn); } .code.c5 { color: var(--bad); }
+.dur { display: flex; align-items: center; gap: 8px; font: 12px var(--mono); color: var(--text-2); }
+.dur .mbar { flex: 1; height: 5px; }
+.dur .mbar i { background: linear-gradient(90deg, rgb(var(--a)), rgb(var(--b))); }
+.dur.slow .mbar i { background: linear-gradient(90deg, #fbbf24, #fb7185); }
+.time { font: 11.5px var(--mono); color: var(--text-3); text-align: right; }
+.chev { color: var(--text-3); transition: transform 180ms var(--ease); }
+.rq.open .chev { transform: rotate(180deg); }
+.est-line { grid-column: 2 / -1; font: 11.5px var(--mono); color: var(--text-3); }
+@media (max-width: 760px) { .req-head { display: none; } .req { grid-template-columns: 60px minmax(0, 1fr) auto; } .req .dur, .req .time { grid-column: 2 / -1; } .req .chev { display: none; } }
+
+.detail { padding: 0 14px 14px; border-top: 1px solid var(--line); }
+.dtabs { display: flex; flex-wrap: wrap; gap: 4px; margin: 12px 0; padding: 3px; width: fit-content; border-radius: 11px; border: 1px solid var(--line-2); background: var(--field); }
+.dtabs button { display: inline-flex; align-items: center; gap: 6px; height: 30px; padding: 0 12px; border: 0; border-radius: 8px; background: none; color: var(--text-3); font-size: 12.5px; font-weight: 500; }
+.dtabs button svg { width: 14px; height: 14px; }
+.dtabs button[aria-selected="true"] { color: #0b0f1e; background: var(--grad); font-weight: 600; }
+.facts { display: grid; grid-template-columns: repeat(auto-fit, minmax(170px, 1fr)); gap: 8px; }
+.fact { padding: 10px 12px; border-radius: 10px; border: 1px solid var(--line); font-size: 12px; color: var(--text-3); }
+.fact b { display: block; margin-top: 3px; font: 600 14px var(--mono); color: var(--text); overflow-wrap: anywhere; }
+.insight { margin-top: 10px; padding: 12px 14px; border-radius: 12px; border: 1px solid rgb(167 139 250 / .35); background: rgb(167 139 250 / .06); }
+.insight h4 { display: flex; align-items: center; gap: 8px; margin: 0; font-size: 13px; font-weight: 600; color: #ddd6fe; }
+.insight p { margin: 6px 0 0; font-size: 13px; line-height: 1.6; color: var(--text-2); }
+.h5 { display: flex; align-items: center; gap: 8px; margin: 16px 0 8px; font-size: 12.5px; font-weight: 600; color: var(--text-2); }
+.stack { display: flex; height: 14px; border-radius: 7px; overflow: hidden; }
+.stack i { height: 100%; }
+.legend { display: flex; flex-wrap: wrap; gap: 6px 14px; margin-top: 8px; font: 12px var(--mono); color: var(--text-2); }
+.legend span { display: inline-flex; align-items: center; gap: 6px; }
+.legend i { width: 10px; height: 10px; border-radius: 3px; }
+.hot { display: grid; grid-template-columns: 52px 1fr; gap: 10px; align-items: center; margin-top: 6px; font: 12px var(--mono); }
+.hot .mbar { height: 6px; } .hot .mbar i { background: linear-gradient(90deg, #fbbf24, #fb923c); }
+.hot .f { grid-column: 2; color: #fed7aa; overflow-wrap: anywhere; margin-top: -2px; }
+.fine { margin-top: 10px; font-size: 12px; color: var(--text-3); line-height: 1.55; }
+
+/* database */
+.shape { display: grid; grid-template-columns: 52px minmax(0, 1fr) 120px; gap: 12px; align-items: center; padding: 10px 12px; border-top: 1px solid var(--line); font-size: 12.5px; }
+.shape:first-of-type { border-top: 0; }
+.shape .cnt { font: 600 13px var(--mono); }
+.shape.rep .cnt { color: var(--warn); }
+.shape .op { color: #c7d2fe; overflow-wrap: anywhere; }
+.shape .m { margin-top: 3px; font: 12px var(--mono); color: var(--text-3); overflow-wrap: anywhere; }
+.shape .t { text-align: right; font: 12px var(--mono); color: var(--text-2); }
+.shape .t .mbar { margin-top: 5px; height: 4px; }
+.table { border-radius: 12px; border: 1px solid var(--line); background: var(--sunk); }
+.rep-box { margin-top: 10px; padding: 12px; border-radius: 12px; border: 1px solid rgb(251 191 36 / .35); background: rgb(251 191 36 / .05); }
+.rep-box h4 { display: flex; align-items: center; gap: 8px; margin: 0; font-size: 13px; color: #fde68a; }
+.rep-box p { margin: 6px 0 0; font-size: 12px; color: var(--text-2); line-height: 1.55; }
+
+/* methods */
+.edge { display: grid; grid-template-columns: minmax(0, 1fr) 20px minmax(0, 1fr) 140px; gap: 10px; align-items: center; padding: 9px 12px; border-top: 1px solid var(--line); font: 12px var(--mono); }
+.edge:first-child { border-top: 0; }
+.edge .caller { color: var(--text-2); overflow-wrap: anywhere; } .edge .callee { color: rgb(var(--a)); overflow-wrap: anywhere; }
+.edge .calls { display: flex; align-items: center; gap: 8px; color: #ddd6fe; } .edge .calls .mbar { flex: 1; height: 4px; } .edge .calls .mbar i { background: linear-gradient(90deg, #a78bfa, #818cf8); }
+
+/* analysis */
+.sends { padding: 12px 14px; border-radius: 12px; border: 1px solid var(--line-2); background: var(--sunk); }
+.sends h4 { display: flex; align-items: center; gap: 8px; margin: 0; font-size: 13px; }
+.sends .cols { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; margin-top: 10px; }
+@media (max-width: 760px) { .sends .cols { grid-template-columns: 1fr; } }
+.sends ul { margin: 6px 0 0; padding: 0; list-style: none; font-size: 12.5px; line-height: 1.8; color: var(--text-2); }
+.sends li { display: flex; gap: 6px; }
+.sends .yes svg { color: var(--ok); } .sends .no svg { color: var(--bad); }
+.sends .lbl { font: 600 11px var(--mono); color: var(--text-3); }
+.finding { margin-top: 8px; padding: 12px; border-radius: 12px; border: 1px solid var(--line); background: var(--sunk); }
+.finding.picked { border-color: rgb(167 139 250 / .5); box-shadow: 0 0 20px rgb(167 139 250 / .1); }
+.finding label { display: flex; gap: 10px; cursor: pointer; }
+.finding input { margin-top: 3px; accent-color: #a78bfa; }
+.finding b { font-size: 13.5px; }
+.finding p { margin: 6px 0 0; font-size: 13px; line-height: 1.55; color: var(--text-2); }
+.finding ul { margin: 6px 0 0 18px; padding: 0; font-size: 13px; color: var(--text-2); line-height: 1.6; }
+.finding .ev { margin-top: 6px; font: 12px var(--mono); color: rgb(var(--a)); overflow-wrap: anywhere; }
+.diff { margin-top: 10px; border-radius: 12px; overflow: hidden; border: 1px solid var(--line); background: #080b16; }
+.diff-h { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; padding: 8px 12px; border-bottom: 1px solid var(--line); font: 12px var(--mono); color: var(--text-3); }
+.diff pre { margin: 0; padding: 8px 0; font: 12px/1.7 var(--mono); color: #c9d4e8; overflow-x: auto; }
+.diff pre div { padding: 0 12px; white-space: pre; }
+.diff .add { background: rgb(52 211 153 / .09); color: #a7f3d0; }
+.diff .rem { background: rgb(251 113 133 / .09); color: #fecdd3; }
+.diff .hunk { color: #818cf8; }
+
+.pager { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 10px; margin-top: 12px; padding-top: 12px; border-top: 1px solid var(--line); font: 12px var(--mono); color: var(--text-3); }
+.pages { display: flex; gap: 4px; }
+.pages button { min-width: 30px; height: 30px; border-radius: 8px; border: 1px solid var(--line-2); background: none; color: var(--text-2); font: 12px var(--mono); }
+.pages button[aria-current="page"] { border: 0; background: var(--grad); color: #0b0f1e; font-weight: 600; }
+
+/* empty + guide */
+.empty { text-align: center; padding: 44px 20px; border-radius: 16px; border: 1.5px dashed var(--line-2); }
+.empty .ico { display: grid; place-items: center; width: 56px; height: 56px; margin: 0 auto 14px; border-radius: 16px; background: linear-gradient(135deg, rgb(var(--a) / .16), rgb(var(--b) / .16)); border: 1px solid rgb(var(--a) / .3); color: rgb(var(--a)); }
+.empty .ico svg { width: 24px; height: 24px; }
+.empty h3 { margin: 0; font-size: 17px; font-weight: 600; }
+.empty p { margin: 6px auto 0; max-width: 460px; font-size: 13px; color: var(--text-2); line-height: 1.6; }
+.steps { display: grid; grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); gap: 10px; margin-top: 12px; }
+.step { position: relative; padding: 14px; border-radius: 14px; border: 1px solid var(--line); background: var(--sunk); }
+.step .n { display: grid; place-items: center; width: 28px; height: 28px; border-radius: 50%; background: var(--grad); color: #0b0f1e; font: 600 13px var(--mono); }
+.step .n.opt { background: none; border: 1px dashed rgb(var(--a) / .5); color: rgb(var(--a)); }
+.step h4 { margin: 10px 0 0; font-size: 13.5px; }
+.step p { margin: 6px 0 0; font-size: 12.5px; color: var(--text-2); line-height: 1.55; }
+.step details { margin-top: 10px; }
+.step summary { cursor: pointer; font-size: 12px; color: rgb(var(--a)); }
+.cmd { position: relative; margin-top: 8px; border-radius: 10px; border: 1px solid var(--line); background: #080b16; }
+.cmd pre { margin: 0; padding: 10px 12px; font: 11.5px/1.6 var(--mono); color: #c9d4e8; overflow-x: auto; }
+.cmd button { position: absolute; top: 6px; right: 6px; height: 24px; padding: 0 8px; border-radius: 6px; border: 1px solid var(--line-2); background: var(--solid); color: var(--text-3); font: 11px var(--mono); }
+
+.switch { position: fixed; z-index: 10; top: 22px; left: 50%; transform: translateX(-50%); display: flex; gap: 4px; padding: 4px; border-radius: 12px; background: rgb(7 9 18 / .92); border: 1px solid var(--line-2); }
+.switch button { height: 30px; padding: 0 12px; border: 0; border-radius: 8px; background: transparent; color: var(--text-2); font-size: 12px; }
+.switch button[aria-pressed="true"] { color: #0b0f1e; background: var(--grad); font-weight: 600; }
+.view[hidden], .pane[hidden] { display: none; }
+@media (prefers-reduced-motion: reduce) { *, *::before, *::after { animation: none !important; transition: none !important; } }
+@media (max-width: 700px) { .sidebar { display: none; } .switch { top: auto; bottom: 12px; } }
+</style>
+</head>
+<body>
+<div class="switch" role="group" aria-label="Preview state">
+  <button data-v="live" aria-pressed="true">Requests</button>
+  <button data-v="empty" aria-pressed="false">No containers yet</button>
+</div>
+
+<div class="shell">
+  <div class="orbs" aria-hidden="true"><div class="orb orb-a"></div><div class="orb orb-b"></div></div>
+  <aside class="sidebar glass">
+    <svg class="logo" viewBox="0 0 48 48" fill="none"><defs><linearGradient id="g1" x1="6" y1="6" x2="42" y2="42" gradientUnits="userSpaceOnUse"><stop stop-color="#22d3ee"/><stop offset="1" stop-color="#818cf8"/></linearGradient></defs><rect x="1.5" y="1.5" width="45" height="45" rx="13" fill="#0d1226" stroke="url(#g1)" stroke-opacity=".55"/><path d="M17 14 8.5 24 17 34M31 14 39.5 24 31 34" stroke="url(#g1)" stroke-width="3.4" stroke-linecap="round" stroke-linejoin="round"/><path d="M24 15.5c.9 4.6 2.9 6.6 7.5 7.5-4.6.9-6.6 2.9-7.5 7.5-.9-4.6-2.9-6.6-7.5-7.5 4.6-.9 6.6-2.9 7.5-7.5Z" fill="url(#g1)"/></svg>
+    <span class="side-ico"><i data-lucide="message-square-text"></i></span>
+    <span class="side-ico"><i data-lucide="library"></i></span>
+    <span class="side-ico"><i data-lucide="shield-check"></i></span>
+    <span class="side-ico on"><i data-lucide="activity"></i></span>
+    <span class="side-ico"><i data-lucide="database"></i></span>
+  </aside>
+
+  <main>
+    <header class="top glass">
+      <div style="flex:1;min-width:0"><div class="ptitle"><span class="crumb">shop-api /</span>Runtime</div><div class="pdesc">Traces and host telemetry</div></div>
+      <span class="chip ok">● Ready</span>
+    </header>
+
+    <section class="page">
+      <div class="wrap">
+        <!-- toolbar: all controls 40px -->
+        <div class="bar rise">
+          <label class="sel"><i data-lucide="box"></i><select aria-label="Project and revision"><option>shop-api · Revision 51c0de34</option><option>pizza · Docker only · no indexed revision</option></select><i data-lucide="chevrons-up-down"></i></label>
+          <button class="btn icon" aria-label="Refresh" title="Refresh"><i data-lucide="refresh-cw"></i></button>
+          <button class="toggle" id="auto" aria-pressed="false" title="Live Runtime updates"><span class="sw"></span>Auto-refresh <b>Off</b></button>
+          <div class="push">
+            <div class="group"><button class="btn"><i data-lucide="wand-2"></i>Set up</button><button class="btn"><i data-lucide="book-open"></i>Guide</button><button class="btn"><i data-lucide="eraser"></i>Clean up</button></div>
+            <button class="btn danger"><i data-lucide="trash-2"></i>Remove local containers</button>
+          </div>
+        </div>
+
+        <!-- ================= LIVE ================= -->
+        <div class="view" data-view="live" style="display:flex;flex-direction:column;gap:16px">
+          <div class="banner ok rise"><i data-lucide="circle-check"></i><b>Setup complete</b><span>Compose project shop · services api, worker. The containers appear below.</span></div>
+
+          <div class="card host rise" style="animation-delay:40ms">
+            <div class="name"><span class="dot"></span>Remote ClickHouse host</div>
+            <div style="display:flex;gap:6px;flex-wrap:wrap"><span class="tag ok">SSH · healthy</span><span class="tag ok">ClickHouse · healthy</span><span class="tag">sampled 12 s ago</span></div>
+            <div class="meter">CPU<b>23.4%</b><span class="mbar"><i style="transform:scaleX(.23)"></i></span></div>
+            <div class="meter">Memory<b>5.1 / 16 GB</b><span class="mbar"><i style="transform:scaleX(.32)"></i></span></div>
+            <div class="meter">Disk<b>41%</b><span class="mbar"><i style="transform:scaleX(.41)"></i></span></div>
+          </div>
+
+          <section class="card rise" style="animation-delay:80ms">
+            <div class="sec-h"><h3><i data-lucide="container"></i>Containers</h3><span class="tag">3 reporting</span><span class="hint" style="margin:0 0 0 auto">Host agent reports every 60 s</span></div>
+            <div class="containers">
+              <div class="ctr"><span class="ico"><i data-lucide="server"></i></span><div><b>api</b><div class="sub">staging · c4a8e21f9b02 · rev 51c0de34</div></div><span class="st tag ok"><i data-lucide="check"></i>match</span></div>
+              <div class="ctr"><span class="ico"><i data-lucide="cog"></i></span><div><b>worker</b><div class="sub">staging · 7f3b0a2d11e4 · rev 51c0de34</div></div><span class="st tag ok"><i data-lucide="check"></i>match</span></div>
+              <div class="ctr mis"><span class="ico"><i data-lucide="clock"></i></span><div><b>scheduler</b><div class="sub">staging · 0a9e3c7b5d21 · unindexed code</div></div><span class="st tag warn"><i data-lucide="triangle-alert"></i>other revision</span></div>
+            </div>
+          </section>
+
+          <section class="card rise" style="animation-delay:120ms">
+            <div class="sec-h">
+              <h3><i data-lucide="radio-tower"></i>Recent sampled requests</h3>
+              <div class="seg" role="radiogroup" aria-label="Filter requests by outcome"><button role="radio" aria-checked="true">All</button><button role="radio" aria-checked="false">Slow</button><button role="radio" aria-checked="false">Errors</button></div>
+              <div class="push"><button class="btn sm"><i data-lucide="refresh-cw"></i>Refresh</button><button class="btn sm"><i data-lucide="eye-off"></i>Clear</button><button class="btn sm danger"><i data-lucide="trash-2"></i>Delete stored traces (42)</button></div>
+            </div>
+            <p class="hint">10 per page, up to 50 from the last 24 hours. PHP CPU and memory are worker-level estimates.</p>
+            <div class="banner warn" style="margin-top:10px;padding:8px 12px;font-size:12.5px"><i data-lucide="triangle-alert"></i>The app records 10% of requests (head sampling), so real traffic is about 10× what's listed.</div>
+
+            <div class="req-head" aria-hidden="true"><span>method</span><span>route</span><span>status</span><span>duration</span><span style="text-align:right">time</span><span></span></div>
+            <div class="reqs">
+              <article class="rq open">
+                <button class="req" aria-expanded="true"><span class="meth get">GET</span><span class="route">/api/orders/{order}</span><span class="code c2">200</span><span class="dur slow"><span class="mbar"><i style="transform:scaleX(.92)"></i></span>842 ms</span><span class="time">14:02:11</span><i data-lucide="chevron-down" class="chev"></i><span class="est-line">PHP CPU estimate 312 ms · PHP-managed peak +18.4 MB</span></button>
+                <div class="detail">
+                  <div class="dtabs" role="tablist" aria-label="Request detail categories">
+                    <button role="tab" data-p="ov" aria-selected="true"><i data-lucide="layout-dashboard"></i>Overview</button>
+                    <button role="tab" data-p="db" aria-selected="false"><i data-lucide="database"></i>Database</button>
+                    <button role="tab" data-p="mt" aria-selected="false"><i data-lucide="git-fork"></i>Method activity</button>
+                    <button role="tab" data-p="ai" aria-selected="false"><i data-lucide="sparkles"></i>AI analysis</button>
+                  </div>
+
+                  <div class="pane" data-pane="ov">
+                    <div class="facts">
+                      <div class="fact">Trace ID<b>4bf92f3577b34da6a3ce929d0e0e4736</b></div>
+                      <div class="fact">Endpoint<b>GET /api/orders/{order}</b></div>
+                      <div class="fact">Total latency <span class="tag obs" style="height:20px">observed</span><b>842 ms</b></div>
+                    </div>
+                    <div class="insight"><h4><i data-lucide="sparkles"></i>Trace summary <span class="tag ai" style="height:20px">AI inference</span></h4><p>Most time is spent in 31 SELECTs on order_items issued from OrderResource::toArray — likely an N+1. Eager-loading items would remove ~600 ms.</p></div>
+                    <div class="h5">Time breakdown <span class="tag obs" style="height:20px">observed spans</span><span class="tag est" style="height:20px">residual estimate</span></div>
+                    <div class="stack"><i style="width:62%;background:#22d3ee"></i><i style="width:9%;background:#818cf8"></i><i style="width:29%;background:repeating-linear-gradient(45deg,#fbbf24 0 6px,#d97706 6px 12px)"></i></div>
+                    <div class="legend"><span><i style="background:#22d3ee"></i>mysql · 522 ms</span><span><i style="background:#818cf8"></i>redis · 76 ms</span><span><i style="background:#fbbf24"></i>other (uninstrumented, estimate) · 244 ms</span></div>
+                    <div class="h5">Excimer hotspots <span class="tag est" style="height:20px">CPU samples</span></div>
+                    <div class="hot"><span>38.2%</span><span class="mbar"><i style="transform:scaleX(.382)"></i></span><span class="f">Illuminate\Database\Connection::select</span></div>
+                    <div class="hot"><span>14.6%</span><span class="mbar"><i style="transform:scaleX(.146)"></i></span><span class="f">App\Http\Resources\OrderResource::toArray</span></div>
+                    <p class="fine">MySQL/Redis spans are de-overlapped estimates; remaining time can include uninstrumented work. Excimer percentages describe retained samples, not exact request time.</p>
+                  </div>
+
+                  <div class="pane" data-pane="db" hidden>
+                    <div class="facts">
+                      <div class="fact">Queries<b>34</b><span>3 distinct shapes · 31 app · 3 framework</span></div>
+                      <div class="fact">Database time<b>522 ms</b><span>62% of request</span></div>
+                      <div class="fact">Slowest query<b>41 ms</b><span>SELECT order_items</span></div>
+                    </div>
+                    <div class="rep-box"><h4><i data-lucide="repeat"></i>Repeated queries</h4><p>The same operation on the same tables from the same method ran 3 or more times — often an N+1 query or a cache read per call. SQL text isn't stored, so the queries may still differ in columns or conditions.</p></div>
+                    <div class="h5">Queries by shape</div>
+                    <div class="table">
+                      <div class="shape rep"><span class="cnt">31×</span><div><div class="op">SELECT · order_items <span class="tag ai" style="height:20px">AI finding</span></div><div class="m">App\Http\Resources\OrderResource::toArray</div></div><div class="t">468 ms<div class="mbar"><i style="transform:scaleX(.9)"></i></div></div></div>
+                      <div class="shape"><span class="cnt">1×</span><div><div class="op">SELECT · orders</div><div class="m">App\Http\Controllers\OrderController::show</div></div><div class="t">21 ms<div class="mbar"><i style="transform:scaleX(.04)"></i></div></div></div>
+                      <div class="shape"><span class="cnt">2×</span><div><div class="op">SELECT · sessions <span class="tag" style="height:20px">framework</span></div><div class="m">framework tables, not application code</div></div><div class="t">33 ms<div class="mbar"><i style="transform:scaleX(.06)"></i></div></div></div>
+                    </div>
+                  </div>
+
+                  <div class="pane" data-pane="mt" hidden>
+                    <div class="sec-h"><span class="tag obs">instrumentation observation</span><span class="hint" style="margin:0">Bounded hook counts show caller → callee counts. They don't show call order or complete execution.</span></div>
+                    <div class="table" style="margin-top:10px">
+                      <div class="edge"><span class="caller">OrderController::show</span><span>→</span><span class="callee">OrderResource::toArray</span><span class="calls"><span class="mbar"><i style="transform:scaleX(.1)"></i></span>1 call</span></div>
+                      <div class="edge"><span class="caller">OrderResource::toArray</span><span>→</span><span class="callee">OrderItem::price</span><span class="calls"><span class="mbar"><i style="transform:scaleX(1)"></i></span>31 calls</span></div>
+                    </div>
+                  </div>
+
+                  <div class="pane" data-pane="ai" hidden>
+                    <div class="sends">
+                      <h4><i data-lucide="send"></i>Before you analyze: what goes to <span class="tag">remote · gapgpt</span></h4>
+                      <div class="cols">
+                        <div><span class="lbl">sent</span><ul class="yes"><li><i data-lucide="check"></i>method, route, status, timing estimates</li><li><i data-lucide="check"></i>database system, tables, operations, durations</li><li><i data-lucide="check"></i>method IDs and counts, profile samples</li><li><i data-lucide="check"></i>matching indexed source excerpts</li></ul></div>
+                        <div><span class="lbl">never sent</span><ul class="no"><li><i data-lucide="x"></i>request/response bodies, headers, credentials</li><li><i data-lucide="x"></i>SQL text and bindings, cache keys</li><li><i data-lucide="x"></i>exception messages</li></ul></div>
+                      </div>
+                      <div style="display:flex;gap:8px;align-items:center;margin-top:10px;flex-wrap:wrap"><button class="btn sm primary"><i data-lucide="sparkles"></i>Analyze again</button><span class="hint" style="margin:0">Model used: gapgpt · gpt-6.1-terra · results disappear after reload</span></div>
+                    </div>
+                    <div class="finding picked"><label><input type="radio" name="f" checked><div><b>N+1 query on order items</b> <span class="tag warn" style="height:20px">high</span> <span class="tag ai" style="height:20px">AI inference</span><p>toArray() loads each item's product separately inside the loop.</p><ul><li>Eager-load items.product in OrderController::show.</li></ul><div class="ev">Evidence: OrderResource::toArray · OrderItem::price</div></div></label></div>
+                    <div style="display:flex;gap:8px;margin-top:10px;flex-wrap:wrap"><button class="btn sm"><i data-lucide="file-diff"></i>Preview code diff</button><button class="btn sm"><i data-lucide="scale"></i>Check against business rules</button></div>
+                    <div class="diff"><div class="diff-h"><i data-lucide="file-code-2"></i>app/Http/Controllers/OrderController.php · revision 51c0de34 · read-only preview</div><pre><div class="hunk">@@ -18,7 +18,7 @@ public function show(Order $order)</div><div class="rem">-        return new OrderResource($order);</div><div class="add">+        return new OrderResource($order->load('items.product'));</div></pre></div>
+                  </div>
+                </div>
+              </article>
+
+              <article class="rq"><button class="req"><span class="meth post">POST</span><span class="route">/api/checkout</span><span class="code c2">201</span><span class="dur"><span class="mbar"><i style="transform:scaleX(.42)"></i></span>384 ms</span><span class="time">14:01:57</span><i data-lucide="chevron-down" class="chev"></i></button></article>
+              <article class="rq"><button class="req"><span class="meth get">GET</span><span class="route">/api/products?page=2</span><span class="code c2">200</span><span class="dur"><span class="mbar"><i style="transform:scaleX(.12)"></i></span>96 ms</span><span class="time">14:01:40</span><i data-lucide="chevron-down" class="chev"></i></button></article>
+              <article class="rq"><button class="req"><span class="meth put">PUT</span><span class="route">/api/cart/{cart}/items/{item}</span><span class="code c4">422</span><span class="dur"><span class="mbar"><i style="transform:scaleX(.06)"></i></span>48 ms</span><span class="time">14:01:12</span><i data-lucide="chevron-down" class="chev"></i></button></article>
+              <article class="rq"><button class="req"><span class="meth delete">DELETE</span><span class="route">/api/orders/{order}</span><span class="code c5">500</span><span class="dur slow"><span class="mbar"><i style="transform:scaleX(.66)"></i></span>602 ms</span><span class="time">14:00:58</span><i data-lucide="chevron-down" class="chev"></i></button></article>
+            </div>
+            <div class="pager"><span>Showing 1–10 of 42</span><div class="pages"><button aria-label="Previous">‹</button><button aria-current="page">1</button><button>2</button><button>3</button><button>4</button><button>5</button><button aria-label="Next">›</button></div></div>
+            <p class="fine">Sampled telemetry can omit requests. SQL text, bindings, request bodies and headers aren't shown.</p>
+          </section>
+        </div>
+
+        <!-- ================= EMPTY + GUIDE ================= -->
+        <div class="view" data-view="empty" hidden style="flex-direction:column;gap:16px">
+          <div class="empty rise">
+            <div class="ico"><i data-lucide="server"></i></div>
+            <h3>No Docker containers are reporting yet</h3>
+            <p>Start the local host agent and opt in your Compose services. You don't need to upload source code to see containers.</p>
+            <div style="display:flex;gap:8px;justify-content:center;margin-top:16px;flex-wrap:wrap"><button class="btn primary"><i data-lucide="wand-2"></i>Set up Runtime</button><button class="btn"><i data-lucide="book-open"></i>Open the guide</button></div>
+          </div>
+          <section class="card rise" style="animation-delay:60ms">
+            <div class="sec-h"><h3><i data-lucide="book-open"></i>Get started with Runtime</h3></div>
+            <p class="hint">Containers work on their own. Snapshots and OpenTelemetry spans add code, route and database activity.</p>
+            <div class="steps">
+              <div class="step"><span class="n">1</span><h4>Listen to your Docker project</h4><p>Use Set up Runtime: pick a Compose project and services, review the label lines, then approve in a dialog on this computer.</p><details open><summary>Terminal commands</summary><div class="cmd"><button>Copy</button><pre>devassist runtime setup --project shop
+devassist runtime agent start</pre></div></details></div>
+              <div class="step"><span class="n opt">2</span><h4>Add a source snapshot <em style="font-style:normal;color:var(--text-3)">(optional)</em></h4><p>Connects observed spans to indexed functions and methods. Use the PHP installer or select a ready revision.</p><details><summary>External CI upload</summary></details></div>
+              <div class="step"><span class="n opt">3</span><h4>Enable code, route and DB activity <em style="font-style:normal;color:var(--text-3)">(optional)</em></h4><p>Start the Collector and export OTLP/HTTP to <code style="font-family:var(--mono);color:rgb(var(--a))">localhost:24318/v1/traces</code>.</p><details><summary>Collector command and span attributes</summary></details></div>
+            </div>
+          </section>
+        </div>
+      </div>
+    </section>
+  </main>
+</div>
+
+<script src="https://unpkg.com/lucide@0.460.0/dist/umd/lucide.min.js"></script>
+<script>
+document.querySelectorAll('.switch button').forEach(b => b.addEventListener('click', () => {
+  document.querySelectorAll('.switch button').forEach(x => x.setAttribute('aria-pressed', x === b));
+  document.querySelectorAll('.view').forEach(v => { const on = v.dataset.view === b.dataset.v; v.hidden = !on; v.style.display = on ? 'flex' : 'none'; });
+}));
+const tabs = [...document.querySelectorAll('.dtabs button')];
+const pick = (t) => { tabs.forEach(x => x.setAttribute('aria-selected', x === t)); document.querySelectorAll('.pane').forEach(p => p.hidden = p.dataset.pane !== t.dataset.p); };
+tabs.forEach((t, i) => { t.addEventListener('click', () => pick(t)); t.addEventListener('keydown', e => { const k = { ArrowRight: i + 1, ArrowLeft: i - 1, Home: 0, End: tabs.length - 1 }[e.key]; if (k == null) return; e.preventDefault(); const n = tabs[(k + tabs.length) % tabs.length]; n.focus(); pick(n); }); });
+document.querySelectorAll('.seg button').forEach(b => b.addEventListener('click', () => document.querySelectorAll('.seg button').forEach(x => x.setAttribute('aria-checked', x === b))));
+const auto = document.getElementById('auto');
+auto.addEventListener('click', () => { const on = auto.getAttribute('aria-pressed') !== 'true'; auto.setAttribute('aria-pressed', on); auto.querySelector('b').textContent = on ? 'On' : 'Off'; });
+if (window.lucide) lucide.createIcons();
+</script>
+</body>
+</html>

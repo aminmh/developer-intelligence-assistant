@@ -1,0 +1,356 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Logs Preview</title>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+<style>
+:root {
+  --a: 103 232 249; --b: 129 140 248;
+  --grad: linear-gradient(135deg, rgb(var(--a)), rgb(var(--b)));
+  --text: #e6ebf5; --text-2: #a3aec4; --text-3: #8591a8;
+  --line: rgb(148 163 255 / .12); --line-2: rgb(148 163 255 / .22);
+  --sunk: #0c1122; --code: #080b16; --field: rgb(8 11 22 / .55);
+  --ease: cubic-bezier(.2,.7,.2,1);
+  --sans: Inter, system-ui, sans-serif; --mono: "JetBrains Mono", ui-monospace, monospace;
+  --info: 129 140 248; --warn: 251 191 36; --err: 251 113 133;
+}
+* { box-sizing: border-box; }
+html, body { height: 100%; margin: 0; }
+body { font-family: var(--sans); color: var(--text); overflow: hidden;
+  background: radial-gradient(1200px 600px at 85% -10%, rgb(var(--b) / .16), transparent 60%), radial-gradient(900px 500px at -10% 110%, rgb(var(--a) / .1), transparent 60%), linear-gradient(160deg, #070912, #0b0f1e 52%, #0b1825); }
+button, input, select { font: inherit; color: inherit; }
+button { cursor: pointer; }
+[hidden] { display: none !important; }
+:focus-visible { outline: 2px solid rgb(var(--a)); outline-offset: 2px; }
+svg.lucide { width: 16px; height: 16px; flex-shrink: 0; }
+.shell { position: relative; display: flex; gap: 12px; height: 100vh; padding: 12px; overflow: clip; }
+.orbs { position: absolute; inset: 0; overflow: clip; pointer-events: none; }
+.orb { position: absolute; border-radius: 50%; }
+.orb-a { width: 520px; height: 520px; left: -160px; top: 18%; background: radial-gradient(circle, rgb(var(--a) / .22), transparent 65%); }
+.orb-b { width: 460px; height: 460px; left: 120px; top: -180px; background: radial-gradient(circle, rgb(var(--b) / .24), transparent 65%); }
+.glass { background: linear-gradient(160deg, rgb(255 255 255 / .07), rgb(255 255 255 / .02)), rgb(14 18 36 / .42); backdrop-filter: blur(16px) saturate(150%); -webkit-backdrop-filter: blur(16px) saturate(150%); border: 1px solid rgb(255 255 255 / .08); box-shadow: inset 0 1px 0 rgb(255 255 255 / .08), 0 18px 48px rgb(0 0 0 / .45); }
+.sidebar { position: relative; z-index: 1; width: 72px; border-radius: 20px; display: flex; flex-direction: column; align-items: center; gap: 6px; padding: 14px 0; }
+.sidebar .logo { width: 38px; height: 38px; margin-bottom: 10px; border-radius: 11px; box-shadow: 0 0 20px rgb(var(--b) / .28); }
+.side-ico { position: relative; display: grid; place-items: center; width: 44px; height: 40px; border-radius: 12px; color: var(--text-2); }
+.side-ico.on { color: var(--text); background: linear-gradient(90deg, rgb(var(--a) / .16), rgb(var(--b) / .06)); box-shadow: inset 0 0 0 1px rgb(var(--a) / .25); }
+.side-ico.on svg { color: rgb(var(--a)); }
+.side-ico.on::before { content: ""; position: absolute; left: 3px; top: 11px; bottom: 11px; width: 3px; border-radius: 3px; background: var(--grad); box-shadow: 0 0 10px rgb(var(--a) / .9); }
+main { position: relative; z-index: 1; flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 12px; }
+header.top { display: flex; align-items: center; gap: 10px; min-height: 60px; padding: 8px 20px; border-radius: 16px; }
+.ptitle { font-size: 15px; font-weight: 600; }
+.pdesc { font-size: 12px; color: var(--text-3); }
+.chip { display: inline-flex; align-items: center; gap: 7px; height: 32px; padding: 0 10px; border-radius: 8px; border: 1px solid rgb(52 211 153 / .3); background: rgb(52 211 153 / .08); color: #34d399; font-size: 12px; }
+.page { flex: 1; min-height: 0; overflow-y: auto; border-radius: 16px; padding: 18px 20px 28px; border: 1px solid rgb(255 255 255 / .08); background: linear-gradient(160deg, rgb(255 255 255 / .05), rgb(255 255 255 / .015)), rgb(14 18 36 / .42); }
+.wrap { display: flex; flex-direction: column; gap: 14px; max-width: 1080px; margin: 0 auto; }
+.rise { animation: rise 260ms var(--ease) both; }
+@keyframes rise { from { opacity: 0; transform: translateY(8px); } to { opacity: 1; transform: none; } }
+
+.btn { display: inline-flex; align-items: center; gap: 7px; height: 40px; padding: 0 13px; border-radius: 11px; border: 1px solid var(--line-2); background: var(--field); color: var(--text); font-size: 12.5px; font-weight: 500; white-space: nowrap; }
+.btn:hover { border-color: rgb(var(--a) / .5); }
+.btn svg { width: 15px; height: 15px; }
+.btn.sm { height: 30px; padding: 0 10px; border-radius: 9px; font-size: 12px; }
+.btn.danger { color: #fda4af; border-color: rgb(var(--err) / .35); }
+
+/* Head */
+.head { position: relative; z-index: 3; display: flex; flex-wrap: wrap; align-items: center; gap: 12px; }
+.head h1 { display: flex; align-items: center; gap: 10px; margin: 0; font-size: 18px; font-weight: 600; }
+.head h1 svg { width: 20px; height: 20px; color: rgb(var(--a)); }
+.head p { margin: 3px 0 0; font-size: 12.5px; color: var(--text-2); }
+.head p b { font-family: var(--mono); font-weight: 600; background: var(--grad); -webkit-background-clip: text; background-clip: text; color: transparent; }
+.head .actions { display: flex; flex-wrap: wrap; gap: 8px; margin-left: auto; position: relative; }
+.live { position: relative; }
+.live .dot { position: relative; width: 8px; height: 8px; border-radius: 50%; background: var(--text-3); }
+.live[aria-pressed="true"] { border-color: rgb(52 211 153 / .45); color: #6ee7b7; }
+.live[aria-pressed="true"] .dot { background: #34d399; }
+.live[aria-pressed="true"] .dot::after { content: ""; position: absolute; inset: -4px; border-radius: 50%; background: rgb(52 211 153 / .45); animation: ping 1.6s ease-out infinite; }
+@keyframes ping { from { transform: scale(.5); opacity: 1; } to { transform: scale(1.6); opacity: 0; } }
+
+/* Clear menu */
+.menu { position: absolute; right: 0; top: 46px; z-index: 5; width: 300px; padding: 12px; border-radius: 14px; border: 1px solid var(--line-2); background: rgb(12 16 32 / .97); box-shadow: 0 18px 48px rgb(0 0 0 / .5); animation: rise 180ms var(--ease) both; }
+.menu h3 { margin: 0 0 4px; font: 500 12px var(--mono); color: var(--text-3); }
+.menu .row { display: flex; flex-direction: column; gap: 4px; margin-bottom: 12px; }
+.menu .item { display: flex; align-items: center; gap: 8px; width: 100%; height: 36px; padding: 0 10px; border: 0; border-radius: 9px; background: none; font-size: 13px; text-align: left; color: var(--text); }
+.menu .item:hover { background: rgb(148 163 255 / .08); }
+.menu .item.danger { color: #fda4af; }
+.menu .item i { width: 8px; height: 8px; border-radius: 50%; }
+.modes { display: grid; grid-template-columns: 1fr 1fr; gap: 6px; }
+.mode { padding: 8px 10px; border-radius: 10px; border: 1px solid var(--line); background: var(--sunk); text-align: left; }
+.mode b { display: block; font-size: 12.5px; }
+.mode span { display: block; margin-top: 2px; font-size: 12px; color: var(--text-3); line-height: 1.4; }
+.mode[aria-pressed="true"] { border-color: rgb(var(--a) / .55); background: rgb(var(--a) / .06); }
+
+/* Filters */
+.filters { display: flex; flex-direction: column; gap: 10px; padding: 12px; border-radius: 14px; border: 1px solid var(--line); background: rgb(16 21 42 / .55); }
+.frow { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
+.search { position: relative; flex: 1 1 260px; }
+.search svg { position: absolute; left: 12px; top: 50%; transform: translateY(-50%); color: var(--text-3); }
+.search input { width: 100%; height: 40px; padding: 0 40px 0 36px; border-radius: 10px; border: 1px solid var(--line-2); background: var(--field); outline: none; font-size: 13px; }
+.search input:focus, .range input:focus { border-color: rgb(var(--a) / .6); box-shadow: 0 0 0 3px rgb(var(--a) / .15); }
+.search kbd { position: absolute; right: 10px; top: 50%; transform: translateY(-50%); padding: 2px 6px; border-radius: 6px; border: 1px solid var(--line-2); font: 11px var(--mono); color: var(--text-3); }
+.chips { display: flex; flex-wrap: wrap; gap: 6px; }
+.fchip { display: inline-flex; align-items: center; gap: 6px; height: 32px; padding: 0 11px; border-radius: 999px; border: 1px solid var(--line-2); background: none; color: var(--text-2); font-size: 12.5px; }
+.fchip i { width: 7px; height: 7px; border-radius: 50%; }
+.fchip:hover { color: var(--text); }
+.fchip[aria-pressed="true"] { border-color: rgb(var(--a) / .55); background: rgb(var(--a) / .1); color: var(--text); }
+.sep { width: 1px; height: 22px; background: var(--line-2); }
+.flabel { font: 12px var(--mono); color: var(--text-3); }
+.range { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
+.range input { height: 34px; padding: 0 10px; border-radius: 9px; border: 1px solid var(--line-2); background: var(--field); font: 12px var(--mono); outline: none; color-scheme: dark; }
+.link { padding: 0; border: 0; background: none; color: rgb(var(--a)); font-size: 12px; text-decoration: underline; text-underline-offset: 2px; }
+
+/* Stream */
+.stream { border-radius: 14px; border: 1px solid var(--line); background: rgb(16 21 42 / .55); overflow: hidden; }
+.day { position: sticky; top: -18px; z-index: 1; display: flex; align-items: center; gap: 10px; padding: 8px 14px; border-bottom: 1px solid var(--line); background: rgb(13 17 34 / .96); font: 12px var(--mono); color: var(--text-3); }
+.day b { color: var(--text-2); font-weight: 500; }
+.day::after { content: ""; flex: 1; height: 1px; background: linear-gradient(90deg, var(--line-2), transparent); }
+.ev { border-bottom: 1px solid var(--line); }
+.ev:last-child { border-bottom: 0; }
+.ev-row { position: relative; display: grid; grid-template-columns: 82px 132px minmax(0, 1fr) auto; align-items: center; gap: 12px; width: 100%; padding: 10px 14px 10px 18px; border: 0; background: none; text-align: left; }
+.ev-row::before { content: ""; position: absolute; left: 0; top: 8px; bottom: 8px; width: 3px; border-radius: 0 3px 3px 0; background: rgb(var(--sev)); box-shadow: 0 0 10px rgb(var(--sev) / .7); }
+.ev-row:hover { background: rgb(148 163 255 / .04); }
+.ev[data-open="true"] .ev-row { background: rgb(var(--a) / .05); }
+.ev time { font: 12px var(--mono); color: var(--text-3); }
+.tag { display: inline-flex; align-items: center; gap: 6px; justify-self: start; height: 24px; padding: 0 9px; border-radius: 999px; border: 1px solid rgb(var(--tc) / .35); background: rgb(var(--tc) / .1); color: rgb(var(--tc)); font: 500 12px var(--mono); white-space: nowrap; }
+.tag svg { width: 12px; height: 12px; }
+.ev-text { min-width: 0; }
+.ev-text b { display: block; overflow: hidden; font-size: 13px; font-weight: 600; text-overflow: ellipsis; white-space: nowrap; }
+.ev-text span { display: block; overflow: hidden; margin-top: 2px; font-size: 12.5px; color: var(--text-2); text-overflow: ellipsis; white-space: nowrap; }
+.chev { color: var(--text-3); transition: transform 180ms var(--ease); }
+.ev[data-open="true"] .chev { transform: rotate(180deg); }
+.ev-body { display: flex; flex-direction: column; gap: 10px; padding: 4px 14px 14px 18px; animation: rise 200ms var(--ease) both; }
+.kv { display: grid; grid-template-columns: repeat(auto-fit, minmax(160px, 1fr)); gap: 8px; }
+.kv div { padding: 8px 10px; border-radius: 10px; border: 1px solid var(--line); background: var(--sunk); }
+.kv dt { font: 12px var(--mono); color: var(--text-3); }
+.kv dd { margin: 3px 0 0; font: 500 13px var(--mono); overflow-wrap: anywhere; }
+.conf { display: flex; align-items: center; gap: 8px; }
+.conf i { flex: 1; height: 5px; border-radius: 5px; background: rgb(148 163 255 / .15); overflow: hidden; }
+.conf i::before { content: ""; display: block; width: var(--v); height: 100%; background: var(--grad); }
+.query { font-size: 13px; color: var(--text-2); }
+.query b { font: 500 12px var(--mono); color: var(--text-3); margin-right: 6px; }
+.code { border-radius: 12px; border: 1px solid var(--line); background: var(--code); overflow: hidden; }
+.code-head { display: flex; align-items: center; gap: 8px; padding: 6px 8px 6px 12px; border-bottom: 1px solid rgb(148 163 255 / .12); font: 12px var(--mono); color: #8591a8; }
+.code-head .btn { margin-left: auto; }
+.code pre { max-height: 300px; margin: 0; padding: 10px 12px; overflow: auto; color: #c9d4e8; font: 12px/1.65 var(--mono); white-space: pre-wrap; overflow-wrap: anywhere; }
+.code pre .hl { color: #fda4af; }
+.code pre .fl { color: rgb(var(--a)); }
+.warn { display: flex; align-items: center; gap: 6px; font-size: 12.5px; color: #fcd34d; }
+.more { display: flex; align-items: center; gap: 12px; padding: 10px 14px; border-top: 1px solid var(--line); font-size: 12.5px; color: var(--text-3); }
+.more .btn { margin-left: auto; }
+.empty { display: grid; place-items: center; gap: 8px; padding: 56px 20px; text-align: center; }
+.empty .ic { display: grid; place-items: center; width: 52px; height: 52px; border-radius: 16px; border: 1px solid var(--line-2); color: rgb(var(--a)); }
+.empty .ic svg { width: 24px; height: 24px; }
+.empty b { font-size: 14px; }
+.empty span { font-size: 12.5px; color: var(--text-3); }
+@media (max-width: 760px) {
+  .ev-row { grid-template-columns: minmax(0, 1fr) auto; grid-template-areas: "tag chev" "text text" "time time"; row-gap: 6px; }
+  .ev-row .tag { grid-area: tag; } .ev-row .chev { grid-area: chev; } .ev-row .ev-text { grid-area: text; } .ev-row time { grid-area: time; }
+  .head .actions { margin-left: 0; }
+  .sep { display: none; }
+  .menu { right: auto; left: 0; width: min(300px, calc(100vw - 48px)); }
+}
+
+.switch { position: fixed; z-index: 10; top: 22px; left: 50%; transform: translateX(-50%); display: flex; gap: 4px; padding: 4px; border-radius: 12px; background: rgb(7 9 18 / .92); border: 1px solid var(--line-2); }
+.switch button { height: 30px; padding: 0 12px; border: 0; border-radius: 8px; background: transparent; color: var(--text-2); font-size: 12px; }
+.switch button[aria-pressed="true"] { color: #0b0f1e; background: var(--grad); font-weight: 600; }
+@media (prefers-reduced-motion: reduce) { *, *::before, *::after { animation: none !important; transition: none !important; } }
+@media (max-width: 700px) { .sidebar { display: none; } .switch { top: auto; bottom: 12px; } }
+</style>
+</head>
+<body>
+<div class="switch" role="group" aria-label="Preview state">
+  <button data-v="stream" aria-pressed="true">Logs</button>
+  <button data-v="menu" aria-pressed="false">Clear menu open</button>
+  <button data-v="empty" aria-pressed="false">No matches</button>
+</div>
+
+<div class="shell">
+  <div class="orbs" aria-hidden="true"><div class="orb orb-a"></div><div class="orb orb-b"></div></div>
+  <aside class="sidebar glass">
+    <svg class="logo" viewBox="0 0 48 48" fill="none"><defs><linearGradient id="g1" x1="6" y1="6" x2="42" y2="42" gradientUnits="userSpaceOnUse"><stop stop-color="#22d3ee"/><stop offset="1" stop-color="#818cf8"/></linearGradient></defs><rect x="1.5" y="1.5" width="45" height="45" rx="13" fill="#0d1226" stroke="url(#g1)" stroke-opacity=".55"/><path d="M17 14 8.5 24 17 34M31 14 39.5 24 31 34" stroke="url(#g1)" stroke-width="3.4" stroke-linecap="round" stroke-linejoin="round"/><path d="M24 15.5c.9 4.6 2.9 6.6 7.5 7.5-4.6.9-6.6 2.9-7.5 7.5-.9-4.6-2.9-6.6-7.5-7.5 4.6-.9 6.6-2.9 7.5-7.5Z" fill="url(#g1)"/></svg>
+    <span class="side-ico"><i data-lucide="message-square-text"></i></span>
+    <span class="side-ico"><i data-lucide="library"></i></span>
+    <span class="side-ico"><i data-lucide="shield-check"></i></span>
+    <span class="side-ico"><i data-lucide="activity"></i></span>
+    <span class="side-ico on"><i data-lucide="scroll-text"></i></span>
+    <span class="side-ico"><i data-lucide="settings"></i></span>
+  </aside>
+
+  <main>
+    <header class="top glass">
+      <div style="flex:1;min-width:0"><div class="ptitle">Developer logs</div><div class="pdesc">Prompts, exceptions and router fallbacks</div></div>
+      <span class="chip">● Ready</span>
+    </header>
+
+    <section class="page">
+      <div class="wrap">
+        <div class="head rise">
+          <div>
+            <h1><i data-lucide="scroll-text"></i>Developer logs</h1>
+            <p><b>312</b> matching events, newest first</p>
+          </div>
+          <div class="actions">
+            <button class="btn live" aria-pressed="true" id="live"><span class="dot"></span>Live · 10s</button>
+            <button class="btn"><i data-lucide="refresh-cw"></i>Refresh</button>
+            <button class="btn danger" id="clearBtn" aria-expanded="false"><i data-lucide="trash-2"></i>Clear<i data-lucide="chevron-down"></i></button>
+            <div class="menu" id="menu" hidden>
+              <div class="row">
+                <h3>// clear one type</h3>
+                <button class="item"><i style="background:rgb(var(--info))"></i>LLM prompts</button>
+                <button class="item"><i style="background:rgb(var(--err))"></i>Exceptions</button>
+                <button class="item"><i style="background:rgb(var(--warn))"></i>Router fallbacks</button>
+                <button class="item danger"><i data-lucide="trash-2"></i>Clear all logs</button>
+              </div>
+              <h3>// clear mode</h3>
+              <div class="modes">
+                <button class="mode" aria-pressed="true"><b>Soft</b><span>Empties the active file only</span></button>
+                <button class="mode" aria-pressed="false"><b>Hard</b><span>Also removes rotated backups</span></button>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <div class="filters rise" style="animation-delay:40ms">
+          <div class="frow">
+            <label class="search"><i data-lucide="search"></i><input placeholder="Search titles, prompts, stack traces…" aria-label="Search logs"><kbd>/</kbd></label>
+          </div>
+          <div class="frow">
+            <span class="flabel">type</span>
+            <div class="chips" role="group" aria-label="Log type">
+              <button class="fchip" aria-pressed="true">All</button>
+              <button class="fchip" aria-pressed="false"><i style="background:rgb(var(--info))"></i>LLM prompts</button>
+              <button class="fchip" aria-pressed="false"><i style="background:rgb(var(--err))"></i>Exceptions</button>
+              <button class="fchip" aria-pressed="false"><i style="background:rgb(var(--warn))"></i>Router fallbacks</button>
+            </div>
+            <span class="sep"></span>
+            <span class="flabel">severity</span>
+            <div class="chips" role="group" aria-label="Severity">
+              <button class="fchip" aria-pressed="true">Any</button>
+              <button class="fchip" aria-pressed="false">Info</button>
+              <button class="fchip" aria-pressed="false">Warning</button>
+              <button class="fchip" aria-pressed="false">Error</button>
+            </div>
+          </div>
+          <div class="frow range">
+            <span class="flabel">time</span>
+            <input type="datetime-local" aria-label="From" value="2026-11-13T08:00">
+            <span class="flabel">→</span>
+            <input type="datetime-local" aria-label="To">
+            <button class="link">Clear range</button>
+          </div>
+        </div>
+
+        <div class="stream rise" style="animation-delay:80ms" id="stream">
+          <div class="day"><b>Today</b> · Thu 13 Nov</div>
+
+          <article class="ev" data-open="true">
+            <button class="ev-row" style="--sev:var(--err)" aria-expanded="true">
+              <time>14:32:07</time>
+              <span class="tag" style="--tc:var(--err)"><i data-lucide="bug"></i>Exception</span>
+              <span class="ev-text"><b>QdrantException: collection not found</b><span>project_ab12 · while searching code chunks for "invoice totals"</span></span>
+              <i data-lucide="chevron-down" class="chev"></i>
+            </button>
+            <div class="ev-body">
+              <div class="query"><b>query</b>Where are invoice totals calculated?</div>
+              <div class="code">
+                <div class="code-head"><i data-lucide="file-warning"></i>stack trace<button class="btn sm"><i data-lucide="copy"></i>Copy</button></div>
+<pre><span class="hl">qdrant_client.http.exceptions.UnexpectedResponse: 404 collection `project_ab12` not found</span>
+  File "<span class="fl">app/index/search.py</span>", line 142, in search_chunks
+    hits = client.search(collection_name=name, query_vector=vec, limit=k)
+  File "<span class="fl">app/rag/answer.py</span>", line 88, in retrieve
+    matches = search_chunks(project_id, query)
+  File "<span class="fl">app/routers/query.py</span>", line 57, in stream_answer</pre>
+              </div>
+            </div>
+          </article>
+
+          <article class="ev" data-open="true">
+            <button class="ev-row" style="--sev:var(--warn)" aria-expanded="true">
+              <time>14:30:51</time>
+              <span class="tag" style="--tc:var(--warn)"><i data-lucide="git-fork"></i>Router fallback</span>
+              <span class="ev-text"><b>Remote model unreachable, answered locally</b><span>gpt-6.1-terra timed out after 30 s</span></span>
+              <i data-lucide="chevron-down" class="chev"></i>
+            </button>
+            <div class="ev-body">
+              <dl class="kv" style="margin:0">
+                <div><dt>route</dt><dd>remote</dd></div>
+                <div><dt>final choice</dt><dd>local · gemma3-4b</dd></div>
+                <div><dt>confidence</dt><dd class="conf">0.42<i style="--v:42%"></i></dd></div>
+                <div style="grid-column:1/-1"><dt>reason</dt><dd>Read timeout from api.gapgpt.app after 30 000 ms</dd></div>
+              </dl>
+            </div>
+          </article>
+
+          <article class="ev">
+            <button class="ev-row" style="--sev:var(--info)" aria-expanded="false">
+              <time>14:28:13</time>
+              <span class="tag" style="--tc:var(--info)"><i data-lucide="message-square-code"></i>LLM prompt</span>
+              <span class="ev-text"><b>Chat answer · 6 context chunks</b><span>Explain how OrderService applies discounts before tax</span></span>
+              <i data-lucide="chevron-down" class="chev"></i>
+            </button>
+          </article>
+
+          <article class="ev">
+            <button class="ev-row" style="--sev:var(--info)" aria-expanded="false">
+              <time>13:02:44</time>
+              <span class="tag" style="--tc:var(--info)"><i data-lucide="message-square-code"></i>LLM prompt</span>
+              <span class="ev-text"><b>Code quality summary · 12 findings</b><span>Summarise the business rule findings for revision 4f2a9c1</span></span>
+              <i data-lucide="chevron-down" class="chev"></i>
+            </button>
+          </article>
+
+          <div class="day"><b>Yesterday</b> · Wed 12 Nov</div>
+          <article class="ev">
+            <button class="ev-row" style="--sev:var(--err)" aria-expanded="false">
+              <time>18:41:09</time>
+              <span class="tag" style="--tc:var(--err)"><i data-lucide="bug"></i>Exception</span>
+              <span class="ev-text"><b>TimeoutError in ClickHouse rollup query</b><span>runtime summary for the last 24 hours</span></span>
+              <i data-lucide="chevron-down" class="chev"></i>
+            </button>
+          </article>
+          <article class="ev">
+            <button class="ev-row" style="--sev:var(--warn)" aria-expanded="false">
+              <time>17:15:30</time>
+              <span class="tag" style="--tc:var(--warn)"><i data-lucide="git-fork"></i>Router fallback</span>
+              <span class="ev-text"><b>Low confidence route, used both retrievers</b><span>confidence 0.38 below the 0.5 threshold</span></span>
+              <i data-lucide="chevron-down" class="chev"></i>
+            </button>
+          </article>
+
+          <div class="more"><span>Showing 50 of 312</span><button class="btn sm"><i data-lucide="chevrons-down"></i>Load 50 more</button></div>
+        </div>
+
+        <div class="stream rise" id="empty" hidden>
+          <div class="empty">
+            <span class="ic"><i data-lucide="search-x"></i></span>
+            <b>No events match these filters</b>
+            <span>Try another type, severity or time range.</span>
+            <button class="btn sm" style="margin-top:6px"><i data-lucide="filter-x"></i>Reset filters</button>
+          </div>
+        </div>
+      </div>
+    </section>
+  </main>
+</div>
+
+<script src="https://unpkg.com/lucide@0.460.0/dist/umd/lucide.min.js"></script>
+<script>
+const menu = document.getElementById('menu'), clearBtn = document.getElementById('clearBtn');
+const setMenu = (open) => { menu.hidden = !open; clearBtn.setAttribute('aria-expanded', open); };
+clearBtn.addEventListener('click', () => setMenu(menu.hidden));
+function show(v) {
+  setMenu(v === 'menu');
+  document.getElementById('stream').hidden = v === 'empty';
+  document.getElementById('empty').hidden = v !== 'empty';
+  document.querySelectorAll('.switch button').forEach(b => b.setAttribute('aria-pressed', b.dataset.v === v));
+}
+document.querySelectorAll('.switch button').forEach(b => b.addEventListener('click', () => show(b.dataset.v)));
+document.querySelectorAll('.ev-row').forEach(r => r.addEventListener('click', () => { const ev = r.parentElement; const open = ev.dataset.open !== 'true'; ev.dataset.open = open; r.setAttribute('aria-expanded', open); }));
+document.querySelectorAll('[role="group"]').forEach(g => g.querySelectorAll('.fchip').forEach(c => c.addEventListener('click', () => g.querySelectorAll('.fchip').forEach(x => x.setAttribute('aria-pressed', x === c)))));
+document.querySelectorAll('.mode').forEach(m => m.addEventListener('click', () => document.querySelectorAll('.mode').forEach(x => x.setAttribute('aria-pressed', x === m))));
+document.getElementById('live').addEventListener('click', e => { const b = e.currentTarget; b.setAttribute('aria-pressed', b.getAttribute('aria-pressed') !== 'true'); });
+if (window.lucide) lucide.createIcons();
+</script>
+</body>
+</html>

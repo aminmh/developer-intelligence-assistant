@@ -1,0 +1,325 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Domain Preview</title>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+<style>
+:root {
+  --a: 34 211 238; --b: 129 140 248;
+  --grad: linear-gradient(135deg, rgb(var(--a)), rgb(var(--b)));
+  --text: #e6ebf5; --text-2: #a3aec4; --text-3: #8591a8;
+  --line: rgb(148 163 255 / .12); --line-2: rgb(148 163 255 / .22);
+  --solid: #10152a; --sunk: #0c1122; --field: rgb(8 11 22 / .55); --code: #080b16;
+  --t-entity: #22d3ee; --t-process: #a78bfa; --t-rule: #fbbf24; --t-event: #f472b6; --t-value: #34d399;
+  --ease: cubic-bezier(.2,.7,.2,1);
+  --sans: Inter, system-ui, sans-serif; --mono: "JetBrains Mono", ui-monospace, monospace;
+}
+* { box-sizing: border-box; }
+html, body { height: 100%; margin: 0; }
+body { font-family: var(--sans); color: var(--text); overflow: hidden;
+  background: radial-gradient(1200px 600px at 85% -10%, rgb(var(--b) / .16), transparent 60%), radial-gradient(900px 500px at -10% 110%, rgb(var(--a) / .1), transparent 60%), linear-gradient(160deg, #070912, #0b0f1e 52%, #0b1825); }
+button, input, select { font: inherit; color: inherit; }
+button { cursor: pointer; }
+:focus-visible { outline: 2px solid rgb(var(--a)); outline-offset: 2px; }
+svg.lucide { width: 16px; height: 16px; flex-shrink: 0; }
+.shell { position: relative; display: flex; gap: 12px; height: 100vh; padding: 12px; overflow: clip; }
+.orbs { position: absolute; inset: 0; overflow: clip; pointer-events: none; }
+.orb { position: absolute; border-radius: 50%; }
+.orb-a { width: 520px; height: 520px; left: -160px; top: 18%; background: radial-gradient(circle, rgb(var(--a) / .22), transparent 65%); }
+.orb-b { width: 460px; height: 460px; left: 120px; top: -180px; background: radial-gradient(circle, rgb(var(--b) / .24), transparent 65%); }
+.glass { background: linear-gradient(160deg, rgb(255 255 255 / .07), rgb(255 255 255 / .02)), rgb(14 18 36 / .42); backdrop-filter: blur(16px) saturate(150%); -webkit-backdrop-filter: blur(16px) saturate(150%); border: 1px solid rgb(255 255 255 / .08); box-shadow: inset 0 1px 0 rgb(255 255 255 / .08), 0 18px 48px rgb(0 0 0 / .45); }
+.sidebar { position: relative; z-index: 1; width: 72px; border-radius: 20px; display: flex; flex-direction: column; align-items: center; gap: 6px; padding: 14px 0; }
+.sidebar .logo { width: 38px; height: 38px; margin-bottom: 10px; border-radius: 11px; box-shadow: 0 0 20px rgb(var(--b) / .28); }
+.side-ico { position: relative; display: grid; place-items: center; width: 44px; height: 40px; border-radius: 12px; color: var(--text-2); }
+.side-ico.on { color: var(--text); background: linear-gradient(90deg, rgb(var(--a) / .16), rgb(var(--b) / .06)); box-shadow: inset 0 0 0 1px rgb(var(--a) / .25); }
+.side-ico.on svg { color: rgb(var(--a)); }
+.side-ico.on::before { content: ""; position: absolute; left: 3px; top: 11px; bottom: 11px; width: 3px; border-radius: 3px; background: var(--grad); box-shadow: 0 0 10px rgb(var(--a) / .9); }
+main { position: relative; z-index: 1; flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 12px; }
+header.top { display: flex; align-items: center; gap: 10px; min-height: 60px; padding: 8px 20px; border-radius: 16px; }
+.ptitle { font-size: 15px; font-weight: 600; } .crumb { font: 12px var(--mono); color: var(--text-3); margin-right: 4px; }
+.pdesc { font-size: 12px; color: var(--text-3); }
+.chip { display: inline-flex; align-items: center; gap: 7px; height: 32px; padding: 0 10px; border-radius: 8px; border: 1px solid var(--line-2); background: var(--field); color: var(--text-2); font-size: 12px; white-space: nowrap; }
+.chip.ok { color: #34d399; border-color: rgb(52 211 153 / .3); background: rgb(52 211 153 / .08); }
+.page { flex: 1; min-height: 0; display: flex; flex-direction: column; gap: 12px; border-radius: 16px; padding: 14px; border: 1px solid rgb(255 255 255 / .08); background: linear-gradient(160deg, rgb(255 255 255 / .05), rgb(255 255 255 / .015)), rgb(14 18 36 / .42); overflow: hidden; }
+.rise { animation: rise 260ms var(--ease) both; }
+@keyframes rise { from { opacity: 0; transform: translateY(8px); } to { opacity: 1; transform: none; } }
+
+.bar { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; padding: 10px; border-radius: 14px; border: 1px solid var(--line); background: rgb(16 21 42 / .55); }
+.pick { display: inline-flex; align-items: center; gap: 8px; height: 38px; flex: 0 1 280px; min-width: 200px; padding: 0 10px; border-radius: 10px; border: 1px solid transparent; background: linear-gradient(var(--solid), var(--solid)) padding-box, linear-gradient(135deg, rgb(var(--a) / .5), rgb(var(--b) / .4)) border-box; font: 12.5px var(--mono); }
+.pick svg:first-child { color: rgb(var(--a)); }
+.pick select { flex: 1; min-width: 0; border: 0; background: none; outline: none; color: var(--text); font: inherit; appearance: none; }
+.seg { display: inline-flex; padding: 3px; border-radius: 11px; border: 1px solid var(--line-2); background: var(--field); }
+.seg button { display: inline-flex; align-items: center; gap: 6px; height: 32px; padding: 0 12px; border: 0; border-radius: 8px; background: none; color: var(--text-3); font-size: 12.5px; font-weight: 500; }
+.seg button svg { width: 14px; height: 14px; }
+.seg button[aria-pressed="true"] { color: #0b0f1e; background: var(--grad); font-weight: 600; box-shadow: 0 0 16px rgb(var(--a) / .3); }
+.search { display: flex; align-items: center; gap: 8px; height: 38px; flex: 1 1 220px; padding: 0 10px; border-radius: 10px; border: 1px solid var(--line-2); background: var(--field); }
+.search input { flex: 1; min-width: 0; border: 0; background: none; outline: none; font-size: 13px; }
+.search svg { color: var(--text-3); }
+.search .nav { display: inline-flex; align-items: center; gap: 2px; font: 11.5px var(--mono); color: var(--text-3); }
+.search .nav button { display: grid; place-items: center; width: 24px; height: 24px; border: 0; border-radius: 6px; background: none; color: var(--text-2); }
+.btn { display: inline-flex; align-items: center; gap: 6px; height: 34px; padding: 0 12px; border-radius: 9px; border: 1px solid var(--line-2); background: var(--field); color: var(--text); font-size: 12.5px; font-weight: 500; white-space: nowrap; }
+.btn:hover { border-color: rgb(var(--a) / .5); }
+.btn.primary { border: 0; background: var(--grad); color: #0b0f1e; font-weight: 600; box-shadow: 0 0 16px rgb(var(--a) / .3); }
+.btn.sm { height: 28px; padding: 0 9px; font-size: 12px; }
+.btn.icon { width: 34px; padding: 0; justify-content: center; }
+.btn svg { width: 15px; height: 15px; }
+.select { height: 38px; padding: 0 10px; border-radius: 10px; border: 1px solid var(--line-2); background: var(--field); font-size: 12.5px; }
+.push { margin-left: auto; }
+
+.grid3 { flex: 1; min-height: 0; display: grid; grid-template-columns: 260px minmax(0, 1fr) 340px; gap: 12px; }
+.grid2 { flex: 1; min-height: 0; display: grid; grid-template-columns: minmax(0, 1fr) 340px; gap: 12px; }
+@media (max-width: 1150px) { .grid3 { grid-template-columns: 220px minmax(0, 1fr); } .grid3 .rail { display: none; } }
+.panel { min-height: 0; overflow-y: auto; border-radius: 16px; border: 1px solid var(--line); background: rgb(16 21 42 / .55); }
+.list-h { position: sticky; top: 0; z-index: 1; display: flex; align-items: center; gap: 8px; padding: 10px 12px; border-bottom: 1px solid var(--line); background: rgb(16 21 42 / .92); font: 12px var(--mono); color: var(--text-3); }
+.concept { position: relative; display: flex; flex-direction: column; gap: 3px; width: 100%; padding: 10px 12px 10px 16px; border: 0; border-bottom: 1px solid var(--line); background: none; text-align: left; transition: background-color 160ms; }
+.concept:hover { background: rgb(148 163 255 / .05); }
+.concept::before { content: ""; position: absolute; left: 6px; top: 14px; width: 6px; height: 6px; border-radius: 50%; background: var(--c); box-shadow: 0 0 6px var(--c); }
+.concept[aria-current="true"] { background: linear-gradient(90deg, rgb(var(--a) / .12), transparent); }
+.concept[aria-current="true"]::after { content: ""; position: absolute; left: 0; top: 8px; bottom: 8px; width: 3px; border-radius: 0 3px 3px 0; background: var(--grad); box-shadow: 0 0 10px rgb(var(--a)); }
+.concept b { font-size: 13px; font-weight: 600; }
+.concept span { font: 11.5px var(--mono); color: var(--text-3); }
+
+.canvas { position: relative; min-height: 0; overflow: hidden; border-radius: 16px; border: 1px solid var(--line); background: radial-gradient(circle at 50% 40%, rgb(var(--b) / .08), transparent 60%), #0a0e1c; }
+.canvas::before { content: ""; position: absolute; inset: 0; background-image: radial-gradient(rgb(148 163 255 / .12) 1px, transparent 1px); background-size: 20px 20px; }
+.canvas-info { position: absolute; z-index: 2; top: 12px; left: 12px; display: flex; gap: 6px; }
+.tool { position: absolute; z-index: 2; top: 12px; right: 12px; display: flex; gap: 2px; padding: 3px; border-radius: 11px; border: 1px solid var(--line-2); background: rgb(10 14 28 / .9); }
+.tool button { display: grid; place-items: center; width: 30px; height: 30px; border: 0; border-radius: 8px; background: none; color: var(--text-2); }
+.tool button:hover { color: var(--text); background: rgb(148 163 255 / .08); }
+.tool button[aria-pressed="true"] { color: #0b0f1e; background: var(--grad); }
+.legend { position: absolute; z-index: 2; bottom: 12px; left: 12px; display: flex; flex-wrap: wrap; gap: 10px; padding: 6px 10px; border-radius: 10px; border: 1px solid var(--line); background: rgb(10 14 28 / .9); font: 11.5px var(--mono); color: var(--text-2); }
+.legend span { display: inline-flex; align-items: center; gap: 6px; }
+.legend i { width: 8px; height: 8px; border-radius: 50%; }
+.tag { display: inline-flex; align-items: center; gap: 5px; height: 24px; padding: 0 8px; border-radius: 7px; border: 1px solid var(--line-2); background: rgb(10 14 28 / .85); font: 11.5px var(--mono); color: var(--text-2); white-space: nowrap; }
+.tag.ok { color: #34d399; border-color: rgb(52 211 153 / .3); }
+.tag.ai { color: #c4b5fd; border-color: rgb(167 139 250 / .4); }
+.tag.warn { color: #fcd34d; border-color: rgb(251 191 36 / .3); }
+svg.edges { position: absolute; inset: 0; width: 100%; height: 100%; }
+.node { position: absolute; z-index: 1; width: 196px; padding: 9px 11px; border-radius: 12px; border: 1px solid var(--line-2); border-left: 3px solid var(--c); background: rgb(16 21 42 / .96); box-shadow: 0 10px 24px rgb(0 0 0 / .35); transition: transform 180ms var(--ease); }
+.node:hover { transform: translateY(-2px); }
+.node b { display: block; font-size: 13px; }
+.node span { font: 11px var(--mono); color: var(--text-3); }
+.node.sel { border-color: rgb(var(--a) / .6); border-left-color: var(--c); box-shadow: 0 0 0 1px rgb(var(--a) / .25), 0 0 28px rgb(var(--a) / .25); }
+
+.rail { min-height: 0; overflow-y: auto; display: flex; flex-direction: column; gap: 10px; }
+.card { padding: 14px; border-radius: 14px; border: 1px solid var(--line); background: rgb(16 21 42 / .55); }
+.card.hero { border: 1px solid transparent; background: linear-gradient(var(--solid), var(--solid)) padding-box, linear-gradient(135deg, rgb(var(--a) / .45), var(--line) 45%, rgb(var(--b) / .35)) border-box; }
+.det-h { display: flex; align-items: flex-start; gap: 8px; }
+.det-h b { font-size: 15px; }
+.det-h .q { display: block; margin-top: 2px; font: 11.5px var(--mono); color: var(--text-3); overflow-wrap: anywhere; }
+.det-h .x { margin-left: auto; }
+.card p { margin: 8px 0 0; font-size: 12.5px; line-height: 1.6; color: var(--text-2); }
+.chips { display: flex; flex-wrap: wrap; gap: 5px; margin-top: 10px; }
+.chips .t { color: var(--c); border-color: color-mix(in srgb, var(--c) 45%, transparent); }
+.card h4 { display: flex; align-items: center; gap: 8px; margin: 0; font-size: 12.5px; font-weight: 600; color: var(--text-2); }
+.card h4 svg { width: 15px; height: 15px; color: rgb(var(--a)); }
+.ev { margin-top: 8px; border-radius: 10px; border: 1px solid var(--line); background: var(--code); overflow: hidden; }
+.ev-h { padding: 6px 10px; border-bottom: 1px solid var(--line); font: 11.5px var(--mono); color: var(--text-3); }
+.ev pre { margin: 0; padding: 8px 10px; font: 11.5px/1.6 var(--mono); color: #c9d4e8; white-space: pre-wrap; }
+.relrow { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; margin-top: 8px; font: 12px var(--mono); color: var(--text-2); }
+.relrow i { font-style: normal; color: rgb(var(--a)); }
+.warnbox { padding: 12px; border-radius: 12px; border: 1px solid rgb(251 191 36 / .35); background: rgb(251 191 36 / .05); }
+.warnbox h4 { color: #fde68a !important; } .warnbox h4 svg { color: #fcd34d !important; }
+
+/* entity model */
+.enode { position: absolute; z-index: 1; width: 230px; border-radius: 14px; border: 1px solid var(--line-2); background: rgb(16 21 42 / .97); box-shadow: 0 12px 28px rgb(0 0 0 / .4); overflow: hidden; font: 12px var(--mono); }
+.enode.sel { border-color: rgb(var(--a) / .6); box-shadow: 0 0 0 1px rgb(var(--a) / .25), 0 0 30px rgb(var(--a) / .22); }
+.enode-h { display: flex; align-items: center; gap: 8px; padding: 9px 11px; background: linear-gradient(90deg, rgb(var(--a) / .2), rgb(var(--b) / .14)); border-bottom: 1px solid var(--line); }
+.enode-h svg { width: 14px; height: 14px; color: rgb(var(--a)); }
+.enode-h b { font-family: var(--sans); font-size: 13px; }
+.enode-h span { margin-left: auto; font-size: 10.5px; color: var(--text-3); }
+.enode-meta { padding: 5px 11px; border-bottom: 1px solid var(--line); font-size: 11px; color: var(--text-3); }
+.enode-rows { padding: 5px 11px; }
+.enode-rows div { display: flex; gap: 6px; color: var(--text-2); line-height: 1.75; }
+.enode-rows div em { font-style: normal; color: var(--text-3); }
+.enode-methods { padding: 5px 7px 7px; border-top: 1px dashed var(--line-2); }
+.enode-methods button { display: block; width: 100%; padding: 2px 4px; border: 0; border-radius: 6px; background: none; color: #c4b5fd; text-align: left; font: 12px var(--mono); }
+.enode-methods button:hover, .enode-methods button.sel { background: rgb(167 139 250 / .14); }
+.props { margin-top: 10px; border-radius: 10px; border: 1px solid var(--line); overflow: hidden; }
+.prop { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; padding: 7px 10px; border-top: 1px solid var(--line); font: 12px var(--mono); }
+.prop:first-child { border-top: 0; }
+.prop em { margin-left: auto; font-style: normal; color: var(--text-3); }
+.prop .k { color: #fbbf24; } .prop .f { color: #818cf8; }
+.usage { margin-top: 8px; padding: 8px 10px; border-radius: 10px; border: 1px solid var(--line); background: var(--sunk); font: 12px var(--mono); }
+.usage span { display: block; margin-top: 2px; font-size: 11px; color: var(--text-3); }
+.code { position: relative; margin-top: 8px; border-radius: 10px; border: 1px solid var(--line); background: var(--code); }
+.code pre { margin: 0; padding: 10px 12px; max-height: 160px; overflow: auto; font: 11.5px/1.6 var(--mono); color: #c9d4e8; }
+
+.switch { position: fixed; z-index: 10; top: 22px; left: 50%; transform: translateX(-50%); display: flex; gap: 4px; padding: 4px; border-radius: 12px; background: rgb(7 9 18 / .92); border: 1px solid var(--line-2); }
+.switch button { height: 30px; padding: 0 12px; border: 0; border-radius: 8px; background: transparent; color: var(--text-2); font-size: 12px; }
+.switch button[aria-pressed="true"] { color: #0b0f1e; background: var(--grad); font-weight: 600; }
+[hidden] { display: none !important; }
+@media (prefers-reduced-motion: reduce) { *, *::before, *::after { animation: none !important; transition: none !important; } }
+@media (max-width: 700px) { .sidebar { display: none; } .switch { top: auto; bottom: 12px; } }
+</style>
+</head>
+<body>
+<div class="switch" role="group" aria-label="Preview state">
+  <button data-v="concepts" aria-pressed="true">Concepts</button>
+  <button data-v="model" aria-pressed="false">Entity model</button>
+</div>
+
+<div class="shell">
+  <div class="orbs" aria-hidden="true"><div class="orb orb-a"></div><div class="orb orb-b"></div></div>
+  <aside class="sidebar glass">
+    <svg class="logo" viewBox="0 0 48 48" fill="none"><defs><linearGradient id="g1" x1="6" y1="6" x2="42" y2="42" gradientUnits="userSpaceOnUse"><stop stop-color="#22d3ee"/><stop offset="1" stop-color="#818cf8"/></linearGradient></defs><rect x="1.5" y="1.5" width="45" height="45" rx="13" fill="#0d1226" stroke="url(#g1)" stroke-opacity=".55"/><path d="M17 14 8.5 24 17 34M31 14 39.5 24 31 34" stroke="url(#g1)" stroke-width="3.4" stroke-linecap="round" stroke-linejoin="round"/><path d="M24 15.5c.9 4.6 2.9 6.6 7.5 7.5-4.6.9-6.6 2.9-7.5 7.5-.9-4.6-2.9-6.6-7.5-7.5 4.6-.9 6.6-2.9 7.5-7.5Z" fill="url(#g1)"/></svg>
+    <span class="side-ico"><i data-lucide="message-square-text"></i></span>
+    <span class="side-ico"><i data-lucide="library"></i></span>
+    <span class="side-ico"><i data-lucide="shield-check"></i></span>
+    <span class="side-ico"><i data-lucide="activity"></i></span>
+    <span class="side-ico"><i data-lucide="database"></i></span>
+    <span class="side-ico on"><i data-lucide="network"></i></span>
+  </aside>
+
+  <main>
+    <header class="top glass">
+      <div style="flex:1;min-width:0"><div class="ptitle"><span class="crumb">shop-api /</span>Domain knowledge</div><div class="pdesc">Business entities and rules</div></div>
+      <span class="chip ok">● Ready</span>
+    </header>
+
+    <section class="page">
+      <div class="bar rise">
+        <label class="pick"><i data-lucide="archive"></i><select aria-label="Saved analysis"><option>shop-api · Laravel · 2026-11-01</option></select><i data-lucide="chevrons-up-down"></i></label>
+        <div class="seg" role="group" aria-label="View"><button data-m="concepts" aria-pressed="true"><i data-lucide="tags"></i>Concepts</button><button data-m="model" aria-pressed="false"><i data-lucide="boxes"></i>Entity model</button></div>
+        <label class="search"><i data-lucide="search"></i><input placeholder="Search concept, alias, role…" aria-label="Search"><span class="nav" id="nav" hidden>2 / 5<button aria-label="Previous match"><i data-lucide="chevron-left"></i></button><button aria-label="Next match"><i data-lucide="chevron-right"></i></button></span></label>
+        <select class="select" id="ctype" aria-label="Concept type"><option>All concept types</option><option>entity</option><option>process</option><option>rule</option></select>
+        <button class="btn primary" id="enrich" hidden><i data-lucide="sparkles"></i>Enrich model</button>
+        <button class="btn icon push" aria-label="Refresh" title="Refresh"><i data-lucide="refresh-cw"></i></button>
+      </div>
+
+      <!-- ============ CONCEPTS ============ -->
+      <div class="view grid3" data-view="concepts">
+        <div class="panel rise" style="animation-delay:40ms">
+          <div class="list-h"><i data-lucide="tags" style="width:14px;height:14px"></i>18 concepts</div>
+          <button class="concept" aria-current="true" style="--c:var(--t-entity)"><b>Order</b><span>entity · 6 relations</span></button>
+          <button class="concept" style="--c:var(--t-entity)"><b>Customer</b><span>entity · 4 relations</span></button>
+          <button class="concept" style="--c:var(--t-process)"><b>Checkout</b><span>process · 5 relations</span></button>
+          <button class="concept" style="--c:var(--t-rule)"><b>Refund window</b><span>rule · 2 relations</span></button>
+          <button class="concept" style="--c:var(--t-event)"><b>OrderPaid</b><span>event · 3 relations</span></button>
+          <button class="concept" style="--c:var(--t-value)"><b>Money</b><span>value · 4 relations</span></button>
+          <button class="concept" style="--c:var(--t-entity)"><b>Product</b><span>entity · 3 relations</span></button>
+        </div>
+
+        <div class="canvas rise" style="animation-delay:80ms">
+          <div class="canvas-info"><span class="tag">12 nodes</span><span class="tag">16 relationships</span></div>
+          <div class="tool"><button aria-label="Fit graph" title="Fit graph"><i data-lucide="maximize-2"></i></button></div>
+          <svg class="edges" viewBox="0 0 800 560" preserveAspectRatio="none" aria-hidden="true">
+            <defs><linearGradient id="eg" x1="0" x2="1"><stop stop-color="#22d3ee" stop-opacity=".8"/><stop offset="1" stop-color="#818cf8" stop-opacity=".8"/></linearGradient></defs>
+            <g fill="none" stroke="url(#eg)" stroke-width="1.6">
+              <path d="M330 120 C 330 200, 180 200, 180 260"/>
+              <path d="M410 120 C 410 200, 560 200, 560 260"/>
+              <path d="M370 120 C 370 300, 370 330, 370 400"/>
+              <path d="M560 300 C 600 360, 620 380, 620 420"/>
+              <path d="M180 300 C 160 360, 140 380, 140 420"/>
+            </g>
+            <g font-family="JetBrains Mono" font-size="11" fill="#a3aec4"><text x="214" y="196">placed by</text><text x="470" y="196">goes through</text><text x="378" y="300">priced in</text><text x="600" y="368">emits</text></g>
+          </svg>
+          <div class="node sel" style="left:44%;top:12%;--c:var(--t-entity);transform:translateX(-50%)"><b>Order</b><span>entity · aggregate root</span></div>
+          <div class="node" style="left:8%;top:46%;--c:var(--t-entity)"><b>Customer</b><span>entity · actor</span></div>
+          <div class="node" style="left:60%;top:46%;--c:var(--t-process)"><b>Checkout</b><span>process</span></div>
+          <div class="node" style="left:38%;top:71%;--c:var(--t-value)"><b>Money</b><span>value</span></div>
+          <div class="node" style="left:68%;top:75%;--c:var(--t-event)"><b>OrderPaid</b><span>event</span></div>
+          <div class="node" style="left:3%;top:75%;--c:var(--t-rule)"><b>Refund window</b><span>rule</span></div>
+          <div class="legend"><span><i style="background:var(--t-entity)"></i>entity</span><span><i style="background:var(--t-process)"></i>process</span><span><i style="background:var(--t-rule)"></i>rule</span><span><i style="background:var(--t-event)"></i>event</span><span><i style="background:var(--t-value)"></i>value</span></div>
+        </div>
+
+        <aside class="rail rise" style="animation-delay:120ms">
+          <div class="card hero">
+            <div class="det-h"><div><b>Order</b><span class="q">App\Models\Order</span></div><button class="btn icon sm x" aria-label="Close"><i data-lucide="x"></i></button></div>
+            <p>A customer's purchase: its items, totals and lifecycle from cart to fulfilment.</p>
+            <div class="chips"><span class="tag t" style="--c:var(--t-entity)">entity</span><span class="tag">aggregate root</span><span class="tag">billing</span></div>
+            <p style="font-size:12px"><span style="color:var(--text-3)">Aliases:</span> purchase, sale</p>
+            <button class="btn primary" style="width:100%;justify-content:center;margin-top:12px"><i data-lucide="send"></i>Explain with domain context</button>
+          </div>
+          <div class="card warnbox"><h4><i data-lucide="triangle-alert"></i>Context notes</h4><p>Context was capped to keep the prompt bounded.</p></div>
+          <div class="card"><h4><i data-lucide="book-open"></i>Evidence</h4>
+            <div class="ev"><div class="ev-h">model · app/Models/Order.php:12</div><pre>class Order extends Model
+{
+    protected $casts = ['total' => Money::class];</pre></div>
+          </div>
+          <div class="card"><h4><i data-lucide="link-2"></i>Related concepts</h4>
+            <div class="relrow">Order <i>placed by</i> Customer</div>
+            <div class="relrow">Order <i>goes through</i> Checkout</div>
+          </div>
+          <details class="card"><summary style="cursor:pointer;list-style:none"><h4 style="display:inline-flex"><i data-lucide="spell-check"></i>Vocabulary index</h4></summary><p style="font-size:11.5px">Global typo-correction vocabulary; frequency isn't business meaning.</p></details>
+        </aside>
+      </div>
+
+      <!-- ============ ENTITY MODEL ============ -->
+      <div class="view grid2" data-view="model" hidden>
+        <div class="canvas rise">
+          <div class="canvas-info"><span class="tag">14 entities</span><span class="tag">19 relationships</span><span class="tag ai">enriched</span></div>
+          <div class="tool">
+            <button aria-label="Fit to view" title="Fit to view"><i data-lucide="maximize-2"></i></button>
+            <button aria-label="Zoom in" title="Zoom in"><i data-lucide="plus"></i></button>
+            <button aria-label="Zoom out" title="Zoom out"><i data-lucide="minus"></i></button>
+            <button aria-label="Reset layout" title="Reset layout"><i data-lucide="focus"></i></button>
+            <button aria-label="Prettify layout" title="Prettify layout"><i data-lucide="sparkles"></i></button>
+            <button aria-label="Move diagram" title="Move diagram" aria-pressed="false"><i data-lucide="hand"></i></button>
+          </div>
+          <svg class="edges" viewBox="0 0 800 560" preserveAspectRatio="none" aria-hidden="true">
+            <defs><linearGradient id="eg2" x1="0" y1="0" x2="800" y2="0" gradientUnits="userSpaceOnUse"><stop stop-color="#22d3ee" stop-opacity=".8"/><stop offset="1" stop-color="#818cf8" stop-opacity=".8"/></linearGradient></defs><g fill="none" stroke="url(#eg2)" stroke-width="1.6"><path d="M300 170 C 380 170, 380 170, 450 170"/><path d="M190 300 C 190 360, 190 360, 190 400"/></g>
+            <g font-family="JetBrains Mono" font-size="11" fill="#a3aec4"><text x="340" y="160">1:N items</text><text x="198" y="360">N:1 customer</text></g>
+          </svg>
+          <div class="enode sel" style="left:5%;top:12%">
+            <div class="enode-h"><i data-lucide="box"></i><b>Order</b><span>«Entity»</span></div>
+            <div class="enode-meta">App\Models · orders</div>
+            <div class="enode-rows"><div><em>+</em>int: id</div><div><em>+</em>Money: total</div><div><em>+</em>string: status <em>enum</em></div><div><em>…</em>+ 4 more</div></div>
+            <div class="enode-methods"><button class="sel">+ markPaid()</button><button>+ cancel(reason)</button></div>
+          </div>
+          <div class="enode" style="left:57%;top:16%">
+            <div class="enode-h"><i data-lucide="box"></i><b>OrderItem</b><span>«Entity»</span></div>
+            <div class="enode-meta">App\Models · order_items</div>
+            <div class="enode-rows"><div><em>+</em>int: quantity</div><div><em>+</em>Money: price</div></div>
+            <div class="enode-methods"><button>+ subtotal()</button></div>
+          </div>
+          <div class="enode" style="left:10%;top:72%">
+            <div class="enode-h"><i data-lucide="box"></i><b>Customer</b><span>«Entity»</span></div>
+            <div class="enode-meta">App\Models · users</div>
+            <div class="enode-rows"><div><em>+</em>string: email</div></div>
+          </div>
+        </div>
+        <aside class="rail rise" style="animation-delay:60ms">
+          <div class="card"><div class="det-h"><h4 style="margin:0"><i data-lucide="boxes"></i>Entity model</h4><span class="tag ai x">enriched</span></div><p style="font-size:12px;font-family:var(--mono)">laravel · 14 entities</p></div>
+          <div class="card hero" style="border-color:transparent">
+            <div class="det-h"><div><b>Order::markPaid()</b><span class="q">public function markPaid(Payment $payment): void</span></div><button class="btn icon sm x" aria-label="Close"><i data-lucide="x"></i></button></div>
+            <p style="font-size:12px"><span style="color:var(--text-3)">Definition:</span> app/Models/Order.php:88</p>
+            <h4 style="margin-top:12px">Verified usages · 3</h4>
+            <div class="usage">app/Http/Controllers/PaymentWebhook.php:41<span>call · PaymentWebhook::handle</span></div>
+            <div class="usage">app/Jobs/ReconcilePayments.php:27<span>call · ReconcilePayments::handle</span></div>
+          </div>
+          <div class="card"><div class="det-h"><h4 style="margin:0"><i data-lucide="file-code"></i>PlantUML source</h4><span class="x" style="display:flex;gap:4px"><button class="btn icon sm" aria-label="Copy"><i data-lucide="copy"></i></button><button class="btn icon sm" aria-label="Download"><i data-lucide="download"></i></button></span></div>
+            <div class="code"><pre>@startuml
+class Order {
+  +int id
+  +Money total
+  +markPaid()
+}
+Order "1" -- "*" OrderItem
+@enduml</pre></div>
+          </div>
+        </aside>
+      </div>
+    </section>
+  </main>
+</div>
+
+<script src="https://unpkg.com/lucide@0.460.0/dist/umd/lucide.min.js"></script>
+<script>
+function show(v) {
+  document.querySelectorAll('.view').forEach(x => x.hidden = x.dataset.view !== v);
+  document.querySelectorAll('.switch button').forEach(b => b.setAttribute('aria-pressed', b.dataset.v === v));
+  document.querySelectorAll('.seg button').forEach(b => b.setAttribute('aria-pressed', b.dataset.m === v));
+  document.getElementById('ctype').hidden = v !== 'concepts';
+  document.getElementById('enrich').hidden = v === 'concepts';
+  document.getElementById('nav').hidden = v === 'concepts';
+  document.querySelector('.search input').placeholder = v === 'concepts' ? 'Search concept, alias, role…' : 'Search entity, class, behavior…';
+}
+document.querySelectorAll('.switch button').forEach(b => b.addEventListener('click', () => show(b.dataset.v)));
+document.querySelectorAll('.seg button').forEach(b => b.addEventListener('click', () => show(b.dataset.m)));
+document.querySelectorAll('.concept').forEach(b => b.addEventListener('click', () => document.querySelectorAll('.concept').forEach(x => x.setAttribute('aria-current', x === b))));
+if (window.lucide) lucide.createIcons();
+</script>
+</body>
+</html>

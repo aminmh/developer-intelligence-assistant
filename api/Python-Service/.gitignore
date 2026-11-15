@@ -1,0 +1,11 @@
+__pycache__
+report.json
+logs/
+downloads/
+data/
+tmp
+php/vendor
+php/lsp/vendor
+workspaces/
+app/config/domain_dictionary.txt
+app/snapshots/

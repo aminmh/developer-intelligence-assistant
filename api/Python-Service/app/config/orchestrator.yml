@@ -1,0 +1,117 @@
+defaults:
+  min_confidence: 0.35
+  workspace_root: /app/workspaces
+  max_tool_timeout_seconds: 300
+  status_poll_interval_ms: 1000
+
+# Limits for model-initiated tool calls (agent_tools/limits.py). Values above
+# the hard ceilings in that module are capped.
+agent_tools:
+  timeout_seconds: 30
+  max_output_bytes: 65536
+  max_calls_per_run: 12
+  # Largest single model request the remote provider accepts, in tokens; 0 = no
+  # limit. Groq's free tier allows 8,000 tokens per minute (use about 6500 there).
+  max_request_tokens: 0
+
+tools:
+  chunk_code:
+    args:
+      export_format: json
+      no_index: true
+
+  export_structure:
+    args:
+      depth: 4
+      include_hidden: false
+    post_process:
+      - action: wrap_code_block
+        args: { language: text, prepend: "Project structure:\n" }
+      - action: truncate
+        args: { max_bytes: 8000 }
+
+routes:
+  code_explain:
+    tool: chunk_code
+    override_args:
+      export_format: json
+      no_index: false
+    post_process:
+      - action: llamaindex_ingest
+    # Explanations must use the project's indexed code/symbol context. External
+    # library docs are reserved for code-changing responses.
+    doc_retrieval: false
+    framework_aware: true
+    prompt_template: explain
+
+  code_refactor:
+    tool: chunk_code
+    override_args:
+      export_format: text
+      no_index: false
+    post_process:
+      - action: llamaindex_ingest
+    doc_retrieval: true
+    framework_aware: true
+    prompt_template: refactor
+
+  debug:
+    tool: chunk_code
+    override_args:
+      export_format: json
+      no_index: false
+    post_process:
+      - action: llamaindex_ingest
+    doc_retrieval: false
+    framework_aware: true
+    prompt_template: debug
+
+  search:
+    tool: null
+    prompt_template: search
+
+  chat:
+    tool: null
+    prompt_template: chat
+
+  knowledge:
+    tool: export_structure
+    override_args:
+      depth: 4
+      include_hidden: false
+    post_process:
+      - action: wrap_code_block
+        args: { language: text, prepend: "Project structure:\n" }
+      - action: truncate
+        args: { max_bytes: 8000 }
+    # Framework profile (routes/models/controllers/schema) so route/feature
+    # questions get grounded in the real Laravel surface.
+    framework_aware: true
+    prompt_template: explain
+
+  structure_analyze:
+    # Static structure census: deterministic, multi-language profile
+    # (framework / language / database / architecture) from the extracted
+    # workspace — no runtime probes, offline. The workspace is
+    # retained (bounded LRU) so a later POST /analysis save can re-extract the
+    # domain concepts from the real source (index_domain_for_workspace).
+    description: Analyze project structure
+    tool: export_structure
+    framework_aware: false
+    structure: true
+    retain_workspace: true
+    post_process: {}
+    prompt_template: analyze_structure
+
+  index_code:
+    # Language-dispatched code index: parses the workspace into chunks for a
+    # PREVIEW only — no llamaindex ingest runs here. POST /analysis later
+    # (persist_code_index) writes Qdrant + Neo4j from the retained workspace.
+    description: Index project codebase
+    tool: null
+    llamaindex: false
+    framework_aware: false
+    language_dispatch: true
+    retain_workspace: true
+    post_process: {}
+    prompt_template: analyze_code

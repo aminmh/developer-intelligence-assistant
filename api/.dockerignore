@@ -1,0 +1,17 @@
+**
+!Python-Service/
+!Python-Service/requirements-analyzer-worker.txt
+!Python-Service/app/
+!Python-Service/app/code_quality/
+!Python-Service/app/code_quality/__init__.py
+!Python-Service/app/code_quality/service.py
+!Python-Service/app/code_quality/external_analyzers.py
+!Python-Service/app/code_quality/scip_index.py
+!Python-Service/app/infra/
+!Python-Service/app/infra/__init__.py
+!Python-Service/app/infra/settings.py
+!Python-Service/app/infra/settings_store.py
+!Python-Service/app/infra/log_paths.py
+!analyzer-worker/
+!analyzer-worker/Dockerfile
+!analyzer-worker/worker.py

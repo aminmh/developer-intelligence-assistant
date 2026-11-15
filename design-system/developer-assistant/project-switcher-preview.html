@@ -1,0 +1,316 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Project Switcher Preview</title>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+<style>
+:root {
+  --a: 103 232 249; --b: 129 140 248;
+  --grad: linear-gradient(135deg, rgb(var(--a)), rgb(var(--b)));
+  --text: #e6ebf5; --text-2: #a3aec4; --text-3: #8591a8;
+  --line: rgb(148 163 255 / .12); --line-2: rgb(148 163 255 / .22);
+  --sunk: #0c1122; --solid: #10152a; --field: rgb(8 11 22 / .55);
+  --ease: cubic-bezier(.2,.7,.2,1);
+  --sans: Inter, system-ui, sans-serif; --mono: "JetBrains Mono", ui-monospace, monospace;
+}
+* { box-sizing: border-box; }
+html, body { height: 100%; margin: 0; }
+body { font-family: var(--sans); color: var(--text); overflow: hidden;
+  background: radial-gradient(1200px 600px at 85% -10%, rgb(var(--b) / .16), transparent 60%), radial-gradient(900px 500px at -10% 110%, rgb(var(--a) / .1), transparent 60%), linear-gradient(160deg, #070912, #0b0f1e 52%, #0b1825); }
+button, input { font: inherit; color: inherit; }
+button { cursor: pointer; }
+[hidden] { display: none !important; }
+:focus-visible { outline: 2px solid rgb(var(--a)); outline-offset: 2px; }
+svg.lucide { width: 16px; height: 16px; flex-shrink: 0; }
+.shell { position: relative; display: flex; gap: 12px; height: 100vh; padding: 12px; overflow: clip; }
+.glass { background: linear-gradient(160deg, rgb(255 255 255 / .07), rgb(255 255 255 / .02)), rgb(14 18 36 / .42); backdrop-filter: blur(16px) saturate(150%); -webkit-backdrop-filter: blur(16px) saturate(150%); border: 1px solid rgb(255 255 255 / .08); box-shadow: inset 0 1px 0 rgb(255 255 255 / .08), 0 18px 48px rgb(0 0 0 / .45); }
+.sidebar { position: relative; z-index: 1; width: 72px; border-radius: 20px; display: flex; flex-direction: column; align-items: center; gap: 6px; padding: 14px 0; }
+.sidebar .logo { width: 38px; height: 38px; margin-bottom: 10px; border-radius: 11px; box-shadow: 0 0 20px rgb(var(--b) / .28); }
+.side-ico { position: relative; display: grid; place-items: center; width: 44px; height: 40px; border-radius: 12px; color: var(--text-2); border: 0; background: none; }
+.side-ico[aria-current="page"] { color: var(--text); background: linear-gradient(90deg, rgb(var(--a) / .16), rgb(var(--b) / .06)); box-shadow: inset 0 0 0 1px rgb(var(--a) / .25); }
+.side-ico[aria-current="page"] svg { color: rgb(var(--a)); }
+.side-ico[aria-current="page"]::before { content: ""; position: absolute; left: 3px; top: 11px; bottom: 11px; width: 3px; border-radius: 3px; background: var(--grad); box-shadow: 0 0 10px rgb(var(--a) / .9); }
+main { position: relative; z-index: 1; flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 12px; }
+header.top { position: relative; z-index: 5; display: flex; flex-wrap: wrap; align-items: center; gap: 10px; min-height: 60px; padding: 8px 14px 8px 20px; border-radius: 16px; }
+.ptitle { font-size: 15px; font-weight: 600; }
+.pdesc { font-size: 12px; color: var(--text-3); }
+.chip { display: inline-flex; align-items: center; gap: 7px; height: 40px; padding: 0 12px; border-radius: 10px; border: 1px solid rgb(52 211 153 / .3); background: rgb(52 211 153 / .08); color: #34d399; font-size: 12px; }
+.btn { display: inline-flex; align-items: center; gap: 7px; height: 40px; padding: 0 13px; border-radius: 10px; border: 1px solid var(--line-2); background: var(--field); color: var(--text); font-size: 12.5px; font-weight: 500; white-space: nowrap; }
+.btn svg { width: 15px; height: 15px; }
+.btn.primary { border: 0; background: var(--grad); color: #0b0f1e; font-weight: 600; }
+
+/* ---------- Project switcher ---------- */
+.ps { position: relative; }
+.ps-trigger { display: inline-flex; align-items: center; gap: 10px; height: 40px; min-width: 300px; max-width: 420px; padding: 0 10px 0 12px; border-radius: 10px; border: 1px solid var(--line-2); background: var(--field); text-align: left; }
+.ps-trigger:hover, .ps-trigger[aria-expanded="true"] { border-color: rgb(var(--a) / .55); box-shadow: 0 0 0 3px rgb(var(--a) / .12); }
+.ps-avatar { display: grid; place-items: center; width: 24px; height: 24px; border-radius: 7px; background: var(--grad); color: #0b0f1e; font: 600 12px var(--mono); flex-shrink: 0; }
+.ps-name { display: flex; flex-direction: column; min-width: 0; flex: 1; line-height: 1.2; }
+.ps-name b { font: 600 13px var(--mono); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.ps-name span { font: 12px var(--mono); color: var(--text-3); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.ps-name span em { font-style: normal; color: rgb(var(--a)); }
+.ps-trigger > svg:last-child { color: var(--text-3); }
+.ps-pop { position: absolute; left: 0; top: calc(100% + 8px); width: 540px; max-width: calc(100vw - 32px); border-radius: 14px; border: 1px solid var(--line-2); background: rgb(12 16 32 / .98); box-shadow: 0 24px 60px rgb(0 0 0 / .55), 0 0 0 1px rgb(var(--a) / .06); overflow: hidden; animation: pop 160ms var(--ease) both; }
+@keyframes pop { from { opacity: 0; transform: translateY(-4px) scale(.98); } to { opacity: 1; transform: none; } }
+.ps-search { position: relative; padding: 10px; border-bottom: 1px solid var(--line); }
+.ps-search svg { position: absolute; left: 22px; top: 50%; transform: translateY(-50%); color: var(--text-3); }
+.ps-search input { width: 100%; height: 38px; padding: 0 12px 0 36px; border-radius: 9px; border: 1px solid var(--line-2); background: var(--field); outline: none; font: 13px var(--mono); }
+.ps-search input:focus { border-color: rgb(var(--a) / .6); box-shadow: 0 0 0 3px rgb(var(--a) / .15); }
+.ps-body { display: grid; grid-template-columns: 200px minmax(0, 1fr); max-height: 360px; }
+.ps-col { overflow-y: auto; padding: 6px; }
+.ps-col + .ps-col { border-left: 1px solid var(--line); }
+.ps-label { margin: 6px 8px 4px; font: 12px var(--mono); color: var(--text-3); }
+.ps-label::before { content: "// "; color: rgb(var(--a) / .7); }
+.ps-proj { display: flex; align-items: center; gap: 8px; width: 100%; height: 36px; padding: 0 8px; border: 0; border-radius: 8px; background: none; text-align: left; font: 13px var(--mono); }
+.ps-proj:hover { background: rgb(148 163 255 / .07); }
+.ps-proj[aria-selected="true"] { background: rgb(var(--a) / .1); color: rgb(var(--a)); }
+.ps-proj .dot { width: 7px; height: 7px; border-radius: 50%; background: #34d399; box-shadow: 0 0 8px rgb(52 211 153 / .7); flex-shrink: 0; }
+.ps-proj .dot.off { background: var(--text-3); box-shadow: none; }
+.ps-proj span { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.ps-proj small { font-size: 11.5px; color: var(--text-3); }
+.ps-rev { display: grid; grid-template-columns: 16px minmax(0, 1fr) auto; align-items: center; gap: 8px; width: 100%; padding: 8px; border: 0; border-radius: 8px; background: none; text-align: left; }
+.ps-rev:hover:not(:disabled) { background: rgb(148 163 255 / .07); }
+.ps-rev[aria-selected="true"] { background: rgb(var(--a) / .1); }
+.ps-rev[aria-selected="true"] .radio { border-color: rgb(var(--a)); background: radial-gradient(circle, rgb(var(--a)) 45%, transparent 50%); }
+.ps-rev:disabled { opacity: .55; cursor: not-allowed; }
+.radio { width: 14px; height: 14px; border-radius: 50%; border: 1.5px solid var(--text-3); }
+.ps-rev b { display: block; font: 500 12.5px var(--mono); }
+.ps-rev span { display: block; margin-top: 2px; font-size: 12px; color: var(--text-3); }
+.tag { display: inline-flex; align-items: center; gap: 4px; height: 22px; padding: 0 8px; border-radius: 999px; font: 500 11.5px var(--mono); white-space: nowrap; }
+.tag svg { width: 12px; height: 12px; }
+.tag.ok { color: #34d399; background: rgb(52 211 153 / .1); border: 1px solid rgb(52 211 153 / .3); }
+.tag.warn { color: #fcd34d; background: rgb(251 191 36 / .08); border: 1px solid rgb(251 191 36 / .3); }
+.tag.git { color: rgb(var(--a)); background: rgb(var(--a) / .08); border: 1px solid rgb(var(--a) / .3); }
+.ps-foot { display: flex; align-items: center; gap: 8px; padding: 8px 10px; border-top: 1px solid var(--line); font-size: 12px; color: var(--text-3); }
+.ps-foot .btn { height: 32px; margin-left: auto; font-size: 12px; }
+.ps-new { display: flex; align-items: center; gap: 8px; margin: 4px 6px 6px; padding: 8px; border-radius: 8px; border: 1px dashed var(--line-2); font-size: 12.5px; color: var(--text-2); }
+.ps-new svg { color: rgb(var(--a)); }
+.ps-new b { font-family: var(--mono); color: var(--text); }
+
+/* ---------- Page area ---------- */
+.page { flex: 1; min-height: 0; overflow-y: auto; border-radius: 16px; padding: 18px 20px 24px; border: 1px solid rgb(255 255 255 / .08); background: linear-gradient(160deg, rgb(255 255 255 / .05), rgb(255 255 255 / .015)), rgb(14 18 36 / .42); }
+.wrap { display: flex; flex-direction: column; gap: 14px; max-width: 1000px; margin: 0 auto; }
+.view { display: flex; flex-direction: column; gap: 14px; animation: rise 240ms var(--ease) both; }
+@keyframes rise { from { opacity: 0; transform: translateY(6px); } to { opacity: 1; transform: none; } }
+.card { padding: 16px; border-radius: 14px; border: 1px solid var(--line); background: rgb(16 21 42 / .55); }
+.card h3 { display: flex; align-items: center; gap: 8px; margin: 0; font-size: 14px; font-weight: 600; }
+.card h3 svg { color: rgb(var(--a)); }
+.hint { margin: 6px 0 0; font-size: 12.5px; line-height: 1.55; color: var(--text-2); }
+.scope { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; padding: 10px 12px; border-radius: 12px; border: 1px solid rgb(var(--a) / .25); background: linear-gradient(90deg, rgb(var(--a) / .08), rgb(var(--b) / .03)); font-size: 12.5px; color: var(--text-2); }
+.scope svg { color: rgb(var(--a)); }
+.scope b { font-family: var(--mono); color: var(--text); }
+.scope .link { margin-left: auto; padding: 0; border: 0; background: none; color: rgb(var(--a)); font-size: 12px; text-decoration: underline; text-underline-offset: 2px; }
+
+/* follow table */
+.follow { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 10px; }
+.fcard { padding: 12px; border-radius: 12px; border: 1px solid var(--line); background: var(--sunk); }
+.fcard b { display: flex; align-items: center; gap: 8px; font-size: 13px; }
+.fcard b svg { color: rgb(var(--a)); }
+.fcard p { margin: 6px 0 0; font-size: 12.5px; line-height: 1.5; color: var(--text-2); }
+
+/* chat mock */
+.composer { border-radius: 16px; border: 1px solid rgb(var(--a) / .35); background: rgb(13 18 36 / .9); box-shadow: 0 0 0 1px rgb(var(--a) / .08), 0 0 24px rgb(var(--a) / .1); }
+.composer textarea { display: block; width: 100%; height: 64px; padding: 14px 16px 6px; border: 0; outline: none; resize: none; background: none; color: var(--text); font: 14px var(--sans); }
+.composer textarea::placeholder { color: var(--text-3); }
+.cbar { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; padding: 6px 8px 8px 10px; }
+.from { display: inline-flex; align-items: center; gap: 6px; height: 34px; padding: 0 10px; border-radius: 9px; border: 1px solid var(--line-2); background: var(--field); font: 12px var(--mono); color: var(--text-2); }
+.from svg { width: 14px; height: 14px; color: rgb(var(--a)); }
+.from b { color: var(--text); font-weight: 500; }
+.from em { font-style: normal; color: rgb(var(--a)); }
+.seg { display: inline-flex; padding: 2px; border-radius: 9px; border: 1px solid var(--line-2); background: var(--field); }
+.seg button { height: 28px; padding: 0 10px; border: 0; border-radius: 7px; background: none; color: var(--text-3); font: 12px var(--mono); }
+.seg button[aria-pressed="true"] { background: var(--grad); color: #0b0f1e; font-weight: 600; }
+.send { display: inline-flex; align-items: center; gap: 6px; height: 34px; margin-left: auto; padding: 0 14px; border: 0; border-radius: 10px; background: var(--grad); color: #0b0f1e; font-size: 13px; font-weight: 600; }
+
+/* KB mock */
+.rows { display: flex; flex-direction: column; gap: 8px; margin-top: 12px; }
+.row { display: grid; grid-template-columns: 22px minmax(0, 1fr) auto; align-items: center; gap: 10px; padding: 10px 12px; border-radius: 10px; border: 1px solid var(--line); background: var(--sunk); }
+.row > svg { color: rgb(var(--a)); }
+.row b { display: block; font: 500 13px var(--mono); }
+.row span { display: block; margin-top: 2px; font-size: 12px; color: var(--text-3); }
+
+.switch { position: fixed; z-index: 50; bottom: 14px; left: 50%; transform: translateX(-50%); display: flex; gap: 4px; padding: 4px; border-radius: 12px; background: rgb(7 9 18 / .94); border: 1px solid var(--line-2); }
+.switch button { height: 30px; padding: 0 12px; border: 0; border-radius: 8px; background: transparent; color: var(--text-2); font-size: 12px; white-space: nowrap; }
+.switch button[aria-pressed="true"] { color: #0b0f1e; background: var(--grad); font-weight: 600; }
+@media (prefers-reduced-motion: reduce) { *, *::before, *::after { animation: none !important; transition: none !important; } }
+@media (max-width: 760px) {
+  .sidebar { display: none; }
+  .ps-trigger { min-width: 0; width: 100%; max-width: 100%; }
+  .ps { flex: 1 1 100%; min-width: 0; }
+  .ps-pop { width: calc(100vw - 32px); }
+  .ps-body { grid-template-columns: minmax(0, 1fr); max-height: 52vh; }
+  .ps-col + .ps-col { border-left: 0; border-top: 1px solid var(--line); }
+  .switch { left: 12px; right: 12px; transform: none; overflow-x: auto; }
+}
+</style>
+</head>
+<body>
+<div class="switch" role="group" aria-label="Preview state">
+  <button data-v="open" aria-pressed="true">Switcher open</button>
+  <button data-v="chat" aria-pressed="false">Chat follows</button>
+  <button data-v="kb" aria-pressed="false">Knowledge base follows</button>
+  <button data-v="map" aria-pressed="false">What each page does</button>
+</div>
+
+<div class="shell">
+  <aside class="sidebar glass">
+    <svg class="logo" viewBox="0 0 48 48" fill="none"><defs><linearGradient id="g1" x1="6" y1="6" x2="42" y2="42" gradientUnits="userSpaceOnUse"><stop stop-color="#22d3ee"/><stop offset="1" stop-color="#818cf8"/></linearGradient></defs><rect x="1.5" y="1.5" width="45" height="45" rx="13" fill="#0d1226" stroke="url(#g1)" stroke-opacity=".55"/><path d="M17 14 8.5 24 17 34M31 14 39.5 24 31 34" stroke="url(#g1)" stroke-width="3.4" stroke-linecap="round" stroke-linejoin="round"/><path d="M24 15.5c.9 4.6 2.9 6.6 7.5 7.5-4.6.9-6.6 2.9-7.5 7.5-.9-4.6-2.9-6.6-7.5-7.5 4.6-.9 6.6-2.9 7.5-7.5Z" fill="url(#g1)"/></svg>
+    <button class="side-ico" data-nav="chat"><i data-lucide="message-square-text"></i></button>
+    <button class="side-ico" data-nav="kb"><i data-lucide="library"></i></button>
+    <button class="side-ico"><i data-lucide="shield-check"></i></button>
+    <button class="side-ico"><i data-lucide="activity"></i></button>
+    <button class="side-ico"><i data-lucide="database"></i></button>
+  </aside>
+
+  <main>
+    <header class="top glass">
+      <div style="min-width:140px"><div class="ptitle" id="ptitle">Codebase chat</div><div class="pdesc" id="pdesc">Ask questions about the indexed code</div></div>
+
+      <div class="ps" id="ps">
+        <button class="ps-trigger" aria-haspopup="dialog" aria-expanded="true" id="psTrigger">
+          <span class="ps-avatar" id="psAvatar">P</span>
+          <span class="ps-name"><b id="psName">pizza</b><span id="psRev"><em>latest</em> · commit 1670d9e · 7 days ago</span></span>
+          <i data-lucide="chevrons-up-down"></i>
+        </button>
+        <div class="ps-pop" id="psPop" role="dialog" aria-label="Choose project and revision">
+          <div class="ps-search"><i data-lucide="search"></i><input placeholder="Find or type a new project ID…" aria-label="Find project" id="psSearch"></div>
+          <div class="ps-body">
+            <div class="ps-col" role="listbox" aria-label="Projects" id="projList">
+              <p class="ps-label">projects</p>
+            </div>
+            <div class="ps-col" role="listbox" aria-label="Revisions" id="revList"></div>
+          </div>
+          <div class="ps-foot"><i data-lucide="link-2"></i>Every page follows this choice.<button class="btn" id="psAccess"><i data-lucide="users"></i>Project access</button></div>
+        </div>
+      </div>
+
+      <span style="flex:1"></span>
+      <span class="chip">● Ready</span>
+    </header>
+
+    <section class="page">
+      <div class="wrap">
+        <!-- MAP -->
+        <div class="view" data-view="map" hidden>
+          <div class="card">
+            <h3><i data-lucide="link-2"></i>One project, every page</h3>
+            <p class="hint">The header switcher holds the project and revision. It's in the URL (<code>?project=pizza&amp;revision=latest</code>), so links and Back work, and it's remembered for your next visit.</p>
+            <div class="follow" style="margin-top:12px">
+              <div class="fcard"><b><i data-lucide="message-square-text"></i>Chat</b><p>Answers from the selected revision. "latest" follows new syncs automatically.</p></div>
+              <div class="fcard"><b><i data-lucide="library"></i>Knowledge base</b><p>Shows only this project's revisions and uploads. Upload, Git source and Business rules use it.</p></div>
+              <div class="fcard"><b><i data-lucide="shield-check"></i>Code quality</b><p>Opens on the selected revision. Changing the revision there changes it everywhere.</p></div>
+              <div class="fcard"><b><i data-lucide="activity"></i>Runtime</b><p>Opens on the selected revision and its deployments.</p></div>
+              <div class="fcard"><b><i data-lucide="database"></i>Database schema</b><p>Uses it for runtime table usage. Saved analyses stay their own list.</p></div>
+              <div class="fcard"><b><i data-lucide="users"></i>Project access</b><p>Members, retention and working-tree sync for the selected project.</p></div>
+            </div>
+          </div>
+          <div class="card">
+            <h3><i data-lucide="triangle-alert"></i>Revisions that can't be used</h3>
+            <p class="hint">A revision whose indexed vectors are missing shows <span class="tag warn">Not indexed</span> and can't be picked for chat. Logs and Settings stay app-wide.</p>
+          </div>
+        </div>
+
+        <!-- CHAT -->
+        <div class="view" data-view="chat" hidden>
+          <div class="scope"><i data-lucide="link-2"></i>Answering from <b>pizza</b> · <b>latest</b> (commit 1670d9e)</div>
+          <div class="card" style="min-height:220px;display:grid;place-items:center;text-align:center">
+            <div><h3 style="justify-content:center;font-size:20px">Ask about <span style="background:var(--grad);-webkit-background-clip:text;background-clip:text;color:transparent">pizza</span></h3><p class="hint">Answers come from the selected revision's code, call graph and business rules.</p></div>
+          </div>
+          <div class="composer">
+            <textarea placeholder="Ask about APIs, code or configuration in pizza…"></textarea>
+            <div class="cbar">
+              <span class="from" title="Change it in the header"><i data-lucide="git-commit-horizontal"></i><b>pizza</b> · <em>latest</em></span>
+              <div class="seg"><button aria-pressed="true">Local</button><button aria-pressed="false">External</button></div>
+              <button class="send"><i data-lucide="send-horizontal"></i>Send</button>
+            </div>
+          </div>
+          <p class="hint" style="margin:0;text-align:center">The composer shows where answers come from; change it from the header.</p>
+        </div>
+
+        <!-- KB -->
+        <div class="view" data-view="kb" hidden>
+          <div class="scope"><i data-lucide="filter"></i>Showing <b>pizza</b> only<button class="link">Show all projects</button></div>
+          <div class="card">
+            <h3><i data-lucide="git-branch"></i>pizza · revisions</h3>
+            <div class="rows">
+              <div class="row"><i data-lucide="git-commit-horizontal"></i><span><b>commit 1670d9e</b><span>Git sync · main · 7 days ago</span></span><span class="tag ok"><i data-lucide="check"></i>Indexed</span></div>
+              <div class="row"><i data-lucide="file-archive"></i><span><b>upload 9a1c2f0</b><span>ZIP upload · 9 days ago · vectors missing</span></span><span class="tag warn"><i data-lucide="triangle-alert"></i>Not indexed</span></div>
+            </div>
+          </div>
+          <div class="card">
+            <h3><i data-lucide="upload-cloud"></i>Upload a revision</h3>
+            <p class="hint">New uploads go to <b style="font-family:var(--mono);color:var(--text)">pizza</b>. To start another project, type its ID in the header switcher.</p>
+          </div>
+        </div>
+
+        <div class="view" data-view="open">
+          <div class="card"><h3><i data-lucide="mouse-pointer-click"></i>Switcher</h3><p class="hint">Projects on the left, the chosen project's revisions on the right. "latest" always follows the newest indexed revision; pick a specific one to pin it. Typing an ID that doesn't exist offers to start a new project.</p></div>
+        </div>
+      </div>
+    </section>
+  </main>
+</div>
+
+<script src="https://unpkg.com/lucide@0.460.0/dist/umd/lucide.min.js"></script>
+<script>
+const data = {
+  'developer-assistant': [{ id: 'latest', t: 'latest', s: 'commit 70b8f0a · 1 day ago', tag: 'git' }, { id: 'r1', t: 'commit 70b8f0a', s: 'Git sync · 1 day ago', tag: 'ok' }],
+  'docker-proxy': [{ id: 'latest', t: 'latest', s: 'upload e55db2d · 1 day ago', tag: 'git' }, { id: 'r1', t: 'upload e55db2d', s: 'ZIP upload · 1 day ago', tag: 'ok' }, { id: 'r2', t: 'commit f74182e', s: 'Git sync · 2 days ago', tag: 'ok' }],
+  'pizza': [{ id: 'latest', t: 'latest', s: 'commit 1670d9e · 7 days ago', tag: 'git' }, { id: 'r1', t: 'commit 1670d9e', s: 'Git sync · main · 7 days ago', tag: 'ok' }],
+  'Pizza': [{ id: 'r1', t: 'upload 45e9b57', s: 'ZIP upload · 12 days ago', tag: 'warn' }],
+  'proxy-git': [{ id: 'latest', t: 'latest', s: 'commit b338063 · 1 day ago', tag: 'git' }, { id: 'r1', t: 'commit b338063', s: 'Git sync · 1 day ago', tag: 'ok' }],
+};
+let proj = 'pizza', rev = 'latest';
+const projList = document.getElementById('projList'), revList = document.getElementById('revList');
+const tagHtml = (t) => t === 'git' ? '<span class="tag git">follows newest</span>' : t === 'ok' ? '<span class="tag ok">Indexed</span>' : '<span class="tag warn">Not indexed</span>';
+function render(filter = '') {
+  projList.querySelectorAll('.ps-proj, .ps-new').forEach(e => e.remove());
+  const names = Object.keys(data).filter(n => n.toLowerCase().includes(filter.toLowerCase()));
+  names.forEach(n => {
+    const ok = data[n].some(r => r.tag !== 'warn');
+    const b = document.createElement('button');
+    b.className = 'ps-proj'; b.setAttribute('role', 'option'); b.setAttribute('aria-selected', n === proj);
+    b.innerHTML = `<i class="dot ${ok ? '' : 'off'}"></i><span>${n}</span><small>${data[n].length > 1 ? data[n].length - 1 : data[n].length}</small>`;
+    b.onclick = () => { proj = n; rev = data[n][0].tag === 'warn' ? '' : data[n][0].id; render(filter); };
+    projList.appendChild(b);
+  });
+  if (filter && !names.some(n => n === filter)) {
+    const d = document.createElement('div'); d.className = 'ps-new';
+    d.innerHTML = `<i data-lucide="plus"></i>Start new project <b>${filter.replace(/[<>&"]/g, '')}</b>`;
+    projList.appendChild(d);
+  }
+  revList.innerHTML = `<p class="ps-label">${proj} · revisions</p>`;
+  (data[proj] || []).forEach(r => {
+    const b = document.createElement('button');
+    b.className = 'ps-rev'; b.setAttribute('role', 'option'); b.setAttribute('aria-selected', r.id === rev);
+    if (r.tag === 'warn') { b.disabled = true; b.title = 'Its indexed vectors are missing. Re-index it from Knowledge base.'; }
+    b.innerHTML = `<span class="radio"></span><span><b>${r.t}</b><span>${r.s}</span></span>${tagHtml(r.tag)}`;
+    b.onclick = () => { rev = r.id; render(filter); updateTrigger(); };
+    revList.appendChild(b);
+  });
+  updateTrigger();
+  if (window.lucide) lucide.createIcons();
+}
+function updateTrigger() {
+  const r = (data[proj] || []).find(x => x.id === rev);
+  document.getElementById('psName').textContent = proj;
+  document.getElementById('psAvatar').textContent = proj[0].toUpperCase();
+  document.getElementById('psRev').innerHTML = r ? (r.id === 'latest' ? `<em>latest</em> · ${r.s}` : `<em>pinned</em> · ${r.t}`) : 'No usable revision';
+}
+const pop = document.getElementById('psPop'), trig = document.getElementById('psTrigger');
+const setOpen = (o) => { pop.hidden = !o; trig.setAttribute('aria-expanded', o); };
+trig.onclick = () => setOpen(pop.hidden);
+document.getElementById('psSearch').oninput = (e) => render(e.target.value.trim());
+function show(v) {
+  setOpen(v === 'open');
+  document.querySelectorAll('.view').forEach(x => x.hidden = x.dataset.view !== v && !(v === 'open' && x.dataset.view === 'open'));
+  document.querySelectorAll('.switch button').forEach(b => b.setAttribute('aria-pressed', b.dataset.v === v));
+  document.querySelectorAll('.side-ico').forEach(b => b.dataset.nav === (v === 'kb' ? 'kb' : 'chat') ? b.setAttribute('aria-current', 'page') : b.removeAttribute('aria-current'));
+  document.getElementById('ptitle').textContent = v === 'kb' ? 'Knowledge base' : v === 'map' ? 'Project selection' : 'Codebase chat';
+}
+document.querySelectorAll('.switch button').forEach(b => b.onclick = () => show(b.dataset.v));
+render(); show('open');
+</script>
+</body>
+</html>

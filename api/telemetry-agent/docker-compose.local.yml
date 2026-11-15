@@ -1,0 +1,10 @@
+services:
+  agent:
+    environment:
+      BACKEND_URL: https://telemetry-caddy:9443
+    networks: [telemetry_ingress]
+
+networks:
+  telemetry_ingress:
+    external: true
+    name: ${TELEMETRY_INGRESS_NETWORK:-devassistant_telemetry_ingress}

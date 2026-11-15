@@ -1,0 +1,6 @@
+{
+  "name": "Developer Assistant RAG System",
+  "description": "Developer assistant RAG system using Qdrant and LangChain for retrieval, file chunking, and semantic search configurations.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}

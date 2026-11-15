@@ -1,0 +1,506 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Code Quality Preview</title>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+<style>
+:root {
+  --a: 34 211 238; --b: 129 140 248;
+  --grad: linear-gradient(135deg, rgb(var(--a)), rgb(var(--b)));
+  --text: #e6ebf5; --text-2: #a3aec4; --text-3: #8591a8;
+  --line: rgb(148 163 255 / .12); --line-2: rgb(148 163 255 / .22);
+  --solid: #10152a; --field: rgb(8 11 22 / .55);
+  --ok: #34d399; --warn: #fcd34d; --bad: #fb7185; --mid: #fbbf24;
+  --ease: cubic-bezier(.2,.7,.2,1);
+  --sans: Inter, system-ui, sans-serif; --mono: "JetBrains Mono", ui-monospace, monospace;
+}
+* { box-sizing: border-box; }
+html, body { height: 100%; margin: 0; }
+body { font-family: var(--sans); color: var(--text); overflow: hidden;
+  background: radial-gradient(1200px 600px at 85% -10%, rgb(var(--b) / .16), transparent 60%), radial-gradient(900px 500px at -10% 110%, rgb(var(--a) / .1), transparent 60%), linear-gradient(160deg, #070912, #0b0f1e 52%, #0b1825); }
+button, input, select { font: inherit; color: inherit; }
+button { cursor: pointer; }
+:focus-visible { outline: 2px solid rgb(var(--a)); outline-offset: 2px; }
+svg.lucide { width: 16px; height: 16px; flex-shrink: 0; }
+.shell { position: relative; display: flex; gap: 12px; height: 100vh; padding: 12px; overflow: clip; }
+.orbs { position: absolute; inset: 0; overflow: clip; pointer-events: none; }
+.orb { position: absolute; border-radius: 50%; }
+.orb-a { width: 520px; height: 520px; left: -160px; top: 18%; background: radial-gradient(circle, rgb(var(--a) / .22), transparent 65%); }
+.orb-b { width: 460px; height: 460px; left: 120px; top: -180px; background: radial-gradient(circle, rgb(var(--b) / .24), transparent 65%); }
+.glass { background: linear-gradient(160deg, rgb(255 255 255 / .07), rgb(255 255 255 / .02)), rgb(14 18 36 / .42); backdrop-filter: blur(16px) saturate(150%); -webkit-backdrop-filter: blur(16px) saturate(150%); border: 1px solid rgb(255 255 255 / .08); box-shadow: inset 0 1px 0 rgb(255 255 255 / .08), 0 18px 48px rgb(0 0 0 / .45); }
+.sidebar { position: relative; z-index: 1; width: 72px; border-radius: 20px; display: flex; flex-direction: column; align-items: center; gap: 6px; padding: 14px 0; }
+.sidebar .logo { width: 38px; height: 38px; margin-bottom: 10px; border-radius: 11px; box-shadow: 0 0 20px rgb(var(--b) / .28); }
+.side-ico { position: relative; display: grid; place-items: center; width: 44px; height: 40px; border-radius: 12px; color: var(--text-2); }
+.side-ico.on { color: var(--text); background: linear-gradient(90deg, rgb(var(--a) / .16), rgb(var(--b) / .06)); box-shadow: inset 0 0 0 1px rgb(var(--a) / .25); }
+.side-ico.on svg { color: rgb(var(--a)); }
+.side-ico.on::before { content: ""; position: absolute; left: 3px; top: 11px; bottom: 11px; width: 3px; border-radius: 3px; background: var(--grad); box-shadow: 0 0 10px rgb(var(--a) / .9); }
+main { position: relative; z-index: 1; flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 12px; }
+header.top { display: flex; align-items: center; gap: 10px; min-height: 60px; padding: 8px 20px; border-radius: 16px; }
+.ptitle { font-size: 15px; font-weight: 600; } .crumb { font: 12px var(--mono); color: var(--text-3); margin-right: 4px; }
+.pdesc { font-size: 12px; color: var(--text-3); }
+.chip { display: inline-flex; align-items: center; gap: 7px; height: 32px; padding: 0 10px; border-radius: 8px; border: 1px solid var(--line-2); background: var(--field); color: var(--text-2); font-size: 12px; white-space: nowrap; }
+.chip.ok { color: var(--ok); border-color: rgb(52 211 153 / .3); background: rgb(52 211 153 / .08); }
+
+.page { flex: 1; min-height: 0; overflow-y: auto; border-radius: 16px; padding: 18px 20px 28px; border: 1px solid rgb(255 255 255 / .08); background: linear-gradient(160deg, rgb(255 255 255 / .05), rgb(255 255 255 / .015)), rgb(14 18 36 / .42); }
+.wrap { max-width: 1240px; margin: 0 auto; display: flex; flex-direction: column; gap: 16px; }
+.rise { animation: rise 260ms var(--ease) both; }
+@keyframes rise { from { opacity: 0; transform: translateY(8px); } to { opacity: 1; transform: none; } }
+
+/* toolbar */
+.bar { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; padding: 10px; border-radius: 14px; border: 1px solid var(--line); background: rgb(16 21 42 / .55); }
+.rev-pick { display: inline-flex; align-items: center; gap: 8px; height: 38px; padding: 0 12px; border-radius: 10px; border: 1px solid var(--line-2); background: var(--field); font: 13px var(--mono); min-width: 260px; }
+.rev-pick svg:first-child { color: rgb(var(--a)); }
+.rev-pick select { flex: 1; border: 0; background: none; outline: none; color: var(--text); font: inherit; appearance: none; }
+.state { display: inline-flex; align-items: center; gap: 6px; height: 28px; padding: 0 10px; border-radius: 8px; font: 12px var(--mono); }
+.state.ok { color: var(--ok); background: rgb(52 211 153 / .08); border: 1px solid rgb(52 211 153 / .3); }
+.state.warn { color: var(--warn); background: rgb(251 191 36 / .06); border: 1px solid rgb(251 191 36 / .3); }
+.tabs { display: inline-flex; flex-wrap: wrap; gap: 2px; padding: 3px; border-radius: 12px; border: 1px solid var(--line-2); background: var(--field); }
+.tabs button { display: inline-flex; align-items: center; gap: 7px; height: 32px; padding: 0 12px; border: 0; border-radius: 9px; background: transparent; color: var(--text-3); font-size: 12.5px; font-weight: 500; }
+.tabs button:hover:not([aria-selected="true"]) { color: var(--text); }
+.tabs button[aria-selected="true"] { color: #0b0f1e; background: var(--grad); font-weight: 600; box-shadow: 0 0 16px rgb(var(--a) / .3); }
+.tabs svg { width: 15px; height: 15px; }
+.btn { display: inline-flex; align-items: center; gap: 6px; height: 34px; padding: 0 12px; border-radius: 9px; border: 1px solid var(--line-2); background: var(--field); color: var(--text); font-size: 12.5px; font-weight: 500; white-space: nowrap; }
+.btn:hover { border-color: rgb(var(--a) / .5); }
+.btn.primary { border: 0; background: var(--grad); color: #0b0f1e; font-weight: 600; box-shadow: 0 0 18px rgb(var(--a) / .35); height: 38px; padding: 0 16px; }
+.btn.danger { color: var(--bad); border-color: rgb(251 113 133 / .3); }
+.btn.danger:hover { background: rgb(251 113 133 / .08); }
+.btn.sm { height: 28px; padding: 0 9px; font-size: 12px; }
+.btn svg { width: 15px; height: 15px; }
+.push { margin-left: auto; display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+
+.layout { display: grid; grid-template-columns: minmax(0, 1fr) 300px; gap: 16px; align-items: start; }
+@media (max-width: 1100px) { .layout { grid-template-columns: minmax(0, 1fr); } }
+
+/* setup disclosure */
+.setup { border-radius: 14px; border: 1px solid var(--line); background: rgb(16 21 42 / .55); }
+.setup > summary { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; padding: 12px 14px; list-style: none; cursor: pointer; }
+.setup > summary::-webkit-details-marker { display: none; }
+.setup > summary b { font-size: 13.5px; font-weight: 600; }
+.setup > summary .sum { font: 12px var(--mono); color: var(--text-3); }
+.setup > summary .chev { margin-left: auto; color: var(--text-3); transition: transform 180ms var(--ease); }
+.setup[open] > summary .chev { transform: rotate(180deg); }
+.setup-body { display: grid; grid-template-columns: repeat(auto-fit, minmax(320px, 1fr)); gap: 16px; padding: 4px 14px 14px; border-top: 1px solid var(--line); }
+.setup h4 { margin: 12px 0 4px; font-size: 13px; font-weight: 600; }
+.hint { font-size: 12px; color: var(--text-3); line-height: 1.5; margin: 0; }
+.weights { display: grid; grid-template-columns: repeat(5, minmax(0, 1fr)); gap: 8px; margin-top: 10px; }
+.w { padding: 10px; border-radius: 10px; border: 1px solid var(--line); background: rgb(8 11 22 / .4); }
+.w span { font-size: 11px; color: var(--text-3); }
+.w div { display: flex; align-items: baseline; gap: 2px; margin-top: 4px; }
+.w input { width: 100%; border: 0; background: none; outline: none; font: 600 18px var(--mono); color: var(--text); }
+.w i { font-style: normal; font-size: 12px; color: var(--text-3); }
+.total { display: flex; align-items: center; gap: 10px; margin-top: 10px; font: 12px var(--mono); color: var(--text-3); }
+.total .tbar { flex: 1; height: 6px; border-radius: 6px; overflow: hidden; display: flex; background: rgb(148 163 255 / .12); }
+.total .tbar i { height: 100%; }
+.total b { color: var(--ok); }
+.tree { margin-top: 10px; padding: 8px; border-radius: 10px; border: 1px solid var(--line); background: rgb(8 11 22 / .4); font: 12px/1.9 var(--mono); color: var(--text-2); }
+.tree label { display: flex; align-items: center; gap: 8px; }
+.tree input { accent-color: rgb(var(--a)); }
+.pats { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 8px; }
+.pat { display: inline-flex; align-items: center; gap: 4px; height: 26px; padding: 0 4px 0 8px; border-radius: 7px; border: 1px solid rgb(var(--b) / .3); background: rgb(var(--b) / .07); font: 11.5px var(--mono); color: var(--text); }
+.pat button { display: grid; place-items: center; width: 20px; height: 20px; border: 0; background: none; color: var(--text-3); border-radius: 4px; }
+.pat svg { width: 12px; height: 12px; }
+.addrow { display: flex; gap: 8px; margin-top: 8px; }
+.input { flex: 1; min-width: 0; height: 34px; padding: 0 10px; border-radius: 9px; border: 1px solid var(--line-2); background: var(--field); font: 12px var(--mono); color: var(--text); outline: none; }
+
+/* report hero */
+.card { border-radius: 16px; border: 1px solid var(--line); background: rgb(16 21 42 / .55); padding: 18px; }
+.hero { display: grid; grid-template-columns: 180px minmax(0, 1fr); gap: 22px; align-items: center; border: 1px solid transparent; background: linear-gradient(var(--solid), var(--solid)) padding-box, linear-gradient(135deg, rgb(var(--a) / .45), var(--line) 45%, rgb(var(--b) / .35)) border-box; }
+@media (max-width: 640px) { .hero { grid-template-columns: 1fr; justify-items: center; text-align: center; } }
+.ring { position: relative; width: 170px; height: 170px; }
+.ring svg { width: 100%; height: 100%; transform: rotate(-90deg); }
+.ring .val { position: absolute; inset: 0; display: grid; place-items: center; text-align: center; }
+.ring .val b { display: block; font: 600 44px/1 var(--mono); background: var(--grad); -webkit-background-clip: text; background-clip: text; color: transparent; }
+.ring .val span { font-size: 12px; color: var(--text-3); }
+.hero h2 { margin: 0; font-size: 20px; font-weight: 600; }
+.meta { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 10px; }
+.tag { display: inline-flex; align-items: center; gap: 5px; height: 24px; padding: 0 8px; border-radius: 7px; border: 1px solid var(--line-2); font: 11px var(--mono); color: var(--text-2); white-space: nowrap; }
+.tag svg { width: 12px; height: 12px; }
+.tag.ok { color: var(--ok); border-color: rgb(52 211 153 / .3); background: rgb(52 211 153 / .07); }
+.tag.warn { color: var(--warn); border-color: rgb(251 191 36 / .3); background: rgb(251 191 36 / .06); }
+.tag.bad { color: var(--bad); border-color: rgb(251 113 133 / .35); background: rgb(251 113 133 / .06); }
+.tag.ai { color: rgb(var(--b)); border-color: rgb(var(--b) / .35); background: rgb(var(--b) / .08); }
+.hero p.note { margin: 10px 0 0; font-size: 12px; color: var(--text-3); line-height: 1.55; }
+
+.cats { display: grid; grid-template-columns: repeat(5, minmax(0, 1fr)); gap: 10px; }
+@media (max-width: 1100px) { .cats { grid-template-columns: repeat(auto-fit, minmax(170px, 1fr)); } }
+.cat { position: relative; padding: 14px; border-radius: 14px; border: 1px solid var(--line); background: rgb(16 21 42 / .55); overflow: hidden; transition: transform 180ms var(--ease); }
+.cat:hover { transform: translateY(-2px); }
+.cat::before { content: ""; position: absolute; left: 0; top: 0; right: 0; height: 2px; background: var(--c, var(--grad)); }
+.cat-top { display: flex; align-items: center; gap: 6px; font-size: 12px; color: var(--text-2); }
+.cat-top svg { width: 14px; height: 14px; color: var(--c2, rgb(var(--a))); }
+.cat .score { margin-top: 8px; font: 600 26px var(--mono); }
+.cat .score small { font-size: 12px; color: var(--text-3); font-weight: 400; }
+.cat .bar2 { margin-top: 8px; height: 4px; border-radius: 4px; background: rgb(148 163 255 / .12); overflow: hidden; }
+.cat .bar2 i { display: block; height: 100%; width: 100%; transform-origin: left; background: var(--c, var(--grad)); }
+.cat p { margin: 10px 0 0; font-size: 12px; line-height: 1.5; color: var(--text-2); }
+.cat .foot { margin-top: 10px; font: 11px var(--mono); color: var(--text-3); }
+
+/* sections */
+.sec-h { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; margin-bottom: 10px; }
+.sec-h h3 { margin: 0; display: flex; align-items: center; gap: 8px; font-size: 14.5px; font-weight: 600; }
+.sec-h h3 svg { color: rgb(var(--a)); }
+.sec-h .push { margin-left: auto; }
+
+.rules { display: grid; grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)); gap: 8px; }
+.rule { padding: 12px; border-radius: 12px; border: 1px solid var(--line); background: rgb(8 11 22 / .4); }
+.rule-top { display: flex; align-items: center; gap: 8px; font-size: 13px; font-weight: 600; }
+.rule-top .tag { margin-left: auto; }
+.rule p { margin: 6px 0 0; font-size: 12px; color: var(--text-2); line-height: 1.5; }
+
+.diag { border-radius: 12px; border: 1px solid var(--line); background: rgb(8 11 22 / .35); }
+.diag + .diag { margin-top: 8px; }
+.diag summary { display: flex; align-items: center; gap: 10px; min-height: 42px; padding: 0 12px; list-style: none; cursor: pointer; font-size: 13px; }
+.diag summary::-webkit-details-marker { display: none; }
+.diag summary svg:first-child { color: var(--text-3); }
+.diag summary .tag { margin-left: auto; }
+.diag summary .chev { color: var(--text-3); transition: transform 180ms var(--ease); }
+.diag[open] summary .chev { transform: rotate(180deg); }
+.diag .body { padding: 0 12px 12px 38px; font-size: 12.5px; color: var(--text-2); line-height: 1.6; }
+
+.filters { display: flex; flex-wrap: wrap; gap: 6px; }
+.fchip { display: inline-flex; align-items: center; gap: 6px; height: 28px; padding: 0 10px; border-radius: 999px; border: 1px solid var(--line-2); background: transparent; color: var(--text-3); font: 12px var(--mono); }
+.fchip[aria-pressed="true"] { color: var(--text); border-color: rgb(var(--a) / .5); background: rgb(var(--a) / .1); }
+.fchip .n { color: var(--text-3); }
+.finding { position: relative; display: grid; grid-template-columns: 4px minmax(0, 1fr); gap: 12px; padding: 12px 14px 12px 0; border-radius: 12px; border: 1px solid var(--line); background: rgb(8 11 22 / .4); }
+.finding + .finding { margin-top: 8px; }
+.finding .sev { border-radius: 0 4px 4px 0; background: var(--s, var(--text-3)); box-shadow: 0 0 10px var(--s, transparent); }
+.f-top { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 8px; }
+.f-top b { font-size: 13.5px; font-weight: 600; }
+.f-top .push { margin-left: auto; }
+.finding p { margin: 6px 0 0; font-size: 12.5px; color: var(--text-2); line-height: 1.55; }
+.f-loc { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin-top: 8px; font: 11.5px var(--mono); color: var(--text-3); }
+.f-loc .file { color: rgb(var(--a)); }
+.trace { margin: 10px 0 0; padding: 0 0 0 14px; border-left: 1px solid rgb(var(--b) / .35); list-style: none; font: 11.5px/1.9 var(--mono); color: var(--text-2); }
+.trace span { color: var(--text-3); }
+.src { margin-top: 10px; border-radius: 10px; overflow: hidden; border: 1px solid var(--line); background: #080b16; }
+.src-h { display: flex; align-items: center; gap: 8px; height: 32px; padding: 0 10px; border-bottom: 1px solid var(--line); font: 11px var(--mono); color: var(--text-3); }
+.src-h button { margin-left: auto; border: 0; background: none; color: var(--text-3); }
+.src pre { margin: 0; padding: 8px 0; font: 12px/1.7 var(--mono); color: #c9d4e8; overflow-x: auto; }
+.src pre div { padding: 0 12px; white-space: pre; }
+.src pre div.hl { background: rgb(251 113 133 / .1); box-shadow: inset 2px 0 0 var(--bad); }
+.src pre i { display: inline-block; width: 34px; color: #4b5670; font-style: normal; }
+
+/* history rail */
+.rail { position: sticky; top: 0; display: flex; flex-direction: column; gap: 12px; }
+.trend { padding: 14px; }
+.trend h3 { margin: 0; font-size: 13.5px; font-weight: 600; }
+.spark { margin-top: 10px; display: flex; align-items: flex-end; gap: 6px; height: 64px; }
+.spark i { flex: 1; border-radius: 4px 4px 2px 2px; background: linear-gradient(180deg, rgb(var(--a)), rgb(var(--b) / .5)); opacity: .55; }
+.spark i.on { opacity: 1; box-shadow: 0 0 12px rgb(var(--a) / .5); }
+.spark-l { display: flex; justify-content: space-between; margin-top: 6px; font: 10.5px var(--mono); color: var(--text-3); }
+.hist { display: flex; flex-direction: column; gap: 6px; margin-top: 10px; }
+.h-item { position: relative; display: grid; grid-template-columns: 46px minmax(0, 1fr) auto; gap: 10px; align-items: center; padding: 10px; border-radius: 12px; border: 1px solid var(--line); background: rgb(8 11 22 / .35); text-align: left; transition: border-color 160ms, background-color 160ms; }
+.h-item:hover { border-color: var(--line-2); }
+.h-item[aria-pressed="true"] { border-color: rgb(var(--a) / .55); background: rgb(var(--a) / .07); }
+.h-score { display: grid; place-items: center; width: 46px; height: 46px; border-radius: 12px; font: 600 15px var(--mono); border: 1px solid var(--line-2); }
+.h-item[aria-pressed="true"] .h-score { border: 0; background: var(--grad); color: #0b0f1e; }
+.h-meta b { display: block; font-size: 12.5px; font-weight: 500; }
+.h-meta span { display: block; font: 10.5px var(--mono); color: var(--text-3); margin-top: 2px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.h-del { display: grid; place-items: center; width: 28px; height: 28px; border: 0; border-radius: 8px; background: none; color: var(--text-3); }
+.h-del:hover { color: var(--bad); background: rgb(251 113 133 / .08); }
+.h-del svg { width: 14px; height: 14px; }
+
+/* running + blocked */
+.running { padding: 16px; border-radius: 14px; border: 1px solid rgb(var(--a) / .3); background: rgb(var(--a) / .05); }
+.running-top { display: flex; align-items: center; gap: 10px; font-size: 13.5px; font-weight: 600; }
+.running-top svg { color: rgb(var(--a)); animation: spin 1s linear infinite; }
+@keyframes spin { to { transform: rotate(360deg); } }
+.track { position: relative; margin-top: 12px; height: 4px; border-radius: 4px; background: rgb(148 163 255 / .14); overflow: hidden; }
+.track::after { content: ""; position: absolute; inset: 0; width: 30%; background: linear-gradient(90deg, transparent, rgb(var(--a)), transparent); animation: sweep 1.6s linear infinite; }
+@keyframes sweep { from { transform: translateX(-100%); } to { transform: translateX(340%); } }
+.running p { margin: 10px 0 0; font-size: 12.5px; color: var(--text-2); }
+.skel { border-radius: 14px; border: 1px solid var(--line); background: linear-gradient(90deg, rgb(148 163 255 / .04), rgb(148 163 255 / .09), rgb(148 163 255 / .04)); height: 120px; }
+.blocked { display: flex; flex-wrap: wrap; align-items: center; gap: 12px; padding: 14px 16px; border-radius: 14px; border: 1px solid rgb(251 191 36 / .35); background: rgb(251 191 36 / .06); font-size: 13px; color: var(--text-2); }
+.blocked svg:first-child { color: var(--warn); }
+.empty { text-align: center; padding: 46px 20px; border-radius: 16px; border: 1.5px dashed var(--line-2); }
+.empty .ico { display: grid; place-items: center; width: 56px; height: 56px; margin: 0 auto 14px; border-radius: 16px; background: linear-gradient(135deg, rgb(var(--a) / .16), rgb(var(--b) / .16)); border: 1px solid rgb(var(--a) / .3); color: rgb(var(--a)); }
+.empty .ico svg { width: 24px; height: 24px; }
+.empty h3 { margin: 0; font-size: 17px; font-weight: 600; }
+.empty p { margin: 6px auto 0; max-width: 420px; font-size: 13px; color: var(--text-2); line-height: 1.6; }
+
+/* compare */
+.cmp-pick { display: grid; grid-template-columns: minmax(0, 1fr) auto minmax(0, 1fr); gap: 10px; align-items: end; }
+.cmp-pick label { display: flex; flex-direction: column; gap: 6px; font-size: 12px; color: var(--text-2); }
+.cmp-pick select { height: 38px; padding: 0 10px; border-radius: 10px; border: 1px solid var(--line-2); background: var(--field); font: 12.5px var(--mono); }
+.cmp-pick .arrow { display: grid; place-items: center; width: 38px; height: 38px; border-radius: 50%; background: var(--grad); color: #0b0f1e; }
+.cmp-row { display: grid; grid-template-columns: 140px 1fr 70px; gap: 14px; align-items: center; padding: 12px 0; border-bottom: 1px solid var(--line); font-size: 13px; }
+.cmp-bars { display: flex; flex-direction: column; gap: 4px; }
+.cmp-bars div { display: flex; align-items: center; gap: 8px; font: 11px var(--mono); color: var(--text-3); }
+.cmp-bars span.b { flex: 1; height: 6px; border-radius: 6px; background: rgb(148 163 255 / .1); overflow: hidden; }
+.cmp-bars span.b i { display: block; height: 100%; width: 100%; transform-origin: left; }
+.delta { justify-self: end; display: inline-flex; align-items: center; gap: 3px; font: 600 13px var(--mono); }
+.delta.up { color: var(--ok); } .delta.down { color: var(--bad); }
+.delta svg { width: 14px; height: 14px; }
+.diff { display: grid; grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); gap: 10px; margin-top: 14px; }
+.diff .col { padding: 12px; border-radius: 12px; border: 1px solid var(--line); background: rgb(8 11 22 / .35); }
+.diff h4 { margin: 0 0 8px; font: 600 12px var(--mono); }
+.diff p { margin: 6px 0 0; font: 11.5px var(--mono); color: var(--text-2); }
+.diff .file { color: rgb(var(--a)); }
+
+.switch { position: fixed; z-index: 10; top: 22px; left: 50%; transform: translateX(-50%); display: flex; gap: 4px; padding: 4px; border-radius: 12px; background: rgb(7 9 18 / .92); border: 1px solid var(--line-2); }
+.switch button { height: 30px; padding: 0 12px; border: 0; border-radius: 8px; background: transparent; color: var(--text-2); font-size: 12px; }
+.switch button[aria-pressed="true"] { color: #0b0f1e; background: var(--grad); font-weight: 600; }
+.view[hidden] { display: none; }
+@media (prefers-reduced-motion: reduce) { *, *::before, *::after { animation: none !important; transition: none !important; } }
+@media (max-width: 700px) { .sidebar { display: none; } .switch { top: auto; bottom: 12px; } .weights { grid-template-columns: repeat(2, 1fr); } }
+</style>
+</head>
+<body>
+<div class="switch" role="group" aria-label="Preview state">
+  <button data-v="report" aria-pressed="true">Report</button>
+  <button data-v="running" aria-pressed="false">Assessing</button>
+  <button data-v="blocked" aria-pressed="false">Not ready / no reports</button>
+  <button data-v="compare" aria-pressed="false">Compare</button>
+</div>
+
+<div class="shell">
+  <div class="orbs" aria-hidden="true"><div class="orb orb-a"></div><div class="orb orb-b"></div></div>
+  <aside class="sidebar glass">
+    <svg class="logo" viewBox="0 0 48 48" fill="none"><defs><linearGradient id="g1" x1="6" y1="6" x2="42" y2="42" gradientUnits="userSpaceOnUse"><stop stop-color="#22d3ee"/><stop offset="1" stop-color="#818cf8"/></linearGradient></defs><rect x="1.5" y="1.5" width="45" height="45" rx="13" fill="#0d1226" stroke="url(#g1)" stroke-opacity=".55"/><path d="M17 14 8.5 24 17 34M31 14 39.5 24 31 34" stroke="url(#g1)" stroke-width="3.4" stroke-linecap="round" stroke-linejoin="round"/><path d="M24 15.5c.9 4.6 2.9 6.6 7.5 7.5-4.6.9-6.6 2.9-7.5 7.5-.9-4.6-2.9-6.6-7.5-7.5 4.6-.9 6.6-2.9 7.5-7.5Z" fill="url(#g1)"/></svg>
+    <span class="side-ico"><i data-lucide="message-square-text"></i></span>
+    <span class="side-ico"><i data-lucide="library"></i></span>
+    <span class="side-ico on"><i data-lucide="shield-check"></i></span>
+    <span class="side-ico"><i data-lucide="activity"></i></span>
+    <span class="side-ico"><i data-lucide="database"></i></span>
+  </aside>
+
+  <main>
+    <header class="top glass">
+      <div style="flex:1;min-width:0"><div class="ptitle"><span class="crumb">shop-api /</span>Code quality</div><div class="pdesc">Scores, analyzers and rule reviews</div></div>
+      <span class="chip ok">● Ready</span>
+    </header>
+
+    <section class="page">
+      <div class="wrap">
+        <!-- control bar -->
+        <div class="bar rise">
+          <label class="rev-pick"><i data-lucide="git-branch"></i><select aria-label="Project revision"><option>shop-api · a1b2c3d4e5f6</option><option>shop-api · rev_9f3a21 (upload)</option><option disabled>shop-api · working tree (can't assess uncommitted edits)</option></select><i data-lucide="chevrons-up-down"></i></label>
+          <span class="state ok" id="state"><i data-lucide="circle-check"></i>Index ready</span>
+          <div class="tabs" role="tablist">
+            <button role="tab" data-t="assess" aria-selected="true"><i data-lucide="gauge"></i>Assessment</button>
+            <button role="tab" data-t="compare" aria-selected="false"><i data-lucide="git-compare-arrows"></i>Compare</button>
+            <button role="tab" aria-selected="false"><i data-lucide="zap"></i>Performance</button>
+            <button role="tab" aria-selected="false"><i data-lucide="list-checks"></i>Custom rules</button>
+            <button role="tab" aria-selected="false"><i data-lucide="plug"></i>External analyzers</button>
+          </div>
+          <div class="push">
+            <button class="btn danger sm" title="Remove revision"><i data-lucide="trash-2"></i>Remove revision</button>
+            <button class="btn primary" id="assessBtn"><i data-lucide="play"></i>Assess this revision</button>
+          </div>
+        </div>
+
+        <!-- ================= REPORT ================= -->
+        <div class="view" data-view="report">
+          <div class="layout">
+            <div style="display:flex;flex-direction:column;gap:16px;min-width:0">
+              <details class="setup rise">
+                <summary><i data-lucide="sliders-horizontal"></i><b>Assessment setup</b><span class="sum">weights 20 · 20 · 20 · 20 · 20 · 4 exclusions</span><i data-lucide="chevron-down" class="chev"></i></summary>
+                <div class="setup-body">
+                  <div>
+                    <h4>Category weights</h4>
+                    <p class="hint">The weighted total appears only when all five categories are assessed. Fixed rubric, temperature 0, top_p 1.</p>
+                    <div class="weights">
+                      <label class="w"><span>Security</span><div><input value="25"><i>%</i></div></label>
+                      <label class="w"><span>Clean code</span><div><input value="20"><i>%</i></div></label>
+                      <label class="w"><span>Maintain.</span><div><input value="20"><i>%</i></div></label>
+                      <label class="w"><span>Reliability</span><div><input value="20"><i>%</i></div></label>
+                      <label class="w"><span>Performance</span><div><input value="15"><i>%</i></div></label>
+                    </div>
+                    <div class="total"><span class="tbar"><i style="width:25%;background:#fb7185"></i><i style="width:20%;background:#818cf8"></i><i style="width:20%;background:#22d3ee"></i><i style="width:20%;background:#34d399"></i><i style="width:15%;background:#fbbf24"></i></span>Total <b>100%</b><button class="btn sm"><i data-lucide="save"></i>Save weights</button></div>
+                  </div>
+                  <div>
+                    <h4>Excluded files and folders</h4>
+                    <p class="hint">Saved for shop-api and applied to future assessments. Built-in artifact exclusions still apply.</p>
+                    <div class="tree">
+                      <label><input type="checkbox">app/</label>
+                      <label style="padding-left:18px"><input type="checkbox" checked>app/Legacy/</label>
+                      <label><input type="checkbox" checked>tests/</label>
+                      <label><input type="checkbox">database/</label>
+                    </div>
+                    <div class="addrow"><input class="input" placeholder="Add a file path or glob, e.g. src/LegacyReport.php"><button class="btn sm">Add</button></div>
+                    <div class="pats"><span class="pat">app/Legacy/**<button aria-label="Remove"><i data-lucide="x"></i></button></span><span class="pat">tests/**<button aria-label="Remove"><i data-lucide="x"></i></button></span><span class="pat">**/*.min.js<button aria-label="Remove"><i data-lucide="x"></i></button></span><span class="pat">src/LegacyReport.php<button aria-label="Remove"><i data-lucide="x"></i></button></span></div>
+                    <div style="margin-top:10px"><button class="btn sm"><i data-lucide="save"></i>Save exclusions</button></div>
+                  </div>
+                </div>
+              </details>
+
+              <div class="card hero rise" style="animation-delay:40ms">
+                <div class="ring">
+                  <svg viewBox="0 0 120 120"><defs><linearGradient id="rg" x1="0" y1="0" x2="1" y2="1"><stop stop-color="#22d3ee"/><stop offset="1" stop-color="#818cf8"/></linearGradient></defs><circle cx="60" cy="60" r="50" fill="none" stroke="rgb(148 163 255 / .12)" stroke-width="10"/><circle cx="60" cy="60" r="50" fill="none" stroke="url(#rg)" stroke-width="10" stroke-linecap="round" stroke-dasharray="314.16" stroke-dashoffset="56.5" style="filter:drop-shadow(0 0 6px rgb(34 211 238 / .5))"/></svg>
+                  <div class="val"><div><b>82</b><span>out of 100</span></div></div>
+                </div>
+                <div>
+                  <h2>Good overall, with two security findings to fix</h2>
+                  <div class="meta">
+                    <span class="tag"><i data-lucide="calendar"></i>Nov 12, 14:20</span>
+                    <span class="tag"><i data-lucide="git-commit-horizontal"></i>a1b2c3d4e5f6</span>
+                    <span class="tag"><i data-lucide="files"></i>412 / 430 files scanned</span>
+                    <span class="tag"><i data-lucide="code"></i>php, js</span>
+                    <span class="tag"><i data-lucide="cpu"></i>48,210 tokens · provider-reported</span>
+                  </div>
+                  <p class="note">18 files over scan limits · 36 artifacts excluded · 22 excluded by project settings. Model providers can still change behaviour; comparisons flag known differences.</p>
+                </div>
+              </div>
+
+              <div class="cats rise" style="animation-delay:80ms">
+                <article class="cat" style="--c:#fb7185;--c2:#fb7185"><div class="cat-top"><i data-lucide="shield-alert"></i>Security</div><div class="score">68<small> /100</small></div><div class="bar2"><i style="transform:scaleX(.68)"></i></div><p>Two SQL queries are built from request input without binding.</p><div class="foot">covered · 14 signals · weight 25%</div></article>
+                <article class="cat" style="--c:#818cf8;--c2:#818cf8"><div class="cat-top"><i data-lucide="sparkles"></i>Clean code</div><div class="score">84<small> /100</small></div><div class="bar2"><i style="transform:scaleX(.84)"></i></div><p>Most classes are small; CartService has 4 SRP violations.</p><div class="foot">covered · 31 signals · weight 20%</div></article>
+                <article class="cat" style="--c:#22d3ee;--c2:#22d3ee"><div class="cat-top"><i data-lucide="wrench"></i>Maintainability</div><div class="score">88<small> /100</small></div><div class="bar2"><i style="transform:scaleX(.88)"></i></div><p>Low duplication; complexity concentrated in checkout.</p><div class="foot">covered · 22 signals · weight 20%</div></article>
+                <article class="cat" style="--c:#34d399;--c2:#34d399"><div class="cat-top"><i data-lucide="life-buoy"></i>Reliability</div><div class="score">90<small> /100</small></div><div class="bar2"><i style="transform:scaleX(.90)"></i></div><p>Errors are handled; one swallowed exception in jobs.</p><div class="foot">covered · 9 signals · weight 20%</div></article>
+                <article class="cat" style="--c:#fbbf24;--c2:#fbbf24"><div class="cat-top"><i data-lucide="zap"></i>Performance</div><div class="score">79<small> /100</small></div><div class="bar2"><i style="transform:scaleX(.79)"></i></div><p>N+1 query in order listing; no caching on catalog.</p><div class="foot">covered · 7 signals · weight 15%</div></article>
+              </div>
+
+              <div class="card rise" style="animation-delay:120ms">
+                <div class="sec-h"><h3><i data-lucide="scale"></i>Business rules</h3><span class="tag ok">Outline · 18 reviewed</span></div>
+                <div class="rules">
+                  <div class="rule"><div class="rule-top">Order total excludes shipping<span class="tag ok">Satisfied</span></div><p>calculate() never adds shipping; CheckoutService adds it later.</p></div>
+                  <div class="rule"><div class="rule-top">Discounts apply before tax<span class="tag ok">Satisfied</span></div><p>DiscountApplier runs before TaxCalculator in calculate().</p></div>
+                  <div class="rule"><div class="rule-top">One active cart per user<span class="tag bad">Violated</span></div><p>CartController::create doesn't close existing carts.</p></div>
+                  <div class="rule"><div class="rule-top">Refunds within 30 days<span class="tag warn">Unknown</span></div><p>No matching code evidence in this revision.</p></div>
+                </div>
+              </div>
+
+              <div class="card rise" style="animation-delay:160ms">
+                <div class="sec-h"><h3><i data-lucide="radar"></i>Coverage and diagnostics</h3><span class="push hint">How the scores were produced</span></div>
+                <details class="diag"><summary><i data-lucide="search-code"></i>Revision-matched code context<span class="tag ok">Retrieved</span><i data-lucide="chevron-down" class="chev"></i></summary><div class="body">146 code excerpts from 40 bounded searches, including 12 business-rule searches. Per-category: Security 32 · Clean code 28 · …</div></details>
+                <details class="diag"><summary><i data-lucide="file-search"></i>Source samples used for category scores<span class="tag">24 excerpts</span><i data-lucide="chevron-down" class="chev"></i></summary><div class="body">24 bounded excerpts from 18 files filled categories without other evidence. These are review context, not findings.</div></details>
+                <details class="diag"><summary><i data-lucide="waypoints"></i>Semantic flow tracing<span class="tag warn">Partial</span><i data-lucide="chevron-down" class="chev"></i></summary><div class="body">12 request-to-sensitive-operation paths · 840 symbols · 2,310 resolved calls · 41 unresolved.</div></details>
+                <details class="diag"><summary><i data-lucide="boxes"></i>PHP design review signals<span class="tag ok">Indexed scope complete</span><i data-lucide="chevron-down" class="chev"></i></summary><div class="body">212 classes · 1,480 methods · 37 review signals.</div></details>
+                <details class="diag"><summary><i data-lucide="triangle-alert"></i>Analyzer warnings<span class="tag warn">1 pass incomplete</span><i data-lucide="chevron-down" class="chev"></i></summary><div class="body">phpstan: memory limit reached. Unsupported file types: .twig (14).</div></details>
+                <details class="diag"><summary><i data-lucide="flask-conical"></i>Experimental analyzer baseline<span class="tag ai">Not used for scores</span><i data-lucide="chevron-down" class="chev"></i></summary><div class="body">Experimental scores per category, shown for calibration only.</div></details>
+              </div>
+
+              <div class="card rise" style="animation-delay:200ms">
+                <div class="sec-h"><h3><i data-lucide="bug"></i>Findings and evidence</h3><span class="tag">23</span>
+                  <div class="filters push">
+                    <button class="fchip" aria-pressed="true">All <span class="n">23</span></button>
+                    <button class="fchip" aria-pressed="false">Security <span class="n">4</span></button>
+                    <button class="fchip" aria-pressed="false">Clean code <span class="n">9</span></button>
+                    <button class="fchip" aria-pressed="false">Performance <span class="n">5</span></button>
+                    <button class="fchip" aria-pressed="false">AI review <span class="n">6</span></button>
+                  </div>
+                </div>
+                <article class="finding" style="--s:#fb7185">
+                  <span class="sev"></span>
+                  <div>
+                    <div class="f-top"><b>SQL built from request input</b><span class="tag bad">high</span><span class="tag">Security</span></div>
+                    <p>`$request->get('sort')` is concatenated into an ORDER BY clause without an allow-list.</p>
+                    <div class="f-loc"><span class="file">app/Http/Controllers/OrderController.php:88</span><button class="btn sm"><i data-lucide="eye"></i>Hide source</button></div>
+                    <ol class="trace"><li>OrderController::index <span>· OrderController.php:80–96 · calls →</span></li><li>OrderRepository::search <span>· OrderRepository.php:40–71 · calls →</span></li><li>DB::select <span>· sink</span></li></ol>
+                    <div class="src"><div class="src-h">OrderController.php · lines 84–92<button aria-label="Close source"><i data-lucide="x"></i></button></div><pre><div><i>86</i>    $sort = $request->get('sort', 'created_at');</div><div><i>87</i>    $orders = DB::select(</div><div class="hl"><i>88</i>        "SELECT * FROM orders ORDER BY " . $sort</div><div><i>89</i>    );</div></pre></div>
+                  </div>
+                </article>
+                <article class="finding" style="--s:#818cf8">
+                  <span class="sev"></span>
+                  <div>
+                    <div class="f-top"><b>CartService has too many responsibilities</b><span class="tag ai">AI review</span><span class="tag">Clean code</span></div>
+                    <p>It handles pricing, persistence and email; split pricing into its own class.</p>
+                    <div class="f-loc"><span class="file">app/Services/CartService.php:1</span><span>· file-level anchor</span><button class="btn sm"><i data-lucide="eye"></i>View source</button></div>
+                  </div>
+                </article>
+                <article class="finding" style="--s:#fbbf24">
+                  <span class="sev"></span>
+                  <div>
+                    <div class="f-top"><b>N+1 query in order listing</b><span class="tag warn">medium</span><span class="tag">Performance</span></div>
+                    <p>Each order loads its customer separately inside the loop.</p>
+                    <div class="f-loc"><span class="file">resources/views/orders/index.blade.php:14</span><button class="btn sm"><i data-lucide="eye"></i>View source</button></div>
+                  </div>
+                </article>
+              </div>
+            </div>
+
+            <aside class="rail rise" style="animation-delay:60ms">
+              <div class="card trend">
+                <h3>Score history</h3>
+                <p class="hint">6 reports for shop-api</p>
+                <div class="spark"><i style="height:52%"></i><i style="height:60%"></i><i style="height:58%"></i><i style="height:71%"></i><i style="height:76%"></i><i class="on" style="height:82%"></i></div>
+                <div class="spark-l"><span>Oct 2</span><span>Nov 12</span></div>
+                <div class="hist">
+                  <div class="h-item" aria-pressed="true"><span class="h-score">82</span><span class="h-meta"><b>Nov 12, 14:20</b><span>a1b2c3d · 48k tokens</span></span><button class="h-del" aria-label="Delete report"><i data-lucide="trash-2"></i></button></div>
+                  <div class="h-item" aria-pressed="false"><span class="h-score">76</span><span class="h-meta"><b>Nov 5, 09:12</b><span>9e8d7c6 · 51k tokens</span></span><button class="h-del" aria-label="Delete report"><i data-lucide="trash-2"></i></button></div>
+                  <div class="h-item" aria-pressed="false"><span class="h-score">71</span><span class="h-meta"><b>Oct 28, 16:40</b><span>rev_51c0de · ~44k est.</span></span><button class="h-del" aria-label="Delete report"><i data-lucide="trash-2"></i></button></div>
+                  <div class="h-item" aria-pressed="false"><span class="h-score">—</span><span class="h-meta"><b>Oct 20, 11:02</b><span>rev_0c11aa · no overall</span></span><button class="h-del" aria-label="Delete report"><i data-lucide="trash-2"></i></button></div>
+                </div>
+              </div>
+            </aside>
+          </div>
+        </div>
+
+        <!-- ================= RUNNING ================= -->
+        <div class="view" data-view="running" hidden>
+          <div class="layout">
+            <div style="display:flex;flex-direction:column;gap:16px">
+              <div class="running rise" role="status">
+                <div class="running-top"><i data-lucide="loader-circle"></i>Assessing shop-api · a1b2c3d4e5f6<span class="tag" style="margin-left:auto">in progress</span></div>
+                <div class="track" role="progressbar" aria-label="Project assessment progress" aria-valuetext="Assessment is running"></div>
+                <p>Running source checks and evidence-based scoring. The report appears here when it's done; you can keep using the app.</p>
+              </div>
+              <div class="skel"></div>
+              <div class="cats"><div class="skel" style="height:150px"></div><div class="skel" style="height:150px"></div><div class="skel" style="height:150px"></div><div class="skel" style="height:150px"></div><div class="skel" style="height:150px"></div></div>
+            </div>
+            <aside class="rail"><div class="card trend"><h3>Score history</h3><p class="hint">6 reports for shop-api</p></div></aside>
+          </div>
+        </div>
+
+        <!-- ================= BLOCKED / EMPTY ================= -->
+        <div class="view" data-view="blocked" hidden>
+          <div class="blocked rise" role="status"><i data-lucide="triangle-alert"></i><span style="flex:1;min-width:220px">This revision isn't indexed yet, so it can't be assessed. Index it in the knowledge base, then check again.</span><button class="btn"><i data-lucide="library"></i>Open knowledge base</button><button class="btn"><i data-lucide="refresh-cw"></i>Check again</button></div>
+          <div class="empty rise" style="margin-top:16px;animation-delay:60ms">
+            <div class="ico"><i data-lucide="gauge"></i></div>
+            <h3>No assessment reports yet</h3>
+            <p>Pick weights in Assessment setup, or keep the equal-weight default, then assess this indexed revision.</p>
+            <div style="margin-top:16px"><button class="btn primary"><i data-lucide="play"></i>Assess this revision</button></div>
+          </div>
+        </div>
+
+        <!-- ================= COMPARE ================= -->
+        <div class="view" data-view="compare" hidden>
+          <div class="card rise">
+            <div class="sec-h"><h3><i data-lucide="git-compare-arrows"></i>Compare saved reports</h3></div>
+            <div class="cmp-pick">
+              <label>Earlier report<select><option>Nov 5, 09:12 · 76</option></select></label>
+              <span class="arrow"><i data-lucide="arrow-right"></i></span>
+              <label>Later report<select><option>Nov 12, 14:20 · 82</option></select></label>
+            </div>
+            <div class="blocked" style="margin-top:14px"><i data-lucide="triangle-alert"></i>Scoring inputs differ (model version, analyzers). Treat score deltas as non-equivalent.</div>
+            <div style="margin-top:10px">
+              <div class="cmp-row"><span>Security</span><div class="cmp-bars"><div>61<span class="b"><i style="transform:scaleX(.61);background:rgb(148 163 255 / .35)"></i></span></div><div>68<span class="b"><i style="transform:scaleX(.68);background:#fb7185"></i></span></div></div><span class="delta up"><i data-lucide="arrow-up-right"></i>7</span></div>
+              <div class="cmp-row"><span>Clean code</span><div class="cmp-bars"><div>80<span class="b"><i style="transform:scaleX(.80);background:rgb(148 163 255 / .35)"></i></span></div><div>84<span class="b"><i style="transform:scaleX(.84);background:#818cf8"></i></span></div></div><span class="delta up"><i data-lucide="arrow-up-right"></i>4</span></div>
+              <div class="cmp-row"><span>Performance</span><div class="cmp-bars"><div>83<span class="b"><i style="transform:scaleX(.83);background:rgb(148 163 255 / .35)"></i></span></div><div>79<span class="b"><i style="transform:scaleX(.79);background:#fbbf24"></i></span></div></div><span class="delta down"><i data-lucide="arrow-down-right"></i>4</span></div>
+            </div>
+            <p class="hint" style="margin-top:12px">Evaluator tokens: 51,020 provider-reported → 48,210 provider-reported</p>
+            <div class="diff">
+              <div class="col"><h4 style="color:var(--ok)">New findings · 3</h4><p><span class="file">OrderController.php:88</span> · SQL built from request input</p><p><span class="file">CartService.php:1</span> · too many responsibilities</p></div>
+              <div class="col"><h4 style="color:var(--text-3)">No longer present · 5</h4><p><span class="file">PaymentGateway.php:40</span> · hard-coded API key</p><p><span class="file">Mailer.php:12</span> · swallowed exception</p></div>
+            </div>
+          </div>
+        </div>
+
+        <p class="hint" style="text-align:center">Performance, Custom rules and External analyzers keep their current controls and get the same panels, fields and buttons.</p>
+      </div>
+    </section>
+  </main>
+</div>
+
+<script src="https://unpkg.com/lucide@0.460.0/dist/umd/lucide.min.js"></script>
+<script>
+function show(v) {
+  document.querySelectorAll('.view').forEach(x => { x.hidden = x.dataset.view !== v; if (!x.hidden) x.querySelectorAll('.rise').forEach(el => { el.style.animation = 'none'; void el.offsetWidth; el.style.animation = ''; }); });
+  document.querySelectorAll('.switch button').forEach(b => b.setAttribute('aria-pressed', b.dataset.v === v));
+  document.querySelectorAll('.tabs button').forEach(b => b.setAttribute('aria-selected', (v === 'compare') === (b.dataset.t === 'compare') && !!b.dataset.t));
+  const st = document.getElementById('state');
+  st.className = 'state ' + (v === 'blocked' ? 'warn' : 'ok');
+  st.lastChild.textContent = v === 'blocked' ? 'Not indexed' : 'Index ready';
+  const ab = document.getElementById('assessBtn');
+  ab.style.opacity = v === 'blocked' || v === 'running' ? .5 : 1;
+  ab.lastChild.textContent = v === 'running' ? 'Assessing…' : 'Assess this revision';
+}
+document.querySelectorAll('.switch button').forEach(b => b.addEventListener('click', () => show(b.dataset.v)));
+document.querySelectorAll('.tabs button[data-t]').forEach(b => b.addEventListener('click', () => show(b.dataset.t === 'compare' ? 'compare' : 'report')));
+document.querySelectorAll('.fchip').forEach(b => b.addEventListener('click', () => document.querySelectorAll('.fchip').forEach(x => x.setAttribute('aria-pressed', x === b))));
+if (window.lucide) lucide.createIcons();
+</script>
+</body>
+</html>

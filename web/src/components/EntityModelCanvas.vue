@@ -1,0 +1,392 @@
+<script setup lang="ts">
+import { nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue';
+import { Graph, Scroller, Selection, Snapline } from '@antv/x6';
+import { DagreLayout } from '@antv/layout';
+import type { Edge, Node } from '@antv/x6';
+import type { DomainEntity, DomainEntityBehavior, DomainEntityRelationship, DomainModelGraphEdge, DomainModelResponse } from '../types';
+import { registerEntityNode } from '../utils/registerEntityNode';
+import { entityModelBehaviorKey, entityModelBehaviors } from '../utils/entityModelSearch';
+import { completeEntityLayoutPositions, hasEntityLayoutCollisions, resolveEntityLayoutCollisions } from '../utils/entityModelLayout';
+
+const props = defineProps<{
+  model: DomainModelResponse | null;
+  search?: string;
+  selectedEntityId?: string;
+  selectedBehaviorKey?: string;
+  selectedRelationshipId?: string;
+  panningEnabled?: boolean;
+}>();
+
+const emit = defineEmits<{
+  (event: 'select-entity', entity: DomainEntity): void;
+  (event: 'select-behavior', entity: DomainEntity, behavior: DomainEntityBehavior): void;
+  (event: 'select-relationship', relationship: DomainEntityRelationship): void;
+  (event: 'ready', graph: Graph): void;
+}>();
+
+const container = ref<HTMLElement | null>(null);
+let graph: Graph | null = null;
+let scroller: Scroller | null = null;
+let localPositions = new Map<string, { x: number; y: number }>();
+let focusZoomFrame: number | null = null;
+let prettifyPass = 0;
+
+const rawEntityId = (entity: DomainEntity) => entity.id || `entity:${entity.name}`;
+// Analysis data can contain same-named entities from different namespaces. X6
+// requires every rendered node ID to be unique, even when the source model is
+// not. Keep the original ID whenever it is unique, and scope duplicates locally.
+const entityId = (entity: DomainEntity) => {
+  const rawId = rawEntityId(entity);
+  const duplicates = (props.model?.entities || []).filter((item) => rawEntityId(item) === rawId);
+  if (duplicates.length < 2) return rawId;
+  const index = duplicates.indexOf(entity);
+  return `${rawId}:${entity.namespace || entity.table || index || 'duplicate'}:${index}`;
+};
+const entityFromNodeId = (id: string) => {
+  const model = props.model;
+  const needle = String(id || '').toLowerCase();
+  return model?.entities.find((item) => (
+    entityId(item) === id
+    || `node-${item.name}` === id
+    || item.name === id
+    || entityId(item).toLowerCase() === needle
+    || `node-${item.name}`.toLowerCase() === needle
+    || item.name.toLowerCase() === needle
+  )) || null;
+};
+const edgeValue = (edge: DomainModelGraphEdge, key: 'source' | 'target') => {
+  const endpoint = edge[key];
+  return typeof endpoint === 'string' ? endpoint : endpoint?.cell;
+};
+const normalizedEndpoint = (value: string | undefined) => String(value || '').replace(/^node-/, '');
+const relationshipForEdge = (edge: DomainModelGraphEdge, index: number): DomainEntityRelationship | null => {
+  const source = entityFromNodeId(edgeValue(edge, 'source') || '');
+  const target = entityFromNodeId(edgeValue(edge, 'target') || '');
+  if (!source || !target) return null;
+  const data = edge.data || {};
+  const label = edge.label || String((edge.labels?.[0] as any)?.attrs?.text?.text || '');
+  return {
+    id: edge.id || `relation:${entityId(source)}:${entityId(target)}:${index}`,
+    source_entity: source.name,
+    target_entity: target.name,
+    name: String(data.name || data.relation_name || label || 'relationship'),
+    relation_name: String(data.relation_name || data.name || label || ''),
+    type: String(data.type || ''),
+    cardinality: String(data.cardinality || label || ''),
+    foreign_key: (data.foreign_key as string | null | undefined) ?? null,
+    description: (data.description as string | null | undefined) ?? null,
+  };
+};
+
+const dimensions = (entity: DomainEntity) => ({ width: 280, height: Math.max(150, 92 + Math.min(14, entity.properties.length) * 25 + Math.min(10, entityModelBehaviors(entity).length) * 25 + (entity.properties.length > 14 ? 20 : 0)) });
+const collisionFreePositions = (nodes: Array<{ id: string; width: number; height: number }>, positions: Map<string, { x: number; y: number }>, gap = 80) => {
+  const resolved = resolveEntityLayoutCollisions(nodes, positions, gap);
+  if (hasEntityLayoutCollisions(nodes, resolved, gap)) throw new Error('Entity layout still contains overlapping nodes.');
+  return resolved;
+};
+const defaultPositions = (entities: DomainEntity[], gap = 80) => {
+  const nodes = entities.map((entity) => ({ id: entityId(entity), ...dimensions(entity) }));
+  const positions = new Map(nodes.map((node, index) => [node.id, { x: 40 + (index % 3) * (280 + gap), y: 40 + Math.floor(index / 3) * (300 + gap) }]));
+  return collisionFreePositions(nodes, positions, gap);
+};
+const prettifySpacing = (expand: boolean) => {
+  if (expand) prettifyPass = Math.min(prettifyPass + 1, 6);
+  const level = expand ? prettifyPass : 0;
+  return { gap: 80 + level * 40, nodesep: 120 + level * 50, ranksep: 220 + level * 80 };
+};
+const syncVisibility = () => {
+  if (!graph) return;
+  // Search is a focus/navigation feature, not a destructive graph filter.
+  // Keep the complete model visible while the parent focuses the match.
+  graph.getNodes().forEach((node) => node.setVisible(true));
+  graph.getEdges().forEach((edge) => edge.setVisible(true));
+};
+const backendPositionFor = (entity: DomainEntity) => {
+  const entityNodeId = entityId(entity).toLowerCase();
+  const namedNodeId = `node-${entity.name}`.toLowerCase();
+  const backendNode = (props.model?.antv_x6?.nodes || []).find((node) => {
+    const id = String(node.id || '').toLowerCase();
+    return id === entityNodeId || id === namedNodeId;
+  });
+  return backendNode?.position || (typeof backendNode?.x === 'number' && typeof backendNode?.y === 'number' ? { x: backendNode.x, y: backendNode.y } : null);
+};
+
+const nodeFor = (entity: DomainEntity, index: number, isVisible: boolean) => {
+  const id = entityId(entity);
+  const size = dimensions(entity);
+  const backendPosition = backendPositionFor(entity);
+  const position = localPositions.get(id) || backendPosition || { x: 40 + (index % 3) * 360, y: 40 + Math.floor(index / 3) * 300 };
+  const portY = (fieldIndex: number) => 58 + fieldIndex * 25 + 12;
+  return {
+    id,
+    shape: 'custom-vue-entity',
+    x: position.x,
+    y: position.y,
+    width: size.width,
+    height: size.height,
+    visible: isVisible,
+    data: {
+      entity,
+      name: entity.name,
+      table: entity.table,
+      framework: entity.framework,
+      selected: props.selectedEntityId === id,
+      selectedBehaviorKey: props.selectedBehaviorKey || '',
+      onBehaviorClick: (behavior: DomainEntityBehavior) => emit('select-behavior', entity, behavior),
+    },
+      ports: {
+      groups: {
+        left: { position: 'absolute', attrs: { circle: { r: 4, magnet: true, stroke: '#0f172a', strokeWidth: 1.5, fill: '#818cf8' } } },
+        right: { position: 'absolute', attrs: { circle: { r: 4, magnet: true, stroke: '#0f172a', strokeWidth: 1.5, fill: '#22d3ee' } } },
+      },
+      items: (entity.properties || []).flatMap((field, fieldIndex) => [
+        { id: `field:${field.name}`, group: 'left', args: { x: 0, y: portY(fieldIndex) } },
+        { id: `field:${field.name}:out`, group: 'right', args: { x: size.width, y: portY(fieldIndex) } },
+      ]),
+    },
+  };
+};
+
+const initialPositions = (entities: DomainEntity[]) => new Map(entities.map((entity, index) => {
+  const id = entityId(entity);
+  return [id, backendPositionFor(entity) || { x: 40 + (index % 3) * 360, y: 40 + Math.floor(index / 3) * 300 }];
+}));
+
+// Layout actions operate on the existing X6 cells. Rebuilding the graph here
+// can discard the visible move before the canvas has a chance to paint it.
+const applyPositions = (positions: Map<string, { x: number; y: number }>) => {
+  localPositions = new Map(positions);
+  graph?.getNodes().forEach((node) => {
+    const position = localPositions.get(node.id);
+    if (position && Number.isFinite(position.x) && Number.isFinite(position.y)) node.setPosition(position.x, position.y);
+  });
+};
+
+const rebuild = (fit = true) => {
+  if (!graph || !props.model) return;
+  graph.clearCells();
+  const entities = props.model.entities || [];
+  const shown = new Set(entities.map(entityId));
+  graph.addNodes(entities.map((entity, index) => nodeFor(entity, index, shown.has(entityId(entity)))));
+  const rawEdges = props.model.antv_x6?.edges || [];
+  const relationships = rawEdges.length ? rawEdges : entities.flatMap((entity) => (entity.relationships || []).map((relationship) => ({
+    id: relationship.id,
+    source: entityId(entity),
+    target: relationship.target_entity,
+    label: [relationship.cardinality, relationship.name || relationship.relation_name].filter(Boolean).join(' '),
+    data: relationship,
+  })));
+  graph.addEdges(relationships.flatMap((rawEdge, index) => {
+    const sourceId = entityFromNodeId(normalizedEndpoint(edgeValue(rawEdge, 'source') || ''));
+    const targetId = entityFromNodeId(normalizedEndpoint(edgeValue(rawEdge, 'target') || ''));
+    const relationship = relationshipForEdge(rawEdge, index) || (rawEdge.data as DomainEntityRelationship | undefined);
+    if (!sourceId || !targetId || !shown.has(entityId(sourceId)) || !shown.has(entityId(targetId))) return [];
+    return [{
+      id: rawEdge.id || relationship?.id || `relation:${entityId(sourceId)}:${entityId(targetId)}:${index}`,
+      shape: 'edge',
+      source: { cell: entityId(sourceId), port: (rawEdge as any).sourcePort || undefined },
+      target: { cell: entityId(targetId), port: (rawEdge as any).targetPort || (relationship?.foreign_key ? `field:${relationship.foreign_key}` : undefined) },
+      router: { name: 'manhattan', args: { padding: 18 } },
+      connector: { name: 'rounded', args: { radius: 8 } },
+      attrs: { line: { stroke: props.selectedRelationshipId === (relationship?.id || rawEdge.id) ? '#22d3ee' : '#89b4fa', strokeWidth: props.selectedRelationshipId === (relationship?.id || rawEdge.id) ? 2.8 : 1.5, targetMarker: { name: 'classic', width: 8, height: 7 } } },
+      labels: [{ position: 0.5, attrs: { label: { text: [relationship?.cardinality, relationship?.name || relationship?.relation_name].filter(Boolean).join(' · ') || rawEdge.label || 'relation', fill: '#bac2de', fontSize: 10 }, body: { fill: '#181825', stroke: '#334155', rx: 4, ry: 3 } } }],
+      data: relationship || rawEdge.data || {},
+    } as any];
+  }));
+  if (fit) graph.zoomToFit({ padding: 24, maxScale: 1.2 });
+};
+
+const selectNode = (cell: Node) => {
+  const entity = entityFromNodeId(cell.id);
+  if (!entity) return;
+  emit('select-entity', entity);
+  focusNode(cell.id);
+};
+const selectEdge = (cell: Edge) => { const relationship = cell.getData() as DomainEntityRelationship; if (relationship?.target_entity) emit('select-relationship', relationship); };
+const syncSelection = () => {
+  if (!graph) return;
+  graph.getNodes().forEach((node) => {
+    const data = node.getData() || {};
+    const selected = props.selectedEntityId === node.id;
+    const selectedBehaviorKey = props.selectedBehaviorKey || '';
+    if (data.selected !== selected || data.selectedBehaviorKey !== selectedBehaviorKey) node.setData({ ...data, selected, selectedBehaviorKey });
+  });
+  graph.getEdges().forEach((edge) => {
+    const data = edge.getData() as DomainEntityRelationship | undefined;
+    const selected = props.selectedRelationshipId === (data?.id || edge.id);
+    edge.setAttrs({
+      line: {
+        stroke: selected ? '#22d3ee' : '#89b4fa',
+        strokeWidth: selected ? 2.8 : 1.5,
+      },
+    });
+  });
+};
+const fit = () => graph?.zoomToFit({ padding: 48, maxScale: 0.75 });
+const zoomIn = () => graph?.zoom(0.15);
+const zoomOut = () => graph?.zoom(-0.15);
+const cancelFocusZoom = () => {
+  if (focusZoomFrame === null) return;
+  cancelAnimationFrame(focusZoomFrame);
+  focusZoomFrame = null;
+};
+const revealLayout = () => graph?.zoomToFit({ padding: 48, maxScale: 0.75 });
+const animateFocusZoom = (node: Node, targetZoom: number) => {
+  if (!graph) return;
+  cancelFocusZoom();
+  const startZoom = graph.zoom();
+  if (Math.abs(targetZoom - startZoom) < 0.01 || window.matchMedia('(prefers-reduced-motion: reduce)').matches) {
+    graph.zoomTo(targetZoom, { maxScale: targetZoom });
+    graph.centerCell(node);
+    return;
+  }
+  const startedAt = performance.now();
+  const duration = 260;
+  const frame = (now: number) => {
+    if (!graph) return;
+    const progress = Math.min(1, (now - startedAt) / duration);
+    const eased = progress < 0.5
+      ? 4 * progress ** 3
+      : 1 - (-2 * progress + 2) ** 3 / 2;
+    graph.zoomTo(startZoom + (targetZoom - startZoom) * eased, { maxScale: targetZoom });
+    graph.centerCell(node);
+    if (progress < 1) focusZoomFrame = requestAnimationFrame(frame);
+    else focusZoomFrame = null;
+  };
+  focusZoomFrame = requestAnimationFrame(frame);
+};
+const focusNode = async (id: string, zoom = false) => {
+  await nextTick();
+  // A click must take ownership of the viewport. Otherwise a pending search
+  // focus animation can continue centering the previously matched node.
+  cancelFocusZoom();
+  const node = graph?.getCellById(id);
+  if (!node || !graph) return;
+  graph.centerCell(node);
+  if (zoom) animateFocusZoom(node, 0.75);
+  graph.centerCell(node);
+};
+const reset = () => {
+  prettifyPass = 0;
+  applyPositions(initialPositions(props.model?.entities || []));
+  revealLayout();
+};
+const prettify = async (expand = true) => {
+  if (!props.model) return;
+  const spacing = prettifySpacing(expand);
+  const entities = props.model.entities || [];
+  const nodes = entities.map((entity) => {
+    const size = dimensions(entity);
+    return { id: entityId(entity), width: size.width, height: size.height };
+  });
+  const rawEdges = props.model.antv_x6?.edges || entities.flatMap((entity) => (entity.relationships || []).map((relationship) => ({
+    id: relationship.id,
+    source: entityId(entity),
+    target: relationship.target_entity,
+    data: relationship,
+  })));
+  const edges = rawEdges.flatMap((edge) => {
+    const source = entityFromNodeId(edgeValue(edge, 'source') || '');
+    const target = entityFromNodeId(edgeValue(edge, 'target') || '');
+    if (!source || !target) return [];
+    return [{
+      id: edge.id || `${entityId(source)}-${entityId(target)}`,
+      source: entityId(source),
+      target: entityId(target),
+    }];
+  });
+  try {
+    const layout = new DagreLayout({
+      type: 'dagre',
+      rankdir: 'LR',
+      nodesep: spacing.nodesep,
+      ranksep: spacing.ranksep,
+      controlPoints: false,
+      nodeSize: (node: { width: number; height: number }) => [node.width, node.height],
+    });
+    await layout.execute({ nodes, edges }, { width: 1600, height: 1000 });
+    const positions = new Map<string, { x: number; y: number }>();
+    layout.forEachNode((node) => positions.set(String(node.id), {
+      x: Math.max(40, node.x - ((node.size as any)?.[0] || 0) / 2),
+      y: Math.max(40, node.y - ((node.size as any)?.[1] || 0) / 2),
+    }));
+    const completedPositions = completeEntityLayoutPositions(nodes, positions, defaultPositions(entities, spacing.gap));
+    applyPositions(collisionFreePositions(nodes, completedPositions, spacing.gap));
+  } catch {
+    applyPositions(defaultPositions(entities, spacing.gap));
+    revealLayout();
+    return;
+  }
+  revealLayout();
+};
+
+defineExpose({ fit, zoomIn, zoomOut, focusNode, reset, prettify });
+
+onMounted(() => {
+  if (!container.value) return;
+  registerEntityNode();
+  graph = new Graph({ container: container.value, background: { color: '#0b1020' }, grid: { visible: true, type: 'dot', args: { color: '#1e293b', thickness: 1 } }, panning: false, mousewheel: { enabled: true, modifiers: ['ctrl', 'meta'] }, interacting: { nodeMovable: true, edgeMovable: true, edgeLabelMovable: false } });
+  scroller = new Scroller({
+    enabled: true,
+    pannable: { enabled: Boolean(props.panningEnabled), eventTypes: ['leftMouseDown'] },
+    autoResize: true,
+    pageVisible: false,
+    padding: 24,
+  });
+  graph.use(scroller);
+  graph.use(new Selection({
+    enabled: true,
+    multiple: true,
+    multipleSelectionModifiers: ['ctrl', 'meta'],
+    rubberband: false,
+    showNodeSelectionBox: true,
+    showEdgeSelectionBox: false,
+    movable: true,
+  }));
+  graph.use(new Snapline({
+    enabled: true,
+    sharp: true,
+    tolerance: 8,
+    clean: 200,
+  }));
+  graph.on('node:click', ({ node, e }) => {
+    const target = e?.target as Element | null;
+    const behaviorElement = target?.closest?.('[data-behavior-key]') as HTMLElement | null;
+    if (behaviorElement) {
+      const entity = entityFromNodeId(node.id);
+      const behavior = entity && entityModelBehaviors(entity).find((item) => entityModelBehaviorKey(entity, item) === behaviorElement.dataset.behaviorKey);
+      if (entity && behavior) emit('select-behavior', entity, typeof behavior === 'string' ? { name: behavior, behavior_key: entityModelBehaviorKey(entity, behavior) } : behavior);
+      return;
+    }
+    selectNode(node);
+  });
+  graph.on('edge:click', ({ edge }) => selectEdge(edge));
+  graph.on('edge:mouseenter', ({ edge }) => edge.addTools({
+    name: 'segments',
+    args: { snapRadius: 12, threshold: 32 },
+  }));
+  graph.on('edge:mouseleave', ({ edge }) => edge.removeTools());
+  graph.on('node:moved', ({ node }) => localPositions.set(node.id, node.getPosition()));
+  emit('ready', graph);
+  rebuild();
+});
+// Model loads and enrichment replace the model object. Watching it deeply makes
+// X6 node interaction look like a model update, rebuilding cells during a drag.
+watch(() => props.model, () => { prettifyPass = 0; rebuild(); });
+// Search only changes visibility. Rebuilding X6 cells for every keystroke can
+// leave stale custom Vue-shape views behind until the component is remounted.
+watch(() => props.search, syncVisibility);
+watch(() => [props.selectedEntityId, props.selectedBehaviorKey, props.selectedRelationshipId], syncSelection);
+watch(() => props.panningEnabled, (enabled) => scroller?.togglePanning(Boolean(enabled)));
+onBeforeUnmount(() => { cancelFocusZoom(); graph?.dispose(); graph = null; scroller = null; });
+</script>
+
+<template><div ref="container" class="h-full w-full" /></template>
+
+<style>
+.x6-widget-selection-box,
+.x6-widget-selection-inner {
+  border-color: #22d3ee !important;
+  box-shadow: 0 0 0 1px rgb(34 211 238 / 25%), 0 0 14px rgb(34 211 238 / 28%) !important;
+}
+</style>

@@ -1,0 +1,52 @@
+{
+  "realm": "developer-assistant",
+  "displayName": "Developer Assistant",
+  "enabled": true,
+  "loginTheme": "developer-assistant",
+  "registrationAllowed": false,
+  "loginWithEmailAllowed": true,
+  "duplicateEmailsAllowed": false,
+  "clients": [
+    {
+      "clientId": "developer-assistant-web",
+      "name": "Developer Assistant Web",
+      "enabled": true,
+      "protocol": "openid-connect",
+      "publicClient": false,
+      "secret": "__OIDC_CLIENT_SECRET__",
+      "standardFlowEnabled": true,
+      "directAccessGrantsEnabled": false,
+      "redirectUris": ["http://localhost:3000/api/auth/callback"],
+      "webOrigins": ["http://localhost:3000"],
+      "protocolMappers": [
+        {
+          "name": "audience",
+          "protocol": "openid-connect",
+          "protocolMapper": "oidc-audience-mapper",
+          "consentRequired": false,
+          "config": {
+            "included.client.audience": "developer-assistant-web",
+            "id.token.claim": "true",
+            "access.token.claim": "true"
+          }
+        }
+      ]
+    }
+  ],
+  "users": [
+    {
+      "id": "3ca3f484-5ef2-4c37-a8e8-d55d0cf47fb8",
+      "username": "developer-admin",
+      "email": "developer-admin@developer-assistant.test",
+      "emailVerified": true,
+      "enabled": true,
+      "credentials": [
+        {
+          "type": "password",
+          "value": "__KEYCLOAK_BOOTSTRAP_PASSWORD__",
+          "temporary": false
+        }
+      ]
+    }
+  ]
+}

@@ -1,0 +1,33 @@
+# Declarative config for the LSP validation framework.
+#
+# Add a new language:
+#   1. Install its language server in the image (Dockerfile).
+#   2. Add an entry here (enabled, adapter, fence_tags, lsp{...}).
+#   3. Create app/lsp/adapters/<adapter>.py implementing the LanguageAdapter
+#      protocol (see app/lsp/base.py + app/lsp/adapters/php.py).
+#
+# `${VAR}` and `${VAR:-default}` are resolved from the environment.
+
+php:
+  enabled: true
+  adapter: php                 # module app/lsp/adapters/php.py
+  fence_tags: ["php"]
+  lsp:
+    binary: /opt/php-lsp/vendor/bin/phpactor
+    interpreter: php
+    args: ["language-server"]
+    language_id: php
+    validate_dir: /tmp/lsp-validate/php
+    timeout: 10
+
+# Example — a future language. Enable + provide an adapter to activate.
+# python:
+#   enabled: false
+#   adapter: python            # module app/lsp/adapters/python.py (create it)
+#   fence_tags: ["python", "py"]
+#   lsp:
+#     binary: ${PYRIGHT_BIN:-/usr/bin/pyright-langserver}
+#     args: ["--stdio"]
+#     language_id: python
+#     validate_dir: /tmp/lsp-validate/python
+#     timeout: 10

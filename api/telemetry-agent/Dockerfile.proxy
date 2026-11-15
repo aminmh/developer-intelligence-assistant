@@ -1,0 +1,14 @@
+FROM golang:1.25.4-bookworm AS build
+WORKDIR /src
+COPY proxy/go.mod ./
+COPY proxy/*.go ./
+# Standard library only: no modules are downloaded. Tests gate the image.
+RUN go vet ./... && go test -count=1 ./... \
+ && CGO_ENABLED=0 GOFLAGS=-trimpath go build -ldflags="-s -w" -o /out/docker-api-proxy .
+
+# No shell, interpreter or package manager next to the Docker socket.
+FROM scratch
+COPY --from=build /out/docker-api-proxy /docker-api-proxy
+USER 10001:10001
+EXPOSE 2375
+ENTRYPOINT ["/docker-api-proxy"]

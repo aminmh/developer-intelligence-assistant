@@ -1,0 +1,92 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Logo Concepts</title>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&family=JetBrains+Mono:wght@400;500;700&display=swap" rel="stylesheet">
+<style>
+:root { --a:#22d3ee; --b:#a78bfa; --text:#e6ebf5; --text-2:#a3aec4; --text-3:#7c88a1; --line:rgb(148 163 255 / .14); }
+* { box-sizing: border-box; }
+body { margin: 0; min-height: 100vh; padding: 28px 16px 48px; font-family: Inter, system-ui, sans-serif; color: var(--text);
+  background: radial-gradient(900px 500px at 90% -10%, rgb(167 139 250 / .18), transparent 60%), radial-gradient(800px 500px at -10% 110%, rgb(34 211 238 / .12), transparent 60%), linear-gradient(160deg, #070912, #0b0f1e); }
+h1 { font-size: 20px; font-weight: 600; margin: 0 auto 4px; max-width: 1100px; }
+.lead { color: var(--text-2); font-size: 14px; margin: 0 auto 24px; max-width: 1100px; }
+.grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(320px, 1fr)); gap: 16px; max-width: 1100px; margin: 0 auto; }
+.card { position: relative; border-radius: 18px; padding: 18px; border: 1px solid rgb(255 255 255 / .08);
+  background: linear-gradient(160deg, rgb(255 255 255 / .06), rgb(255 255 255 / .015)), rgb(14 18 36 / .5); }
+.card.rec { border-color: rgb(34 211 238 / .45); box-shadow: 0 0 0 1px rgb(34 211 238 / .15), 0 0 30px rgb(34 211 238 / .08); }
+.badge { position: absolute; top: 14px; right: 14px; font: 600 11px "JetBrains Mono", monospace; color: #0b0f1e; background: linear-gradient(135deg, var(--a), var(--b)); padding: 3px 8px; border-radius: 999px; }
+.name { font-family: "JetBrains Mono", monospace; font-weight: 700; font-size: 14px; }
+.idea { color: var(--text-2); font-size: 13px; line-height: 1.55; margin: 4px 0 14px; min-height: 60px; }
+.hero { display: grid; place-items: center; height: 170px; border-radius: 14px; background: #080b16; border: 1px solid var(--line); margin-bottom: 12px; }
+.hero .mark { width: 112px; height: 112px; }
+.row { display: flex; align-items: center; gap: 14px; flex-wrap: wrap; }
+.tile { display: flex; align-items: center; gap: 10px; padding: 10px 12px; border-radius: 12px; border: 1px solid var(--line); background: rgb(14 18 36 / .6); }
+.tile.light { background: #f5f7fb; border-color: #dfe4ee; }
+.tile.light .word { color: #0f172a; }
+.mark { display: block; }
+.word { font: 600 15px "JetBrains Mono", monospace; letter-spacing: -.02em; color: var(--text); }
+.word i { font-style: normal; background: linear-gradient(135deg, var(--a), var(--b)); -webkit-background-clip: text; background-clip: text; color: transparent; }
+.sizes { display: flex; align-items: flex-end; gap: 12px; margin-top: 12px; color: var(--text-3); font: 11px "JetBrains Mono", monospace; }
+.sizes div { display: flex; flex-direction: column; align-items: center; gap: 6px; }
+/* hover motion: transform only, never on idle */
+.spark, .orbit, .cursor { transform-box: fill-box; transform-origin: center; transition: transform 420ms cubic-bezier(.2,.7,.2,1); }
+.card:hover .spark { transform: rotate(90deg) scale(1.12); }
+.card:hover .orbit { transform: rotate(120deg); }
+.card:hover .cursor { transform: translateX(3px); }
+@media (prefers-reduced-motion: reduce) { * { transition: none !important; } }
+</style>
+</head>
+<body>
+<h1>Logo concepts</h1>
+<p class="lead">Each mark is shown large, in the sidebar lockup, on a light background, and at favicon sizes. Hover a card to see its small motion.</p>
+<div class="grid" id="grid"></div>
+
+<script>
+let n = 0;
+const defs = (id) => `<defs><linearGradient id="${id}" x1="6" y1="6" x2="42" y2="42" gradientUnits="userSpaceOnUse"><stop stop-color="#22d3ee"/><stop offset="1" stop-color="#a78bfa"/></linearGradient></defs>`;
+const marks = {
+  spark: (g) => `
+    <rect x="1.5" y="1.5" width="45" height="45" rx="13" fill="#0d1226" stroke="url(#${g})" stroke-opacity=".55"/>
+    <path d="M17 14 8.5 24 17 34M31 14 39.5 24 31 34" stroke="url(#${g})" stroke-width="3.4" stroke-linecap="round" stroke-linejoin="round" fill="none"/>
+    <path class="spark" d="M24 15.5c.9 4.6 2.9 6.6 7.5 7.5-4.6.9-6.6 2.9-7.5 7.5-.9-4.6-2.9-6.6-7.5-7.5 4.6-.9 6.6-2.9 7.5-7.5Z" fill="url(#${g})"/>`,
+  graph: (g) => `
+    <rect x="1.5" y="1.5" width="45" height="45" rx="13" fill="#0d1226" stroke="url(#${g})" stroke-opacity=".55"/>
+    <path d="M17 10.5c-4 0-5 2-5 5.5v3.5c0 2.6-1.4 4.2-3.8 4.5 2.4.3 3.8 1.9 3.8 4.5V32c0 3.5 1 5.5 5 5.5M31 10.5c4 0 5 2 5 5.5v3.5c0 2.6 1.4 4.2 3.8 4.5-2.4.3-3.8 1.9-3.8 4.5V32c0 3.5-1 5.5-5 5.5" stroke="url(#${g})" stroke-width="3" stroke-linecap="round" fill="none"/>
+    <g class="orbit"><path d="M24 17.5 19 29.5h10Z" stroke="url(#${g})" stroke-width="1.6" stroke-linejoin="round" fill="none" opacity=".7"/>
+    <circle cx="24" cy="17.5" r="3" fill="#22d3ee"/><circle cx="19" cy="29.5" r="3" fill="#7dd3fc"/><circle cx="29" cy="29.5" r="3" fill="#a78bfa"/></g>`,
+  prompt: (g) => `
+    <rect x="1.5" y="1.5" width="45" height="45" rx="13" fill="url(#${g})"/>
+    <rect x="4" y="4" width="40" height="40" rx="10.5" fill="#0d1226"/>
+    <path d="m13 17 7.5 7-7.5 7" stroke="url(#${g})" stroke-width="3.6" stroke-linecap="round" stroke-linejoin="round" fill="none"/>
+    <rect class="cursor" x="24" y="28" width="11" height="3.6" rx="1.8" fill="url(#${g})"/>
+    <circle cx="35" cy="14" r="2.6" fill="#a78bfa"/><circle cx="35" cy="14" r="5.5" stroke="#a78bfa" stroke-opacity=".45" fill="none"/>`,
+  monogram: (g) => `
+    <path d="M24 3.5 41.8 13.75v20.5L24 44.5 6.2 34.25v-20.5Z" fill="#0d1226" stroke="url(#${g})" stroke-opacity=".55" stroke-width="1.5" stroke-linejoin="round"/>
+    <path d="M15 33V15h5.5c6 0 9.5 3.6 9.5 9s-3.5 9-9.5 9H15Z" stroke="url(#${g})" stroke-width="3.2" stroke-linejoin="round" fill="none"/>
+    <path d="M27 33l6-17 3.2 9" stroke="url(#${g})" stroke-width="3.2" stroke-linecap="round" stroke-linejoin="round" fill="none"/>
+    <circle class="spark" cx="36.2" cy="25" r="2.6" fill="#a78bfa"/>`,
+};
+const concepts = [
+  ['spark', 'Code spark', 'Code brackets < > with an AI spark between them: "an assistant inside your code". The most readable at 16px, and it says what the app does without words.', true],
+  ['graph', 'Knowledge braces', 'Curly braces { } holding a small graph of three connected nodes. It refers to how the app works: code turned into a searchable knowledge graph.'],
+  ['prompt', 'Live prompt', 'A terminal prompt > with a cursor and a signal ping. It feels like a CLI tool: very "developer", less about AI.'],
+  ['monogram', 'DA monogram', 'A D and A drawn as one line inside a hexagon, with a node dot. More of a brand mark; it needs the name next to it to be understood.'],
+];
+const svg = (key, size) => { const g = 'g' + (n++); return `<svg class="mark" width="${size}" height="${size}" viewBox="0 0 48 48" fill="none" aria-hidden="true">${defs(g)}${marks[key](g)}</svg>`; };
+document.getElementById('grid').innerHTML = concepts.map(([key, name, idea, rec]) => `
+  <section class="card${rec ? ' rec' : ''}">
+    ${rec ? '<span class="badge">recommended</span>' : ''}
+    <div class="name">${name}</div>
+    <p class="idea">${idea}</p>
+    <div class="hero">${svg(key, 112)}</div>
+    <div class="row">
+      <div class="tile">${svg(key, 34)}<span class="word">dev<i>.</i>assistant</span></div>
+      <div class="tile light">${svg(key, 34)}<span class="word">dev<i>.</i>assistant</span></div>
+    </div>
+    <div class="sizes"><div>${svg(key, 48)}48</div><div>${svg(key, 32)}32</div><div>${svg(key, 24)}24</div><div>${svg(key, 16)}16</div></div>
+  </section>`).join('');
+</script>
+</body>
+</html>

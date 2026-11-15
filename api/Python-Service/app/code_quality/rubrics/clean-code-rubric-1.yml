@@ -1,0 +1,125 @@
+version: clean-code-rubric-1
+metric_schema: code-metrics-1
+score_method: design-metrics-1
+limits:
+  candidates_per_principle: 5
+  candidates_total: 25
+  body_chars: 1400
+  reason_chars: 240
+  max_chunks: 20000
+  completion_tokens: 1536
+  request_token_limit_fallback: 12000
+unsupported_exceptions:
+  - BadMethodCallException
+  - UnsupportedOperationException
+  - NotImplementedException
+  - LogicException
+infrastructure:
+  prefixes:
+    - "aws\\"
+    - "doctrine\\dbal\\"
+    - "guzzlehttp\\"
+    - "illuminate\\database\\"
+    - "predis\\"
+    - "stripe\\"
+    - "symfony\\component\\httpclient\\"
+    - "symfony\\contracts\\httpclient\\"
+    - "app\\infrastructure\\"
+    - "app\\infra\\"
+  names:
+    - pdo
+    - redis
+    - mysqli
+rules:
+  - id: srp-lcom4
+    principle: SRP
+    metric: lcom4
+    threshold: 1
+    penalty: 15
+    judge: model
+    applies_to: [class, trait, enum]
+    min_method_count: 4
+    question: "Does this class combine unrelated responsibilities that change for different reasons, as suggested by its disconnected method groups?"
+  - id: srp-method-count
+    principle: SRP
+    metric: method_count
+    threshold: 15
+    penalty: 10
+    judge: model
+    applies_to: [class, trait, enum]
+    question: "Does this class have more than one reason to change given its large number of methods?"
+  - id: ocp-type-switch
+    principle: OCP
+    metric: type_switch
+    threshold: 2
+    penalty: 15
+    judge: model
+    applies_to: [class, trait, enum]
+    question: "Does the flagged method branch on concrete types in a way that forces edits here whenever a new type is added?"
+  - id: isp-interface-size
+    principle: ISP
+    metric: method_count
+    threshold: 8
+    penalty: 12
+    judge: model
+    applies_to: [interface]
+    question: "Is this interface so broad that its clients are forced to depend on methods they do not use?"
+  - id: lsp-unsupported-override
+    principle: LSP
+    metric: unsupported_overrides
+    threshold: 0
+    penalty: 20
+    judge: model
+    applies_to: [class, trait, enum]
+    question: "Does the flagged override refuse an inherited or interface contract so that this class cannot substitute for its parent type?"
+  - id: dip-concrete-dependencies
+    principle: DIP
+    metric: concrete_dependencies
+    threshold: 2
+    penalty: 10
+    judge: model
+    applies_to: [class, trait, enum]
+    question: "Do the constructor dependencies on concrete classes tie this class to implementations instead of abstractions?"
+  - id: dip-direct-infrastructure
+    principle: DIP
+    metric: infrastructure_instantiations
+    threshold: 0
+    penalty: 15
+    judge: model
+    applies_to: [class, trait, enum]
+    question: "Does the flagged method construct an infrastructure type directly instead of receiving it behind an abstraction?"
+  - id: clean-cyclomatic
+    principle: CLEAN
+    metric: max_cyclomatic
+    threshold: 10
+    penalty: 8
+    judge: none
+    applies_to: [class, trait, enum]
+  - id: clean-nesting
+    principle: CLEAN
+    metric: max_nesting
+    threshold: 4
+    penalty: 5
+    judge: none
+    applies_to: [class, trait, enum]
+  - id: clean-parameters
+    principle: CLEAN
+    metric: max_params
+    threshold: 5
+    penalty: 5
+    judge: none
+    applies_to: [class, trait, enum]
+  - id: clean-method-length
+    principle: CLEAN
+    metric: max_method_loc
+    threshold: 60
+    penalty: 5
+    judge: none
+    applies_to: [class, trait, enum]
+  - id: clean-class-length
+    principle: CLEAN
+    metric: loc
+    threshold: 400
+    penalty: 8
+    judge: none
+    applies_to: [class, trait, enum]

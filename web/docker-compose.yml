@@ -1,0 +1,198 @@
+services:
+  drawio:
+    profiles: [drawio]
+    image: jgraph/drawio:32.6.9@sha256:8a25d78e91275a7ebc0cfcca782a5eb357292752c9c886286448d6951db684e2
+    volumes:
+      - ./drawio/props.js:/usr/local/tomcat/webapps/draw/plugins/props.js:ro
+    ports:
+      - "127.0.0.1:18081:8080"
+    restart: unless-stopped
+
+  keycloak:
+    profiles: [local-auth, outline]
+    image: quay.io/keycloak/keycloak:26.7.4
+    container_name: developer-assistant-keycloak
+    env_file:
+      - .env
+    environment:
+      KC_BOOTSTRAP_ADMIN_USERNAME: ${KEYCLOAK_ADMIN_USERNAME:-admin}
+      KC_BOOTSTRAP_ADMIN_PASSWORD: ${KEYCLOAK_ADMIN_PASSWORD:?Set KEYCLOAK_ADMIN_PASSWORD in web/.env}
+      OUTLINE_OIDC_CLIENT_SECRET: ${OUTLINE_OIDC_CLIENT_SECRET:-}
+      KC_HOSTNAME: http://localhost:8180
+      KC_HTTP_ENABLED: "true"
+      KC_HEALTH_ENABLED: "true"
+    entrypoint:
+      - /bin/sh
+      - -ec
+    command:
+      - >-
+        mkdir -p /opt/keycloak/data/import;
+        sed -e "s|__OIDC_CLIENT_SECRET__|$${OIDC_CLIENT_SECRET}|g"
+        -e "s|__KEYCLOAK_BOOTSTRAP_PASSWORD__|$${KEYCLOAK_BOOTSTRAP_PASSWORD}|g"
+        /opt/keycloak/realm-template/developer-assistant-realm.json
+        > /opt/keycloak/data/import/developer-assistant-realm.json;
+        exec /opt/keycloak/bin/kc.sh start-dev --import-realm
+    ports:
+      - "127.0.0.1:8180:8080"
+    volumes:
+      - keycloak-data:/opt/keycloak/data
+      - ./keycloak:/opt/keycloak/realm-template:ro
+      - ./keycloak/themes:/opt/keycloak/themes:ro
+    restart: unless-stopped
+    networks:
+      - devassistant_net
+
+  outline-postgres:
+    profiles: [outline]
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_DB: outline
+      POSTGRES_USER: outline
+      POSTGRES_PASSWORD: ${OUTLINE_DATABASE_PASSWORD:-}
+    volumes:
+      - outline-postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U outline -d outline"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+    mem_limit: 512m
+    restart: unless-stopped
+
+  outline-redis:
+    profiles: [outline]
+    image: redis:7.4-alpine
+    command: ["redis-server", "--appendonly", "no"]
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+    mem_limit: 128m
+    restart: unless-stopped
+
+  outline:
+    profiles: [outline]
+    image: docker.getoutline.com/outlinewiki/outline:1.11.0
+    init: true
+    environment:
+      NODE_ENV: production
+      URL: http://localhost:3020
+      SECRET_KEY: ${OUTLINE_SECRET_KEY:-}
+      UTILS_SECRET: ${OUTLINE_UTILS_SECRET:-}
+      DATABASE_URL: postgres://outline:${OUTLINE_DATABASE_PASSWORD:-}@outline-postgres:5432/outline
+      DATABASE_URL_USE_SSL: "false"
+      PGSSLMODE: disable
+      REDIS_URL: redis://outline-redis:6379
+      FILE_STORAGE: local
+      FILE_STORAGE_LOCAL_ROOT_DIR: /var/lib/outline/data
+      FORCE_HTTPS: "false"
+      OIDC_CLIENT_ID: developer-assistant-outline
+      OIDC_CLIENT_SECRET: ${OUTLINE_OIDC_CLIENT_SECRET:-}
+      OIDC_AUTH_URI: http://localhost:8180/realms/developer-assistant/protocol/openid-connect/auth
+      OIDC_TOKEN_URI: http://keycloak:8080/realms/developer-assistant/protocol/openid-connect/token
+      OIDC_USERINFO_URI: http://keycloak:8080/realms/developer-assistant/protocol/openid-connect/userinfo
+      OIDC_LOGOUT_URI: http://localhost:8180/realms/developer-assistant/protocol/openid-connect/logout?client_id=developer-assistant-outline&post_logout_redirect_uri=http%3A%2F%2Flocalhost%3A3020
+      OIDC_USERNAME_CLAIM: preferred_username
+      OIDC_DISPLAY_NAME: Developer Assistant
+      OIDC_SCOPES: openid profile email
+    ports:
+      - "127.0.0.1:3020:3000"
+    volumes:
+      - outline-file-data:/var/lib/outline/data
+    depends_on:
+      outline-postgres:
+        condition: service_healthy
+      outline-redis:
+        condition: service_healthy
+      keycloak:
+        condition: service_started
+    mem_limit: 768m
+    restart: unless-stopped
+    networks:
+      - default
+      - devassistant_net
+
+  web:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      args:
+        VITE_API_URL: ${VITE_API_URL:-}
+        VITE_TUS_THRESHOLD_BYTES: ${VITE_TUS_THRESHOLD_BYTES:-}
+        VITE_DRAWIO_ORIGIN: ${VITE_DRAWIO_ORIGIN:-}
+    container_name: web
+    env_file:
+      - .env
+    environment:
+      OLLAMA_URL: http://host.docker.internal:11434
+      PYTHON_API_URL: http://python-api:9002
+      RUNTIME_HELPER_URL: http://host.docker.internal:47831
+      OIDC_INTERNAL_ISSUER: ${OIDC_LITE_INTERNAL_ISSUER:-${OIDC_ISSUER:-http://keycloak:8080/realms/developer-assistant}}
+    ports:
+      - "3000:3000"
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    volumes:
+      - "./data:/app/data"
+    restart: unless-stopped
+    networks:
+      - default
+      - devassistant_net
+
+  web-dev:
+    build:
+      context: .
+      dockerfile: Dockerfile.dev
+    container_name: web-dev
+    working_dir: /workspace
+    command:
+      - sh
+      - -c
+      - >-
+        lock_hash="$$(sha256sum /workspace/package-lock.json | cut -d ' ' -f1)";
+        if [ ! -f /workspace/node_modules/.deps-lock.sha256 ] || [ "$${lock_hash}" != "$$(cat /workspace/node_modules/.deps-lock.sha256 2>/dev/null)" ]; then
+        cd /workspace;
+        if [ -f package-lock.json ]; then npm ci --no-audit --no-fund; else npm install --no-audit --no-fund; fi;
+        printf '%s' "$${lock_hash}" > /workspace/node_modules/.deps-lock.sha256;
+        fi;
+        rm -rf /workspace/node_modules/@esbuild/darwin-* /workspace/node_modules/tsx/node_modules/@esbuild/darwin-*;
+        exec npm run dev
+    env_file:
+      - .env
+    environment:
+      NODE_ENV: development
+      VITE_DRAWIO_ORIGIN: ${VITE_DRAWIO_ORIGIN:-http://localhost:18081}
+      WEB_LISTEN_HOST: 0.0.0.0
+      NODE_OPTIONS: --max-old-space-size=2304
+      OLLAMA_URL: http://host.docker.internal:11434
+      PYTHON_API_URL: http://python-api:9002
+      RUNTIME_HELPER_URL: http://host.docker.internal:47831
+      OIDC_INTERNAL_ISSUER: ${OIDC_LITE_INTERNAL_ISSUER:-${OIDC_ISSUER:-http://keycloak:8080/realms/developer-assistant}}
+    ports:
+      - "127.0.0.1:3000:3000"
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    volumes:
+      - ".:/workspace"
+      - type: volume
+        source: web-dev-node-modules
+        target: /workspace/node_modules
+        volume:
+          nocopy: true
+    profiles:
+      - dev
+    networks:
+      - default
+      - devassistant_net
+
+networks:
+  default: {}
+  devassistant_net:
+    external: true
+
+volumes:
+  web-dev-node-modules:
+  keycloak-data:
+  outline-postgres-data:
+  outline-file-data:

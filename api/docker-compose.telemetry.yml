@@ -1,0 +1,69 @@
+# Optional, standalone Phase0 sandbox. Never merge with docker-compose.yml.
+name: devassistant-telemetry
+services:
+  collector:
+    image: ghcr.io/open-telemetry/opentelemetry-collector-releases/opentelemetry-collector-contrib:0.136.0
+    command: ["--config=/etc/otelcol/collector.yaml"]
+    environment:
+      TELEMETRY_CH_PASSWORD: ${TELEMETRY_CH_PASSWORD:-telemetry-dev-only}
+    volumes:
+      - ./telemetry-dev/collector.yaml:/etc/otelcol/collector.yaml:ro
+    ports:
+      - "127.0.0.1:14318:4318"
+    networks: [telemetry_ingest]
+    depends_on:
+      clickhouse:
+        condition: service_healthy
+    mem_limit: 512m
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+
+  clickhouse:
+    image: clickhouse/clickhouse-server:25.8.4.13
+    environment:
+      CLICKHOUSE_DB: telemetry
+      CLICKHOUSE_USER: telemetry
+      CLICKHOUSE_PASSWORD: ${TELEMETRY_CH_PASSWORD:-telemetry-dev-only}
+      CLICKHOUSE_DEFAULT_ACCESS_MANAGEMENT: "1"
+    volumes:
+      - telemetry_clickhouse:/var/lib/clickhouse
+      - ./telemetry-dev/clickhouse-users.xml:/etc/clickhouse-server/users.d/telemetry.xml:ro
+    ports:
+      - "127.0.0.1:18123:8123"
+    networks: [telemetry_ingest]
+    healthcheck:
+      test: ["CMD-SHELL", "clickhouse-client --user telemetry --password \"$$CLICKHOUSE_PASSWORD\" --query 'SELECT 1' >/dev/null"]
+      interval: 3s
+      timeout: 3s
+      retries: 30
+    mem_limit: 2g
+    ulimits:
+      nofile: {soft: 262144, hard: 262144}
+
+  neo4j:
+    image: neo4j:5.26.0
+    environment:
+      NEO4J_AUTH: neo4j/${TELEMETRY_NEO4J_PASSWORD:-telemetry-dev-only}
+      NEO4J_dbms_usage__report_enabled: "false"
+      NEO4J_server_memory_heap_initial__size: 256m
+      NEO4J_server_memory_heap_max__size: 512m
+      NEO4J_server_memory_pagecache_size: 128m
+    volumes:
+      - telemetry_neo4j:/data
+    ports:
+      - "127.0.0.1:17474:7474"
+      - "127.0.0.1:17687:7687"
+    # Deliberately unreachable from the Collector. Phase0 has no graph writer.
+    networks: [telemetry_graph]
+    mem_limit: 1g
+
+networks:
+  telemetry_ingest:
+    internal: true
+  telemetry_graph:
+    internal: true
+
+volumes:
+  telemetry_clickhouse:
+  telemetry_neo4j:

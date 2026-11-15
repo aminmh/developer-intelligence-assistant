@@ -1,0 +1,170 @@
+# Runtime pipelines are separate from the synthetic-only Phase 0 collector.
+receivers:
+  otlp:
+    protocols:
+      http:
+        endpoint: 0.0.0.0:4318
+
+processors:
+  memory_limiter:
+    check_interval: 1s
+    limit_mib: 384
+    spike_limit_mib: 64
+  filter/runtime_privacy:
+    error_mode: propagate
+    traces:
+      span:
+        - 'Len(span.links) > 0'
+        - 'resource.attributes["indexer.project_id"] == nil'
+        - 'resource.attributes["indexer.revision_id"] == nil'
+        - 'resource.attributes["indexer.code_dirty"] != false'
+        - 'resource.attributes["indexer.schema.version"] != "indexer-telemetry-v2"'
+      spanevent:
+        - 'true'
+  transform/runtime_privacy:
+    error_mode: propagate
+    trace_statements:
+      - context: resource
+        statements:
+          - 'keep_keys(attributes, ["service.name", "service.version", "service.namespace", "deployment.environment.name", "container.id", "container.image.name", "container.image.id", "indexer.project_id", "indexer.revision_id", "vcs.ref.head.revision", "indexer.code_dirty", "indexer.schema.version", "indexer.sampling.ratio"])'
+      - context: scope
+        statements:
+          - 'limit(attributes, 0, [])'
+          - 'set(name, "devassistant.runtime")'
+          - 'set(version, "1")'
+      - context: span
+        statements:
+          - 'keep_keys(attributes, ["indexer.symbol_id", "indexer.caller.symbol_id", "indexer.route_id", "indexer.table_ids", "indexer.db.table", "indexer.command.name", "indexer.exception.type", "indexer.exception.normalized_message", "indexer.exception.top_frames", "indexer.php.cpu_time_us", "indexer.php.peak_memory_bytes", "indexer.method_hook_counts", "indexer.dropped.hook_calls", "indexer.benchmark_run_id", "profiler.profile_id", "profiler.top_frames", "profiler.sample_period_ms", "http.route", "http.request.method", "http.response.status_code", "db.system.name", "db.namespace", "db.operation.name", "db.collection.name", "server.address", "url.scheme", "rpc.system", "messaging.system", "error.type", "browser.route", "browser.vital.lcp_ms", "browser.vital.inp_ms", "browser.vital.cls", "browser.frontend.project_id", "browser.frontend.revision_id", "indexer.browser.trace_id", "indexer.browser.span_id"])'
+          # Benchmark tags come from a request header: keep only well-formed run ids.
+          - 'delete_key(attributes, "indexer.benchmark_run_id") where attributes["indexer.benchmark_run_id"] != nil and not IsMatch(attributes["indexer.benchmark_run_id"], "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$")'
+          # error.type carries an exception class or status code; drop anything else (free text could hold data).
+          - 'delete_key(attributes, "error.type") where attributes["error.type"] != nil and not IsMatch(attributes["error.type"], "^[A-Za-z0-9_\\\\]{1,255}$")'
+          # Browser spans arrive through the application's relay, which already validates them. Check the
+          # text attributes again here: a route must look like a route template, never free text or a URL
+          # with a query string, and the front-end identity must have the registry's shape.
+          - 'delete_key(attributes, "browser.route") where attributes["browser.route"] != nil and not IsMatch(attributes["browser.route"], "^[A-Za-z0-9_./:{}*@ ()\\[\\]-]{1,200}$")'
+          - 'delete_key(attributes, "browser.frontend.project_id") where attributes["browser.frontend.project_id"] != nil and not IsMatch(attributes["browser.frontend.project_id"], "^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$")'
+          - 'delete_key(attributes, "browser.frontend.revision_id") where attributes["browser.frontend.revision_id"] != nil and not IsMatch(attributes["browser.frontend.revision_id"], "^rev_[0-9a-f]{32}$")'
+          # A request span may name the browser screen view that sent it: two hex IDs, nothing else.
+          - 'delete_key(attributes, "indexer.browser.trace_id") where attributes["indexer.browser.trace_id"] != nil and not IsMatch(attributes["indexer.browser.trace_id"], "^[0-9a-f]{32}$")'
+          - 'delete_key(attributes, "indexer.browser.span_id") where attributes["indexer.browser.span_id"] != nil and not IsMatch(attributes["indexer.browser.span_id"], "^[0-9a-f]{16}$")'
+          # Keep the bounded set of span names the indexr library creates; rewrite anything else,
+          # since auto-instrumentation names can contain URLs or SQL.
+          - 'set(name, "runtime.span") where not IsMatch(name, "^(http\\.server|db\\.query|messaging\\.process|cli\\.command|browser\\.page|browser\\.interaction|browser\\.error)$")'
+          - 'set(status.message, "")'
+          - 'set(trace_state, "")'
+  p95policy/runtime:
+    policy_file: /var/lib/devassistant/runtime/sampling-policy.json
+  # Remote mode only. PHP flushes spans every 5 s and long requests or jobs can span several flushes,
+  # so the decision waits 30 s. The caches remember decisions so spans arriving later still follow them.
+  tail_sampling/runtime:
+    decision_wait: 30s
+    num_traces: 50000
+    expected_new_traces_per_sec: 100
+    decision_cache:
+      sampled_cache_size: 100000
+      non_sampled_cache_size: 100000
+    policies:
+      - name: retain-errors
+        type: status_code
+        status_code:
+          status_codes: [ERROR]
+      - name: retain-over-p95
+        type: string_attribute
+        string_attribute:
+          key: indexer.sampling.slow
+          values: ["true"]
+      - name: baseline-sample
+        type: probabilistic
+        probabilistic:
+          sampling_percentage: ${env:TELEMETRY_RECORDING_PERCENT:-10}
+  # Each flush is one ClickHouse insert and one new part to merge. Larger, less frequent batches keep
+  # merge work low; new requests can take up to `timeout` longer to appear in the Runtime view.
+  batch:
+    timeout: 5s
+    send_batch_size: 4096
+    send_batch_max_size: 8192
+
+connectors:
+  # Privacy filtering and transforms run once in traces/ingest; this fans the result out.
+  forward/runtime: {}
+  spanmetrics/runtime:
+    aggregation_temporality: AGGREGATION_TEMPORALITY_CUMULATIVE
+    metrics_flush_interval: 60s
+    resource_metrics_key_attributes:
+      - service.name
+      - indexer.project_id
+      - indexer.revision_id
+    dimensions:
+      - name: indexer.symbol_id
+      - name: indexer.caller.symbol_id
+
+exporters:
+  clickhouse/full:
+    endpoint: tcp://telemetry-clickhouse-router:9000
+    username: ${env:TELEMETRY_CLICKHOUSE_USER}
+    password: ${env:TELEMETRY_CLICKHOUSE_PASSWORD}
+    database: ${env:TELEMETRY_CLICKHOUSE_DATABASE:-telemetry}
+    traces_table_name: otel_spans_full
+    # The Python service owns this table's DDL, sort key and TTL (telemetry/span_schema.py).
+    create_schema: false
+    async_insert: false
+    sending_queue:
+      enabled: true
+      queue_size: 512
+    retry_on_failure:
+      enabled: true
+      max_elapsed_time: 30s
+  clickhouse/sampled:
+    endpoint: tcp://telemetry-clickhouse-router:9000
+    username: ${env:TELEMETRY_CLICKHOUSE_USER}
+    password: ${env:TELEMETRY_CLICKHOUSE_PASSWORD}
+    database: ${env:TELEMETRY_CLICKHOUSE_DATABASE:-telemetry}
+    traces_table_name: otel_traces
+    create_schema: true
+    ttl: ${env:TELEMETRY_RETENTION_HOURS:-72}h
+    async_insert: false
+    sending_queue:
+      enabled: true
+      queue_size: 512
+    retry_on_failure:
+      enabled: true
+      max_elapsed_time: 30s
+  clickhouse/metrics:
+    endpoint: tcp://telemetry-clickhouse-router:9000
+    username: ${env:TELEMETRY_CLICKHOUSE_USER}
+    password: ${env:TELEMETRY_CLICKHOUSE_PASSWORD}
+    database: ${env:TELEMETRY_CLICKHOUSE_DATABASE:-telemetry}
+    create_schema: true
+    ttl: ${env:TELEMETRY_RETENTION_HOURS:-72}h
+    async_insert: false
+    sending_queue:
+      enabled: true
+      queue_size: 512
+    retry_on_failure:
+      enabled: true
+      max_elapsed_time: 30s
+
+service:
+  telemetry:
+    logs:
+      level: error
+    metrics:
+      level: none
+  pipelines:
+    traces/ingest:
+      receivers: [otlp]
+      processors: [memory_limiter, filter/runtime_privacy, transform/runtime_privacy]
+      exporters: [forward/runtime]
+    traces/full:
+      receivers: [forward/runtime]
+      processors: [batch]
+      exporters: [clickhouse/full, spanmetrics/runtime]
+    traces/sampled:
+      receivers: [forward/runtime]
+      processors: [p95policy/runtime, tail_sampling/runtime, batch]
+      exporters: [clickhouse/sampled]
+    metrics/runtime:
+      receivers: [spanmetrics/runtime]
+      processors: [memory_limiter, batch]
+      exporters: [clickhouse/metrics]

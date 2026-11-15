@@ -1,0 +1,562 @@
+[
+  {
+    "input": {
+      "kind": "method",
+      "class": "App\\Http\\Controllers\\OrderController",
+      "method": "store"
+    },
+    "expected": "App\\Http\\Controllers\\OrderController::store"
+  },
+  {
+    "input": {
+      "kind": "method",
+      "class": " \\App\\Service ",
+      "method": " Run "
+    },
+    "expected": "App\\Service::Run"
+  },
+  {
+    "input": {
+      "kind": "method",
+      "class": "App\\Traits\\Logs",
+      "method": "log"
+    },
+    "expected": "App\\Traits\\Logs::log"
+  },
+  {
+    "input": {
+      "kind": "method",
+      "class": "App\\Service",
+      "method": "log"
+    },
+    "expected": "App\\Service::log"
+  },
+  {
+    "input": {
+      "kind": "method",
+      "class": "GlobalClass",
+      "method": "__call"
+    },
+    "expected": "GlobalClass::__call"
+  },
+  {
+    "input": {
+      "kind": "function",
+      "name": "App\\Support\\money_format"
+    },
+    "expected": "\\App\\Support\\money_format"
+  },
+  {
+    "input": {
+      "kind": "function",
+      "name": " \\App\\Support\\Money "
+    },
+    "expected": "\\App\\Support\\Money"
+  },
+  {
+    "input": {
+      "kind": "function",
+      "name": "global_helper"
+    },
+    "expected": "\\global_helper"
+  },
+  {
+    "input": {
+      "kind": "closure",
+      "path": "routes/web.php",
+      "line": 42
+    },
+    "expected": "closure@routes/web.php:42"
+  },
+  {
+    "input": {
+      "kind": "closure",
+      "path": " ././src\\Handler.php ",
+      "line": 1
+    },
+    "expected": "closure@src/Handler.php:1"
+  },
+  {
+    "input": {
+      "kind": "controller",
+      "controller": "App\\Http\\Controllers\\OrderController@store"
+    },
+    "expected": "App\\Http\\Controllers\\OrderController::store"
+  },
+  {
+    "input": {
+      "kind": "controller",
+      "controller": " \\App\\Controller\\OrderController :: store "
+    },
+    "expected": "App\\Controller\\OrderController::store"
+  },
+  {
+    "input": {
+      "kind": "controller",
+      "controller": "App\\Http\\Controllers\\ShowDashboard"
+    },
+    "expected": "App\\Http\\Controllers\\ShowDashboard::__invoke"
+  },
+  {
+    "input": {
+      "kind": "controller",
+      "controller": "\\GlobalController"
+    },
+    "expected": "GlobalController::__invoke"
+  },
+  {
+    "input": {
+      "kind": "route",
+      "method": " post ",
+      "template": " /orders/{order} "
+    },
+    "expected": "route:POST /orders/{order}"
+  },
+  {
+    "input": {
+      "kind": "route",
+      "method": "get",
+      "template": "/orders/{order?}"
+    },
+    "expected": "route:GET /orders/{order?}"
+  },
+  {
+    "input": {
+      "kind": "route",
+      "method": "HEAD",
+      "template": "/"
+    },
+    "expected": "route:HEAD /"
+  },
+  {
+    "input": {
+      "kind": "table",
+      "connection": " mysql ",
+      "name": " orders "
+    },
+    "expected": "table:mysql.orders"
+  },
+  {
+    "input": {
+      "kind": "table",
+      "connection": "Reporting_1",
+      "name": "OrderItems"
+    },
+    "expected": "table:Reporting_1.OrderItems"
+  },
+  {
+    "input": {
+      "kind": "method",
+      "class": "\\\\App\\Service",
+      "method": "run"
+    },
+    "error": true
+  },
+  {
+    "input": {
+      "kind": "method",
+      "class": "App\\",
+      "method": "run"
+    },
+    "error": true
+  },
+  {
+    "input": {
+      "kind": "method",
+      "class": "App\\Service",
+      "method": "bad-name"
+    },
+    "error": true
+  },
+  {
+    "input": {
+      "kind": "method",
+      "class": "App\\Service",
+      "method": "one::two"
+    },
+    "error": true
+  },
+  {
+    "input": {
+      "kind": "method",
+      "class": true,
+      "method": "run"
+    },
+    "error": true
+  },
+  {
+    "input": {
+      "kind": "method",
+      "class": "App\\Service",
+      "method": 3
+    },
+    "error": true
+  },
+  {
+    "input": {
+      "kind": "function",
+      "name": "\\\\App\\helper"
+    },
+    "error": true
+  },
+  {
+    "input": {
+      "kind": "function",
+      "name": "App\\bad name"
+    },
+    "error": true
+  },
+  {
+    "input": {
+      "kind": "function",
+      "name": ""
+    },
+    "error": true
+  },
+  {
+    "input": {
+      "kind": "function",
+      "name": null
+    },
+    "error": true
+  },
+  {
+    "input": {
+      "kind": "closure",
+      "path": "/tmp/app.php",
+      "line": 1
+    },
+    "error": true
+  },
+  {
+    "input": {
+      "kind": "closure",
+      "path": "C:\\app.php",
+      "line": 1
+    },
+    "error": true
+  },
+  {
+    "input": {
+      "kind": "closure",
+      "path": "\\\\host\\app.php",
+      "line": 1
+    },
+    "error": true
+  },
+  {
+    "input": {
+      "kind": "closure",
+      "path": "../app.php",
+      "line": 1
+    },
+    "error": true
+  },
+  {
+    "input": {
+      "kind": "closure",
+      "path": "src/../app.php",
+      "line": 1
+    },
+    "error": true
+  },
+  {
+    "input": {
+      "kind": "closure",
+      "path": "src/./app.php",
+      "line": 1
+    },
+    "error": true
+  },
+  {
+    "input": {
+      "kind": "closure",
+      "path": "src//app.php",
+      "line": 1
+    },
+    "error": true
+  },
+  {
+    "input": {
+      "kind": "closure",
+      "path": "./",
+      "line": 1
+    },
+    "error": true
+  },
+  {
+    "input": {
+      "kind": "closure",
+      "path": "src/app.php",
+      "line": 0
+    },
+    "error": true
+  },
+  {
+    "input": {
+      "kind": "closure",
+      "path": "src/app.php",
+      "line": -1
+    },
+    "error": true
+  },
+  {
+    "input": {
+      "kind": "closure",
+      "path": "src/app.php",
+      "line": "1"
+    },
+    "error": true
+  },
+  {
+    "input": {
+      "kind": "closure",
+      "path": "src/app.php",
+      "line": true
+    },
+    "error": true
+  },
+  {
+    "input": {
+      "kind": "closure",
+      "path": "src/app.php",
+      "line": 1.5
+    },
+    "error": true
+  },
+  {
+    "input": {
+      "kind": "closure",
+      "path": false,
+      "line": 1
+    },
+    "error": true
+  },
+  {
+    "input": {
+      "kind": "controller",
+      "controller": "order_controller"
+    },
+    "error": true
+  },
+  {
+    "input": {
+      "kind": "controller",
+      "controller": "order_controller::store"
+    },
+    "error": true
+  },
+  {
+    "input": {
+      "kind": "controller",
+      "controller": "App\\Controller@one@two"
+    },
+    "error": true
+  },
+  {
+    "input": {
+      "kind": "controller",
+      "controller": "App\\Controller::"
+    },
+    "error": true
+  },
+  {
+    "input": {
+      "kind": "controller",
+      "controller": "\\\\App\\Controller"
+    },
+    "error": true
+  },
+  {
+    "input": {
+      "kind": "controller",
+      "controller": [
+        "App\\Controller",
+        "store"
+      ]
+    },
+    "error": true
+  },
+  {
+    "input": {
+      "kind": "route",
+      "method": "GET|POST",
+      "template": "/orders"
+    },
+    "error": true
+  },
+  {
+    "input": {
+      "kind": "route",
+      "method": "GET POST",
+      "template": "/orders"
+    },
+    "error": true
+  },
+  {
+    "input": {
+      "kind": "route",
+      "method": [
+        "GET",
+        "POST"
+      ],
+      "template": "/orders"
+    },
+    "error": true
+  },
+  {
+    "input": {
+      "kind": "route",
+      "method": 1,
+      "template": "/orders"
+    },
+    "error": true
+  },
+  {
+    "input": {
+      "kind": "route",
+      "method": "GET",
+      "template": "orders"
+    },
+    "error": true
+  },
+  {
+    "input": {
+      "kind": "route",
+      "method": "GET",
+      "template": "/orders?q=1"
+    },
+    "error": true
+  },
+  {
+    "input": {
+      "kind": "route",
+      "method": "GET",
+      "template": "/orders#fragment"
+    },
+    "error": true
+  },
+  {
+    "input": {
+      "kind": "route",
+      "method": "GET",
+      "template": "/orders/{bad-name}"
+    },
+    "error": true
+  },
+  {
+    "input": {
+      "kind": "route",
+      "method": "GET",
+      "template": "/orders/{order"
+    },
+    "error": true
+  },
+  {
+    "input": {
+      "kind": "route",
+      "method": "GET",
+      "template": "/orders//show"
+    },
+    "error": true
+  },
+  {
+    "input": {
+      "kind": "route",
+      "method": "GET",
+      "template": "/orders/../show"
+    },
+    "error": true
+  },
+  {
+    "input": {
+      "kind": "route",
+      "method": "GET",
+      "template": "/orders with spaces"
+    },
+    "error": true
+  },
+  {
+    "input": {
+      "kind": "table",
+      "connection": "mysql.prod",
+      "name": "orders"
+    },
+    "error": true
+  },
+  {
+    "input": {
+      "kind": "table",
+      "connection": "mysql",
+      "name": "schema.orders"
+    },
+    "error": true
+  },
+  {
+    "input": {
+      "kind": "table",
+      "connection": "mysql",
+      "name": "orders;drop"
+    },
+    "error": true
+  },
+  {
+    "input": {
+      "kind": "table",
+      "connection": false,
+      "name": "orders"
+    },
+    "error": true
+  },
+  {
+    "input": {
+      "kind": "table",
+      "connection": "",
+      "name": "orders"
+    },
+    "error": true
+  },
+  {
+    "input": {
+      "kind": "class",
+      "name": "App\\Service"
+    },
+    "error": true
+  },
+  {
+    "input": {
+      "kind": 1
+    },
+    "error": true
+  },
+  {
+    "input": {},
+    "error": true
+  },
+  {
+    "name": "PHP trim kind",
+    "input": {
+      "kind": " function ",
+      "name": " App\\f "
+    },
+    "expected": "\\App\\f"
+  },
+  {
+    "name": "NBSP path is not trimmed",
+    "input": {
+      "kind": "closure",
+      "path": "src/a.php ",
+      "line": 3
+    },
+    "expected": "closure@src/a.php :3"
+  },
+  {
+    "name": "NBSP route matches PHP ASCII whitespace",
+    "input": {
+      "kind": "route",
+      "method": "GET",
+      "template": "/a b"
+    },
+    "expected": "route:GET /a b"
+  }
+]

@@ -1,0 +1,50 @@
+name: devassistant-telemetry-agent
+services:
+  docker-api-proxy:
+    image: devassistant/docker-api-read-proxy:2.0.0
+    build:
+      context: .
+      dockerfile: Dockerfile.proxy
+    user: "10001:10001"
+    group_add: ["${DOCKER_SOCK_GID:-0}"]
+    volumes:
+      - ${DOCKER_SOCK_PATH:-/var/run/docker.sock}:/var/run/docker.sock:ro
+    networks: [agent_internal]
+    healthcheck:
+      test: ["CMD", "/docker-api-proxy", "-healthcheck"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 5s
+    read_only: true
+    pids_limit: 64
+    mem_limit: 64m
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    restart: unless-stopped
+
+  agent:
+    image: devassistant/telemetry-agent:1.0.0
+    build:
+      context: .
+      dockerfile: Dockerfile.agent
+    environment:
+      BACKEND_URL: ${BACKEND_URL:-https://telemetry.example.invalid}
+      BACKEND_CA: /run/identity/ca.pem
+      HOST_CERT: /run/identity/host.crt
+      HOST_KEY: /run/identity/host.key
+    volumes:
+      - ${HOST_IDENTITY_DIR:?Set the provisioned certificate directory}:/run/identity:ro
+    networks: [agent_internal, agent_egress]
+    depends_on:
+      docker-api-proxy:
+        condition: service_healthy
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    restart: unless-stopped
+
+networks:
+  agent_internal:
+    internal: true
+  agent_egress: {}

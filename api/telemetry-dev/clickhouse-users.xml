@@ -1,0 +1,8 @@
+<clickhouse>
+  <profiles>
+    <default>
+      <!-- Do not retain query text in system.query_log in this sandbox. -->
+      <log_queries>0</log_queries>
+    </default>
+  </profiles>
+</clickhouse>

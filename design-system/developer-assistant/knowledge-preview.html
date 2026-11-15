@@ -1,0 +1,401 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Knowledge Base Preview</title>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+<style>
+:root {
+  --a: 34 211 238; --b: 129 140 248;
+  --grad: linear-gradient(135deg, rgb(var(--a)), rgb(var(--b)));
+  --text: #e6ebf5; --text-2: #a3aec4; --text-3: #8591a8;
+  --line: rgb(148 163 255 / .12); --line-2: rgb(148 163 255 / .22);
+  --solid: #10152a; --field: rgb(8 11 22 / .55);
+  --ok: #34d399; --warn: #fcd34d; --bad: #fb7185;
+  --ease: cubic-bezier(.2,.7,.2,1);
+  --sans: Inter, system-ui, sans-serif; --mono: "JetBrains Mono", ui-monospace, monospace;
+}
+* { box-sizing: border-box; }
+html, body { height: 100%; margin: 0; }
+body { font-family: var(--sans); color: var(--text); overflow: hidden;
+  background: radial-gradient(1200px 600px at 85% -10%, rgb(var(--b) / .16), transparent 60%), radial-gradient(900px 500px at -10% 110%, rgb(var(--a) / .1), transparent 60%), linear-gradient(160deg, #070912, #0b0f1e 52%, #0b1825); }
+button, input, select { font: inherit; color: inherit; }
+button { cursor: pointer; }
+:focus-visible { outline: 2px solid rgb(var(--a)); outline-offset: 2px; }
+svg.lucide { width: 16px; height: 16px; flex-shrink: 0; }
+.shell { position: relative; display: flex; gap: 12px; height: 100vh; padding: 12px; overflow: clip; }
+.orbs { position: absolute; inset: 0; overflow: clip; pointer-events: none; }
+.orb { position: absolute; border-radius: 50%; }
+.orb-a { width: 520px; height: 520px; left: -160px; top: 18%; background: radial-gradient(circle, rgb(var(--a) / .22), transparent 65%); }
+.orb-b { width: 460px; height: 460px; left: 120px; top: -180px; background: radial-gradient(circle, rgb(var(--b) / .24), transparent 65%); }
+.glass { background: linear-gradient(160deg, rgb(255 255 255 / .07), rgb(255 255 255 / .02)), rgb(14 18 36 / .42); backdrop-filter: blur(16px) saturate(150%); -webkit-backdrop-filter: blur(16px) saturate(150%); border: 1px solid rgb(255 255 255 / .08); box-shadow: inset 0 1px 0 rgb(255 255 255 / .08), 0 18px 48px rgb(0 0 0 / .45); }
+.sidebar { position: relative; z-index: 1; width: 72px; border-radius: 20px; display: flex; flex-direction: column; align-items: center; gap: 6px; padding: 14px 0; }
+.sidebar .logo { width: 38px; height: 38px; margin-bottom: 10px; border-radius: 11px; box-shadow: 0 0 20px rgb(var(--b) / .28); }
+.side-ico { position: relative; display: grid; place-items: center; width: 44px; height: 40px; border-radius: 12px; color: var(--text-2); }
+.side-ico.on { color: var(--text); background: linear-gradient(90deg, rgb(var(--a) / .16), rgb(var(--b) / .06)); box-shadow: inset 0 0 0 1px rgb(var(--a) / .25); }
+.side-ico.on svg { color: rgb(var(--a)); }
+.side-ico.on::before { content: ""; position: absolute; left: 3px; top: 11px; bottom: 11px; width: 3px; border-radius: 3px; background: var(--grad); box-shadow: 0 0 10px rgb(var(--a) / .9); }
+main { position: relative; z-index: 1; flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 12px; }
+header { display: flex; align-items: center; gap: 10px; min-height: 60px; padding: 8px 20px; border-radius: 16px; }
+.ptitle { font-size: 15px; font-weight: 600; } .crumb { font: 12px var(--mono); color: var(--text-3); margin-right: 4px; }
+.pdesc { font-size: 12px; color: var(--text-3); }
+.chip { display: inline-flex; align-items: center; gap: 7px; height: 32px; padding: 0 10px; border-radius: 8px; border: 1px solid var(--line-2); background: var(--field); color: var(--text-2); font-size: 12px; white-space: nowrap; }
+.chip.ok { color: var(--ok); border-color: rgb(52 211 153 / .3); background: rgb(52 211 153 / .08); }
+
+/* ================= knowledge base ================= */
+.page { flex: 1; min-height: 0; overflow-y: auto; border-radius: 16px; padding: 18px 20px 24px; border: 1px solid rgb(255 255 255 / .08); background: linear-gradient(160deg, rgb(255 255 255 / .05), rgb(255 255 255 / .015)), rgb(14 18 36 / .42); }
+.wrap { max-width: 1200px; margin: 0 auto; display: flex; flex-direction: column; gap: 16px; }
+.rise { animation: rise 260ms var(--ease) both; }
+@keyframes rise { from { opacity: 0; transform: translateY(8px); } to { opacity: 1; transform: none; } }
+
+.topbar { display: flex; flex-wrap: wrap; align-items: center; gap: 12px; }
+.tabs { display: inline-flex; gap: 2px; padding: 3px; border-radius: 12px; border: 1px solid var(--line-2); background: var(--field); }
+.tabs button { display: inline-flex; align-items: center; gap: 8px; height: 34px; padding: 0 14px; border: 0; border-radius: 9px; background: transparent; color: var(--text-3); font-size: 13px; font-weight: 500; }
+.tabs button:hover:not([aria-selected="true"]) { color: var(--text); }
+.tabs button[aria-selected="true"] { color: #0b0f1e; background: var(--grad); font-weight: 600; box-shadow: 0 0 16px rgb(var(--a) / .3); }
+.tabs .dot { width: 6px; height: 6px; border-radius: 50%; background: var(--ok); box-shadow: 0 0 6px var(--ok); }
+.tabs [aria-selected="true"] .dot { background: #0b0f1e; box-shadow: none; }
+.stats { display: flex; flex-wrap: wrap; gap: 8px; margin-left: auto; }
+.stat { display: inline-flex; align-items: baseline; gap: 6px; height: 34px; padding: 0 12px; border-radius: 10px; border: 1px solid var(--line); background: rgb(8 11 22 / .35); font-size: 12px; color: var(--text-3); align-items: center; }
+.stat b { font: 600 14px var(--mono); background: var(--grad); -webkit-background-clip: text; background-clip: text; color: transparent; }
+
+.grid { display: grid; grid-template-columns: minmax(0, 1fr) 340px; gap: 16px; align-items: start; }
+@media (max-width: 1080px) { .grid { grid-template-columns: minmax(0, 1fr); } .aside { order: -1; } }
+
+/* projects */
+.project { border-radius: 16px; border: 1px solid var(--line); background: rgb(16 21 42 / .55); overflow: hidden; }
+.project + .project { margin-top: 12px; }
+.p-head { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; padding: 14px 16px; border-bottom: 1px solid var(--line); }
+.p-icon { display: grid; place-items: center; width: 34px; height: 34px; border-radius: 10px; background: linear-gradient(135deg, rgb(var(--a) / .18), rgb(var(--b) / .18)); border: 1px solid rgb(var(--a) / .3); color: rgb(var(--a)); }
+.p-name { font: 600 14px var(--mono); }
+.p-meta { font-size: 12px; color: var(--text-3); }
+.p-head .right { margin-left: auto; display: flex; gap: 6px; align-items: center; }
+.tag { display: inline-flex; align-items: center; gap: 5px; height: 24px; padding: 0 8px; border-radius: 7px; border: 1px solid var(--line-2); font: 11px var(--mono); color: var(--text-2); white-space: nowrap; }
+.tag svg { width: 12px; height: 12px; }
+.tag.ok { color: var(--ok); border-color: rgb(52 211 153 / .3); background: rgb(52 211 153 / .07); }
+.tag.warn { color: var(--warn); border-color: rgb(251 191 36 / .3); background: rgb(251 191 36 / .06); }
+.tag.bad { color: var(--bad); border-color: rgb(251 113 133 / .35); background: rgb(251 113 133 / .06); }
+.tag.run { color: rgb(var(--a)); border-color: rgb(var(--a) / .35); background: rgb(var(--a) / .07); }
+.tag.dim { color: var(--text-3); }
+
+.rev { position: relative; display: grid; grid-template-columns: 22px minmax(0, 1fr) auto; gap: 12px; align-items: start; padding: 14px 16px; transition: background-color 160ms; }
+.rev + .rev { border-top: 1px solid var(--line); }
+.rev:hover { background: rgb(148 163 255 / .04); }
+.rev-dot { margin-top: 5px; width: 10px; height: 10px; border-radius: 50%; justify-self: center; background: var(--text-3); }
+.rev-dot.ok { background: var(--ok); box-shadow: 0 0 8px var(--ok); }
+.rev-dot.run { background: rgb(var(--a)); box-shadow: 0 0 8px rgb(var(--a)); }
+.rev-dot.bad { background: var(--bad); box-shadow: 0 0 8px var(--bad); }
+.rev-line::before { content: ""; position: absolute; left: 26px; top: 0; height: 18px; width: 1px; background: var(--line-2); }
+.rev-title { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 8px; }
+.rev-title b { font-size: 13.5px; font-weight: 600; }
+.rev-sub { margin-top: 6px; display: flex; flex-wrap: wrap; gap: 6px 14px; font: 11.5px var(--mono); color: var(--text-3); }
+.rev-sub span { display: inline-flex; align-items: center; gap: 5px; }
+.rev-sub svg { width: 12px; height: 12px; }
+.rev-note { margin-top: 6px; font-size: 12px; display: flex; align-items: center; gap: 6px; }
+.rev-note svg { width: 13px; height: 13px; }
+.rev-note.ok { color: var(--ok); } .rev-note.warn { color: var(--warn); } .rev-note.bad { color: var(--bad); }
+.actions { display: flex; gap: 6px; align-items: center; }
+.btn { display: inline-flex; align-items: center; gap: 6px; height: 32px; padding: 0 12px; border-radius: 9px; border: 1px solid var(--line-2); background: var(--field); color: var(--text); font-size: 12px; font-weight: 500; white-space: nowrap; }
+.btn:hover { border-color: rgb(var(--a) / .5); }
+.btn.primary { border: 0; background: var(--grad); color: #0b0f1e; font-weight: 600; box-shadow: 0 0 16px rgb(var(--a) / .3); }
+.btn.danger:hover { color: var(--bad); border-color: rgb(251 113 133 / .45); background: rgb(251 113 133 / .08); }
+.btn.icon { width: 32px; padding: 0; justify-content: center; }
+.btn svg { width: 15px; height: 15px; }
+.progress { margin-top: 10px; }
+.progress-top { display: flex; justify-content: space-between; font: 11.5px var(--mono); color: rgb(var(--a)); }
+.track { position: relative; margin-top: 6px; height: 4px; border-radius: 4px; background: rgb(148 163 255 / .14); overflow: hidden; }
+.track i { display: block; height: 100%; width: 100%; background: var(--grad); transform-origin: left; transform: scaleX(.64); }
+.graph { margin-top: 6px; font: 11px var(--mono); color: var(--text-3); }
+
+/* upload aside */
+.aside { position: sticky; top: 0; display: flex; flex-direction: column; gap: 12px; }
+.card { border-radius: 16px; padding: 16px; border: 1px solid transparent; background: linear-gradient(var(--solid), var(--solid)) padding-box, linear-gradient(135deg, rgb(var(--a) / .45), var(--line) 45%, rgb(var(--b) / .35)) border-box; }
+.card h3 { display: flex; align-items: center; gap: 8px; margin: 0; font-size: 14px; font-weight: 600; }
+.card h3 svg { color: rgb(var(--a)); }
+.card .lead { margin: 6px 0 14px; font-size: 12.5px; line-height: 1.55; color: var(--text-2); }
+.field { display: flex; flex-direction: column; gap: 6px; margin-bottom: 12px; }
+.field label { font-size: 12px; font-weight: 500; color: var(--text-2); }
+.field label em { font-style: normal; color: var(--text-3); font-weight: 400; }
+.input { height: 38px; padding: 0 12px; border-radius: 10px; border: 1px solid var(--line-2); background: var(--field); color: var(--text); font: 13px var(--mono); outline: none; transition: border-color 140ms, box-shadow 140ms; }
+.input:focus { border-color: rgb(var(--a) / .6); box-shadow: 0 0 0 3px rgb(var(--a) / .15); }
+.input::placeholder { color: var(--text-3); }
+.help { font-size: 11.5px; color: var(--text-3); line-height: 1.45; }
+.drop { position: relative; display: flex; flex-direction: column; align-items: center; gap: 8px; width: 100%; padding: 22px 14px; border-radius: 14px; border: 1.5px dashed rgb(var(--a) / .4); background: rgb(var(--a) / .04); text-align: center; transition: background-color 180ms, border-color 180ms; }
+.drop:hover, .drop.over { border-color: rgb(var(--a) / .8); background: rgb(var(--a) / .09); }
+.drop .ico { display: grid; place-items: center; width: 42px; height: 42px; border-radius: 12px; background: var(--grad); color: #0b0f1e; box-shadow: 0 0 22px rgb(var(--a) / .35); }
+.drop .ico svg { width: 20px; height: 20px; }
+.drop b { font-size: 13px; } .drop span { font-size: 11.5px; color: var(--text-3); }
+.ready { margin-top: 10px; display: flex; align-items: center; gap: 6px; font-size: 12px; color: var(--ok); }
+.ready svg { width: 14px; height: 14px; }
+.upl { margin-top: 12px; display: flex; flex-direction: column; gap: 8px; }
+.upl-row { padding: 10px 12px; border-radius: 10px; border: 1px solid var(--line); background: rgb(8 11 22 / .45); }
+.upl-row .progress-top { color: var(--text-2); }
+
+/* git + rules */
+.two { display: grid; grid-template-columns: repeat(auto-fit, minmax(320px, 1fr)); gap: 16px; align-items: start; }
+.panel { border-radius: 16px; padding: 18px; border: 1px solid var(--line); background: rgb(16 21 42 / .55); }
+.panel h3 { display: flex; align-items: center; gap: 8px; margin: 0; font-size: 15px; font-weight: 600; }
+.panel h3 svg { color: rgb(var(--a)); }
+.panel .lead { margin: 6px 0 16px; font-size: 13px; line-height: 1.6; color: var(--text-2); }
+.row3 { display: grid; grid-template-columns: repeat(auto-fit, minmax(160px, 1fr)); gap: 12px; }
+.btns { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 4px; }
+.status { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; padding: 14px; border-radius: 12px; border: 1px solid var(--line); background: rgb(8 11 22 / .4); }
+.status .big { font: 600 14px var(--mono); }
+.status .right { margin-left: auto; display: flex; gap: 6px; }
+.steps3 { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 8px; margin-top: 14px; }
+.step { padding: 12px; border-radius: 12px; border: 1px solid var(--line); font-size: 12px; color: var(--text-2); line-height: 1.5; }
+.step b { display: flex; align-items: center; gap: 8px; margin-bottom: 4px; font: 600 11px var(--mono); color: rgb(var(--a)); }
+.docs { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 8px; margin-top: 12px; }
+.doc { display: flex; align-items: center; gap: 10px; height: 44px; padding: 0 12px; border-radius: 10px; border: 1px solid var(--line); background: rgb(8 11 22 / .4); font-size: 13px; color: var(--text); text-decoration: none; transition: border-color 160ms, transform 160ms var(--ease); }
+.doc:hover { border-color: rgb(var(--a) / .45); transform: translateY(-1px); }
+.doc svg:first-child { color: rgb(var(--b)); } .doc svg:last-child { margin-left: auto; color: var(--text-3); width: 14px; height: 14px; }
+.note { font-size: 12px; color: var(--text-3); line-height: 1.55; }
+.sync { margin-top: 12px; padding: 10px 12px; border-radius: 10px; border: 1px solid rgb(52 211 153 / .25); background: rgb(52 211 153 / .05); font-size: 12.5px; color: var(--text-2); }
+.sync b { color: var(--ok); }
+
+.empty { text-align: center; padding: 50px 20px; border-radius: 16px; border: 1.5px dashed var(--line-2); }
+.empty .ico { display: grid; place-items: center; width: 56px; height: 56px; margin: 0 auto 14px; border-radius: 16px; background: linear-gradient(135deg, rgb(var(--a) / .16), rgb(var(--b) / .16)); border: 1px solid rgb(var(--a) / .3); color: rgb(var(--a)); }
+.empty .ico svg { width: 24px; height: 24px; }
+.empty h3 { margin: 0; font-size: 17px; font-weight: 600; }
+.empty p { margin: 6px auto 0; max-width: 420px; font-size: 13px; color: var(--text-2); line-height: 1.6; }
+
+.switch { position: fixed; z-index: 10; top: 22px; left: 50%; transform: translateX(-50%); display: flex; gap: 4px; padding: 4px; border-radius: 12px; background: rgb(7 9 18 / .92); border: 1px solid var(--line-2); }
+.switch button { height: 30px; padding: 0 12px; border: 0; border-radius: 8px; background: transparent; color: var(--text-2); font-size: 12px; }
+.switch button[aria-pressed="true"] { color: #0b0f1e; background: var(--grad); font-weight: 600; }
+.view[hidden] { display: none; }
+@media (prefers-reduced-motion: reduce) { *, *::before, *::after { animation: none !important; transition: none !important; } }
+@media (max-width: 700px) { .sidebar { display: none; } .switch { top: auto; bottom: 12px; } .stats { margin-left: 0; } }
+</style>
+</head>
+<body>
+<div class="switch" role="group" aria-label="Preview state">
+  <button data-v="files" aria-pressed="true">Files</button>
+  <button data-v="empty" aria-pressed="false">No uploads yet</button>
+  <button data-v="git" aria-pressed="false">Git source</button>
+  <button data-v="rules" aria-pressed="false">Business rules</button>
+</div>
+
+<div class="shell">
+  <div class="orbs" aria-hidden="true"><div class="orb orb-a"></div><div class="orb orb-b"></div></div>
+  <aside class="sidebar glass">
+    <svg class="logo" viewBox="0 0 48 48" fill="none"><defs><linearGradient id="g1" x1="6" y1="6" x2="42" y2="42" gradientUnits="userSpaceOnUse"><stop stop-color="#22d3ee"/><stop offset="1" stop-color="#818cf8"/></linearGradient></defs><rect x="1.5" y="1.5" width="45" height="45" rx="13" fill="#0d1226" stroke="url(#g1)" stroke-opacity=".55"/><path d="M17 14 8.5 24 17 34M31 14 39.5 24 31 34" stroke="url(#g1)" stroke-width="3.4" stroke-linecap="round" stroke-linejoin="round"/><path d="M24 15.5c.9 4.6 2.9 6.6 7.5 7.5-4.6.9-6.6 2.9-7.5 7.5-.9-4.6-2.9-6.6-7.5-7.5 4.6-.9 6.6-2.9 7.5-7.5Z" fill="url(#g1)"/></svg>
+    <span class="side-ico"><i data-lucide="message-square-text"></i></span>
+    <span class="side-ico on"><i data-lucide="library"></i></span>
+    <span class="side-ico"><i data-lucide="shield-check"></i></span>
+    <span class="side-ico"><i data-lucide="activity"></i></span>
+    <span class="side-ico"><i data-lucide="database"></i></span>
+    <span class="side-ico"><i data-lucide="network"></i></span>
+  </aside>
+
+  <main>
+    <header class="glass">
+      <div style="flex:1;min-width:0"><div class="ptitle"><span class="crumb">shop-api /</span>Knowledge base</div><div class="pdesc">Upload, version and index projects</div></div>
+      <span class="chip"><i data-lucide="users"></i>Project access</span>
+      <span class="chip ok">● Ready</span>
+    </header>
+
+    <section class="page">
+      <div class="wrap">
+        <div class="topbar rise">
+          <div class="tabs" role="tablist" aria-label="Knowledge base sections">
+            <button role="tab" data-v="files" aria-selected="true"><i data-lucide="files"></i>Files and indexing</button>
+            <button role="tab" data-v="git" aria-selected="false"><i data-lucide="git-branch"></i>Git source<span class="dot" title="Synced"></span></button>
+            <button role="tab" data-v="rules" aria-selected="false"><i data-lucide="scale"></i>Business rules<span class="dot" title="Connected"></span></button>
+          </div>
+          <div class="stats">
+            <span class="stat"><b>2</b>projects</span>
+            <span class="stat"><b>5</b>revisions</span>
+            <span class="stat"><b>12,480</b>chunks</span>
+            <span class="stat"><b>3/5</b>indexed</span>
+          </div>
+        </div>
+
+        <!-- ============ FILES ============ -->
+        <div class="view" data-view="files">
+          <div class="grid">
+            <div>
+              <article class="project rise" style="animation-delay:40ms">
+                <div class="p-head">
+                  <span class="p-icon"><i data-lucide="folder-git-2"></i></span>
+                  <div><div class="p-name">shop-api</div><div class="p-meta">3 revisions · latest 2 h ago</div></div>
+                  <div class="right"><span class="tag ok"><i data-lucide="container"></i>Running in Docker · 2 containers</span></div>
+                </div>
+
+                <div class="rev">
+                  <span class="rev-dot run"></span>
+                  <div style="min-width:0">
+                    <div class="rev-title"><b>shop-api-main.zip</b><span class="tag run"><i data-lucide="loader-circle"></i>Indexing</span><span class="tag">rev_9f3a21</span></div>
+                    <div class="rev-sub"><span><i data-lucide="upload"></i>Upload revision · no Git commit</span><span>14.2 MB</span><span>uploaded 2 h ago</span></div>
+                    <div class="progress"><div class="progress-top"><span>Embedding chunks: 2,410 / 3,760</span><span>64%</span></div><div class="track"><i></i></div></div>
+                    <div class="graph">Neo4j graph: writing symbols…</div>
+                  </div>
+                  <div class="actions"><button class="btn icon danger" aria-label="Delete" title="Delete"><i data-lucide="trash-2"></i></button></div>
+                </div>
+
+                <div class="rev">
+                  <span class="rev-dot ok"></span>
+                  <div style="min-width:0">
+                    <div class="rev-title"><b>shop-api-v2.4.zip</b><span class="tag ok"><i data-lucide="check"></i>Indexed · 3,712 chunks</span><span class="tag">rev_51c0de</span></div>
+                    <div class="rev-sub"><span><i data-lucide="git-commit-horizontal"></i>a1b2c3d4e5f6</span><span>13.9 MB</span><span>yesterday</span></div>
+                    <div class="rev-note ok"><i data-lucide="container"></i>Matches the running deployment</div>
+                  </div>
+                  <div class="actions"><button class="btn"><i data-lucide="refresh-cw"></i>Re-index</button><button class="btn icon danger" aria-label="Delete" title="Delete"><i data-lucide="trash-2"></i></button></div>
+                </div>
+
+                <div class="rev">
+                  <span class="rev-dot bad"></span>
+                  <div style="min-width:0">
+                    <div class="rev-title"><b>shop-api-hotfix.zip</b><span class="tag bad"><i data-lucide="circle-x"></i>Failed</span><span class="tag">rev_77ab02</span></div>
+                    <div class="rev-sub"><span><i data-lucide="git-commit-horizontal"></i>9e8d7c6b5a40</span><span>13.8 MB</span><span>3 days ago</span></div>
+                    <div class="rev-note bad"><i data-lucide="triangle-alert"></i>Embedding service timed out after 120 s.</div>
+                  </div>
+                  <div class="actions"><button class="btn primary"><i data-lucide="cpu"></i>Retry index</button><button class="btn icon danger" aria-label="Delete" title="Delete"><i data-lucide="trash-2"></i></button></div>
+                </div>
+              </article>
+
+              <article class="project rise" style="animation-delay:80ms">
+                <div class="p-head">
+                  <span class="p-icon"><i data-lucide="folder-git-2"></i></span>
+                  <div><div class="p-name">pizza</div><div class="p-meta">2 revisions · latest last week</div></div>
+                  <div class="right"><span class="tag dim">No running deployment</span></div>
+                </div>
+                <div class="rev">
+                  <span class="rev-dot"></span>
+                  <div style="min-width:0">
+                    <div class="rev-title"><b>pizza-1.0.zip</b><span class="tag warn">Not indexed</span><span class="tag">rev_0c11aa</span></div>
+                    <div class="rev-sub"><span><i data-lucide="upload"></i>Upload revision · no Git commit</span><span>4.1 MB</span><span>last week</span></div>
+                  </div>
+                  <div class="actions"><button class="btn primary"><i data-lucide="cpu"></i>Index</button><button class="btn icon danger" aria-label="Delete" title="Delete"><i data-lucide="trash-2"></i></button></div>
+                </div>
+                <div class="rev">
+                  <span class="rev-dot ok"></span>
+                  <div style="min-width:0">
+                    <div class="rev-title"><b>pizza-0.9.zip</b><span class="tag ok"><i data-lucide="check"></i>Indexed · 1,008 chunks</span><span class="tag">rev_3d4e5f</span></div>
+                    <div class="rev-sub"><span><i data-lucide="upload"></i>Upload revision · no Git commit</span><span>3.9 MB</span><span>2 weeks ago</span></div>
+                  </div>
+                  <div class="actions"><button class="btn"><i data-lucide="refresh-cw"></i>Re-index</button><button class="btn"><i data-lucide="sparkles"></i>Rebuild Cohere</button><button class="btn icon danger" aria-label="Delete" title="Delete"><i data-lucide="trash-2"></i></button></div>
+                </div>
+              </article>
+            </div>
+
+            <aside class="aside rise" style="animation-delay:60ms">
+              <div class="card">
+                <h3><i data-lucide="upload-cloud"></i>Upload a new revision</h3>
+                <p class="lead">Pick a project ID and drop a ZIP. The server creates the revision ID and verifies the archive checksum. No Git repository or commit is needed.</p>
+                <div class="field">
+                  <label for="pid">Project ID</label>
+                  <input id="pid" class="input" value="shop-api" list="pids">
+                  <span class="help">Use the same ID for later revisions of this project.</span>
+                </div>
+                <div class="field">
+                  <label for="sha">Commit SHA <em>(optional)</em></label>
+                  <input id="sha" class="input" placeholder="Leave empty for an automatic upload revision">
+                  <span class="help">Only add a real Git commit if you want to link this upload to it.</span>
+                </div>
+                <button class="drop" id="drop"><span class="ico"><i data-lucide="file-archive"></i></span><b>Choose or drop ZIP archives</b><span>Source is parsed when you index it.</span></button>
+                <div class="ready"><i data-lucide="circle-check"></i>Ready to upload. The revision ID appears in the list.</div>
+                <div class="upl">
+                  <div class="upl-row"><div class="progress-top"><span>shop-api-feature.zip</span><span>42%</span></div><div class="track"><i style="transform:scaleX(.42)"></i></div></div>
+                </div>
+              </div>
+            </aside>
+          </div>
+        </div>
+
+        <!-- ============ EMPTY ============ -->
+        <div class="view" data-view="empty" hidden>
+          <div class="grid">
+            <div class="empty rise">
+              <div class="ico"><i data-lucide="library"></i></div>
+              <h3>Add your first project</h3>
+              <p>Upload a ZIP of your source code, or connect a GitHub branch. Once it's indexed, chat and code quality can answer questions about it.</p>
+              <div class="btns" style="justify-content:center;margin-top:18px"><button class="btn primary"><i data-lucide="upload-cloud"></i>Upload a ZIP</button><button class="btn"><i data-lucide="git-branch"></i>Connect GitHub</button></div>
+            </div>
+            <aside class="aside"><div class="card"><h3><i data-lucide="upload-cloud"></i>Upload a new revision</h3><p class="lead">Pick a project ID and drop a ZIP. The server creates the revision ID and verifies the archive checksum. No Git repository or commit is needed.</p><div class="field"><label>Project ID</label><input class="input" placeholder="pizza"><span class="help" style="color:var(--warn)">Enter a project ID to upload.</span></div><div class="field"><label>Commit SHA <em>(optional)</em></label><input class="input" placeholder="Leave empty for an automatic upload revision"></div><button class="drop" style="opacity:.55;cursor:not-allowed"><span class="ico"><i data-lucide="file-archive"></i></span><b>Add a project ID first</b><span>Then choose or drop ZIP archives.</span></button></div></aside>
+          </div>
+        </div>
+
+        <!-- ============ GIT ============ -->
+        <div class="view" data-view="git" hidden>
+          <div class="two">
+            <div class="panel rise">
+              <h3><i data-lucide="github"></i>GitHub source</h3>
+              <p class="lead">Fetch a branch head into an immutable revision. The read-only token lives in your OS credential store; the API never saves it.</p>
+              <div class="row3">
+                <div class="field"><label>Project ID</label><input class="input" value="shop-api"></div>
+                <div class="field"><label>Repository</label><input class="input" value="acme/shop-api"></div>
+                <div class="field"><label>Branch</label><input class="input" value="main"></div>
+              </div>
+              <div class="btns"><button class="btn"><i data-lucide="save"></i>Save repository</button><button class="btn"><i data-lucide="refresh-cw"></i>Load settings</button></div>
+            </div>
+            <div class="panel rise" style="animation-delay:60ms">
+              <div class="status">
+                <span class="p-icon"><i data-lucide="git-branch"></i></span>
+                <div><div class="big">acme/shop-api · main</div><div class="p-meta">Synced · a1b2c3d4e5f6 · 12 min ago</div></div>
+                <div class="right"><span class="tag ok"><i data-lucide="key-round"></i>Token saved</span></div>
+              </div>
+              <div class="field" style="margin-top:14px"><label>Fine-grained GitHub token</label><div style="display:flex;gap:8px;flex-wrap:wrap"><input class="input" type="password" placeholder="Read-only Contents access" style="flex:1;min-width:180px"><button class="btn"><i data-lucide="shield-check"></i>Save token</button><button class="btn danger"><i data-lucide="unplug"></i>Remove</button></div></div>
+              <button class="btn primary" style="width:100%;justify-content:center;height:38px"><i data-lucide="refresh-cw"></i>Fetch branch head and index</button>
+              <div class="steps3">
+                <div class="step"><b><i data-lucide="download"></i>1 · Fetch</b>The branch head is fetched as a new revision.</div>
+                <div class="step"><b><i data-lucide="cpu"></i>2 · Index</b>It's queued for indexing automatically.</div>
+                <div class="step"><b><i data-lucide="shield-check"></i>3 · Assess</b>Code quality can use it once indexing is ready.</div>
+              </div>
+              <p class="note" style="margin-top:12px">Public repositories work without a token. Push webhooks are optional; sync always fetches the branch itself.</p>
+            </div>
+          </div>
+        </div>
+
+        <!-- ============ RULES ============ -->
+        <div class="view" data-view="rules" hidden>
+          <div class="two">
+            <div class="panel rise">
+              <h3><i data-lucide="scale"></i>Business rules in Outline<a class="btn" style="margin-left:auto" href="#"><i data-lucide="external-link"></i>Open Outline</a></h3>
+              <p class="lead">Outline holds the plain-language rules. Each project reads one dedicated collection; this app never edits Outline.</p>
+              <div class="field"><label>Outline instance URL</label><input class="input" value="http://outline:3000"><span class="help">Use http://outline:3000 inside Docker, or an HTTPS address.</span></div>
+              <div class="field"><label>Outline API token</label><input class="input" type="password" placeholder="Saved in the OS credential store; leave blank to keep it"></div>
+              <div class="field"><label>Project collection</label><select class="input"><option>shop-api rules</option></select></div>
+              <div class="btns"><button class="btn"><i data-lucide="refresh-cw"></i>Load collections</button><button class="btn primary"><i data-lucide="link"></i>Save connection</button><button class="btn danger"><i data-lucide="unplug"></i>Disconnect</button></div>
+            </div>
+            <div class="panel rise" style="animation-delay:60ms">
+              <div class="status">
+                <span class="p-icon"><i data-lucide="plug-zap"></i></span>
+                <div><div class="big">Connected</div><div class="p-meta">http://outline:3000 · shop-api rules</div></div>
+                <div class="right"><span class="tag ok"><i data-lucide="key-round"></i>Token saved</span></div>
+              </div>
+              <div class="sync"><b>Last sync:</b> 18 rules from 20 documents · today 09:12 · 2 documents skipped</div>
+              <div style="display:flex;align-items:center;margin-top:16px"><h3 style="font-size:13.5px">Rule documents</h3><button class="btn" style="margin-left:auto;height:28px"><i data-lucide="refresh-cw"></i>Refresh</button></div>
+              <div class="docs">
+                <a class="doc" href="#"><i data-lucide="file-text"></i>Order total excludes shipping<i data-lucide="external-link"></i></a>
+                <a class="doc" href="#"><i data-lucide="file-text"></i>Discounts apply before tax<i data-lucide="external-link"></i></a>
+                <a class="doc" href="#"><i data-lucide="file-text"></i>Refunds within 30 days<i data-lucide="external-link"></i></a>
+                <a class="doc" href="#"><i data-lucide="file-text"></i>One active cart per user<i data-lucide="external-link"></i></a>
+              </div>
+              <div style="display:flex;flex-wrap:wrap;gap:10px;align-items:center;margin-top:16px;padding-top:14px;border-top:1px solid var(--line)"><div style="flex:1;min-width:200px"><b style="font-size:13px">Migrate local rules</b><p class="note" style="margin:2px 0 0">Export old rules to copy into Outline.</p></div><button class="btn"><i data-lucide="download"></i>Export</button></div>
+            </div>
+          </div>
+          <p class="note" style="margin-top:14px">Below this: the existing rule knowledge panel (rules matched to code), restyled to match.</p>
+        </div>
+      </div>
+    </section>
+  </main>
+</div>
+
+<script src="https://unpkg.com/lucide@0.460.0/dist/umd/lucide.min.js"></script>
+<script>
+function show(v) {
+  document.querySelectorAll('.view').forEach(x => { x.hidden = x.dataset.view !== v; if (!x.hidden) x.querySelectorAll('.rise').forEach(el => { el.style.animation = 'none'; void el.offsetWidth; el.style.animation = ''; }); });
+  const tab = v === 'empty' ? 'files' : v;
+  document.querySelectorAll('.tabs button').forEach(b => b.setAttribute('aria-selected', b.dataset.v === tab));
+  document.querySelectorAll('.switch button').forEach(b => b.setAttribute('aria-pressed', b.dataset.v === v));
+  document.querySelector('.stats').style.visibility = v === 'empty' ? 'hidden' : '';
+}
+document.querySelectorAll('.switch button, .tabs button').forEach(b => b.addEventListener('click', () => show(b.dataset.v)));
+const drop = document.getElementById('drop');
+['dragenter','dragover'].forEach(e => drop.addEventListener(e, ev => { ev.preventDefault(); drop.classList.add('over'); }));
+['dragleave','drop'].forEach(e => drop.addEventListener(e, ev => { ev.preventDefault(); drop.classList.remove('over'); }));
+if (window.lucide) lucide.createIcons();
+</script>
+</body>
+</html>

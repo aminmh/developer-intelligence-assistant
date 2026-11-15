@@ -1,0 +1,7 @@
+.DS_Store
+minio-data
+.claude
+qdrant-data
+telemetry-dev/host/certs/
+telemetry-dev/__pycache__/
+.env

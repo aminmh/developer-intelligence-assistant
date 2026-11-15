@@ -1,0 +1,116 @@
+"""Provider health and system integration HTTP endpoints."""
+
+from __future__ import annotations
+
+import json
+import logging
+import time
+import urllib.request
+
+from fastapi import APIRouter
+
+import runtime.llm as llm_module
+from infra.settings import settings
+from runtime.lmstudio import lmstudio_load, lmstudio_models
+
+router = APIRouter(tags=["Health & System"])
+
+
+def _probe_local_llm() -> dict:
+    try:
+        req = urllib.request.Request(
+            f"{settings.ollama_base_url.rstrip('/')}/api/tags",
+            headers={"Content-Type": "application/json"},
+        )
+        with urllib.request.urlopen(req, timeout=2.0) as resp:
+            data = json.loads(resp.read().decode("utf-8"))
+        return {"configured": True, "reachable": True, "models": len(data.get("models") or [])}
+    except Exception as exc:  # noqa: BLE001 — health probes never raise
+        logging.getLogger(__name__).warning("Local LLM health probe failed: %s", exc)
+        return {"configured": True, "reachable": False, "models": None}
+
+
+def _probe_remote_llm() -> dict:
+    base_url = (settings.llm_remote_base_url or "").strip()
+    if not base_url:
+        return {"configured": False, "reachable": False, "model": None, "error": None}
+    try:
+        headers = {"Accept": "application/json"}
+        api_key = (settings.llm_remote_api_key or "").strip()
+        if api_key:
+            headers["Authorization"] = f"Bearer {api_key}"
+        req = urllib.request.Request(f"{base_url.rstrip('/')}/v1/models", headers=headers)
+        with urllib.request.urlopen(req, timeout=2.0) as resp:
+            data = json.loads(resp.read().decode("utf-8"))
+        items = data.get("data") or []
+        return {"configured": True, "reachable": True, "model": items[0].get("id") if items else None, "error": None}
+    except Exception as exc:  # noqa: BLE001 — health probes never raise
+        return {"configured": True, "reachable": False, "model": None, "error": str(exc)}
+
+
+@router.get("/health/llm", summary="LLM Provider Health")
+def health_llm():
+    return {"local": _probe_local_llm(), "remote": _probe_remote_llm()}
+
+
+@router.post("/health/test/remote", tags=["LLM Providers"], summary="Test External OpenAI-Compatible Connection")
+def remote_test_connection():
+    return llm_module.test_remote()
+
+
+@router.post("/health/test/embedding", tags=["Embedding Providers"], summary="Test Embedding Provider")
+def embedding_test_connection():
+    started = time.monotonic()
+    try:
+        from index.embeddings import EmbeddingProviderError, embed_texts, embedding_profile
+
+        profile = embedding_profile("search_query")
+        vectors = embed_texts(
+            ["code quality assessment query"],
+            input_type="search_query",
+            retry_rate_limits=False,
+        )
+        dimensions = len(vectors[0]) if vectors and isinstance(vectors[0], list) else 0
+        return {
+            "ok": dimensions > 0,
+            "provider": profile.get("provider"),
+            "model": profile.get("model"),
+            "dimensions": dimensions,
+            "latency_ms": round((time.monotonic() - started) * 1000),
+            "detail": "query embedding accepted" if dimensions > 0 else "provider returned no vector",
+        }
+    except EmbeddingProviderError as exc:
+        return {
+            "ok": False,
+            "provider": settings.embedding_provider,
+            "model": None,
+            "dimensions": 0,
+            "latency_ms": round((time.monotonic() - started) * 1000),
+            "detail": str(exc)[:300] or f"{type(exc).__name__} during embedding request",
+            "status_code": exc.code,
+            "retry_after_seconds": exc.retry_after_seconds,
+        }
+    except Exception as exc:  # noqa: BLE001 — provider diagnostics are safe and bounded
+        return {
+            "ok": False,
+            "provider": settings.embedding_provider,
+            "model": None,
+            "dimensions": 0,
+            "latency_ms": round((time.monotonic() - started) * 1000),
+            "detail": str(exc)[:300] or f"{type(exc).__name__} during embedding request",
+        }
+
+
+@router.get("/lmstudio/models", tags=["LM Studio"], summary="List LM Studio Models")
+def lmstudio_models_endpoint(base_url: str | None = None):
+    result = lmstudio_models(base_url or settings.llm_remote_base_url or "")
+    return {"success": result.pop("ok"), **result}
+
+
+@router.post("/lmstudio/load", tags=["LM Studio"], summary="Load Model into LM Studio")
+def lmstudio_load_endpoint(body: dict):
+    model_id = (body.get("model") or "").strip()
+    base_url = body.get("base_url") or settings.llm_remote_base_url or ""
+    result = lmstudio_load(base_url, model_id)
+    return {"success": result.pop("ok"), **result}
+

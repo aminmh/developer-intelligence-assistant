@@ -1,0 +1,77 @@
+# Phase0 accepts synthetic traces only. No SDK/app/exporter is enabled by this file.
+receivers:
+  otlp:
+    protocols:
+      http:
+        endpoint: 0.0.0.0:4318
+
+processors:
+  memory_limiter:
+    check_interval: 1s
+    limit_mib: 384
+    spike_limit_mib: 64
+  filter/privacy:
+    error_mode: propagate
+    traces:
+      # No supported drop-links function in this pin: reject the entire span.
+      span:
+        - 'Len(span.links) > 0'
+        - 'resource.attributes["service.name"] != "telemetry-canary"'
+        - 'resource.attributes["service.namespace"] != "devassistant"'
+        - 'resource.attributes["deployment.environment.name"] != "development"'
+        - 'attributes["indexer.project_id"] != "telemetry-fixture"'
+        - 'attributes["vcs.ref.head.revision"] != "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" and attributes["vcs.ref.head.revision"] != "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"'
+        - 'attributes["indexer.symbol_id"] != "App\\Http\\Controllers\\OrderController::store"'
+        - 'attributes["indexer.dirty"] != false'
+        - 'attributes["indexer.schema.version"] != "indexer-telemetry-v1"'
+      spanevent:
+        - 'true'
+  transform/privacy:
+    error_mode: propagate
+    trace_statements:
+      - context: resource
+        statements:
+          - 'keep_keys(attributes, ["service.name", "service.namespace", "deployment.environment.name"])'
+      - context: scope
+        statements:
+          - 'limit(attributes, 0, [])'
+          - 'set(name, "devassistant.telemetry.phase0")'
+          - 'set(version, "1")'
+      - context: span
+        statements:
+          - 'keep_keys(attributes, ["indexer.project_id", "vcs.ref.head.revision", "indexer.symbol_id", "indexer.dirty", "indexer.schema.version"])'
+          - 'set(name, "telemetry.dev.span")'
+          - 'set(status.message, "")'
+          - 'set(trace_state, "")'
+  batch:
+    timeout: 1s
+    send_batch_size: 128
+
+exporters:
+  clickhouse:
+    endpoint: tcp://clickhouse:9000
+    username: telemetry
+    password: ${env:TELEMETRY_CH_PASSWORD}
+    database: telemetry
+    traces_table_name: otel_traces
+    create_schema: true
+    ttl: 168h
+    async_insert: false
+    sending_queue:
+      enabled: true
+      queue_size: 128
+    retry_on_failure:
+      enabled: true
+      max_elapsed_time: 30s
+
+service:
+  telemetry:
+    logs:
+      level: error
+    metrics:
+      level: none
+  pipelines:
+    traces:
+      receivers: [otlp]
+      processors: [memory_limiter, filter/privacy, transform/privacy, batch]
+      exporters: [clickhouse]

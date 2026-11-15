@@ -1,0 +1,30 @@
+.git
+
+# PHP CLI vendor is installed inside the image at /opt/php-cli; never copy it.
+php/vendor/
+# Phpactor/PHPStan toolchain vendor is installed inside the image at /opt/php-lsp.
+php/lsp/vendor/
+
+app/__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+.venv/
+venv/
+env/
+
+.env
+.env.*
+
+dist/
+build/
+*.egg-info/
+
+.idea/
+.vscode/
+
+*.log
