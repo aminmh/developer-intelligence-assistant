@@ -13,6 +13,7 @@ retrieves relevant context and uses a locally configured language model to help 
 - [Screenshots](#screenshots)
 - [Installation and first use](#installation-and-first-use)
 - [Features](#features-implemented)
+- [Front-End Assistant](#front-end-assistant)
 - [Code Quality and analyzers](#code-quality-assessment)
 - [Runtime telemetry and PHP packages](#runtime-telemetry)
 - [Architecture](#architecture)
@@ -142,6 +143,21 @@ If a language server is unavailable, validation falls back to `bin/lint-php` (ph
    requires `docker compose build python-api`.
 
 For a guided walkthrough, use the `add-language-lsp` skill.
+
+### Front-End Assistant
+
+Explore Angular, React, and Vue projects alongside their back-end APIs:
+
+- **UI map:** inspect indexed routes, components, stores, and HTTP requests, plus source-based quality checks.
+- **API contracts:** upload a Swagger/OpenAPI document, load it from a repository path or URL, and attach its versions to consumer and provider projects.
+- **Conformance and impact:** compare front-end calls and back-end routes with a contract, review live route and status-code observations, and see which front-end code a contract change affects.
+- **Code generation:** generate TypeScript models, Angular services, React hooks, Vue composables, and mock handlers from a contract.
+- **Live browser views:** inspect reported screen views and related requests when browser telemetry is configured; the supplied relay is available for Laravel.
+
+To get started, upload or sync and index a front-end project in **Knowledge Base**, add and attach its
+API contract under **API contracts**, then open **UI map** or the contract's checks and generation panels.
+Static analysis depends on what the index can resolve. Runtime contract checks compare observed routes
+and status codes; they do not compare response bodies.
 
 ### Code Quality assessment
 
