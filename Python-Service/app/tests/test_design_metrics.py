@@ -176,7 +176,7 @@ def test_assessment_uses_metric_score_and_persists_no_card_source(monkeypatch, t
     store = ReportStore(tmp_path / "reports.sqlite")
     report = service.assess_revision("pizza", revision, snapshot, b"archive", "alice", store)
     assert report["categories"]["clean_code"]["score"] == 85
-    assert report["categories"]["clean_code"]["score_method"] == "design-metrics-1"
+    assert report["categories"]["clean_code"]["score_method"] == "design-metrics-2"
     assert report["overall_score"] is None  # the evidence categories have no evidence in this fixture
     assert report["clean_code_design"]["unit_count"] == 1
     assert "card" not in report["clean_code_design"]["candidates"][0]
@@ -301,3 +301,66 @@ def test_two_class_revision_delta_only_judges_changed_class(tmp_path):
     assert len(calls) == 2 and len(calls[1]) == 1
     assert calls[1][0]["card"]["symbol"] == "App\\Other"
     assert {c["symbol"]: verdicts[c["evidence_id"]]["cache_hit"] for c in second} == {"App\\Example": True, "App\\Other": False}
+
+
+# ── rubric 2: ranked, budgeted judging and estimated penalties (plan Phase 5) ──
+
+def _unit(name, loc=100, **metrics):
+    base = {"method_count": 20, "loc": loc, "lcom4": 1, "type_switch": 0, "concrete_dependencies": 0,
+            "unsupported_overrides": 0, "infrastructure_instantiations": 0, "max_cyclomatic": 1, "max_nesting": 1,
+            "max_params": 1, "max_method_loc": 10, "fan_out": 0, "public_interface_size": 1}
+    return {"declaration": {"node_type": "class", "fq_symbol_name": f"App\\{name}", "file_path": f"src/{name}.php",
+                            "start_line": 1, "code": f"class {name}", "content_hash": name},
+            "metrics": {**base, **metrics}, "flagged": {}, "methods": [], "properties": [], "related": []}
+
+
+def _limits(rubric, **limits):
+    return {**rubric, "limits": {**rubric["limits"], **limits}}
+
+
+def test_candidates_are_ranked_by_severity_with_a_minimum_per_principle():
+    rubric, _ = load_rubric()
+    units = [_unit(f"Big{n}", method_count=16 + n, lcom4=1) for n in range(10)] + [_unit("Switchy", method_count=5, type_switch=3)]
+    candidates, counts = select_candidates("p", "r", units, _limits(rubric, min_candidates_per_principle=1, max_candidates=3))
+    # Each principle's most severe unit, then the next most severe overall, in severity order
+    # (type switch 3/2 x 15 = 22.5 outranks method count 25/15 x 10 = 16.7).
+    assert [(c["rule_id"], c["symbol"]) for c in candidates] == [
+        ("ocp-type-switch", "App\\Switchy"), ("srp-method-count", "App\\Big9"), ("srp-method-count", "App\\Big8")]
+    assert counts["SRP"]["exceeding"] == 10 and counts["SRP"]["unjudged"] == 8 and counts["OCP"]["unjudged"] == 0
+    assert candidates[0]["severity"] > candidates[1]["severity"]
+
+
+def test_the_judge_token_budget_bounds_how_many_are_judged():
+    rubric, _ = load_rubric()
+    units = [_unit(f"Big{n}", method_count=16 + n) for n in range(30)]
+    small, _ = select_candidates("p", "r", units, _limits(rubric, judge_input_tokens=400))
+    large, _ = select_candidates("p", "r", units, _limits(rubric, judge_input_tokens=100_000))
+    assert 0 < len(small) < len(large) == 30
+
+
+def test_unjudged_units_carry_the_judged_violation_rate_as_an_estimated_penalty():
+    rubric, rubric_hash = load_rubric()
+    units = [_unit(f"Big{n}", method_count=20) for n in range(4)]
+    rubric = _limits(rubric, min_candidates_per_principle=1, max_candidates=2)
+    candidates, counts = select_candidates("p", "r", units, rubric)
+    verdicts = {candidates[0]["evidence_id"]: {"verdict": "violation", "reason": "Mixed responsibilities."},
+                candidates[1]["evidence_id"]: {"verdict": "acceptable", "reason": "Cohesive."}}
+    category, provenance, findings = score_design(units, candidates, verdicts, counts, rubric, rubric_hash, False)
+    scores = {u["symbol"]: u for u in provenance["unit_scores"]}
+    judged_bad, judged_ok = candidates[0]["symbol"], candidates[1]["symbol"]
+    assert scores[judged_bad]["score"] == 90 and scores[judged_ok]["score"] == 100
+    unjudged = [u for symbol, u in scores.items() if symbol not in (judged_bad, judged_ok)]
+    assert all(u["score"] == 95 and u["estimated_rules"] == ["srp-method-count"] for u in unjudged)  # 10 × 0.5
+    assert provenance["unjudged_estimate"]["rates"]["srp-method-count"] == 0.5 and provenance["unjudged_estimate"]["units"] == 2
+    assert counts["SRP"]["estimated"] == 2 and category["assessment_status"] == "provisional"
+    assert category["score"] == 95 and "estimated penalty" in category["reason"] and len(findings) == 1
+
+
+def test_without_decisive_verdicts_the_default_rate_applies():
+    rubric, rubric_hash = load_rubric()
+    units = [_unit("Big1", method_count=20), _unit("Big2", method_count=20)]
+    rubric = _limits(rubric, min_candidates_per_principle=1, max_candidates=1)
+    candidates, counts = select_candidates("p", "r", units, rubric)
+    verdicts = {candidates[0]["evidence_id"]: {"verdict": "uncertain", "reason": "Unclear."}}
+    _, provenance, _ = score_design(units, candidates, verdicts, counts, rubric, rubric_hash, False)
+    assert provenance["unjudged_estimate"]["rates"]["srp-method-count"] == rubric["unjudged_default_rate"]
