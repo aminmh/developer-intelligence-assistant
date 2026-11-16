@@ -128,7 +128,7 @@ def test_assessment_sends_trace_excerpts_but_persists_only_citations(monkeypatch
     from io import BytesIO
     import zipfile
 
-    source = "<?php class Controller {}"
+    source = "<?php declare(strict_types=1); class Controller {}"  # strict, so no maintainability finding
     archive_buffer = BytesIO()
     with zipfile.ZipFile(archive_buffer, "w") as archive:
         archive.writestr("src/Controller.php", source)

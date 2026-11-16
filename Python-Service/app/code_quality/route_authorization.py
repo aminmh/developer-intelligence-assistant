@@ -7,7 +7,8 @@ Reads only normalized records (decision: framework-knowledge-lives-in-plugins-ov
 A route is **protected** by a non-public guard on its handler (or the handler's class,
 ``Class::*``) or on the route itself (``/path`` or ``METHOD /path``), or by the deciding access rule with requirements;
 **public** when every guard explicitly allows anonymous access, or the deciding rule is
-public and nothing protects it; otherwise **unprotected**, which becomes a Security finding
+public and nothing protects it, or when nothing protects it and the project declared it public
+(``code_quality/public_routes.py``); otherwise **unprotected**, which becomes a Security finding
 at the handler. Access rules are evaluated layer by layer, first non-conditional match per
 layer, against the route path with placeholders filled in. A finding means "no declared
 rule", not "exploitable": checks done inside services, listeners or bundles are not seen.
@@ -20,9 +21,10 @@ from typing import Any
 
 from agent.core.capability import Capability
 from agent.core.records import AccessRuleRecord, GuardRecord, RouteRecord
+from code_quality.public_routes import matching_pattern
 
 NAME = "route-authorization"
-VERSION = "route-authorization-1"
+VERSION = "route-authorization-2"
 RULE_ID = "route-without-authorization"
 MAX_FINDINGS = 150
 _SAFE_METHODS = {"GET", "HEAD", "OPTIONS"}
@@ -65,7 +67,8 @@ def _deciding_rules(rules: list[AccessRuleRecord], path: str, method: str) -> li
     return chosen
 
 
-def decide(route: RouteRecord, method: str, guards: list[GuardRecord], rules: list[AccessRuleRecord]) -> dict[str, Any]:
+def decide(route: RouteRecord, method: str, guards: list[GuardRecord], rules: list[AccessRuleRecord],
+           declared_public: list[str] | None = None) -> dict[str, Any]:
     owner = (route.handler or "").partition("::")[0]
     own = [g for g in guards if g.handler and (g.handler == route.handler or g.handler == f"{owner}::*")]
     own += [g for g in guards if g.route and g.route in (route.path, f"{method} {route.path}")]
@@ -81,8 +84,13 @@ def decide(route: RouteRecord, method: str, guards: list[GuardRecord], rules: li
         elif rule.requirements:
             mechanisms.append("access-rule")
             requirements = list(rule.requirements)
+    declared = None
+    if not mechanisms and not public_reason and declared_public:
+        declared = matching_pattern(method, route.path, declared_public)
+        if declared:
+            public_reason = f"declared public in project settings ('{declared}')"
     status = "protected" if mechanisms else ("public" if public_reason else "unprotected")
-    return {"method": method, "path": route.path, "handler": route.handler, "framework": route.framework,
+    return {"declared_public": declared, "method": method, "path": route.path, "handler": route.handler, "framework": route.framework,
             "file": route.file, "line": route.line, "status": status, "mechanisms": mechanisms,
             "requirements": requirements, "public_reason": public_reason}
 
@@ -92,17 +100,18 @@ def _group(path: str) -> str:
     return "/" + first if first else "/"
 
 
-def evaluate(collections: dict[Capability, Any]) -> list[dict[str, Any]]:
+def evaluate(collections: dict[Capability, Any], declared_public: list[str] | None = None) -> list[dict[str, Any]]:
     """One decision per route and method."""
     routes = [r for r in collections[Capability.ROUTE_ANALYSIS].records if isinstance(r, RouteRecord)]
     authorization = collections[Capability.ROUTE_AUTHORIZATION].records
     guards = [r for r in authorization if isinstance(r, GuardRecord)]
     rules = [r for r in authorization if isinstance(r, AccessRuleRecord)]
-    return [decide(route, method, guards, rules) for route in routes for method in route.methods]
+    return [decide(route, method, guards, rules, declared_public) for route in routes for method in route.methods]
 
 
-def run(collections: dict[Capability, Any]) -> tuple[list[dict[str, Any]], dict[str, Any]]:
-    rows = evaluate(collections)
+def run(collections: dict[Capability, Any], settings: dict[str, Any] | None = None) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+    declared_public = list((settings or {}).get("public_routes") or [])
+    rows = evaluate(collections, declared_public)
     findings = []
     for row in rows:
         if row["status"] != "unprotected":
@@ -128,6 +137,11 @@ def run(collections: dict[Capability, Any]) -> tuple[list[dict[str, Any]], dict[
         groups.setdefault(_group(row["path"]), []).append(row)
     summary = {**counts(rows), "groups": {name: counts(items) for name, items in sorted(groups.items())},
                "frameworks": sorted({r["framework"] for r in rows})}
+    if declared_public:
+        used = {r["declared_public"] for r in rows if r["declared_public"]}
+        summary["declared_public"] = sum(1 for r in rows if r["declared_public"])
+        summary["public_route_patterns"] = declared_public
+        summary["unmatched_public_route_patterns"] = [p for p in declared_public if p not in used]
     if len(findings) > MAX_FINDINGS:
         summary["findings_truncated"] = len(findings) - MAX_FINDINGS
     return findings[:MAX_FINDINGS], summary
@@ -136,4 +150,5 @@ def run(collections: dict[Capability, Any]) -> tuple[list[dict[str, Any]], dict[
 def check():
     from code_quality.framework_evidence import FrameworkCheck
 
-    return FrameworkCheck(NAME, VERSION, (Capability.ROUTE_ANALYSIS, Capability.ROUTE_AUTHORIZATION), run)
+    return FrameworkCheck(NAME, VERSION, (Capability.ROUTE_ANALYSIS, Capability.ROUTE_AUTHORIZATION), run,
+                          accepts_settings=True)

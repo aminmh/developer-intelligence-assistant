@@ -1045,8 +1045,10 @@ def assess_revision(project_id: str, revision_id: str, snapshot: dict, archive_d
     framework_coverage: dict[str, Any] = {"checks": [], "capabilities": []}
     try:
         from code_quality.framework_evidence import run_on_archive as run_framework_checks
+        from code_quality.public_routes import PublicRouteStore
         framework_rows, framework_coverage = run_framework_checks(
-            archive_data, files, snapshot.get("source_archive_sha256"))
+            archive_data, files, snapshot.get("source_archive_sha256"),
+            settings={"public_routes": PublicRouteStore().patterns(project_id)})
     except Exception as exc:  # noqa: BLE001 — a failing check is reported, never fatal
         framework_rows = []
         analyzer_failures.append({"name": "framework-checks", "reason": f"Framework checks failed ({type(exc).__name__})."})
@@ -1060,6 +1062,20 @@ def assess_revision(project_id: str, revision_id: str, snapshot: dict, archive_d
            "tool_version": row.get("tool_version")}
         for row in framework_rows if row.get("category") in CATEGORIES
     ])[:MAX_FINDINGS]
+    # declare(strict_types=1) coverage from PHP facts: one maintainability finding per revision (plan task 10).
+    strict_types_summary = None
+    if "php" in languages:
+        try:
+            from code_quality.php_strict_types import run_on_archive as run_strict_types
+            strict_row, strict_types_summary = run_strict_types(archive_data, files, snapshot.get("source_archive_sha256"))
+        except Exception as exc:  # noqa: BLE001 — a failing check is reported, never fatal
+            strict_row = None
+            analyzer_failures.append({"name": "php-strict-types", "reason": f"strict_types coverage failed ({type(exc).__name__})."})
+        if strict_row:
+            findings = (findings + [
+                _finding(strict_row["file"], strict_row["line"], strict_row["rule"], strict_row["category"], strict_row["message"])
+                | {"severity": strict_row["severity"], "kind": "finding", "tool": "php-strict-types",
+                   "tool_version": strict_types_summary["version"]}])[:MAX_FINDINGS]
     from code_quality.design_metrics import load_rubric, read_revision_chunks, build_units, select_candidates, score_design
     try:
         design_rubric, design_rubric_hash = load_rubric()
@@ -1315,6 +1331,8 @@ def assess_revision(project_id: str, revision_id: str, snapshot: dict, archive_d
                           "limits": {"execution_seconds": 210, "memory_bytes": 2 * 1024 * 1024 * 1024,
                                      "temporary_file_bytes": 512 * 1024 * 1024,
                                      "files_per_language": 20_000, "findings": 500, "output_bytes": 2_000_000}})
+    if strict_types_summary:
+        analyzers.append({**strict_types_summary, "languages": ["php"], "categories": ["maintainability"]})
     if psalm_result["status"] != "disabled":
         analyzers.append({"name": "psalm", "version": psalm_result.get("version", "unknown"),
                           "languages": ["php"], "selected_languages": ["php"], "categories": ["security"],

@@ -36,7 +36,9 @@ class FrameworkCheck:
     version: str
     capabilities: tuple[Capability, ...]
     # collections by capability → findings, or (findings, summary) where the summary joins the coverage row
-    run: Callable[[dict[Capability, Any]], Any]
+    run: Callable[..., Any]
+    # when True, run(collections, settings) also receives the project's check settings
+    accepts_settings: bool = False
 
 
 def _registered_checks() -> list[FrameworkCheck]:
@@ -58,8 +60,8 @@ def collect_capabilities(context: Any, capabilities: set[Capability], registry: 
     return {capability: registry.collect(capability, context) for capability in sorted(capabilities, key=lambda c: c.value)}
 
 
-def run_framework_checks(context: Any, checks: list[FrameworkCheck] | None = None,
-                         registry: Any = None) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+def run_framework_checks(context: Any, checks: list[FrameworkCheck] | None = None, registry: Any = None,
+                         settings: dict[str, Any] | None = None) -> tuple[list[dict[str, Any]], dict[str, Any]]:
     """Findings of every registered check, and coverage per check and capability. Never raises."""
     checks = FRAMEWORK_CHECKS if checks is None else checks
     if not checks:
@@ -78,7 +80,7 @@ def run_framework_checks(context: Any, checks: list[FrameworkCheck] | None = Non
             continue
         summary = None
         try:
-            produced = check.run(own) or []
+            produced = (check.run(own, settings or {}) if check.accepts_settings else check.run(own)) or []
             if isinstance(produced, tuple):
                 produced, summary = produced
             produced = list(produced)
@@ -119,13 +121,14 @@ def archive_context(archive_data: bytes, files: list[str], archive_sha256: str |
 
 
 def run_on_archive(archive_data: bytes, files: list[str], archive_sha256: str | None = None,
-                   checks: list[FrameworkCheck] | None = None, registry: Any = None) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+                   checks: list[FrameworkCheck] | None = None, registry: Any = None,
+                   settings: dict[str, Any] | None = None) -> tuple[list[dict[str, Any]], dict[str, Any]]:
     """Extract the inventoried files to a temporary tree and run the framework checks on it."""
     checks = FRAMEWORK_CHECKS if checks is None else checks
     if not checks:
         return [], {"checks": [], "capabilities": []}
     with archive_context(archive_data, files, archive_sha256) as context:
-        return run_framework_checks(context, checks, registry)
+        return run_framework_checks(context, checks, registry, settings)
 
 
 def taint_stubs(archive_data: bytes, files: list[str], analyzer: str = "psalm", language: str = "php",
