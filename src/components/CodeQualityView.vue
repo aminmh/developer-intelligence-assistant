@@ -42,6 +42,15 @@ type CategoryScore = { assessed: boolean; score: number | null; reason: string; 
 type FlowTrace = { nodes: Array<{ symbol: string; file: string; start_line: number; end_line: number }>; edges: Array<{ type: string; from: string; to: string; file: string; line: number }> };
 type PhpDesignSignals = { status: 'complete' | 'partial' | 'unavailable'; revision_id: string; analyzer_version: string; languages: string[]; principles_with_static_signals: string[]; principles_requiring_semantic_evidence: string[]; chunk_count: number; class_count: number; method_count: number; signal_count: number; signals_truncated: boolean; limits?: Record<string, number>; reason: string };
 type AssessmentEvidence = { evidence_id: string; kind?: 'finding' | 'coverage' | 'semantic_trace' | 'semantic_context' | 'architectural_signal' | 'runtime_measurement'; category: CategoryId | 'business_rule'; rule: string; file: string | null; line: number | null; message: string; trace?: FlowTrace };
+// Budgeted per-category model reviews (assessment plan Phase 4): findings are kept only with verified citations.
+type ReviewTraceRow = { tool: string; arguments: Record<string, unknown>; ok: boolean; error?: string | null; result_bytes: number; truncated: boolean; ranges_returned: number };
+type CategoryReview = { category: string; status: 'complete' | 'partial' | 'unavailable'; reason: string | null; summary: string | null;
+  budget: { max_tool_calls: number; max_tokens: number; max_seconds: number };
+  usage: { tool_calls: number; total_tokens: number; estimated: boolean; seconds: number };
+  trace: ReviewTraceRow[]; accepted_findings: number; rejected_citations: number };
+type CategoryReviews = { status: 'complete' | 'partial' | 'disabled' | 'unavailable'; version: string; reason?: string; model?: string;
+  config: { max_tool_calls: number; max_tokens: number; max_seconds: number; global_max_tokens: number; parallel: number; tools: string[] };
+  categories: Record<string, CategoryReview>; total_tokens?: number; seconds?: number };
 type BusinessRuleSnapshot = { rule_id: string; version: number; title: string; statement: string; category: string; source?: 'outline'; collection_id?: string; updated_at?: string; content_hash?: string };
 type BusinessRuleReview = { rule_id: string; version: number; status: 'supported' | 'concern' | 'unknown'; reason: string; evidence_ids: string[] };
 type TokenUsage = { prompt_tokens: number | null; completion_tokens: number | null; total_tokens: number; estimated: boolean; source: 'provider' | 'estimate'; batch_count?: number; summarized_evidence_count?: number };
@@ -50,6 +59,7 @@ type Report = {
   overall_score: number | null; categories: Record<CategoryId, CategoryScore>; weights: Record<CategoryId, number>; shadow_scoring?: { version: string; status: string; categories: Record<CategoryId, CategoryScore> };
   coverage: { files: number; scanned_files: number; skipped_files: number; excluded_files?: number; user_excluded_files?: number; user_exclusion_patterns?: string[]; scanned_bytes: number; languages: Record<string, number>; unsupported_extensions: Record<string, number>; analyzer_failures: Array<{ name: string; reason: string }>; categories: Record<CategoryId, { supported: boolean; status?: 'covered' | 'partial' | 'unavailable'; evidence_count: number; reason?: string | null }>; analyzers: Array<{ name: string; version: string; rules_version?: string; languages: string[]; categories: string[]; status?: string; server_version?: string; server_edition?: string; scanned_files?: number; skipped_files?: number; finding_count?: number; reason?: string | null; unresolved?: string[] }>; external_analyzers?: { sonarqube?: { status: string; version?: string; server_version?: string; server_edition?: string; scanned_files?: number; skipped_files?: number; finding_count?: number; reason?: string | null }; joern?: { status: string; version?: string; languages?: string[]; scanned_files?: number; skipped_files?: number; finding_count?: number; reason?: string | null; unresolved?: string[] } }; business_rule_review?: { status: string; reason?: string | null; collection_id?: string | null; document_count?: number; imported_count?: number; omitted_count?: number; oversized_count?: number; limit_exceeded?: boolean; synchronized_at?: string | null }; semantic_context?: { status: 'available' | 'available_no_matches' | 'unavailable'; revision_id: string; retriever_version: string; query_count: number; business_rule_query_count?: number; omitted_business_rule_ids?: string[]; evidence_count: number; failure_code?: string | null; diagnostic_detail?: string | null; searched_collection_count?: number; candidate_count?: number; rejected_revision_count?: number; rejected_source_count?: number; category_search?: Partial<Record<CategoryId, { attempted_queries: number; candidate_count: number; accepted_count: number; rejected_revision_count: number; rejected_source_count: number }>>; reason?: string | null }; category_review_context?: { status: 'available' | 'partial' | 'unavailable' | 'not_needed'; source: string | null; excerpt_count: number; categories: Record<CategoryId, number>; scanned_files: number; scanned_bytes: number; reason: string }; semantic_flow_tracing?: { status: 'complete' | 'partial' | 'unavailable'; revision_id: string; tracer_version: string; languages?: string[]; flow_types: string[]; node_count: number; edge_count: number; trace_count: number; unresolved_edge_count: number; unresolved_edges?: Array<{ source_symbol: string; file: string; line: number; target_symbol: string | null; reason: string; count: number }>; limits_reached?: string[]; reason: string }; php_design_signals?: PhpDesignSignals };
   token_usage?: TokenUsage | null;
+  category_reviews?: CategoryReviews;
   custom_rules?: Array<{ rule_id: string; title: string; content_hash: string; yaml: string }>;
   findings: Array<{ evidence_id: string; category: CategoryId; rule: string; file: string; line: number; message: string; severity?: string; tool?: string; tool_version?: string }>;
   evidence: AssessmentEvidence[];
@@ -166,7 +176,13 @@ const compareIsEquivalent = computed(() => {
   const [left, right] = compareReports.value;
   if (!left || !right) return true;
   const analyzer = (report: Report) => report.coverage.analyzers.map((item) => `${item.name}:${item.version}:${item.rules_version || ''}`).sort();
+  // Different review models, budgets or tool sets make scores non-equivalent (review spec clause 12).
+  const review = (report: Report) => {
+    const reviews = report.category_reviews;
+    return reviews && reviews.status !== 'disabled' ? { model: reviews.model, config: reviews.config } : null;
+  };
   return left.rubric_version === right.rubric_version
+    && JSON.stringify(review(left)) === JSON.stringify(review(right))
     && left.categories.clean_code?.score_method === right.categories.clean_code?.score_method
     && left.categories.clean_code?.metric_schema === right.categories.clean_code?.metric_schema
     && left.categories.clean_code?.rubric_version === right.categories.clean_code?.rubric_version
@@ -953,6 +969,27 @@ const statusTone = (status?: string) => (status === 'complete' || status === 'av
                   <div class="cq-mini-grid">
                     <div v-for="category in categories" :key="category.id" class="cq-mini"><b>{{ category.label }}</b><span>{{ currentReport.coverage.category_review_context.categories[category.id] || 0 }} excerpts</span></div>
                   </div>
+                </div>
+              </details>
+
+              <details v-if="currentReport.category_reviews" class="cq-diag">
+                <summary><Radar aria-hidden="true" />Category reviews<span class="cq-tag" :data-tone="statusTone(currentReport.category_reviews.status)">{{ currentReport.category_reviews.status === 'disabled' ? 'Off' : currentReport.category_reviews.status }}</span><ChevronDown class="cq-chev" aria-hidden="true" /></summary>
+                <div class="cq-diag-body" aria-live="polite">
+                  <p v-if="currentReport.category_reviews.status === 'disabled' || !Object.keys(currentReport.category_reviews.categories).length">{{ currentReport.category_reviews.reason }}</p>
+                  <template v-else>
+                    <p>{{ currentReport.category_reviews.model }} explored this revision with read-only tools, one budgeted review per category ({{ currentReport.category_reviews.config.max_tool_calls }} tool calls, {{ currentReport.category_reviews.config.max_tokens.toLocaleString() }} tokens and {{ currentReport.category_reviews.config.max_seconds }} s each; {{ (currentReport.category_reviews.total_tokens || 0).toLocaleString() }} of {{ currentReport.category_reviews.config.global_max_tokens.toLocaleString() }} tokens used in {{ currentReport.category_reviews.seconds }} s). Findings are kept only when a tool showed the cited lines.</p>
+                    <div v-for="(review, key) in currentReport.category_reviews.categories" :key="key" class="cq-review">
+                      <p class="cq-review-head"><b>{{ categoryLabel(key as CategoryId) }}</b>
+                        <span class="cq-tag" :data-tone="statusTone(review.status)">{{ review.status }}</span>
+                        <span>{{ review.usage.tool_calls }}/{{ review.budget.max_tool_calls }} tool calls · {{ review.usage.total_tokens.toLocaleString() }}{{ review.usage.estimated ? ' (estimated)' : '' }} tokens · {{ review.usage.seconds }} s · {{ review.accepted_findings }} kept</span>
+                        <span v-if="review.rejected_citations" data-tone="warn">· {{ review.rejected_citations }} rejected citations</span></p>
+                      <p v-if="review.reason" class="cq-hint" data-tone="warn">{{ review.reason }}</p>
+                      <p v-if="review.summary" class="cq-hint">{{ review.summary }}</p>
+                      <ul v-if="review.trace.length" class="cq-mono">
+                        <li v-for="(step, index) in review.trace" :key="index">{{ step.ok ? '✓' : '✗' }} {{ step.tool }} {{ Object.values(step.arguments).map((value) => String(value)).join(' ').slice(0, 120) }} · {{ step.result_bytes.toLocaleString() }} bytes<span v-if="step.ranges_returned"> · {{ step.ranges_returned }} citable ranges</span><span v-if="step.error"> · {{ step.error }}</span></li>
+                      </ul>
+                    </div>
+                  </template>
                 </div>
               </details>
 
