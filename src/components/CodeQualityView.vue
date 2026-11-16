@@ -4,7 +4,7 @@ import {
   AlertCircle, ArrowDownRight, ArrowRight, ArrowUpRight, Boxes, Bug, Calendar, ChevronDown, ChevronsUpDown, CircleCheck, Code, Cpu,
   Eye, Files, FileSearch, FlaskConical, Gauge, GitBranch, GitCommitHorizontal, GitCompareArrows, Library, LifeBuoy, ListChecks,
   LoaderCircle, Play, Plug, Radar, RefreshCw, Save, SearchCode, ShieldAlert, SlidersHorizontal, Sparkles, Trash2, TriangleAlert,
-  Waypoints, Wrench, X, Zap,
+  Waypoints, Wrench, X, Zap, Workflow, BookOpen, Languages, Accessibility,
 } from 'lucide-vue-next';
 import ConfirmModal from './ConfirmModal.vue';
 import { makeRequest } from '../ui/makeRequest';
@@ -25,10 +25,16 @@ const emit = defineEmits<{ openKnowledgeBase: []; revisionRemoved: [] }>();
 
 const categories = [
   { id: 'security', label: 'Security' },
-  { id: 'clean_code', label: 'Clean code' },
+  { id: 'clean_code', label: 'Architecture and design' },
   { id: 'maintainability', label: 'Maintainability' },
   { id: 'reliability', label: 'Reliability' },
   { id: 'performance', label: 'Performance' },
+  // Scored only from their own non-source evidence; unassessed with a reason when there is none.
+  { id: 'process', label: 'Process' },
+  { id: 'testing', label: 'Testing' },
+  { id: 'documentation', label: 'Documentation' },
+  { id: 'localization', label: 'Localization' },
+  { id: 'accessibility', label: 'Accessibility' },
 ] as const;
 type CategoryId = typeof categories[number]['id'];
 type AiOpinion = { assessed: boolean; score: number | null; reason: string; evidence_ids: string[] };
@@ -104,8 +110,9 @@ watch(selectedRevision, (key) => {
   if (picked.project_id !== scope.projectId.value || nextRevision !== scope.revision.value) keepLocalPick = true;
   scope.select(picked.project_id, nextRevision);
 });
-const weights = ref<Record<CategoryId, number>>({ security: 20, clean_code: 20, maintainability: 20, reliability: 20, performance: 20 });
-const savedWeights = ref<Record<CategoryId, number>>({ security: 20, clean_code: 20, maintainability: 20, reliability: 20, performance: 20 });
+const equalWeights = () => Object.fromEntries(categories.map((item) => [item.id, 100 / categories.length])) as Record<CategoryId, number>;
+const weights = ref<Record<CategoryId, number>>(equalWeights());
+const savedWeights = ref<Record<CategoryId, number>>(equalWeights());
 const history = ref<HistoryRow[]>([]);
 const selectedReportId = ref('');
 const leftCompareId = ref('');
@@ -146,6 +153,8 @@ let reportRequest = 0;
 let exclusionsRequest = 0;
 
 const selectedProject = computed(() => projects.value.find((item) => revisionKey(item) === selectedRevision.value) || null);
+// Reports saved before the ten-category rubric hold only the five source categories.
+const reportCategories = computed(() => categories.filter((item) => currentReport.value?.categories?.[item.id]));
 const totalWeight = computed(() => categories.reduce((total, item) => total + Number(weights.value[item.id] || 0), 0));
 const weightsChanged = computed(() => categories.some((item) => Number(weights.value[item.id]) !== savedWeights.value[item.id]));
 const parsedExclusionPatterns = computed(() => [...new Set(exclusionPatterns.value.map((item) => item.trim()).filter(Boolean))].sort());
@@ -636,6 +645,11 @@ const categoryMeta: Record<CategoryId, { color: string; icon: unknown }> = {
   maintainability: { color: '#22d3ee', icon: Wrench },
   reliability: { color: '#34d399', icon: LifeBuoy },
   performance: { color: '#fbbf24', icon: Zap },
+  process: { color: '#a78bfa', icon: Workflow },
+  testing: { color: '#2dd4bf', icon: FlaskConical },
+  documentation: { color: '#60a5fa', icon: BookOpen },
+  localization: { color: '#f472b6', icon: Languages },
+  accessibility: { color: '#a3e635', icon: Accessibility },
 };
 const qualityTabs = [
   { id: 'assessment' as const, label: 'Assessment', icon: Gauge, domId: 'quality-assessment-tab', panel: 'quality-assessment-panel' },
@@ -795,7 +809,7 @@ const statusTone = (status?: string) => (status === 'complete' || status === 'av
             <div class="cq-setup-body">
               <div>
                 <h3 class="cq-h4">Category weights</h3>
-                <p class="cq-hint">The weighted total appears only when all five categories are assessed. Scoring uses a fixed rubric, temperature 0 and top_p 1. Providers can still change behaviour; comparisons flag known differences in model, rubric, analyzers, coverage, weights and scoring settings.</p>
+                <p class="cq-hint">The weighted total appears only when all ten categories are assessed. Scoring uses a fixed rubric, temperature 0 and top_p 1. Providers can still change behaviour; comparisons flag known differences in model, rubric, analyzers, coverage, weights and scoring settings.</p>
                 <div class="cq-weights">
                   <label v-for="category in categories" :key="category.id" class="cq-weight" :style="{ '--c': categoryMeta[category.id].color }">
                     <span>{{ category.label }}</span>
@@ -888,7 +902,7 @@ const statusTone = (status?: string) => (status === 'complete' || status === 'av
             </section>
 
             <div class="cq-cats">
-              <article v-for="category in categories" :key="category.id" class="cq-cat" :style="{ '--c': categoryMeta[category.id].color }" :data-assessed="currentReport.categories[category.id].assessed">
+              <article v-for="category in reportCategories" :key="category.id" class="cq-cat" :style="{ '--c': categoryMeta[category.id].color }" :data-assessed="currentReport.categories[category.id].assessed">
                 <div class="cq-cat-top"><component :is="categoryMeta[category.id].icon" aria-hidden="true" />{{ category.label }}</div>
                 <div class="cq-cat-score">{{ formatScore(currentReport.categories[category.id].score) }}<small v-if="currentReport.categories[category.id].assessed"> /100</small></div>
                 <div class="cq-cat-bar" aria-hidden="true"><i :style="{ transform: `scaleX(${(currentReport.categories[category.id].score ?? 0) / 100})` }"></i></div>
