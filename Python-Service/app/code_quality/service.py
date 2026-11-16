@@ -942,6 +942,14 @@ def assess_revision(project_id: str, revision_id: str, snapshot: dict, archive_d
         for item in enabled_business_rules
     ]
     languages, findings, files, scan_stats, analyzer_failures = inventory_archive(archive_data, exclusion_patterns)
+    # Non-source evidence (CI, container, manifests, configuration, docs, translations, templates):
+    # names and sizes only, for the category collectors and the review's evidence tools (plan task 13).
+    from code_quality import evidence_files
+    try:
+        evidence_inventory = evidence_files.inventory_archive(archive_data, exclusion_patterns)
+    except Exception as exc:  # noqa: BLE001 — a failing inventory is reported, never fatal
+        evidence_inventory = None
+        analyzer_failures.append({"name": "evidence-files", "reason": f"The evidence file inventory failed ({type(exc).__name__})."})
     from code_quality.external_analyzers import (
         ExternalAnalyzerSettingsStore,
         developer_mode_enabled,
@@ -1445,6 +1453,7 @@ def assess_revision(project_id: str, revision_id: str, snapshot: dict, archive_d
                      "user_excluded_files": scan_stats.get("user_excluded_files", 0),
                      "user_exclusion_patterns": exclusion_patterns,
                      "scanned_bytes": scan_stats["scanned_bytes"],
+                     "evidence_files": evidence_files.report_summary(evidence_inventory) if evidence_inventory else None,
                      "languages": languages, "unsupported_extensions": scan_stats["unsupported_extensions"],
                      "categories": coverage, "analyzer_failures": analyzer_failures[:20],
                      "analyzer_policy_version": POLICY_VERSION, "analyzers": analyzers,

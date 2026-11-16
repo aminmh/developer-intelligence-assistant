@@ -165,7 +165,10 @@ def read_lines(context: ToolContext, path: str, start_line: int, end_line: int) 
 
 def _read(args: dict[str, Any], context: ToolContext) -> dict[str, Any]:
     root = resolve_source(context)
-    path = root.resolve_file(str(args["path"]))
+    return _read_window(root, root.resolve_file(str(args["path"])), args)
+
+
+def _read_window(root: SourceRoot, path: Path, args: dict[str, Any]) -> dict[str, Any]:
     if path.stat().st_size > _READ_MAX_FILE_BYTES:
         raise ToolCallRejected("too_large", "The file is larger than 2 MB; search it instead.")
     data = path.read_bytes()
@@ -445,6 +448,44 @@ def _stats(args: dict[str, Any], context: ToolContext) -> dict[str, Any]:
             "note": "Complexity is scc's branch-count estimate, not a quality score."}
 
 
+# --- evidence_files / evidence_read (plan task 14) ---------------------------------------------------------
+
+_EVIDENCE_NOTE = ("Secret-bearing files are listed by name only and cannot be read; files over 2 MB are listed "
+                  "but not readable. Source code is read with code_read.")
+
+
+def _evidence_files(args: dict[str, Any], context: ToolContext) -> dict[str, Any]:
+    from fnmatch import fnmatch
+
+    from code_quality.evidence_files import inventory_directory
+
+    root = resolve_source(context)
+    inventory = inventory_directory(root.path, root.exclusion_patterns, root.wrapper_prefix)
+    kind, glob = args.get("kind"), args.get("path_glob")
+    rows = [row for row in inventory["files"]
+            if (not kind or row["kind"] == kind) and (not glob or fnmatch(row["path"], glob))]
+    limit = int(args.get("max_results", 100))
+    return {"source": root.origin, "items": rows[:limit], "truncated": len(rows) > limit, "limit": limit,
+            "by_kind": inventory["by_kind"], "unlisted_files": inventory["unlisted_files"], "note": _EVIDENCE_NOTE}
+
+
+def _evidence_read(args: dict[str, Any], context: ToolContext) -> dict[str, Any]:
+    from code_quality.evidence_files import SECRET, classify
+
+    from agent_tools.source import is_secret_path
+    from code_quality.evidence_files import is_excluded_path
+
+    root = resolve_source(context)
+    # Source rules, except that docs/ (left out of source scoring) is readable as evidence.
+    path = root.resolve_file(str(args["path"]), excluded=lambda rel: is_secret_path(rel) or is_excluded_path(rel)
+                             or root.matches_exclusion_patterns(rel))
+    relative = root.relative(path)
+    kind = classify(relative or "")
+    if kind is None or kind == SECRET:
+        raise ToolCallRejected("not_evidence", f"{relative} is not an evidence file; read source code with code_read.")
+    return {**_read_window(root, path, args), "kind": kind}
+
+
 # --- definitions ------------------------------------------------------------------------------------------
 
 def _definition(name: str, description: str, schema: dict[str, Any], handler) -> ToolDefinition:
@@ -520,6 +561,32 @@ NAVIGATION_TOOLS = [
             "max_files": {"type": "integer", "minimum": 1, "maximum": 60, "default": 25},
         }, "additionalProperties": False},
         _repo_map,
+    ),
+    _definition(
+        "evidence_files",
+        "List the project's non-source evidence files by kind: ci, container, build, manifest (dependencies and "
+        "toolchain versions), config, docs, translations, templates. Returns path, kind, size and whether it can "
+        "be read. Use it to find CI pipelines, Dockerfiles, lock files, test configuration, README and ADRs, "
+        "translation catalogues or templates.",
+        {"type": "object", "properties": {
+            "kind": {"type": "string", "enum": ["ci", "container", "build", "manifest", "config", "docs",
+                                                "translations", "templates", "secret"]},
+            "path_glob": _PATH_GLOB,
+            "max_results": {"type": "integer", "minimum": 1, "maximum": 300, "default": 100}},
+         "additionalProperties": False},
+        _evidence_files,
+    ),
+    _definition(
+        "evidence_read",
+        "Read numbered lines of one evidence file listed by evidence_files (CI, container, manifest, config, "
+        "docs, translations, templates). Reads 120 lines by default and at most 200. Secret-bearing files "
+        "cannot be read.",
+        {"type": "object", "properties": {
+            "path": _PATH,
+            "start_line": {"type": "integer", "minimum": 1, "default": 1},
+            "end_line": {"type": "integer", "minimum": 1}},
+         "required": ["path"], "additionalProperties": False},
+        _evidence_read,
     ),
     _definition(
         "code_stats",
