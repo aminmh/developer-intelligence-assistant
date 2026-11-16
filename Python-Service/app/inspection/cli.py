@@ -141,7 +141,9 @@ def inspect_index(project_dir: str, exclude: list[str] | None = None) -> dict[st
         return {"definitions": [], "references": []}
     definitions = data.get("definitions")
     references = data.get("references")
-    return {
+    from inspection.graph import stamp_origin
+
+    return stamp_origin({
         "definitions": definitions if isinstance(definitions, list) else [],
         "references": references if isinstance(references, list) else [],
-    }
+    }, "php-parser")

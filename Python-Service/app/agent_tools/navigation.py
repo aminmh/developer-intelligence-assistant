@@ -263,23 +263,37 @@ def _symbol_row(record: dict[str, Any], root: SourceRoot | None) -> dict[str, An
     path = _graph_path(node.get("file") or node.get("source_file"), root)
     if path and root is not None and root.is_excluded(path):
         return None
-    # The edge's origin when this row is a reference, else the definition's; older graphs have neither.
+    # The edge's origin when this row is a reference, else the definition's; graphs written before
+    # origins existed came only from the PHP parser.
     edge = record.get("ref") if isinstance(record.get("ref"), dict) else {}
     origin = edge.get("origin") or record.get("origin") or "php-parser"
     # Reference rows locate the call site (edge) but name the calling or called definition (record).
     return {"path": path, "line": node.get("line") or node.get("start_line"),
-            "kind": node.get("kind"), "symbol": record.get("fqn") or record.get("name"), "origin": origin}
+            "kind": node.get("kind"), "symbol": record.get("fqn") or record.get("name"), "origin": origin,
+            "language": record.get("language") or _language_of(path)}
+
+
+def _language_of(path: str | None) -> str | None:
+    from inspection.graph import language_for_path
+
+    return language_for_path(path)
 
 
 _MAX_LOOKUP_DEFINITIONS = 5
 
 
-def _prefer_scip(items: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    """One row per site: the `scip` row when SCIP and a parser report the same one, else the parser's."""
+# Edge preference when producers report the same site (external-analyzer spec clause 36):
+# SCIP indexers, then language servers, then parsers (php-parser, tree-sitter, python-ast).
+_ORIGIN_RANK = {"scip": 0, "lsp": 1}
+
+
+def _prefer_precise(items: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """One row per site: the most precise producer's row (`scip` > `lsp` > parser)."""
     chosen: dict[tuple, dict[str, Any]] = {}
     for item in items:
         key = (item.get("path"), item.get("line"), item.get("symbol"))
-        if key not in chosen or (item.get("origin") == "scip" and chosen[key].get("origin") != "scip"):
+        rank = _ORIGIN_RANK.get(str(item.get("origin")), 2)
+        if key not in chosen or rank < _ORIGIN_RANK.get(str(chosen[key].get("origin")), 2):
             chosen[key] = item
     return list(chosen.values())
 
@@ -311,6 +325,8 @@ def _symbol_lookup(args: dict[str, Any], context: ToolContext) -> dict[str, Any]
             return {"coverage": "complete", "items": [], "detail": f"No definition named {name} in the symbol graph."}
         # A short name can match several definitions (User::isAdmin, UserRole::isAdmin); look up each.
         rows = []
+        runtime_rows: list[dict[str, Any]] = []
+        runtime = {"observed": False, "stale_edges": 0}
         for definition in definitions[:_MAX_LOOKUP_DEFINITIONS]:
             fqn = str(definition.get("fqn") or name)
             if relation == "references":
@@ -319,12 +335,66 @@ def _symbol_lookup(args: dict[str, Any], context: ToolContext) -> dict[str, Any]
                 rows += service.find_implementations(collection, fqn)
             else:
                 hierarchy = service.call_hierarchy(collection, fqn, name=name) or {}
-                rows += hierarchy.get(relation, []) if isinstance(hierarchy, dict) else []
-    items = _prefer_scip([row for row in (_symbol_row(r, root) for r in rows if isinstance(r, dict)) if row])
-    items.sort(key=lambda i: (i.get("path") or "", i.get("line") or 0))
-    return {"coverage": "complete", "relation": relation, "items": items[:limit], "truncated": len(items) > limit,
-            "detail": "Static graph: dynamic calls, reflection, and container resolution may be missing; "
-                      "each item's origin names the extractor (php-parser or tree-sitter)."}
+                if isinstance(hierarchy, dict):
+                    rows += hierarchy.get(relation, [])
+                    runtime_rows += hierarchy.get(f"runtime_{relation}", []) or []
+                    runtime["observed"] = runtime["observed"] or bool(hierarchy.get("runtime_observed"))
+                    runtime["stale_edges"] += int(hierarchy.get("runtime_stale_edges") or 0)
+    items = _prefer_precise([row for row in (_symbol_row(r, root) for r in rows if isinstance(r, dict)) if row])
+    if relation in ("callers", "callees"):
+        items = _with_runtime(items, runtime_rows, runtime["observed"], root)
+        items.sort(key=lambda i: (0 if i.get("runtime") in ("confirmed", "runtime_only") else 1,
+                                  i.get("path") or "", i.get("line") or 0))
+        try:
+            runtime["coverage"] = service.runtime_coverage(collection)
+        except Exception:  # noqa: BLE001 — coverage is informational
+            runtime["coverage"] = None
+    else:
+        items.sort(key=lambda i: (i.get("path") or "", i.get("line") or 0))
+    out = {"coverage": "complete", "relation": relation, "items": items[:limit], "truncated": len(items) > limit,
+           "detail": "Static graph: dynamic calls, reflection, and container resolution may be missing; "
+                     "each item's origin names the producer (scip, lsp, php-parser, tree-sitter, python-ast or "
+                     "runtime) and its language."}
+    if relation in ("callers", "callees"):
+        out["runtime"] = runtime
+        if runtime["observed"]:
+            out["detail"] += (" Runtime data covers only code that ran in the aggregation window: "
+                              "'unconfirmed' means not seen running, not absent.")
+    return out
+
+
+def _with_runtime(items: list[dict[str, Any]], runtime_rows: list[dict[str, Any]], observed: bool,
+                  root: SourceRoot | None) -> list[dict[str, Any]]:
+    """Mark static call edges seen at runtime (lsp-first plan, task 18h) and add runtime-only ones.
+
+    A static edge whose caller/callee was seen running is ``confirmed``; one never seen is
+    ``unconfirmed`` only when the revision has runtime data; edges that only ran (facades,
+    magic methods, container resolution) are added with origin ``runtime``.
+    """
+    seen: dict[str, dict[str, Any]] = {}
+    for row in runtime_rows:
+        if isinstance(row, dict) and row.get("fqn"):
+            seen.setdefault(str(row["fqn"]), row)
+    static_symbols = set()
+    for item in items:
+        symbol = str(item.get("symbol") or "")
+        static_symbols.add(symbol)
+        hit = seen.get(symbol)
+        if hit is not None:
+            ref = hit.get("ref") or {}
+            item.update(runtime="confirmed", runtime_count=ref.get("count"), last_seen=ref.get("last_seen"))
+        elif observed:
+            item["runtime"] = "unconfirmed"
+    for symbol, row in seen.items():
+        if symbol in static_symbols:
+            continue
+        item = _symbol_row(row, root)
+        if item:
+            ref = row.get("ref") or {}
+            item.update(runtime="runtime_only", runtime_count=ref.get("count"), last_seen=ref.get("last_seen"),
+                        sources=ref.get("sources") or [])
+            items.append(item)
+    return items
 
 
 # --- code_repo_map ----------------------------------------------------------------------------------------

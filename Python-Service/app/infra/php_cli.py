@@ -104,10 +104,12 @@ class PhpCli:
             raise PhpCliError("project-inspect index produced unparseable output", result)
         definitions = payload.get("definitions")
         references = payload.get("references")
-        return {
+        from inspection.graph import stamp_origin
+
+        return stamp_origin({
             "definitions": definitions if isinstance(definitions, list) else [],
             "references": references if isinstance(references, list) else [],
-        }
+        }, "php-parser")
 
 
 def _decode_json_array(stdout: str) -> list[dict[str, Any]] | None:

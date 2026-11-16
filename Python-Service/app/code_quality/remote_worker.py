@@ -413,3 +413,98 @@ def run_scip_job(target: dict[str, Any], archive_data: bytes, files: list[str], 
                           for k, v in list(coverage.items())[:8]},
             "truncated": bool(output.get("truncated")) or len(output["definitions"]) > MAX_SCIP_DEFINITIONS
             or len(output["references"]) > MAX_SCIP_REFERENCES}
+
+
+# --- LSP indexer (language servers feed the symbol graph) ------------------------------------------------
+
+MAX_LSP_RESPONSE_BYTES = 32 * 1024 * 1024
+MAX_LSP_DEFINITIONS = 20_000
+MAX_LSP_REFERENCES = 50_000
+MAX_LSP_RELATIONS = 50
+_LSP_DEFINITION_KINDS = {"class", "interface", "trait", "enum", "method", "property", "class_const", "function",
+                         "const"}
+_LSP_REFERENCE_KINDS = {"method_call", "function_call", "class_reference", "class_const", "property_fetch", "new"}
+_LSP_RELATION_KINDS = {"extends", "implements", "uses_trait"}
+
+
+def lsp_inventory(archive_data: bytes, extensions: dict[str, list[str]]) -> tuple[list[str], dict[str, int]]:
+    """Source files of a revision archive for the LSP-indexed languages, and counts per language."""
+    from code_quality.service import MAX_FILE_BYTES, _is_excluded_source_path, _safe_archive_path
+
+    by_suffix = {suffix: language for language, suffixes in extensions.items() for suffix in suffixes}
+    files: list[str] = []
+    languages: dict[str, int] = {}
+    with zipfile.ZipFile(io.BytesIO(archive_data)) as archive:
+        for member in sorted(archive.infolist(), key=lambda item: item.filename):
+            try:
+                path = _safe_archive_path(member.filename)
+            except (ValueError, TypeError):
+                continue
+            language = by_suffix.get(os.path.splitext(path)[1].lower())
+            if language is None or member.is_dir() or member.file_size > MAX_FILE_BYTES or _is_excluded_source_path(path):
+                continue
+            files.append(path)
+            languages[language] = languages.get(language, 0) + 1
+    return files, languages
+
+
+def _lsp_definition(record: Any, files: set[str]) -> dict[str, Any] | None:
+    clean = _scip_record(record, files, {"kind": str, "fqn": str, "name": str, "owner": str, "file": str,
+                                         "line": int, "end_line": int}, _LSP_DEFINITION_KINDS)
+    if clean is None or not clean.get("fqn"):
+        return None
+    clean["origin"] = "lsp"
+    relations = record.get("relations")
+    if relations is not None:
+        if (not isinstance(relations, list) or len(relations) > MAX_LSP_RELATIONS
+                or any(not isinstance(r, dict) or r.get("kind") not in _LSP_RELATION_KINDS
+                       or not isinstance(r.get("target"), str) or len(r["target"]) > 500 for r in relations)):
+            return None
+        clean["relations"] = [{"kind": r["kind"], "target": r["target"]} for r in relations]
+    return clean
+
+
+def run_lsp_job(target: dict[str, Any], archive_data: bytes, files: list[str], languages: dict[str, int],
+                revision_id: str, commit_sha: str | None) -> dict[str, Any]:
+    """Index a revision with language servers on the worker; returns a validated symbol export."""
+    if not target.get("source_transfer_consent"):
+        raise RemoteWorkerError("Explicit consent is required before transferring source to the analyzer worker.")
+    source_bundle, line_counts = _filtered_source_bundle(archive_data, files)
+    bundle_sha256 = hashlib.sha256(source_bundle).hexdigest()
+    payload = {
+        "schema_version": 1, "job_id": str(uuid4()), "revision_id": revision_id, "commit_sha": commit_sha,
+        "archive_base64": base64.b64encode(source_bundle).decode("ascii"), "bundle_sha256": bundle_sha256,
+        "files": files, "file_line_counts": line_counts, "languages": languages, "analyzers": ["lsp"],
+        "settings": {"sonarqube": {"enabled": False}, "joern": {"enabled": False}}, "sonarqube_token": None,
+    }
+    # The worker's own run limit is 900 s (config/lsps.yml); allow transfer on top.
+    result = _request(target, "POST", "/v1/jobs", payload, timeout=960, max_bytes=MAX_LSP_RESPONSE_BYTES)
+    if (result.get("job_id") != payload["job_id"] or result.get("revision_id") != revision_id
+            or result.get("bundle_sha256") != bundle_sha256):
+        raise RemoteWorkerError("The analyzer worker returned a result for a different job.")
+    output = (result.get("analyzers") or {}).get("lsp")
+    if not isinstance(output, dict) or not isinstance(output.get("definitions"), list) \
+            or not isinstance(output.get("references"), list):
+        raise RemoteWorkerError("The analyzer worker returned no LSP result.")
+    selected = set(files)
+    definitions = [d for d in (_lsp_definition(r, selected) for r in output["definitions"][:MAX_LSP_DEFINITIONS]) if d]
+    references = []
+    for record in output["references"][:MAX_LSP_REFERENCES]:
+        clean = _scip_record(record, selected, {"scope": str, "kind": str, "to_fqn": str, "to_member": str,
+                                                "file": str, "line": int}, _LSP_REFERENCE_KINDS)
+        if clean and clean.get("scope") and clean.get("to_fqn"):
+            clean["origin"] = "lsp"
+            references.append(clean)
+    coverage = output.get("languages") if isinstance(output.get("languages"), dict) else {}
+    languages_out = {str(k)[:40]: {"status": str((v or {}).get("status"))[:20],
+                                   **({"reason": str(v["reason"])[:300]} if isinstance(v, dict) and v.get("reason") else {})}
+                     for k, v in list(coverage.items())[:8]}
+    truncated = (bool(output.get("truncated")) or len(output["definitions"]) > MAX_LSP_DEFINITIONS
+                 or len(output["references"]) > MAX_LSP_REFERENCES)
+    from lsp.jobs import overall_status
+
+    status = overall_status(languages_out)
+    if status == "complete" and truncated:
+        status = "partial"
+    return {"name": "lsp", "origin": "lsp", "status": status, "languages": languages_out,
+            "definitions": definitions, "references": references, "truncated": truncated}

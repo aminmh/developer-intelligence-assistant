@@ -7,6 +7,7 @@ external plugins arrive via entry points (``discover_entry_points``).
 
 from __future__ import annotations
 
+from agent.core.di import Container
 from agent.core.registry import PluginRegistry
 from agent.plugins.frameworks.laravel import LaravelFrameworkPlugin
 from agent.plugins.frameworks.symfony import SymfonyFrameworkPlugin
@@ -14,9 +15,12 @@ from agent.plugins.languages.php import PhpLanguagePlugin
 from agent.plugins.test_framework import TestFrameworkPlugin
 
 
-def register_builtins(registry: PluginRegistry) -> PluginRegistry:
+def register_builtins(registry: PluginRegistry, container: Container | None = None) -> PluginRegistry:
+    """Register the builtin plugins. With a ``container``, plugins get its live services
+    (``lsp_registry`` for LSP validation); without one they stay hermetic (structural checks)."""
     from agent.migration.adapters import LaravelMigrationAdapter, DoctrineMigrationAdapter
-    registry.register_language(PhpLanguagePlugin())
+    lsp_registry = container.get("lsp_registry") if container is not None else None
+    registry.register_language(PhpLanguagePlugin(lsp_registry=lsp_registry))
     registry.register_framework(LaravelFrameworkPlugin())
     registry.register_framework(SymfonyFrameworkPlugin())
     registry.register_framework(TestFrameworkPlugin())

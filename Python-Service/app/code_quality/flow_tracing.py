@@ -2,6 +2,12 @@
 
 This adapter follows indexed symbol calls from request-input methods to
 sensitive-operation methods. It does not claim variable-level taint/data-flow.
+
+Call edges come from the revision's symbol graph when it has them (origins scip,
+lsp, php-parser, and runtime for calls only observed running; the most precise wins
+per call), else from the chunks' own
+``called_symbols`` with coverage marked partial (lsp-first-symbol-navigation plan,
+Phase 3a). Nodes, code excerpts and the source/sink patterns stay PHP-only.
 """
 from __future__ import annotations
 
@@ -13,7 +19,7 @@ from typing import Any
 
 from telemetry.snapshot import Snapshot, source_filter, validate_project_id, validate_revision_id
 
-TRACER_VERSION = "php-call-reachability-2"
+TRACER_VERSION = "php-call-reachability-3"
 MAX_GRAPH_NODES = 20_000
 MAX_GRAPH_EDGES = 60_000
 MAX_TRACES = 3
@@ -62,6 +68,14 @@ _FLOW_TYPES = {
     "sink": _SINK,
 }
 _CALLABLE_TYPES = {"method", "function", "class_method", "classmethod"}
+# Most precise producer first (external-analyzer spec clause 36). Runtime edges (indexr-otel)
+# rank last: they fill in calls no static producer resolved (facades, magic methods,
+# container resolution) and never replace a static edge.
+_ORIGIN_RANK = {"scip": 0, "lsp": 1, "runtime": 3}
+
+
+def _origin_rank(origin: Any) -> int:
+    return _ORIGIN_RANK.get(str(origin or ""), 2)
 
 
 def _unavailable(revision_id: str, reason: str) -> dict[str, Any]:
@@ -128,8 +142,13 @@ def build_call_traces(
     business_files: list[str],
     *,
     truncated: bool = False,
+    graph_edges: list[dict[str, Any]] | None = None,
 ) -> tuple[dict[str, Any], list[dict[str, Any]]]:
-    """Build deterministic request-to-sensitive-sink call paths from AST chunks."""
+    """Build deterministic request-to-sensitive-sink call paths.
+
+    Nodes come from AST chunks. Edges come from ``graph_edges`` (the symbol graph's
+    caller → callee calls) when given and non-empty, else from the chunks' own calls.
+    """
     validate_project_id(project_id)
     validate_revision_id(revision_id)
     commit_sha = snapshot.get("commit_sha")
@@ -215,7 +234,54 @@ def build_call_traces(
     present_ids = set(nodes)
     symbol_to_id = {key: node_id for key, node_id in symbol_to_id.items() if node_id in present_ids}
     adjacency: dict[str, list[str]] = {node_id: [] for node_id in nodes}
-    for node_id, node in nodes.items():
+    edge_origin: dict[tuple[str, str], str] = {}
+    use_graph = bool(graph_edges)
+    if not use_graph:
+        limit_reasons.append("graph_edges_unavailable")
+    else:
+        best: dict[tuple[str, str], str] = {}
+        for edge in graph_edges or []:
+            if not isinstance(edge, dict):
+                continue
+            caller = _call_target(edge.get("caller"))
+            callee = _call_target(edge.get("callee"))
+            source_id = symbol_to_id.get(caller.casefold()) if caller else None
+            if source_id is None:
+                continue  # the caller is outside the inventoried business source
+            target_id = symbol_to_id.get(callee.casefold()) if callee else None
+            if target_id is None:
+                unresolved_count += 1
+                if len(unresolved_details) < MAX_UNRESOLVED_DETAILS:
+                    unresolved_details.append({
+                        "source_symbol": nodes[source_id]["symbol"], "file": nodes[source_id]["file"],
+                        "line": nodes[source_id]["start_line"], "target_symbol": callee,
+                        "reason": "ambiguous_target" if callee and callee.casefold() in ambiguous_symbols
+                        else "target_not_indexed", "count": 1,
+                    })
+                continue
+            pair = (source_id, target_id)
+            origin = str(edge.get("origin") or "php-parser")
+            if pair not in best or _origin_rank(origin) < _origin_rank(best[pair]):
+                best[pair] = origin
+        for (source_id, target_id), origin in sorted(best.items()):
+            if edge_count >= MAX_GRAPH_EDGES:
+                limit_reasons.append("edge_limit")
+                break
+            adjacency[source_id].append(target_id)
+            edge_origin[(source_id, target_id)] = origin
+            edge_count += 1
+        for node_id, node in nodes.items():
+            adjacency[node_id].sort(key=lambda value: (nodes[value]["file"], nodes[value]["start_line"],
+                                                       nodes[value]["symbol"].casefold()))
+            # Calls neither the parser nor the graph resolved stay explicit unknowns.
+            dynamic = sum(1 for target in node["calls"] if target.startswith("__unknown::"))
+            unresolved_count += dynamic
+            if dynamic and len(unresolved_details) < MAX_UNRESOLVED_DETAILS:
+                unresolved_details.append({
+                    "source_symbol": node["symbol"], "file": node["file"], "line": node["start_line"],
+                    "target_symbol": None, "reason": "dynamic_call_unresolved", "count": dynamic,
+                })
+    for node_id, node in ([] if use_graph else nodes.items()):
         for target_name in node["calls"]:
             target_id = symbol_to_id.get(target_name)
             if target_id is None:
@@ -256,7 +322,7 @@ def build_call_traces(
             traversal_steps += 1
             if current in sink_ids:
                 found_sink = True
-                traces.append(_trace(project_id, revision_id, nodes, path))
+                traces.append(_trace(project_id, revision_id, nodes, path, edge_origin))
                 if len(traces) >= MAX_TRACES:
                     break
             if len(path) >= MAX_PATH_NODES:
@@ -280,7 +346,9 @@ def build_call_traces(
     status = "partial" if truncated or unresolved_count or limit_reasons else "complete"
     reason = (
         "Call reachability is shown; variable-level data flow is not proven. "
-        "Some graph edges are unresolved or outside the indexed PHP business-source scope."
+        + ("The symbol graph had no call edges for this revision, so the chunks' own calls were used. "
+           if not use_graph else "")
+        + "Some graph edges are unresolved or outside the indexed PHP business-source scope."
         if status == "partial" else
         "Call reachability is complete only for recognized request-input and sensitive-sink patterns in the indexed PHP business-source scope; variable-level data flow is not proven."
     )
@@ -291,6 +359,8 @@ def build_call_traces(
         "languages": ["php"],
         "flow_types": [_FLOW_TYPES["id"]],
         "edge_types": ["resolved_static_call"],
+        "edge_source": "symbol_graph" if use_graph else "chunk_calls",
+        "edge_origins": sorted(set(edge_origin.values())) if use_graph else ["php-parser"],
         "node_count": len(nodes),
         "edge_count": edge_count,
         "trace_count": len(traces),
@@ -324,7 +394,8 @@ def build_call_traces(
     return summary, evidence
 
 
-def _trace(project_id: str, revision_id: str, nodes: dict[str, dict[str, Any]], path: list[str]) -> dict[str, Any]:
+def _trace(project_id: str, revision_id: str, nodes: dict[str, dict[str, Any]], path: list[str],
+           edge_origin: dict[tuple[str, str], str] | None = None) -> dict[str, Any]:
     evidence_id = "ev_" + sha256(
         f"{project_id}:{revision_id}:{TRACER_VERSION}:{'|'.join(path)}".encode()
     ).hexdigest()[:16]
@@ -336,7 +407,8 @@ def _trace(project_id: str, revision_id: str, nodes: dict[str, dict[str, Any]], 
                         for node_id in path],
         "edges": [{"type": "resolved_static_call", "from": nodes[left]["symbol"],
                    "to": nodes[right]["symbol"], "file": nodes[left]["file"],
-                   "line": nodes[left]["start_line"]}
+                   "line": nodes[left]["start_line"],
+                   "origin": (edge_origin or {}).get((left, right), "php-parser")}
                   for left, right in zip(path, path[1:])],
     }
 
@@ -404,6 +476,7 @@ def retrieve_revision_call_traces(
             offset = next_offset
         flow_summary, flow_evidence = build_call_traces(
             project_id, revision_id, snapshot, rows, business_files, truncated=truncated,
+            graph_edges=_graph_call_edges(expected_collection),
         )
         if not include_design_signals:
             return flow_summary, flow_evidence
@@ -427,3 +500,13 @@ def retrieve_revision_call_traces(
         return flow_summary, [*flow_evidence, *design_evidence]
     except Exception:
         return _unavailable(revision_id, "The selected revision's PHP call graph could not be read."), []
+
+
+def _graph_call_edges(collection: str) -> list[dict[str, Any]] | None:
+    """The revision's symbol-graph call edges (``sym_<snapshot collection>``); None when unreadable."""
+    try:
+        from inspection.graph import InspectionGraph
+
+        return InspectionGraph().call_edges("sym_" + collection, limit=MAX_GRAPH_EDGES)
+    except Exception:  # noqa: BLE001 — the tracer falls back to chunk calls
+        return None

@@ -201,16 +201,16 @@ RETURN n.id AS src, m.id AS tgt, type(r) AS rel,
        m.type AS type, m.collection AS collection
 """
 
-# Tier-4 sym leg: resolve vector-hit symbols to PhpSymbol nodes inside
+# Tier-4 sym leg: resolve vector-hit symbols to Symbol nodes inside
 # sym_<stem>, then return one-hop DECLARES/REFERENCES evidence rows. Every row
 # is a real graph fact (node props + edge props) — never fabricated source.
 _SYM_EVIDENCE_CYPHER = """
 UNWIND $candidates AS candidate
-MATCH (anchor:PhpSymbol {collection: $collection})
+MATCH (anchor:Symbol {collection: $collection})
 WHERE anchor.fqn = candidate OR anchor.name = candidate
 WITH COLLECT(DISTINCT anchor.id) AS anchor_ids
 UNWIND anchor_ids AS anchor_id
-MATCH (a:PhpSymbol {collection: $collection})-[r:DECLARES|REFERENCES]-(e:PhpSymbol {collection: $collection})
+MATCH (a:Symbol {collection: $collection})-[r:DECLARES|REFERENCES]-(e:Symbol {collection: $collection})
 WHERE a.id = anchor_id
 RETURN a.id AS src, a.fqn AS src_fqn, a.kind AS src_kind,
        type(r) AS rel, r.kind AS rel_kind,
@@ -243,7 +243,7 @@ def _point_id_for(node_id: str) -> str:
 # chunk_code_* wholesale, knowledge must survive).
 _KNOWLEDGE_PREFIX = "proj_knowledge_"
 _CODE_PREFIX = "chunk_code_"
-# Tier-4 inspection symbol graph (PhpSymbol nodes) — separate from the chunk
+# Tier-4 inspection symbol graph (Symbol nodes) — separate from the chunk
 # graph; scoped by collection sym_<stem>.
 _SYM_PREFIX = "sym_"
 
@@ -407,7 +407,7 @@ def qdrant_collection_has_points(collection_name: str) -> bool:
 
 
 def sym_collection_exists(stem: str) -> bool:
-    """True when the graph holds a PhpSymbol for ``sym_<stem>``.
+    """True when the graph holds a Symbol for ``sym_<stem>``.
 
     Mirrors ``analysis_service.link_knowledge_to_graph``: the driver session is
     taken from a fresh ``CodePropertyGraph`` store handle. Guarded — any
@@ -425,7 +425,7 @@ def sym_collection_exists(stem: str) -> bool:
         collection = f"sym_{stem or 'unnamed'}"
         with driver.session() as session:
             result = session.run(
-                "MATCH (s:PhpSymbol) WHERE s.collection = $collection "
+                "MATCH (s:Symbol) WHERE s.collection = $collection "
                 "RETURN count(s) AS n",
                 collection=collection,
             )
@@ -635,12 +635,19 @@ def build_embeddable_text(chunk: Dict[str, Any]) -> str:
     return text
 
 
-_ORIGIN_BY_LANGUAGE = {"javascript": "tree-sitter", "typescript": "tree-sitter", "python": "python-ast"}
+_ORIGIN_BY_LANGUAGE = {"php": "php-parser", "javascript": "tree-sitter", "typescript": "tree-sitter",
+                       "python": "python-ast"}
 
 
 def _edge_origin(chunk: Dict[str, Any]) -> str:
-    """Which extractor found a call edge: the chunk's own origin, else by language (PHP parser by default)."""
-    return str(chunk.get("origin") or _ORIGIN_BY_LANGUAGE.get(str(chunk.get("language") or ""), "php-parser"))
+    """Which extractor found a call edge: the chunk's own origin, else the language's default producer.
+
+    Chunks without a language predate multi-language indexing and came from the PHP parser.
+    """
+    language = str(chunk.get("language") or "")
+    if not language:
+        return str(chunk.get("origin") or "php-parser")
+    return str(chunk.get("origin") or _ORIGIN_BY_LANGUAGE.get(language, "unknown"))
 
 
 def _strip_none(mapping: Dict[str, Any]) -> Dict[str, Any]:

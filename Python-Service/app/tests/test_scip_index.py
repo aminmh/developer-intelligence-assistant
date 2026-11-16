@@ -78,12 +78,12 @@ def test_unsupported_languages_and_missing_indexers_are_reported(tmp_path, monke
 
 
 def test_lookup_prefers_scip_rows_and_falls_back_to_parser_rows():
-    from agent_tools.navigation import _prefer_scip
+    from agent_tools.navigation import _prefer_precise
 
     rows = [{"path": "a.ts", "line": 3, "symbol": "A::f", "origin": "tree-sitter"},
             {"path": "a.ts", "line": 3, "symbol": "A::f", "origin": "scip"},
             {"path": "a.ts", "line": 9, "symbol": "A::g", "origin": "tree-sitter"}]
-    assert sorted((r["line"], r["origin"]) for r in _prefer_scip(rows)) == [(3, "scip"), (9, "tree-sitter")]
+    assert sorted((r["line"], r["origin"]) for r in _prefer_precise(rows)) == [(3, "scip"), (9, "tree-sitter")]
 
 
 def test_worker_scip_output_is_validated_as_untrusted(monkeypatch):

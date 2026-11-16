@@ -21,7 +21,14 @@ import re
 from typing import Any
 
 from inspection import cli as php_cli
-from inspection.graph import InspectionGraph, canonical_definition, node_key, node_properties
+from inspection.graph import (
+    InspectionGraph,
+    canonical_definition,
+    default_origin,
+    language_for_path,
+    node_key,
+    node_properties,
+)
 from telemetry.snapshot import Snapshot, storage_id
 from inspection.queries import SymbolGraphQuery
 
@@ -172,7 +179,7 @@ class InspectionService:
                     "file": r.get("file", ""),
                     "line": r.get("line", 0),
                     "to_member": r.get("to_member"),
-                    "origin": r.get("origin") or "php-parser",
+                    "origin": r.get("origin") or default_origin(language_for_path(r.get("file"))),
                 }
             )
             linked += 1
@@ -256,6 +263,9 @@ class InspectionService:
     ) -> dict[str, Any]:
         return self._query.call_hierarchy(collection, fqn, name=name)
 
+    def runtime_coverage(self, collection: str) -> dict[str, Any]:
+        return self._query.runtime_coverage(collection)
+
     # --- record mapping helpers --------------------------------------------
 
     def _def_node(self, record: dict[str, Any], collection: str) -> dict | None:
@@ -300,6 +310,9 @@ class InspectionService:
         if kind in ("static_call", "method_call") and member:
             # Target is a method on a known class.
             return node_key("method", f"{to_fqn}::{member}", member)
+        if kind == "property_fetch" and member:
+            # Target is a property node (`Owner::$name`); LSP indexing emits these.
+            return node_key("property", f"{to_fqn}::{member}", member)
         # new / instanceof / catch / class_const / function_call → def record.
         target = by_fqn.get(to_fqn)
         if target is None:

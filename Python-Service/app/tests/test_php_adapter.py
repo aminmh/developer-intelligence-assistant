@@ -148,3 +148,40 @@ def test_truncated_blocks_not_repaired(monkeypatch):
     _, summary = validate_and_repair_blocks(Adapter(), md, "q", FakeLspClient([diag]), max_retries=2)
     assert summary[0]["status"] == "warning"
     assert calls == []
+
+
+# ─── Index-time settings (lsp/indexer.py) ────────────────────────────────────
+
+def test_index_settings_never_load_project_autoloader():
+    settings = Adapter().index_settings()
+    assert settings["composer.enable"] is False  # vendor/autoload.php would run project code
+    assert settings["language_server_phpstan.enabled"] is False
+    assert settings["language_server_psalm.enabled"] is False
+    assert settings["indexer.enabled_watchers"] == []
+
+
+def test_prepare_builds_phpactor_index_with_same_settings():
+    import json
+
+    argv = Adapter().prepare_argv(["php", "/opt/phpactor", "language-server"], {"composer.enable": False})
+    assert argv[:3] == ["php", "/opt/phpactor", "index:build"]
+    extra = next(a for a in argv if a.startswith("--config-extra="))
+    assert json.loads(extra.split("=", 1)[1]) == {"composer.enable": False}
+
+
+def test_namespace_and_qualified_names():
+    adapter = Adapter()
+    assert adapter.namespace_of("<?php\n\nnamespace App\\Models;\n\nclass User {}") == "App\\Models"
+    assert adapter.namespace_of("<?php\nnamespace App\\Legacy {\n}") == "App\\Legacy"
+    assert adapter.namespace_of("<?php\nclass Plain {}") == ""
+    assert adapter.qualify("App\\Models", "User") == "App\\Models\\User"
+    assert adapter.qualify("", "helper") == "helper"
+    assert adapter.member_name("property", "name") == "$name"
+    assert adapter.member_name("method", "name") == "name"
+
+
+def test_declaration_kind_detects_traits():
+    adapter = Adapter()
+    assert adapter.declaration_kind("class", "trait HasUlid", "HasUlid") == "trait"
+    assert adapter.declaration_kind("class", "final class User extends Model", "User") == "class"
+    assert adapter.declaration_kind("class", "#[Attr]", "User") is None

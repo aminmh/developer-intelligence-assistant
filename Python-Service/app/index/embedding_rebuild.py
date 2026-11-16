@@ -144,6 +144,10 @@ def _run_rebuild_locked(lock: threading.Lock, job_id: str, filename: str, archiv
         snapshot = Snapshot.from_row(identity["project_id"], identity)
         if snapshot.collection != snapshot_collection:
             raise RuntimeError("Snapshot identity changed while the rebuild was queued")
+        if not snapshot.dirty:
+            from lsp.jobs import enrich_export
+
+            exported = enrich_export(exported, str(workdir), zip_data=archive, identity=identity)
 
         def report(stage: str, completed: int, total: int) -> None:
             write_status(

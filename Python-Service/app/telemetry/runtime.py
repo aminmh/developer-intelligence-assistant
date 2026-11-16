@@ -937,7 +937,7 @@ class ClickHouseRuntime:
 
 
 def snapshot_definitions(project_id: str, commit_sha: str) -> list[dict]:
-    """Read the immutable Phase 0 PhpSymbol snapshot; never inspect legacy rows."""
+    """Read the immutable Phase 0 Symbol snapshot; never inspect legacy rows."""
     from inspection.service import InspectionService
     from telemetry.snapshot import storage_id
 
@@ -962,8 +962,11 @@ def _project_runtime(project_id: str, snapshot: dict, registry) -> dict:
     matching = [row for row in deployments if commit_sha and row["commit_sha"] == commit_sha]
     index_available = snapshot.get("state") == "ready"
     index_reason = None
+    from telemetry.snapshot import runtime_reference
+
+    reference = runtime_reference(project_id, snapshot)
     try:
-        definitions = snapshot_definitions(project_id, commit_sha) if index_available and commit_sha else []
+        definitions = snapshot_definitions(project_id, reference) if index_available and reference else []
     except Exception:  # Neo4j/index may be offline while ClickHouse is reachable.
         definitions = []
         index_available = False
@@ -973,11 +976,11 @@ def _project_runtime(project_id: str, snapshot: dict, registry) -> dict:
     telemetry = clickhouse.summary(project_id, revision_id, known_ids) if revision_id else clickhouse._empty(
         "This snapshot has no indexed revision ID yet."
     )
-    if index_available and commit_sha and revision_id:
+    if index_available and reference and revision_id:
         try:
             from inspection.graph import InspectionGraph
             from telemetry.snapshot import storage_id
-            collection = "sym_snapshot_" + storage_id(project_id, commit_sha, "")
+            collection = "sym_snapshot_" + storage_id(project_id, reference, "")
             static_edges = InspectionGraph().static_call_edges(collection)
             observed_edges = {
                 (row.get("caller_symbol_id"), row.get("symbol_id"))
@@ -994,6 +997,13 @@ def _project_runtime(project_id: str, snapshot: dict, registry) -> dict:
                 "percent": round(100 * len(expected_edges & observed_edges) / len(expected_edges), 1) if expected_edges else None,
                 "basis": "runtime samples within the selected aggregation window",
             }
+            # Share of indexed methods seen running, and routes observed (lsp-first plan, task 18k).
+            try:
+                from inspection.service import InspectionService
+
+                telemetry["runtime_coverage"] = InspectionService().runtime_coverage(collection)
+            except Exception:  # noqa: BLE001 — informational; leave edge coverage intact
+                telemetry["runtime_coverage"] = None
         except Exception:
             telemetry["method_edge_coverage"] = {"observed_edges": 0, "static_edges": 0, "percent": None, "basis": "static graph unavailable"}
     return {

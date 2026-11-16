@@ -32,6 +32,18 @@ def source_reference(metadata: dict[str, Any]) -> str:
     return snapshot.reference
 
 
+def runtime_reference(project_id: str, row: dict[str, Any]) -> str | None:
+    """The source key of a registry row: the commit for clean Git revisions, ``wt_<archive>`` for
+    working trees, ``upload_<archive>`` for uploads. Rows merge their metadata, whose
+    ``commit_sha`` is the Git commit, so it alone names the wrong snapshot for working trees and
+    none for uploads; rows without archive identity fall back to it."""
+    try:
+        return source_reference({**row, "project_id": project_id})
+    except (KeyError, TypeError, ValueError):
+        value = row.get("commit_sha")
+        return value if isinstance(value, str) and value else None
+
+
 def source_filter(metadata: dict[str, Any]) -> dict[str, str]:
     reference = source_reference(metadata)
     return {"commit_sha": reference} if metadata.get("commit_sha") else {"source_ref": reference}

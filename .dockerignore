@@ -11,6 +11,15 @@
 !Python-Service/app/infra/settings.py
 !Python-Service/app/infra/settings_store.py
 !Python-Service/app/infra/log_paths.py
+!Python-Service/app/infra/exception_logger.py
+!Python-Service/app/lsp/
+!Python-Service/app/lsp/**/*.py
+!Python-Service/app/config/
+!Python-Service/app/config/lsps.yml
+!Python-Service/php/
+!Python-Service/php/lsp/
+!Python-Service/php/lsp/composer.json
+!Python-Service/php/lsp/composer.lock
 !analyzer-worker/
 !analyzer-worker/Dockerfile
 !analyzer-worker/worker.py

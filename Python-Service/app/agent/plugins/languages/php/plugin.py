@@ -33,8 +33,8 @@ class PhpLanguagePlugin(LanguagePlugin):
         return list(_PHP_EXTENSIONS)
 
     def __init__(self, lsp_registry: object | None = None) -> None:
-        # TODO(scope-B): pull the live LspRegistry via the DI container
-        # instead of the lazy import below.
+        # Injected by register_builtins from the DI container (``lsp_registry``);
+        # None keeps validation structural (hermetic tests).
         self._lsp_registry = lsp_registry
 
     # -- detection ---------------------------------------------------------

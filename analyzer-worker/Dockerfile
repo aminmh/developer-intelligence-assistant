@@ -1,4 +1,17 @@
 # syntax=docker/dockerfile:1.7
+
+# phpactor for LSP indexing (lsp/indexer.py), built with Composer in its own stage so the
+# worker image itself carries no Composer. The PHP packages match the worker stage below.
+FROM python:3.12-slim-trixie AS php-lsp
+RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
+    --mount=type=cache,target=/var/lib/apt/lists,sharing=locked \
+    rm -f /etc/apt/apt.conf.d/docker-clean && apt-get update \
+    && apt-get install -y --no-install-recommends ca-certificates php-cli php-mbstring php-xml composer unzip
+COPY Python-Service/php/lsp/composer.json Python-Service/php/lsp/composer.lock /opt/php-lsp/
+RUN --mount=type=cache,target=/root/.cache/composer cd /opt/php-lsp \
+    && composer install --no-dev --no-interaction --no-progress --no-scripts --optimize-autoloader \
+    && php vendor/bin/phpactor --version
+
 FROM python:3.12-slim-trixie
 
 ARG TARGETARCH
@@ -13,7 +26,8 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
     HOME=/tmp \
     TMPDIR=/tmp \
     SETTINGS_DB_PATH=/tmp/analyzer-settings.db \
-    TELEMETRY_SNAPSHOT_ROOT=/tmp/analyzer-snapshots
+    TELEMETRY_SNAPSHOT_ROOT=/tmp/analyzer-snapshots \
+    LOG_DIR=/tmp/analyzer-logs
 
 RUN apt-get update \
     && apt-get install -y --no-install-recommends ca-certificates curl gnupg openjdk-21-jre-headless unzip xz-utils \
@@ -109,6 +123,8 @@ RUN apt-get update \
     && rm -rf /var/lib/apt/lists/* \
     && php --version
 
+COPY --from=php-lsp /opt/php-lsp /opt/php-lsp
+
 # App code last, so code changes rebuild only these layers, not the downloads above.
 COPY Python-Service/app/code_quality/__init__.py /app/code_quality/__init__.py
 COPY Python-Service/app/code_quality/service.py /app/code_quality/service.py
@@ -117,6 +133,9 @@ COPY Python-Service/app/code_quality/scip_index.py /app/code_quality/scip_index.
 COPY Python-Service/app/infra/settings.py /app/infra/settings.py
 COPY Python-Service/app/infra/settings_store.py /app/infra/settings_store.py
 COPY Python-Service/app/infra/log_paths.py /app/infra/log_paths.py
+COPY Python-Service/app/infra/exception_logger.py /app/infra/exception_logger.py
+COPY Python-Service/app/lsp/ /app/lsp/
+COPY Python-Service/app/config/lsps.yml /app/config/lsps.yml
 COPY analyzer-worker/worker.py /opt/analyzer-worker/worker.py
 
 RUN useradd --system --uid 10001 --create-home --home-dir /tmp/analyzer analyzer \

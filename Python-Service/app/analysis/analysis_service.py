@@ -386,6 +386,19 @@ def _prepare_workspace_http(filename: str) -> str | None:
         return None
 
 
+def _php_symbol_export(workspace_path: str) -> dict[str, Any] | None:
+    """The PHP inspector's export plus language-server edges (origin `lsp`); None lets the
+    graph indexer run the inspector itself when the export fails."""
+    try:
+        from inspection.cli import inspect_index
+        from lsp.jobs import enrich_export
+
+        return enrich_export(inspect_index(workspace_path), workspace_path)
+    except Exception as exc:  # noqa: BLE001 — fall back to the inspector inside index()
+        get_exception_logger().warning("PHP symbol export failed; using the inspector: %s", exc)
+        return None
+
+
 def _index_sym_graph(workspace_path: str, stem: str, exported: dict[str, Any] | None = None) -> dict[str, Any]:
     """Best-effort symbol graph (sym_<stem>); graph down → skipped dict.
 
@@ -515,7 +528,7 @@ def persist_code_index(job_id: str, label: str = "") -> dict[str, Any] | None:
 
                 ingest = CodePropertyGraph().ingest(chunks, collection) or {}
                 if result.get("producer") == "code-parse":
-                    sym = _index_sym_graph(workspace_path, stem)
+                    sym = _index_sym_graph(workspace_path, stem, _php_symbol_export(workspace_path))
                 elif result.get("symbol_index"):
                     sym = _index_sym_graph(workspace_path, stem, result["symbol_index"])
     except Exception as exc:  # noqa: BLE001 — persistence must not hard-fail the run

@@ -1,6 +1,6 @@
 """Read-side symbol-graph queries (Tier-4 surface).
 
-Pure Cypher against the ``PhpSymbol``/``sym_<stem>`` subgraph, scoped by the
+Pure Cypher against the ``Symbol``/``sym_<stem>`` subgraph, scoped by the
 indexed collection so concurrent projects never bleed into each other.
 
 Queries mirror the prompt's tool vocabulary:
@@ -16,15 +16,15 @@ from __future__ import annotations
 
 from typing import Any
 
-from inspection.graph import node_key
+from inspection.graph import default_origin, language_for_path, node_key
 
 _MATCH_NODE_BY_ID = """
-MATCH (s:PhpSymbol {id: $id})
+MATCH (s:Symbol {id: $id})
 RETURN s AS n
 """
 
 _MATCH_NODE_BY_FQN = """
-MATCH (s:PhpSymbol {collection: $collection, fqn: $fqn})
+MATCH (s:Symbol {collection: $collection, fqn: $fqn})
 RETURN s AS n
 ORDER BY CASE s.kind WHEN 'class' THEN 0 WHEN 'interface' THEN 1
          WHEN 'trait' THEN 2 WHEN 'enum' THEN 3 WHEN 'method' THEN 4
@@ -34,13 +34,13 @@ ORDER BY CASE s.kind WHEN 'class' THEN 0 WHEN 'interface' THEN 1
 # Functions are stored with their full name as `name` (the inspector keys call scopes
 # by it), so a short function name matches the end of the full name instead.
 _MATCH_FUNCTION_BY_SUFFIX = """
-MATCH (s:PhpSymbol {collection: $collection, kind: 'function'})
+MATCH (s:Symbol {collection: $collection, kind: 'function'})
 WHERE s.fqn ENDS WITH $suffix
 RETURN s AS n ORDER BY s.file, s.line LIMIT 20
 """
 
 _MATCH_NODE_BY_NAME = """
-MATCH (s:PhpSymbol {collection: $collection, name: $name})
+MATCH (s:Symbol {collection: $collection, name: $name})
 RETURN s AS n
 ORDER BY CASE s.kind WHEN 'class' THEN 0 WHEN 'interface' THEN 1
          WHEN 'trait' THEN 2 WHEN 'enum' THEN 3 WHEN 'method' THEN 4
@@ -48,14 +48,14 @@ ORDER BY CASE s.kind WHEN 'class' THEN 0 WHEN 'interface' THEN 1
 """
 
 _FIND_IMPLEMENTATIONS = """
-MATCH (impl:PhpSymbol {collection: $collection})
-WHERE (impl)-[:DECLARES {kind: 'implements'}]->(:PhpSymbol {id: $target_id})
-   OR (impl)-[:DECLARES {kind: 'extends'}]->(:PhpSymbol {id: $target_id})
+MATCH (impl:Symbol {collection: $collection})
+WHERE (impl)-[:DECLARES {kind: 'implements'}]->(:Symbol {id: $target_id})
+   OR (impl)-[:DECLARES {kind: 'extends'}]->(:Symbol {id: $target_id})
 RETURN impl AS n ORDER BY impl.file, impl.line
 """
 
 _FIND_REFERENCES = """
-MATCH (t:PhpSymbol {id: $target_id})<-[r:REFERENCES]-(caller:PhpSymbol)
+MATCH (t:Symbol {id: $target_id})<-[r:REFERENCES]-(caller:Symbol)
 WHERE caller.collection = $collection AND t.collection = $collection
 RETURN caller AS n, r.kind AS rkind, r.file AS file, r.line AS line,
        r.to_member AS to_member, r.origin AS origin
@@ -63,7 +63,7 @@ ORDER BY caller.file, r.line
 """
 
 _CALLEES = """
-MATCH (s:PhpSymbol {id: $source_id})-[r:REFERENCES]->(t:PhpSymbol)
+MATCH (s:Symbol {id: $source_id})-[r:REFERENCES]->(t:Symbol)
 WHERE s.collection = $collection AND t.collection = $collection
 RETURN t AS n, r.kind AS rkind, r.file AS file, r.line AS line,
        r.to_member AS to_member, r.origin AS origin
@@ -71,15 +71,47 @@ ORDER BY t.file, r.line
 """
 
 _CALLERS = """
-MATCH (s:PhpSymbol {id: $source_id})<-[r:REFERENCES]-(c:PhpSymbol)
+MATCH (s:Symbol {id: $source_id})<-[r:REFERENCES]-(c:Symbol)
 WHERE s.collection = $collection AND c.collection = $collection
 RETURN c AS n, r.kind AS rkind, r.file AS file, r.line AS line,
        r.to_member AS to_member, r.origin AS origin
 ORDER BY c.file, r.line
 """
 
+# Runtime call edges (indexr-otel spans, hooks and profiler samples) written by
+# telemetry aggregation. An edge counts only for the revision it was recorded on
+# (lsp-first plan, task 18j); others are returned flagged so callers report them stale.
+_RUNTIME_CALLEES = """
+MATCH (s:Symbol {id: $source_id})-[r:RUNTIME_CALLS]->(t:Symbol)
+WHERE s.collection = $collection AND t.collection = $collection
+RETURN t AS n, r.calls AS calls, r.last_seen AS last_seen, r.sources AS sources,
+       coalesce(r.revision_id, '') = coalesce(s.revision_id, '') AND r.revision_id IS NOT NULL AS current
+ORDER BY t.file, t.line
+"""
+
+_RUNTIME_CALLERS = """
+MATCH (s:Symbol {id: $source_id})<-[r:RUNTIME_CALLS]-(c:Symbol)
+WHERE s.collection = $collection AND c.collection = $collection
+RETURN c AS n, r.calls AS calls, r.last_seen AS last_seen, r.sources AS sources,
+       coalesce(r.revision_id, '') = coalesce(s.revision_id, '') AND r.revision_id IS NOT NULL AS current
+ORDER BY c.file, c.line
+"""
+
+_RUNTIME_COVERAGE = """
+MATCH (s:Symbol {collection: $collection})
+WHERE s.kind IN ['method', 'function'] AND s.symbol_id IS NOT NULL
+RETURN count(s) AS total,
+       sum(CASE WHEN coalesce(s.runtime_count_rolling, 0) > 0 THEN 1 ELSE 0 END) AS seen,
+       max(s.runtime_window_hours) AS window_hours, max(s.runtime_last_seen) AS last_seen
+"""
+
+_RUNTIME_ROUTES_SEEN = """
+MATCH (r:RuntimeRoute {collection: $collection})
+RETURN count(r) AS routes
+"""
+
 _LIST_PROJECTS = """
-MATCH (s:PhpSymbol)
+MATCH (s:Symbol)
 WHERE s.collection STARTS WITH 'sym_'
 WITH s.collection AS collection, count(s) AS definitions,
      collect(DISTINCT s.project_id) AS project_ids,
@@ -91,7 +123,7 @@ ORDER BY collection
 """
 
 _COUNT_DEFINITIONS = """
-MATCH (s:PhpSymbol {collection: $collection})
+MATCH (s:Symbol {collection: $collection})
 WHERE ($search = '' OR toLower(coalesce(s.name, '')) CONTAINS $search
        OR toLower(coalesce(s.fqn, '')) CONTAINS $search
        OR toLower(coalesce(s.owner, '')) CONTAINS $search
@@ -102,7 +134,7 @@ RETURN count(s) AS total
 """
 
 _LIST_DEFINITIONS = """
-MATCH (s:PhpSymbol {collection: $collection})
+MATCH (s:Symbol {collection: $collection})
 WHERE ($search = '' OR toLower(coalesce(s.name, '')) CONTAINS $search
        OR toLower(coalesce(s.fqn, '')) CONTAINS $search
        OR toLower(coalesce(s.owner, '')) CONTAINS $search
@@ -154,7 +186,12 @@ def _node_row(node: Any) -> dict[str, Any]:
         "static": props.get("static"),
         "abstract": props.get("abstract"),
         "owner": props.get("owner"),
-        "origin": props.get("origin") or "php-parser",
+        "language": props.get("language") or language_for_path(props.get("file")),
+        **({"runtime": {"count": props.get("runtime_count_rolling"), "last_seen": props.get("runtime_last_seen"),
+                        "window_hours": props.get("runtime_window_hours")}}
+           if props.get("runtime_window_hours") is not None else {}),
+        # Nodes written before origins existed came only from the PHP parser.
+        "origin": props.get("origin") or default_origin(props.get("language") or language_for_path(props.get("file"))),
     }
 
 
@@ -166,6 +203,7 @@ def _edge_ref(row: dict[str, Any]) -> dict[str, Any]:
         "file": row.get("file", ""),
         "line": row.get("line"),
         "to_member": row.get("to_member"),
+        # Edges written before origins existed came only from the PHP parser.
         "origin": row.get("origin") or "php-parser",
     }
 
@@ -316,4 +354,37 @@ class SymbolGraphQuery:
             item = _node_row(row.get("n") or {})
             item["ref"] = _edge_ref(row)
             callers.append(item)
-        return {"callees": callees, "callers": callers}
+        runtime_callees, stale_down = self._runtime_rows(_RUNTIME_CALLEES, collection, key)
+        runtime_callers, stale_up = self._runtime_rows(_RUNTIME_CALLERS, collection, key)
+        return {"callees": callees, "callers": callers,
+                "runtime_callees": runtime_callees, "runtime_callers": runtime_callers,
+                "runtime_stale_edges": stale_down + stale_up,
+                # The target's own runtime window: present once aggregation covered this revision.
+                "runtime_observed": t.get("runtime") is not None}
+
+    def _runtime_rows(self, cypher: str, collection: str, key: str) -> tuple[list[dict[str, Any]], int]:
+        out, stale = [], 0
+        for row in self._run(cypher, {"collection": collection, "source_id": key}):
+            if not row.get("current"):
+                stale += 1
+                continue
+            item = _node_row(row.get("n") or {})
+            item["ref"] = {"kind": "runtime_call", "file": item.get("file", ""), "line": item.get("line"),
+                           "to_member": None, "origin": "runtime", "count": row.get("calls"),
+                           "last_seen": row.get("last_seen"),
+                           "sources": list(row.get("sources") or []) if isinstance(row.get("sources"), list) else []}
+            out.append(item)
+        return out, stale
+
+    def runtime_coverage(self, collection: str) -> dict[str, Any]:
+        """Share of indexed methods seen running in the aggregation window, and routes observed."""
+        rows = self._run(_RUNTIME_COVERAGE, {"collection": collection})
+        row = rows[0] if rows else {}
+        total = int(row.get("total") or 0)
+        seen = int(row.get("seen") or 0)
+        routes = self._run(_RUNTIME_ROUTES_SEEN, {"collection": collection})
+        observed = row.get("window_hours") is not None
+        return {"observed": observed, "methods_seen": seen, "methods_total": total,
+                "percent": round(100 * seen / total, 1) if observed and total else None,
+                "routes_seen": int((routes[0] if routes else {}).get("routes") or 0),
+                "window_hours": row.get("window_hours"), "last_seen": row.get("last_seen")}

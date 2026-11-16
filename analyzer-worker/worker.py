@@ -1,4 +1,4 @@
-"""Isolated HTTPS worker for fixed SonarScanner, Joern, and SCIP jobs."""
+"""Isolated HTTPS worker for fixed SonarScanner, Joern, SCIP, and LSP indexing jobs."""
 from __future__ import annotations
 
 import asyncio
@@ -22,6 +22,7 @@ from starlette.concurrency import run_in_threadpool
 
 from code_quality.external_analyzers import check_sonarqube_access, run_joern, run_sonarqube
 from code_quality.scip_index import run_scip
+from lsp.jobs import run_lsp
 from code_quality.service import MAX_ARCHIVE_BYTES, MAX_FILE_BYTES, MAX_FILES, MAX_SCAN_BYTES, _safe_archive_path
 
 logger = logging.getLogger("analyzer_worker")
@@ -30,7 +31,7 @@ MAX_ARCHIVE_B64_BYTES = (MAX_ARCHIVE_BYTES * 4 // 3) + 8
 MAX_JOB_FILES = min(MAX_FILES, 20_000)
 _SHA = re.compile(r"^[a-fA-F0-9]{40,64}$")
 _REVISION_ID = re.compile(r"^rev_[0-9a-f]{32}$")
-_ANALYZERS = {"sonarqube", "joern", "scip"}
+_ANALYZERS = {"sonarqube", "joern", "scip", "lsp"}
 _ALLOWED_SONAR_HOSTS = {
     host.strip().lower().rstrip(".")
     for host in os.environ.get("ANALYZER_ALLOWED_SONAR_HOSTS", "sonarqube").split(",")
@@ -193,6 +194,9 @@ def _run_job(payload: dict[str, Any]) -> dict[str, Any]:
         elif name == "scip":
             # Needs no settings: it reads only the bundled source and never builds the project.
             analyzers[name] = run_scip(archive, files, languages)
+        elif name == "lsp":
+            # Language servers index the bundled source with project-code features off (lsp/indexer.py).
+            analyzers[name] = run_lsp(archive, files, languages)
     return {"schema_version": 1, "job_id": job_id,
             "revision_id": payload["revision_id"],
             "commit_sha": payload.get("commit_sha"), "bundle_sha256": payload["bundle_sha256"],
@@ -233,7 +237,21 @@ async def capabilities() -> dict[str, Any]:
                         "reason": None if not missing else "Not installed: " + ", ".join(missing),
                         "languages": ["typescript", "javascript", "python"],
                         "versions": {name: found for name, found in scip_tools.items() if found}}
+    snapshot["lsp"] = _lsp_capability()
     return {"schema_version": 1, "analyzers": snapshot}
+
+
+def _lsp_capability() -> dict[str, Any]:
+    from lsp import registry
+    from lsp.jobs import language_extensions
+
+    languages = sorted(language_extensions(registry))
+    missing = [lang for lang in languages if not registry.server_installed(lang)]
+    ready = bool(languages) and not missing
+    return {"enabled": True, "analyzer_available": ready, "status": "ready" if ready else "unavailable",
+            "reason": None if ready else ("Language server not installed for: " + ", ".join(missing) if missing
+                                          else "No language has LSP indexing enabled."),
+            "languages": languages}
 
 
 @app.post("/v1/sonarqube/check")

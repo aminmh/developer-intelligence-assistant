@@ -240,7 +240,8 @@ def test_inspection_reads_use_stored_ids_and_require_ready(tmp_path, monkeypatch
     query.find_references(collection, node["fqn"])
     query.find_implementations(collection, node["fqn"])
     query.call_hierarchy(collection, node["fqn"])
-    assert len(calls) == 7
+    # call_hierarchy also reads runtime callers and callees (lsp-first plan, task 18g).
+    assert len(calls) == 9
     for params in calls:
         if "target_id" in params or "source_id" in params:
             assert params.get("target_id", params.get("source_id")) == node["id"]

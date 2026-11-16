@@ -223,6 +223,8 @@ class IndexingService:
             chunks, index, parse_error = self._parse_source(str(workdir), filename)
             if chunks and identity:
                 index = self._with_scip(index, zip_data, identity)
+            if chunks:
+                index = self._with_lsp(index, zip_data, str(workdir), identity)
             snapshot = None
             if identity:
                 from telemetry.snapshot import Snapshot
@@ -311,6 +313,14 @@ class IndexingService:
         definitions += [d for d in export["definitions"] if (d.get("kind"), d.get("fqn")) not in known]
         return {"definitions": definitions,
                 "references": [*(index.get("references") or []), *export["references"]]}
+
+    @staticmethod
+    def _with_lsp(index: dict[str, Any], zip_data: bytes, workdir: str,
+                  identity: dict[str, Any] | None) -> dict[str, Any]:
+        """Add language-server definitions and references (origin `lsp`); see ``lsp.jobs.enrich_export``."""
+        from lsp.jobs import enrich_export
+
+        return enrich_export(index, workdir, zip_data=zip_data, identity=identity)
 
     @staticmethod
     def _store_repo_map(archive_sha256: str | None, chunks: list[dict[str, Any]]) -> None:

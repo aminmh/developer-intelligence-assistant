@@ -198,7 +198,7 @@ def test_symbol_lookup_relativizes_paths_and_skips_excluded(monkeypatch, project
 
     definition = _output(_run("code_symbol_lookup", {"symbol": "User"}, project, **kwargs))
     assert definition["items"] == [{"path": "app/Models/User.php", "line": 4, "kind": "class",
-                                    "symbol": "App\\Models\\User", "origin": "php-parser"}]
+                                    "symbol": "App\\Models\\User", "origin": "php-parser", "language": "php"}]
 
     refs = _output(_run("code_symbol_lookup", {"symbol": "User", "relation": "references"}, project, **kwargs))
     assert [i["path"] for i in refs["items"]] == ["app/Http/Controllers/UserController.php"]
