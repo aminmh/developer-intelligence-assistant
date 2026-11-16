@@ -12,6 +12,7 @@ import PerformanceSetup from './code-quality/PerformanceSetup.vue';
 import RuleManager from './code-quality/RuleManager.vue';
 import SourcePreview from './code-quality/SourcePreview.vue';
 import DirectoryExclusionTree from './code-quality/DirectoryExclusionTree.vue';
+import PublicRouteSettings from './code-quality/PublicRouteSettings.vue';
 import BusinessRuleReviews from './code-quality/BusinessRuleReviews.vue';
 import ExternalAnalyzerSetup from './code-quality/ExternalAnalyzerSetup.vue';
 import { useUrlTab } from '../composables/useUrlTab';
@@ -840,6 +841,7 @@ const statusTone = (status?: string) => (status === 'complete' || status === 'av
                   <span v-if="exclusionMessage" class="cq-hint" data-tone="ok" role="status">{{ exclusionMessage }}</span>
                 </div>
               </div>
+              <PublicRouteSettings :project-id="selectedProject?.project_id" :disabled="assessing" />
             </div>
           </details>
 

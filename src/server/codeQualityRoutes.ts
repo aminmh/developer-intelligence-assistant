@@ -499,6 +499,29 @@ export function registerCodeQualityRoutes(app: Express, dependencies: RouteDepen
     }
   });
 
+  // Routes the project declares intentionally public for the route-authorization check.
+  app.get('/api/code-quality/projects/:projectId/public-routes', async (req, res) => {
+    try {
+      const user = allowed(res, req.params.projectId); if (!user) return;
+      const path = `/code-quality/projects/${encodeURIComponent(req.params.projectId)}/public-routes`;
+      return await reply(res, await forward(path, user), 'Public routes are unavailable.');
+    } catch {
+      return res.status(502).json({ detail: 'Public routes are unavailable.' });
+    }
+  });
+
+  app.put('/api/code-quality/projects/:projectId/public-routes', async (req, res) => {
+    try {
+      const user = allowed(res, req.params.projectId); if (!user) return;
+      const path = `/code-quality/projects/${encodeURIComponent(req.params.projectId)}/public-routes`;
+      return await reply(res, await forward(path, user, {
+        method: 'PUT', body: JSON.stringify({ patterns: req.body?.patterns }),
+      }), 'Public routes could not be saved.');
+    } catch {
+      return res.status(502).json({ detail: 'Public routes could not be saved.' });
+    }
+  });
+
   app.get('/api/code-quality/projects/:projectId/business-rules', async (req, res) => {
     try {
       const user = allowed(res, req.params.projectId); if (!user) return;
