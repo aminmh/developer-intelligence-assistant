@@ -131,6 +131,30 @@ RUN apt-get update \
     && rm -rf /var/lib/apt/lists/* \
     && php --version
 
+# Betterleaks for secrets in Git history (code_quality/history_secrets.py): Git reads the history
+# from a bundle the API sends; the scanner runs with no network and validation off.
+ARG BETTERLEAKS_VERSION=1.9.0
+RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
+    --mount=type=cache,target=/var/lib/apt/lists,sharing=locked \
+    set -eux; \
+    apt-get update; \
+    apt-get install -y --no-install-recommends git; \
+    case "${TARGETARCH}" in \
+      amd64) arch=x64; sum=f8b185a39ffcece2a1ca82bf3a4e7435cd81963ffd16b7a9128daf75f35f6de7 ;; \
+      arm64) arch=arm64; sum=1d39116e0a58dc94574715e2aa12a2dbd5062f193eee3fec011fef6ba06bd13b ;; \
+      *) echo "Unsupported worker architecture: ${TARGETARCH}" >&2; exit 1 ;; \
+    esac; \
+    curl --fail --location --retry 3 --output /tmp/betterleaks.tgz \
+      "https://github.com/betterleaks/betterleaks/releases/download/v${BETTERLEAKS_VERSION}/betterleaks_${BETTERLEAKS_VERSION}_linux_${arch}.tar.gz"; \
+    echo "${sum}  /tmp/betterleaks.tgz" | sha256sum --check; \
+    mkdir /tmp/betterleaks; \
+    tar -xzf /tmp/betterleaks.tgz -C /tmp/betterleaks; \
+    install -m 0755 /tmp/betterleaks/betterleaks /usr/local/bin/betterleaks; \
+    install -D -m 0644 /tmp/betterleaks/LICENSE /usr/share/licenses/betterleaks/LICENSE; \
+    rm -rf /tmp/betterleaks /tmp/betterleaks.tgz; \
+    git --version; \
+    betterleaks version
+
 COPY --from=php-lsp /opt/php-lsp /opt/php-lsp
 COPY --from=php-psalm /opt/psalm /opt/psalm
 COPY Python-Service/php/psalm/missing-symbols.php /opt/psalm/missing-symbols.php
@@ -142,6 +166,7 @@ COPY Python-Service/app/code_quality/service.py /app/code_quality/service.py
 COPY Python-Service/app/code_quality/external_analyzers.py /app/code_quality/external_analyzers.py
 COPY Python-Service/app/code_quality/scip_index.py /app/code_quality/scip_index.py
 COPY Python-Service/app/code_quality/taint_analysis.py /app/code_quality/taint_analysis.py
+COPY Python-Service/app/code_quality/history_secrets.py /app/code_quality/history_secrets.py
 COPY Python-Service/app/infra/settings.py /app/infra/settings.py
 COPY Python-Service/app/infra/settings_store.py /app/infra/settings_store.py
 COPY Python-Service/app/infra/log_paths.py /app/infra/log_paths.py

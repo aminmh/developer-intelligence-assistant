@@ -1035,6 +1035,39 @@ def assess_revision(project_id: str, revision_id: str, snapshot: dict, archive_d
         for row in psalm_result.get("findings", [])
     ]
     findings = (findings + sonar_findings + joern_findings + psalm_findings)[:MAX_FINDINGS]
+    # Secrets committed to Git history (plan task 12): Git-synchronized revisions keep recent history
+    # next to their archive. On the worker when it offers the scanner, otherwise here.
+    from code_quality import history_secrets
+    history_result, history_on_worker = None, False
+    try:
+        history_data = history_secrets.load_history(project_id, snapshot)
+        if history_data is None:
+            history_result = history_secrets.not_applicable(
+                "Only Git-synchronized revisions carry history; synchronize the repository to scan it.")
+        else:
+            if worker_target:
+                try:
+                    from code_quality.remote_worker import run_history_job
+                    history_result = run_history_job(worker_target, history_data, revision_id, snapshot["commit_sha"])
+                    history_on_worker = True
+                except Exception:  # noqa: BLE001 — an older or unreachable worker leaves it to the API
+                    history_result = None
+            if history_result is None or history_result["status"] == "unavailable":
+                history_on_worker = False
+                history_result = history_secrets.run_history_scan(history_data, snapshot["commit_sha"])
+    except Exception as exc:  # noqa: BLE001 — a failing analyzer is reported, never fatal
+        history_result = {"name": "betterleaks", "version": "unknown", "status": "failed", "findings": [],
+                          "reason": f"The history secret scan failed ({type(exc).__name__})."}
+    if history_result["status"] not in {"complete", "disabled"}:
+        analyzer_failures.append({"name": "history-secrets",
+                                  "reason": str(history_result.get("reason") or "The history secret scan did not complete.")[:240]})
+    # Committed secrets go first so the finding limit never drops them.
+    findings = ([
+        _finding(row["file"], row["line"], row["rule"], row["category"], row["message"])
+        | {"severity": row["severity"], "kind": "finding", "tool": "betterleaks",
+           "tool_version": history_result.get("version", "unknown")}
+        for row in history_secrets.findings(history_result)
+    ] + findings)[:MAX_FINDINGS] if history_result.get("findings") else findings
     from code_quality.rules import CustomRuleStore
     custom_rule_sets = CustomRuleStore().enabled(user_id)
     semgrep_findings, semgrep_failures, semgrep_result = _run_static_rules(archive_data, files, custom_rule_sets)
@@ -1342,6 +1375,10 @@ def assess_revision(project_id: str, revision_id: str, snapshot: dict, archive_d
                           "taint_models": sorted(taint_stub_files), "reason": psalm_result.get("reason"),
                           "worker_identity": worker_identity if "psalm" in worker_results else None,
                           "limits": {"timeout_seconds": 600, "memory_bytes": 2 * 1024 * 1024 * 1024, "findings": 500}})
+    if history_result["status"] != "disabled":
+        from code_quality.history_secrets import summary as history_summary
+        analyzers.append({**history_summary(history_result), "languages": [],
+                          "worker_identity": worker_identity if history_on_worker else None})
     analyzers.append({"name": "revision-scoped-semantic-context",
                       "version": semantic_summary["retriever_version"],
                       "languages": sorted(languages), "categories": [category for category in CATEGORIES if not design_mode or category != "clean_code"],

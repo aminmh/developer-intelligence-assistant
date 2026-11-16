@@ -85,6 +85,16 @@ def _git(args: list[str], cwd: str, env: dict[str, str], *, timeout: int = 90,
 
 def fetch_branch_archive(repository: str, branch: str, token: str | None = None) -> tuple[str, bytes]:
     """Fetch one branch head from fixed github.com over HTTPS and export its tree."""
+    commit, archive, _history = _fetch(repository, branch, token, with_history=False)
+    return commit, archive
+
+
+def fetch_branch_snapshot(repository: str, branch: str, token: str | None = None) -> tuple[str, bytes, bytes | None]:
+    """The branch head, its tree, and its recent history for the secret scan (None when unavailable)."""
+    return _fetch(repository, branch, token, with_history=True)
+
+
+def _fetch(repository: str, branch: str, token: str | None, *, with_history: bool) -> tuple[str, bytes, bytes | None]:
     repository = validate_repository(repository)
     branch = validate_branch(branch)
     if token is not None and (not isinstance(token, str) or len(token) > 8192):
@@ -122,12 +132,32 @@ def fetch_branch_archive(repository: str, branch: str, token: str | None = None)
                        str(work), env, max_output=MAX_GIT_ARCHIVE_BYTES)
         if not archive or len(archive) > MAX_GIT_ARCHIVE_BYTES:
             raise GitSyncError("git_archive_limit", "The fetched source exceeds the 64 MiB archive limit.")
-        return commit, archive
+        return commit, archive, (_fetch_history(work, env, commit) if with_history else None)
+
+
+def _fetch_history(work: Path, env: dict[str, str], commit: str) -> bytes | None:
+    """Up to HISTORY_DEPTH commits behind ``commit`` as a history artifact (code_quality.history_secrets).
+
+    Best effort: a failure or an oversized history leaves the revision without a history scan,
+    never fails the synchronization.
+    """
+    from code_quality.history_secrets import HISTORY_DEPTH, HISTORY_REF, MAX_HISTORY_BYTES, pack_history
+
+    try:
+        _git(["fetch", "--quiet", f"--depth={HISTORY_DEPTH}", "origin", commit], str(work), env, timeout=180)
+        _git(["update-ref", HISTORY_REF, commit], str(work), env)
+        bundle = _git(["bundle", "create", "--quiet", "-", HISTORY_REF], str(work), env, timeout=180,
+                      max_output=MAX_HISTORY_BYTES)
+        shallow_file = work / ".git" / "shallow"
+        shallow = shallow_file.read_text(encoding="ascii").split() if shallow_file.is_file() else []
+        return pack_history(bundle, shallow)
+    except (GitSyncError, OSError, UnicodeError, ValueError):
+        return None
 
 
 class GitSourceService:
     def __init__(self, registry: SnapshotRegistry | None = None, sources: SourceService | None = None,
-                 fetcher=fetch_branch_archive):
+                 fetcher=fetch_branch_snapshot):
         self.registry = registry or default_registry()
         if sources is None:
             from index.storage import storage
@@ -164,21 +194,38 @@ class GitSourceService:
         repo = validate_repository(repository)
         return self.registry.git_source_for_repository(repo)
 
+    def _store_history(self, project_id: str, commit_sha: str, history: bytes | None) -> bool:
+        """Keep the history artifact next to the source archive; a failure only skips the history scan."""
+        from code_quality.history_secrets import history_key
+
+        put = getattr(self.sources.storage, "put_snapshot_history", None)
+        archive_key = self.registry.archive_key(project_id, commit_sha)
+        if history is None or put is None or not archive_key:
+            return False
+        try:
+            put(history_key(archive_key, commit_sha), history)
+            return True
+        except Exception:  # noqa: BLE001 — never log storage errors with provider details
+            return False
+
     def synchronize(self, user_id: str, project_id: str, token: str | None = None) -> dict[str, Any]:
         source = self.registry.get_git_source(user_id, project_id)
         if source is None:
             raise GitSyncError("git_source_missing", "Configure a GitHub repository before synchronizing.")
         self.registry.update_git_source_status(user_id, project_id, status="fetching", error_code=None)
         try:
-            commit_sha, archive = self.fetcher(source["repository"], source["branch"], token)
+            fetched = self.fetcher(source["repository"], source["branch"], token)
+            commit_sha, archive = fetched[0], fetched[1]
             result = self.sources.upload_git_snapshot(project_id, commit_sha, archive)
+            history_stored = self._store_history(project_id, commit_sha, fetched[2] if len(fetched) > 2 else None)
             self.registry.update_git_source_status(
                 user_id, project_id,
                 status="ready" if result.get("state") == "ready" else "indexing",
                 commit_sha=commit_sha, revision_id=result.get("revision_id"), error_code=None,
             )
             return {"project_id": project_id, "repository": source["repository"], "branch": source["branch"],
-                    "commit_sha": commit_sha, "revision_id": result.get("revision_id"), "state": result.get("state")}
+                    "commit_sha": commit_sha, "revision_id": result.get("revision_id"), "state": result.get("state"),
+                    "history_available": history_stored}
         except GitSyncError as exc:
             self.registry.update_git_source_status(user_id, project_id, status="failed", error_code=exc.code)
             raise

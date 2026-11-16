@@ -279,6 +279,33 @@ def run_worker(target: dict[str, Any], settings: dict[str, Any], archive_data: b
             name: _not_selected(name) for name in _ALLOWED_ANALYZERS - set(analyzers)}
 
 
+def run_history_job(target: dict[str, Any], history: bytes, revision_id: str, commit_sha: str) -> dict[str, Any]:
+    """Scan a revision's history artifact for committed secrets on the worker (plan task 12).
+
+    Raises RemoteWorkerError when the worker cannot run it (no consent, an older worker without the
+    scanner, transport errors); the caller then falls back to the API's own scanner.
+    """
+    from code_quality import history_secrets
+
+    if not target.get("source_transfer_consent"):
+        raise RemoteWorkerError("Explicit consent is required before transferring source to the analyzer worker.")
+    capability = get_worker_capabilities(target).get("betterleaks")
+    if not isinstance(capability, dict) or capability.get("status") != "ready":
+        raise RemoteWorkerError("The analyzer worker does not offer the history secret scan.")
+    digest = hashlib.sha256(history).hexdigest()
+    payload = {"schema_version": 1, "job_id": str(uuid4()), "revision_id": revision_id, "commit_sha": commit_sha,
+               "history_base64": base64.b64encode(history).decode("ascii"), "history_sha256": digest}
+    result = _request(target, "POST", "/v1/history-scan", payload, timeout=history_secrets.TIMEOUT_SECONDS + 60)
+    if (result.get("schema_version") != 1 or result.get("job_id") != payload["job_id"]
+            or result.get("revision_id") != revision_id or result.get("commit_sha") != commit_sha
+            or result.get("history_sha256") != digest):
+        raise RemoteWorkerError("The analyzer worker returned a result for a different job.")
+    try:
+        return history_secrets.validate_result(result.get("result"))
+    except ValueError as exc:
+        raise RemoteWorkerError(str(exc)) from exc
+
+
 def _unavailable(name: str, reason: str, status: str = "unavailable") -> dict[str, Any]:
     return {"name": name, "version": "unknown", "status": status, "findings": [],
             "scanned_files": 0, "skipped_files": 0, "reason": reason[:300]}

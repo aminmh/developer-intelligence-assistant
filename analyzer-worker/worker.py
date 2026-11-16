@@ -1,4 +1,4 @@
-"""Isolated HTTPS worker for fixed SonarScanner, Joern, SCIP, LSP indexing, and Psalm taint jobs."""
+"""Isolated HTTPS worker for fixed SonarScanner, Joern, SCIP, LSP indexing, Psalm taint and history secret-scan jobs."""
 from __future__ import annotations
 
 import asyncio
@@ -23,6 +23,7 @@ from starlette.concurrency import run_in_threadpool
 from code_quality.external_analyzers import check_sonarqube_access, run_joern, run_sonarqube
 from code_quality.scip_index import run_scip
 from code_quality.taint_analysis import run_taint_analysis, validate_stubs
+from code_quality import history_secrets
 from lsp.jobs import run_lsp
 from code_quality.service import MAX_ARCHIVE_BYTES, MAX_FILE_BYTES, MAX_FILES, MAX_SCAN_BYTES, _safe_archive_path
 
@@ -254,6 +255,11 @@ async def capabilities() -> dict[str, Any]:
     snapshot["psalm"] = {"enabled": True, "analyzer_available": ready, "status": "ready" if ready else "unavailable",
                          "reason": None if ready else "The pinned Psalm is not installed.",
                          "languages": ["php"], "version": psalm_version}
+    history_ready = history_secrets.available()
+    snapshot["betterleaks"] = {"enabled": True, "analyzer_available": history_ready,
+                               "status": "ready" if history_ready else "unavailable",
+                               "reason": None if history_ready else "The pinned Betterleaks scanner or Git is not installed.",
+                               "version": history_secrets.VERSION, "endpoint": "/v1/history-scan"}
     return {"schema_version": 1, "analyzers": snapshot}
 
 
@@ -303,6 +309,48 @@ async def submit_job(request: Request) -> dict[str, Any]:
             raise HTTPException(500, "The analyzer job failed; retry the assessment.") from exc
     logger.info("analyzer_job_finished job_id=%s", result["job_id"])
     return result
+
+
+def _validate_history_job(payload: dict[str, Any]) -> tuple[str, str, str, bytes]:
+    if set(payload) != {"schema_version", "job_id", "revision_id", "commit_sha", "history_base64", "history_sha256"}:
+        raise HTTPException(422, "History scan job contains unsupported or missing fields.")
+    if payload.get("schema_version") != 1:
+        raise HTTPException(422, "Unsupported history scan job schema.")
+    try:
+        job_id = str(UUID(payload.get("job_id", "")))
+    except (ValueError, TypeError, AttributeError) as exc:
+        raise HTTPException(422, "History scan job identity is invalid.") from exc
+    revision_id, commit_sha = payload.get("revision_id"), payload.get("commit_sha")
+    if not isinstance(revision_id, str) or not _REVISION_ID.fullmatch(revision_id):
+        raise HTTPException(422, "History scan revision identity is invalid.")
+    if not isinstance(commit_sha, str) or not re.fullmatch(r"[0-9a-f]{40}|[0-9a-f]{64}", commit_sha):
+        raise HTTPException(422, "History scan commit is invalid.")
+    encoded, digest = payload.get("history_base64"), payload.get("history_sha256")
+    if not isinstance(encoded, str) or len(encoded) > (history_secrets.MAX_HISTORY_BYTES + 1024 * 1024) * 4 // 3 + 8:
+        raise HTTPException(413, "History artifact exceeds the transfer limit.")
+    try:
+        data = base64.b64decode(encoded, validate=True)
+    except (ValueError, binascii.Error) as exc:
+        raise HTTPException(422, "History artifact is malformed.") from exc
+    if not isinstance(digest, str) or hashlib.sha256(data).hexdigest() != digest:
+        raise HTTPException(422, "History artifact digest does not match its contents.")
+    try:
+        history_secrets.unpack_history(data, commit_sha)
+    except ValueError as exc:
+        raise HTTPException(422, str(exc)) from exc
+    return job_id, revision_id, commit_sha, data
+
+
+@app.post("/v1/history-scan")
+async def submit_history_scan(request: Request) -> dict[str, Any]:
+    """Scan a Git-synchronized revision's recent history for committed secrets (Betterleaks, no network)."""
+    payload = await _read_bounded_json(request)
+    job_id, revision_id, commit_sha, data = _validate_history_job(payload)
+    async with _job_slots:
+        result = await run_in_threadpool(history_secrets.run_history_scan, data, commit_sha)
+    logger.info("history_scan_finished job_id=%s status=%s", job_id, result["status"])
+    return {"schema_version": 1, "job_id": job_id, "revision_id": revision_id, "commit_sha": commit_sha,
+            "history_sha256": payload["history_sha256"], "result": result}
 
 
 def serve() -> None:

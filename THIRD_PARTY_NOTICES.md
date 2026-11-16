@@ -70,3 +70,29 @@ modification must be published under OSL-3.0.
 - `Python-Service/app/agent/plugins/frameworks/*/psalm/taint.phpstub`: written for Developer Assistant from
   the public Laravel, Symfony and Doctrine APIs; no third-party stub content is copied.
 - `Python-Service/app/code_quality/rules/builtin.yml`: written for Developer Assistant.
+
+## Betterleaks history secret scan (analyzer worker and API image, `/usr/local/bin/betterleaks`)
+
+Betterleaks 1.9.0 (MIT, Copyright (c) 2026 Zachary Rice), the official release binary from
+https://github.com/betterleaks/betterleaks/releases/tag/v1.9.0, verified by SHA-256 and shipped
+unmodified. Its licence text ships at `/usr/share/licenses/betterleaks/LICENSE`. Its detection rules are
+the ones built into that release.
+
+The binary statically links the Go modules listed in its `go.mod` at tag `v1.9.0`:
+
+- MIT: Masterminds/semver, andybalholm/brotli, betterleaks/go-re2, charlievieth/fastwalk, dlclark/regexp2,
+  expr-lang/expr, gitleaks/go-gitdiff, go-sprout/sprout, h2non/filetype, klauspost/pgzip, lucasjones/reggen,
+  mattn/go-colorable, mattn/go-isatty, mholt/archives, mitchellh/copystructure, mitchellh/reflectwalk,
+  pelletier/go-toml, pkoukk/tiktoken-go, rrethy/ahocorasick, rs/zerolog, shurcooL/githubv4,
+  shurcooL/graphql, spf13/cast, stretchr/testify, wasilibs/wazero-helpers
+- BSD-2-Clause / BSD-3-Clause / ISC / 0BSD: STARRY-S/zip, bodgit/plumbing, bodgit/sevenzip, bodgit/windows,
+  dario.cat/mergo, davecgh/go-spew, dsnet/compress, fatih/semgroup, google/go-cmp, google/go-github,
+  google/go-querystring, google/uuid, klauspost/compress (with Apache-2.0 and MIT parts),
+  mikelolasagasti/xz, nwaples/rardecode, pierrec/lz4, pmezard/go-difflib, rogpeppe/go-internal,
+  spf13/pflag, ulikunitz/xz, golang.org/x/{crypto,exp,sync,sys,text}, gopkg.in/check.v1
+- Apache-2.0: go4.org, inconshreveable/mousetrap, minio/minlz, sorairolake/lzip-go, spf13/afero,
+  spf13/cobra, tetratelabs/wazero; go.yaml.in/yaml/v3 and gopkg.in/yaml.v3 (MIT and Apache-2.0)
+- MPL-2.0: hashicorp/go-version 1.7.0 and hashicorp/golang-lru/v2 2.0.7, unmodified; their source is at
+  https://github.com/hashicorp/go-version and https://github.com/hashicorp/golang-lru at those versions.
+
+Regenerate this list from the release's `go.mod` whenever `BETTERLEAKS_VERSION` changes.
