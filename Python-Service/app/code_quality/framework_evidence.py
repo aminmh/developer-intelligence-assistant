@@ -34,11 +34,18 @@ class FrameworkCheck:
     name: str
     version: str
     capabilities: tuple[Capability, ...]
-    run: Callable[[dict[Capability, Any]], list[dict[str, Any]]]   # collections by capability → findings
+    # collections by capability → findings, or (findings, summary) where the summary joins the coverage row
+    run: Callable[[dict[Capability, Any]], Any]
 
 
-# Registered checks. Task 7 of the gap-closing plan adds the route-authorization check here.
-FRAMEWORK_CHECKS: list[FrameworkCheck] = []
+def _registered_checks() -> list[FrameworkCheck]:
+    from code_quality import route_authorization
+
+    return [route_authorization.check()]
+
+
+# Registered framework-neutral checks.
+FRAMEWORK_CHECKS: list[FrameworkCheck] = _registered_checks()
 
 
 def collect_capabilities(context: Any, capabilities: set[Capability], registry: Any = None) -> dict[Capability, Any]:
@@ -68,8 +75,12 @@ def run_framework_checks(context: Any, checks: list[FrameworkCheck] | None = Non
                                "reason": "No detected framework plugin provides "
                                          + ", ".join(c.value for c in check.capabilities) + "."})
             continue
+        summary = None
         try:
-            produced = list(check.run(own) or [])
+            produced = check.run(own) or []
+            if isinstance(produced, tuple):
+                produced, summary = produced
+            produced = list(produced)
         except Exception as exc:  # noqa: BLE001 — a failing check is reported, never fatal
             logger.warning("framework check %s failed: %s", check.name, exc)
             check_rows.append({"name": check.name, "version": check.version, "status": "failed",
@@ -81,7 +92,7 @@ def run_framework_checks(context: Any, checks: list[FrameworkCheck] | None = Non
         findings.extend(produced)
         check_rows.append({"name": check.name, "version": check.version,
                            "status": "partial" if "partial" in statuses or "unavailable" in statuses else "complete",
-                           "findings": len(produced)})
+                           "findings": len(produced), **({"summary": summary} if summary is not None else {})})
     return findings, {"checks": check_rows,
                       "capabilities": [collection.coverage() for collection in collections.values()]}
 

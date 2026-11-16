@@ -11,7 +11,8 @@ Facts are stored per revision, keyed by the source archive's SHA-256, under
 
 Argument and constant values arrive encoded (see the exporter): JSON scalars,
 ``{"array": [...]}``, ``{"class": FQN}``, ``{"const": {"class", "name"}}``,
-``{"call": {"name", "args"}}``, ``{"closure": true}`` or ``{"expr": text}``.
+``{"call": {"name", "args"}}``, ``{"concat": [parts]}``, ``{"closure": true}`` or
+``{"expr": text}``.
 The ``literal_*`` helpers below decode them.
 """
 
@@ -41,6 +42,9 @@ def literal_str(value: Any, facts: "PhpFacts | None" = None) -> str | None:
     if isinstance(value, dict):
         if "class" in value and isinstance(value["class"], str):
             return value["class"]
+        if isinstance(value.get("concat"), list):
+            parts = [literal_str(part, facts) for part in value["concat"]]
+            return "".join(parts) if all(part is not None for part in parts) else None
         const = value.get("const")
         if facts is not None and isinstance(const, dict):
             resolved = facts.constant(const.get("class"), const.get("name"))

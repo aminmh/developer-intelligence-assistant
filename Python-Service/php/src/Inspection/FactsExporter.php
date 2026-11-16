@@ -271,7 +271,8 @@ final class FactsVisitor extends NodeVisitorAbstract
         }
         $class['methods'][] = [
             'name' => $node->name->toString(),
-            'line' => $node->getStartLine(), 'end_line' => $node->getEndLine(),
+            // The method starts at its first attribute; name_line is the `function` line.
+            'line' => $node->getStartLine(), 'name_line' => $node->name->getStartLine(), 'end_line' => $node->getEndLine(),
             'visibility' => $this->visibility($node), 'static' => $node->isStatic(),
             'abstract' => $node->isAbstract(),
             'attributes' => $this->attributes($node->attrGroups),
@@ -497,6 +498,12 @@ final class FactsVisitor extends NodeVisitorAbstract
             if (is_string($left) && is_string($right)) {
                 return mb_substr($left . $right, 0, self::MAX_STRING);
             }
+            // Keep the parts (for example '/progress' . self::ID_ROUTE) so constants can be resolved later.
+            $parts = [];
+            foreach ([$left, $right] as $part) {
+                array_push($parts, ...(is_array($part) && isset($part['concat']) ? $part['concat'] : [$part]));
+            }
+            return ['concat' => $parts];
         }
         if ($expr instanceof Expr\FuncCall && $expr->name instanceof Node\Name && !$expr->isFirstClassCallable()) {
             return ['call' => ['name' => $expr->name->toString(), 'args' => $this->args($expr->args, $depth + 1)]];

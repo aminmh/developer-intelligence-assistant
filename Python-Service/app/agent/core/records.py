@@ -42,17 +42,27 @@ class GuardRecord:
 
 @dataclass(frozen=True)
 class AccessRuleRecord:
-    """Capability ``route_authorization``: an ordered path-based access rule (first match wins)."""
+    """Capability ``route_authorization``: an ordered path-based access rule.
+
+    Rules are evaluated layer by layer (lowest ``layer`` first); within a layer the
+    first matching rule wins. A matching rule with requirements protects the route,
+    a ``public`` one makes it explicitly public, and one with neither leaves it
+    unprotected, unless it is a ``passthrough`` rule, which hands the decision to
+    the next layer (for example a firewall that only enables authentication).
+    """
 
     framework: str
     order: int
-    path_pattern: str                  # regular expression as configured
+    path_pattern: str                  # regular expression as configured; "" matches every path
     methods: tuple[str, ...]           # empty means any method
     requirements: tuple[str, ...]      # roles or abilities; empty means none required
     public: bool
     conditional: bool                  # depends on host, IP, port or other request properties
     file: str
     line: int
+    layer: int = 0
+    passthrough: bool = False
+    label: str = ""                    # how the report names the rule, e.g. "access_control rule 2"
 
 
 @dataclass(frozen=True)

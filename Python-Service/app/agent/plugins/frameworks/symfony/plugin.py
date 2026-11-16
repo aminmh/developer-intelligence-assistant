@@ -2,17 +2,40 @@
 from __future__ import annotations
 
 import json
+from typing import TYPE_CHECKING
 
 from agent.core.capability import Capability
 from agent.core.types import AnalysisFinding, AnalysisResult, AnalysisScope, DetectionResult, Project, RuntimeInspection, Tool, Workspace
 from agent.interfaces.framework import FrameworkPlugin
 from agent.interfaces.validator import Validator
 
+if TYPE_CHECKING:
+    from agent.core.revision import RevisionContext
+
 
 class SymfonyFrameworkPlugin(FrameworkPlugin):
     name = "symfony"
     language = "php"
-    capabilities = (Capability.AST_ANALYSIS, Capability.DEPENDENCY_ANALYSIS)
+    capabilities = (Capability.AST_ANALYSIS, Capability.DEPENDENCY_ANALYSIS,
+                    Capability.ROUTE_ANALYSIS, Capability.ROUTE_AUTHORIZATION)
+
+    def provide(self, capability: Capability, context: "RevisionContext") -> list:
+        """Routes, guards and access rules from PHP facts and Symfony configuration.
+
+        Decision: framework-knowledge-lives-in-plugins-over-language-facts. No PHP is parsed here.
+        """
+        from agent.interfaces.capabilities import CapabilityUnavailable
+        from agent.plugins.frameworks.symfony.authorization import provide_access_rules, provide_guards
+        from agent.plugins.frameworks.symfony.routes import provide_routes
+
+        facts = context.facts("php")
+        if facts is None:
+            raise CapabilityUnavailable("PHP facts are unavailable for this revision, so Symfony routes cannot be read.")
+        if capability == Capability.ROUTE_ANALYSIS:
+            return provide_routes(context, facts)
+        if capability == Capability.ROUTE_AUTHORIZATION:
+            return [*provide_guards(facts), *provide_access_rules(context)]
+        return []
 
     def detect(self, project: Project) -> DetectionResult:
         manifest = project.root / "composer.json"
