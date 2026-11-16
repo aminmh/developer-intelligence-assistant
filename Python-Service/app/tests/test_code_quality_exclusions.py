@@ -116,7 +116,7 @@ def test_assessment_shares_filtered_inventory_and_persists_exclusion_provenance(
             category: {"assessed": True, "score": 60, "reason": f"Reviewed {category} source context.",
                        "evidence_ids": [next(row["evidence_id"] for row in evidence
                                              if row.get("category") == category and row.get("kind") != "coverage")]}
-            for category in service.CATEGORIES
+            for category in service.SOURCE_CATEGORIES
         }
         return categories, "test-model", "test-provider", None, [], []
 

@@ -184,7 +184,7 @@ def test_assessment_sends_trace_excerpts_but_persists_only_citations(monkeypatch
             category: {"assessed": True, "score": 60, "reason": f"Reviewed {category} source context.",
                        "evidence_ids": [next(row["evidence_id"] for row in evidence
                                              if row.get("category") == category and row.get("kind") != "coverage")]}
-            for category in service.CATEGORIES
+            for category in service.SOURCE_CATEGORIES
         }
         return categories, "model", "local", {"total_tokens": 1}, [], []
 
@@ -195,8 +195,8 @@ def test_assessment_sends_trace_excerpts_but_persists_only_citations(monkeypatch
     assert any(row.get("context_snippet") == private_snippet for row in model_input["evidence"])
     assert report["coverage"]["semantic_flow_tracing"] == trace_summary
     assert report["coverage"]["php_design_signals"] == local_design_summary
-    assert all(report["categories"][category]["assessed"] for category in service.CATEGORIES)
-    assert report["overall_score"] == 60
+    assert all(report["categories"][category]["assessed"] for category in service.SOURCE_CATEGORIES)
+    assert report["overall_score"] is None  # no evidence-category evidence in this fixture
     assert report["shadow_scoring"]["version"] == "deterministic-category-score-1"
     assert report["coverage"]["category_review_context"]["status"] == "available"
     local_context_categories = {row["category"] for row in model_input["evidence"]

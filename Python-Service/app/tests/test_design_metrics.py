@@ -160,7 +160,7 @@ def test_assessment_uses_metric_score_and_persists_no_card_source(monkeypatch, t
     flow_summary = {"status": "complete", "tracer_version": "test", "flow_types": [], "limits": {}}
     monkeypatch.setattr(flow, "retrieve_revision_call_traces", lambda *_, **__: (flow_summary, []))
     monkeypatch.setattr(service, "_score", lambda *_, **__: ({category: {"assessed": True, "score": 60, "reason": "Fixture", "evidence_ids": []}
-        for category in service.CATEGORIES if category != "clean_code"}, "model", "local", {"total_tokens": 1}, [], []))
+        for category in service.SOURCE_CATEGORIES if category != "clean_code"}, "model", "local", {"total_tokens": 1}, [], []))
     monkeypatch.setattr(llm, "remote_configured", lambda: False)
     judge_calls = []
     def complete(prompt, **_):
@@ -170,14 +170,14 @@ def test_assessment_uses_metric_score_and_persists_no_card_source(monkeypatch, t
                                        "verdict": "violation", "reason": "Disconnected responsibilities."} for entry in entries]}), "model", "local"
     monkeypatch.setattr(llm, "complete_with_model", complete)
     # Existing evidence prevents archive fallback in this isolated orchestration test.
-    monkeypatch.setattr(service, "_category_coverage", lambda *_: {c: {"supported": True, "reason": None} for c in service.CATEGORIES})
+    monkeypatch.setattr(service, "_category_coverage", lambda *_: {c: {"supported": True, "reason": None} for c in service.SOURCE_CATEGORIES})
     import code_quality.category_context as context
     monkeypatch.setattr(context, "build_category_context", lambda *_args, **_kwargs: ({"status": "available", "source": None, "excerpt_count": 0, "categories": {}, "scanned_files": 0, "scanned_bytes": 0, "reason": "fixture"}, []))
     store = ReportStore(tmp_path / "reports.sqlite")
     report = service.assess_revision("pizza", revision, snapshot, b"archive", "alice", store)
     assert report["categories"]["clean_code"]["score"] == 85
     assert report["categories"]["clean_code"]["score_method"] == "design-metrics-1"
-    assert report["overall_score"] == 65
+    assert report["overall_score"] is None  # the evidence categories have no evidence in this fixture
     assert report["clean_code_design"]["unit_count"] == 1
     assert "card" not in report["clean_code_design"]["candidates"][0]
     assert store.get_report("pizza", report["report_id"])["clean_code_design"]["clean_code_hash"] == report["clean_code_design"]["clean_code_hash"]

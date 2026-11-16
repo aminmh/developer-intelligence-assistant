@@ -8,7 +8,7 @@ import zipfile
 import pytest
 
 import runtime.llm as llm
-from code_quality.service import AssessmentError, CATEGORIES, ReportStore, _finding, _score, inventory_archive, model_failure_diagnostic
+from code_quality.service import AssessmentError, SOURCE_CATEGORIES as CATEGORIES, ReportStore, _finding, _score, inventory_archive, model_failure_diagnostic
 from code_quality.deterministic_scoring import SCORING_VERSION, score_categories
 from code_quality.source_view import SourceViewError, read_source_window
 
@@ -252,7 +252,7 @@ def test_score_keeps_category_unassessed_without_valid_category_citation(monkeyp
         for category in CATEGORIES
     ]
 
-    with pytest.raises(AssessmentError, match="did not return evidence-cited scores for all five categories"):
+    with pytest.raises(AssessmentError, match="did not return evidence-cited scores for all 5 scored categories"):
         _score(
             evidence=evidence,
             coverage={category: {"supported": True, "reason": None} for category in CATEGORIES},
