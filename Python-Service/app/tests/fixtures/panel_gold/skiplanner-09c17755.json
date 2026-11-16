@@ -1,0 +1,484 @@
+{
+ "project": "skiplanner-api",
+ "commit": "09c177555d9bcd40a9ea490dc44abb2ad39fac75",
+ "source": "Ten-reviewer panel report of 2026-11-01 (codequality-reports in the skiplanner-api checkout); decisive findings behind each category's final score, restated.",
+ "panel_finals": {
+  "clean_code": 4.5,
+  "maintainability": 5,
+  "process": 4,
+  "testing": 4.5,
+  "reliability": 4,
+  "security": 3,
+  "performance": 4.5,
+  "localization": 5,
+  "documentation": 4.5,
+  "accessibility": 3.5
+ },
+ "panel_cost_usd": 98.6,
+ "matching": "Informational inventory findings never match. scope line: same file within tolerance lines; file: any finding in the file; rule:<prefix>[:<path prefix>]: a finding whose rule starts with prefix (and file with the path prefix); summary: a check's coverage summary value above zero (check.key). Line and file scopes also need the same category or one listed in also_categories.",
+ "findings": [
+  {
+   "id": "A1",
+   "category": "clean_code",
+   "file": "src/Entity/Address.php",
+   "line": 5,
+   "scope": "line",
+   "tolerance": 3,
+   "deterministic": false,
+   "claim": "An entity imports a controller class for serializer-group constants."
+  },
+  {
+   "id": "A2",
+   "category": "clean_code",
+   "file": "src/EventListener/RequestListener.php",
+   "line": 44,
+   "scope": "line",
+   "tolerance": 3,
+   "deterministic": false,
+   "claim": "Tenant filtering is switched off by comparing the request Host header with the admin domain."
+  },
+  {
+   "id": "A3",
+   "category": "clean_code",
+   "file": "src/Repository/UserRepository.php",
+   "line": 44,
+   "scope": "line",
+   "tolerance": 3,
+   "deterministic": false,
+   "claim": "A repository reads $_SERVER['HTTP_HOST'] directly."
+  },
+  {
+   "id": "A4",
+   "category": "clean_code",
+   "file": "src/MessageHandler/ClientExcelExportNotificationHandler.php",
+   "line": 40,
+   "scope": "line",
+   "tolerance": 3,
+   "deterministic": false,
+   "claim": "A long property chain reaches through collaborator wrappers."
+  },
+  {
+   "id": "M1",
+   "category": "maintainability",
+   "file": null,
+   "line": null,
+   "scope": "rule:php-missing-strict-types",
+   "tolerance": 3,
+   "deterministic": false,
+   "claim": "declare(strict_types=1) is in about 68 of 1,494 src PHP files."
+  },
+  {
+   "id": "M2",
+   "category": "maintainability",
+   "file": "src/Entity/Enums/SupportCategoryEnum.php",
+   "line": 68,
+   "scope": "line",
+   "tolerance": 5,
+   "deterministic": false,
+   "claim": "schema() is a 489-line method."
+  },
+  {
+   "id": "M3",
+   "category": "maintainability",
+   "file": "src/Controller/Tenant/ClientController.php",
+   "line": null,
+   "scope": "file",
+   "tolerance": 3,
+   "deterministic": false,
+   "claim": "A 682-line controller."
+  },
+  {
+   "id": "M4",
+   "category": "maintainability",
+   "file": "phpstan/rules/NoMagicValueUsedRule.php",
+   "line": 23,
+   "scope": "line",
+   "tolerance": 3,
+   "deterministic": false,
+   "claim": "The custom magic-value rule fires only on ===."
+  },
+  {
+   "id": "M5",
+   "category": "maintainability",
+   "file": "phpunit.xml.dist",
+   "line": 42,
+   "scope": "line",
+   "tolerance": 3,
+   "deterministic": false,
+   "claim": "The PHPUnit config excludes a directory that does not exist."
+  },
+  {
+   "id": "P1",
+   "category": "process",
+   "file": "phpunit.xml.dist",
+   "line": null,
+   "scope": "file",
+   "tolerance": 3,
+   "deterministic": true,
+   "claim": "phpunit.xml.dist uses PHPUnit 10+ syntax while composer.json pins PHPUnit 9.6.13.",
+   "also_categories": [
+    "testing"
+   ]
+  },
+  {
+   "id": "P2",
+   "category": "process",
+   "file": "Makefile",
+   "line": 200,
+   "scope": "line",
+   "tolerance": 3,
+   "deterministic": false,
+   "claim": "The Makefile calls vendor/bin/paratest, which is not installed."
+  },
+  {
+   "id": "P3",
+   "category": "process",
+   "file": "Dockerfile",
+   "line": 22,
+   "scope": "line",
+   "tolerance": 3,
+   "deterministic": false,
+   "claim": "The image build copies auth.json."
+  },
+  {
+   "id": "P4",
+   "category": "process",
+   "file": "Dockerfile",
+   "line": 30,
+   "scope": "line",
+   "tolerance": 3,
+   "deterministic": false,
+   "claim": "The image copies the whole build context while .dockerignore does not exclude .env or auth.json.",
+   "also_categories": [
+    "security"
+   ]
+  },
+  {
+   "id": "P5",
+   "category": "process",
+   "file": "code-analyze.sh",
+   "line": 52,
+   "scope": "line",
+   "tolerance": 3,
+   "deterministic": false,
+   "claim": "The PHPStan run ends with || true, so its failures are ignored."
+  },
+  {
+   "id": "T1",
+   "category": "testing",
+   "file": "tests/Functional/Controller/Tenant/ClientControllerTest.php",
+   "line": 181,
+   "scope": "line",
+   "tolerance": 3,
+   "deterministic": false,
+   "claim": "A test disables the tenant filter; no test checks cross-tenant reads."
+  },
+  {
+   "id": "T2",
+   "category": "testing",
+   "file": "behat.yml.dist",
+   "line": 5,
+   "scope": "line",
+   "tolerance": 3,
+   "deterministic": false,
+   "claim": "behat.yml.dist names a context class that does not exist."
+  },
+  {
+   "id": "T3",
+   "category": "testing",
+   "file": null,
+   "line": null,
+   "scope": "rule:testing-handler-without-tests",
+   "tolerance": 3,
+   "deterministic": false,
+   "claim": "Only about 15 of 100 controllers are covered by tests."
+  },
+  {
+   "id": "R1",
+   "category": "reliability",
+   "file": "src/Services/Landlord/SportClubRemoverService.php",
+   "line": 71,
+   "scope": "line",
+   "tolerance": 14,
+   "deterministic": true,
+   "claim": "rm -rf runs after setDomain(null), so the path resolves to the upload root and deletes every club's files.",
+   "also_categories": [
+    "security"
+   ]
+  },
+  {
+   "id": "R2",
+   "category": "reliability",
+   "file": "src/Services/Payment/Webhook/Mollie/Handler/AbstractMollieWebhookHandler.php",
+   "line": 51,
+   "scope": "line",
+   "tolerance": 3,
+   "deterministic": false,
+   "claim": "A repeated webhook re-sends the confirmation e-mail."
+  },
+  {
+   "id": "R3",
+   "category": "reliability",
+   "file": "src/Message/ClientExcelExportNotification.php",
+   "line": 12,
+   "scope": "line",
+   "tolerance": 3,
+   "deterministic": false,
+   "claim": "A whole Doctrine entity is put in a queued message."
+  },
+  {
+   "id": "S1",
+   "category": "security",
+   "file": "src/Controller/Auth/UserSupportController.php",
+   "line": 25,
+   "scope": "line",
+   "tolerance": 10,
+   "deterministic": true,
+   "claim": "A support-request route returning personal data has no authorization (public)."
+  },
+  {
+   "id": "S2",
+   "category": "security",
+   "file": "src/Services/Auth/AuthenticationService.php",
+   "line": 111,
+   "scope": "line",
+   "tolerance": 3,
+   "deterministic": false,
+   "claim": "Refresh-token decoding has no token-purpose check."
+  },
+  {
+   "id": "S3",
+   "category": "security",
+   "file": "src/Services/TokenManagerService.php",
+   "line": 36,
+   "scope": "line",
+   "tolerance": 3,
+   "deterministic": false,
+   "claim": "Refresh tokens carry only an exp claim."
+  },
+  {
+   "id": "S4",
+   "category": "security",
+   "file": "src/Services/Auth/TwoFactorAuthenticator.php",
+   "line": 62,
+   "scope": "line",
+   "tolerance": 3,
+   "deterministic": false,
+   "claim": "The 2FA code check has no attempt limit."
+  },
+  {
+   "id": "S5",
+   "category": "security",
+   "file": null,
+   "line": null,
+   "scope": "summary",
+   "tolerance": 3,
+   "deterministic": true,
+   "claim": "Dozens of tenant routes have no authorization.",
+   "summary": "route-authorization.access_rule_only",
+   "note": "The assessment counts these as protected only by an access_control role rule (no per-route check), which is the panel's point; it is a coverage count, not a finding."
+  },
+  {
+   "id": "S6",
+   "category": "security",
+   "file": null,
+   "line": null,
+   "scope": "rule:history-secret-",
+   "tolerance": 3,
+   "deterministic": false,
+   "claim": ".env and auth.json are still in Git history, so their credentials need rotating."
+  },
+  {
+   "id": "F1",
+   "category": "performance",
+   "file": "src/Services/Paginator/CustomPaginator.php",
+   "line": 22,
+   "scope": "line",
+   "tolerance": 3,
+   "deterministic": false,
+   "claim": "itemsPerPage comes from the query string with no upper bound.",
+   "note": "Expected from the review loop, not a deterministic rule, by the user's later decision: task 9 moved unbounded page sizes to the review checklist (CWE-770)"
+  },
+  {
+   "id": "F2",
+   "category": "performance",
+   "file": "src/Services/Paginator/CustomPaginator.php",
+   "line": 46,
+   "scope": "line",
+   "tolerance": 3,
+   "deterministic": false,
+   "claim": "Each page runs the COUNT query twice."
+  },
+  {
+   "id": "F3",
+   "category": "performance",
+   "file": "src/Services/Paginator/PaginationModel.php",
+   "line": 16,
+   "scope": "line",
+   "tolerance": 3,
+   "deterministic": false,
+   "claim": "itemsPerPage=0 divides by zero."
+  },
+  {
+   "id": "F4",
+   "category": "performance",
+   "file": "src/EventListener/RequestListener.php",
+   "line": 40,
+   "scope": "line",
+   "tolerance": 3,
+   "deterministic": false,
+   "claim": "Translations are loaded on every request."
+  },
+  {
+   "id": "F5",
+   "category": "performance",
+   "file": "config/packages/sentry.yaml",
+   "line": 24,
+   "scope": "line",
+   "tolerance": 3,
+   "deterministic": false,
+   "claim": "Sentry traces every request (traces_sample_rate 1.0).",
+   "note": "Expected from the review loop, not a deterministic rule, by the user's later decision: task 11 dropped the tracing sample rate as project-specific."
+  },
+  {
+   "id": "L1",
+   "category": "localization",
+   "file": "translations/exceptions.en_US.yml",
+   "line": 38,
+   "scope": "line",
+   "tolerance": 3,
+   "deterministic": false,
+   "claim": "A booking-conflict message has unrelated English text."
+  },
+  {
+   "id": "L2",
+   "category": "localization",
+   "file": "translations/tenant.nl_NL.yml",
+   "line": 743,
+   "scope": "line",
+   "tolerance": 3,
+   "deterministic": false,
+   "claim": "The Dutch message uses a different placeholder name than English."
+  },
+  {
+   "id": "L3",
+   "category": "localization",
+   "file": "src/Emails/Generators/EmployeeNewBookingForSiderBookerEventGenerator.php",
+   "line": 61,
+   "scope": "line",
+   "tolerance": 3,
+   "deterministic": false,
+   "claim": "E-mail generators hardcode Dutch copy."
+  },
+  {
+   "id": "L4",
+   "category": "localization",
+   "file": "templates/invoice.twig",
+   "line": 122,
+   "scope": "line",
+   "tolerance": 3,
+   "deterministic": false,
+   "claim": "Invoice amounts use fixed number separators for every currency."
+  },
+  {
+   "id": "L5",
+   "category": "localization",
+   "file": "templates/invoice.twig",
+   "line": 3,
+   "scope": "line",
+   "tolerance": 0,
+   "deterministic": false,
+   "claim": "The invoice hardcodes lang=\"en\"."
+  },
+  {
+   "id": "D1",
+   "category": "documentation",
+   "file": "CLAUDE.md",
+   "line": 43,
+   "scope": "line",
+   "tolerance": 3,
+   "deterministic": false,
+   "claim": "CLAUDE.md says PHPUnit 11 and composer test; composer.json pins 9.6.13 and has no test script."
+  },
+  {
+   "id": "D2",
+   "category": "documentation",
+   "file": "CLAUDE.md",
+   "line": 20,
+   "scope": "line",
+   "tolerance": 3,
+   "deterministic": false,
+   "claim": "CLAUDE.md says to read CONTEXT.md, which does not exist."
+  },
+  {
+   "id": "D3",
+   "category": "documentation",
+   "file": "README.md",
+   "line": 125,
+   "scope": "line",
+   "tolerance": 3,
+   "deterministic": false,
+   "claim": "README documents make phpcs with no tool behind it."
+  },
+  {
+   "id": "D4",
+   "category": "documentation",
+   "file": "docs/adr/0001-booking-payment-long-method-cluster.md",
+   "line": null,
+   "scope": "file",
+   "tolerance": 3,
+   "deterministic": false,
+   "claim": "ADR 0001 describes a method that has since shrunk; ADRs cited by code are missing."
+  },
+  {
+   "id": "X1",
+   "category": "accessibility",
+   "file": "templates/base.html.twig",
+   "line": 31,
+   "scope": "line",
+   "tolerance": 3,
+   "deterministic": false,
+   "claim": "A 10px footer colour has about 3.1:1 contrast."
+  },
+  {
+   "id": "X2",
+   "category": "accessibility",
+   "file": "templates/base.html.twig",
+   "line": 16,
+   "scope": "line",
+   "tolerance": 3,
+   "deterministic": false,
+   "claim": "A decorative banner has alt=\"cover\"."
+  },
+  {
+   "id": "X3",
+   "category": "accessibility",
+   "file": "templates/invoice.twig",
+   "line": 3,
+   "scope": "line",
+   "tolerance": 0,
+   "deterministic": false,
+   "claim": "The invoice language is fixed to English."
+  },
+  {
+   "id": "X4",
+   "category": "accessibility",
+   "file": "templates/invoice.twig",
+   "line": 101,
+   "scope": "line",
+   "tolerance": 3,
+   "deterministic": false,
+   "claim": "Invoice line items are floated divs, not a table."
+  },
+  {
+   "id": "X5",
+   "category": "accessibility",
+   "file": "src/Controller/Auth/PasswordController.php",
+   "line": 94,
+   "scope": "line",
+   "tolerance": 3,
+   "deterministic": false,
+   "claim": "An invalid new password returns 204, so clients cannot tell it failed."
+  }
+ ]
+}
