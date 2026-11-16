@@ -42,9 +42,9 @@ class FrameworkCheck:
 
 
 def _registered_checks() -> list[FrameworkCheck]:
-    from code_quality import route_authorization
+    from code_quality import config_risks, route_authorization
 
-    return [route_authorization.check()]
+    return [route_authorization.check(), config_risks.check()]
 
 
 # Registered framework-neutral checks.

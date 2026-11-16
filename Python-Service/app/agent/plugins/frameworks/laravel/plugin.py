@@ -114,6 +114,7 @@ class LaravelFrameworkPlugin(FrameworkPlugin):
         Capability.ROUTE_ANALYSIS,
         Capability.ROUTE_AUTHORIZATION,
         Capability.TAINT_MODEL,
+        Capability.CONFIG_RISKS,
         Capability.RUNTIME_INSPECTION,
         Capability.TEST_EXECUTION,
     )
@@ -854,6 +855,10 @@ class LaravelFrameworkPlugin(FrameworkPlugin):
             return provide_routes(context, facts)
         if capability == Capability.ROUTE_AUTHORIZATION:
             return provide_guards(facts, provide_routes(context, facts))
+        if capability == Capability.CONFIG_RISKS:
+            from agent.plugins.frameworks.laravel.config_risks import provide_config_risks
+
+            return provide_config_risks(context, facts)
         return []
 
 

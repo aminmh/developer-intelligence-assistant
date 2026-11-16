@@ -135,7 +135,7 @@ def test_php_facts_export_resolves_attributes_constants_promoted_properties_and_
 # ─── facts helpers and store ────────────────────────────────────────────────
 
 def _facts_payload() -> dict:
-    return {"schema": "php-facts-2", "files": [
+    return {"schema": "php-facts-3", "files": [
         {"path": "a.php", "strict_types": True, "classes": [
             {"fqn": "A\\Child", "extends": ["A\\Base"], "implements": [], "constants": [], "methods": []}]},
         {"path": "b.php", "strict_types": False, "classes": [

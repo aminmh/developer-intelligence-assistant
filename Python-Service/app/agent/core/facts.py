@@ -3,7 +3,7 @@
 Decision: @.archcore/code-quality/framework-knowledge-lives-in-plugins-over-language-facts.adr.md.
 Framework plugins read facts produced by each language's own parser instead of
 parsing source themselves. For PHP that is ``php bin/project-inspect facts``
-(nikic/php-parser, schema ``php-facts-2``; @api/Python-Service/php/src/Inspection/FactsExporter.php).
+(nikic/php-parser, schema ``php-facts-3``; @api/Python-Service/php/src/Inspection/FactsExporter.php).
 
 Facts are stored per revision, keyed by the source archive's SHA-256, under
 ``FACTS_DIR`` (default ``/app/data/facts``) as ``<sha256>.<language>.json.gz``.
@@ -30,7 +30,7 @@ from typing import Any, Iterator
 
 logger = logging.getLogger(__name__)
 
-PHP_FACTS_SCHEMA = "php-facts-2"
+PHP_FACTS_SCHEMA = "php-facts-3"
 _SHA = re.compile(r"[0-9a-f]{64}\Z")
 
 
@@ -85,7 +85,7 @@ def short_name(fqn: str | None) -> str:
 # ── PHP facts ────────────────────────────────────────────────────────────────
 
 class PhpFacts:
-    """Read-only view over one revision's ``php-facts-2`` export."""
+    """Read-only view over one revision's ``php-facts-3`` export."""
 
     language = "php"
 

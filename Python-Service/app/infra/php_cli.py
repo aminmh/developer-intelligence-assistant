@@ -114,7 +114,7 @@ class PhpCli:
     def inspect_facts(
         self, project_path: str, exclude: Sequence[str] | None = None
     ) -> dict[str, Any]:
-        """Export language facts for framework plugins (schema ``php-facts-2``)."""
+        """Export language facts for framework plugins (schema ``php-facts-3``)."""
         args = [project_path]
         if exclude:
             args.append(",".join(item for item in exclude if item))
@@ -125,7 +125,7 @@ class PhpCli:
                 result,
             )
         payload = _decode_json_object(result.stdout)
-        if not isinstance(payload, dict) or payload.get("schema") != "php-facts-2" \
+        if not isinstance(payload, dict) or payload.get("schema") != "php-facts-3" \
                 or not isinstance(payload.get("files"), list):
             raise PhpCliError("project-inspect facts produced unparseable output", result)
         return payload

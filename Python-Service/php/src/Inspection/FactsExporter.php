@@ -15,7 +15,7 @@ use PhpParser\NodeVisitorAbstract;
 use PhpParser\PrettyPrinter\Standard as PrettyPrinter;
 
 /**
- * Language facts for framework plugins (schema ``php-facts-2``).
+ * Language facts for framework plugins (schema ``php-facts-3``).
  *
  * One pass over a project's PHP files with the real parser. Framework plugins
  * (Python, ``agent/plugins/frameworks``) read these facts instead of parsing
@@ -36,7 +36,7 @@ use PhpParser\PrettyPrinter\Standard as PrettyPrinter;
  */
 final class FactsExporter
 {
-    public const SCHEMA = 'php-facts-2';
+    public const SCHEMA = 'php-facts-3';
     public const MAX_CALLS_PER_FILE = 3000;
 
     private PhpAstParser $parser;
@@ -481,6 +481,10 @@ final class FactsVisitor extends NodeVisitorAbstract
             $class = $this->className($expr->class);
             $name = $this->identifier($expr->name);
             return $name === 'class' ? ['class' => $class] : ['const' => ['class' => $class, 'name' => $name]];
+        }
+        if ($expr instanceof Expr\Cast) {
+            // Casts are transparent: (bool) env('APP_DEBUG', false) keeps its env() call.
+            return $this->literal($expr->expr, $depth);
         }
         if ($expr instanceof Node\Scalar\MagicConst\Dir) {
             return ['magic' => '__DIR__'];

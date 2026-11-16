@@ -17,7 +17,8 @@ class SymfonyFrameworkPlugin(FrameworkPlugin):
     name = "symfony"
     language = "php"
     capabilities = (Capability.AST_ANALYSIS, Capability.DEPENDENCY_ANALYSIS,
-                    Capability.ROUTE_ANALYSIS, Capability.ROUTE_AUTHORIZATION, Capability.TAINT_MODEL)
+                    Capability.ROUTE_ANALYSIS, Capability.ROUTE_AUTHORIZATION, Capability.TAINT_MODEL,
+                    Capability.CONFIG_RISKS)
 
     def provide(self, capability: Capability, context: "RevisionContext") -> list:
         """Routes, guards and access rules from PHP facts and Symfony configuration; the Psalm taint model.
@@ -43,6 +44,10 @@ class SymfonyFrameworkPlugin(FrameworkPlugin):
             return provide_routes(context, facts)
         if capability == Capability.ROUTE_AUTHORIZATION:
             return [*provide_guards(facts), *provide_access_rules(context)]
+        if capability == Capability.CONFIG_RISKS:
+            from agent.plugins.frameworks.symfony.config_risks import provide_config_risks
+
+            return provide_config_risks(context, facts)
         return []
 
     def detect(self, project: Project) -> DetectionResult:

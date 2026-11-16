@@ -20,7 +20,7 @@ use App\Inspection\SymbolExporter;
  *   php bin/project-inspect symbols <dir> [exclude_csv]
  *   php bin/project-inspect references <dir> [exclude_csv]
  *   php bin/project-inspect index <dir> [exclude_csv]
- *   php bin/project-inspect facts <dir> [exclude_csv]   (php-facts-2, for framework plugins)
+ *   php bin/project-inspect facts <dir> [exclude_csv]   (php-facts-3, for framework plugins)
  *
  * exclude_csv: comma-separated relative dir segments to skip (e.g.
  * tests,coverage). Built-ins (vendor, node_modules, .git, …) always skip.
