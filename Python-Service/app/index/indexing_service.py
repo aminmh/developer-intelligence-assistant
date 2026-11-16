@@ -239,6 +239,7 @@ class IndexingService:
                     chunk["symbol_id"] = from_chunk(chunk)
             if chunks and identity:
                 self._store_repo_map(identity.get("source_archive_sha256"), chunks)
+                self._store_language_facts(identity.get("source_archive_sha256"), str(workdir))
             if not chunks:
                 logger.warning("No chunks produced: %s (%s)", collection_name, parse_error)
                 self.write_status(
@@ -321,6 +322,16 @@ class IndexingService:
         from lsp.jobs import enrich_export
 
         return enrich_export(index, workdir, zip_data=zip_data, identity=identity)
+
+    @staticmethod
+    def _store_language_facts(archive_sha256: str | None, workdir: str) -> None:
+        """Export and store the revision's language facts for framework plugins. Best-effort."""
+        try:
+            from agent.core.facts import facts_for_workspace
+
+            facts_for_workspace(workdir, archive_sha256)
+        except Exception as exc:  # noqa: BLE001 — providers export on first use when this fails
+            logger.warning("Language facts not stored: %s", exc)
 
     @staticmethod
     def _store_repo_map(archive_sha256: str | None, chunks: list[dict[str, Any]]) -> None:

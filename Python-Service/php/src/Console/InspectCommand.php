@@ -5,6 +5,8 @@ declare(strict_types=1);
 namespace App\Console;
 
 use App\Inspection\AstProbe;
+use App\Inspection\FactsExporter;
+use App\Inspection\PhpFileFinder;
 use App\Inspection\SkeletonExporter;
 use App\Inspection\SymbolExporter;
 
@@ -18,6 +20,7 @@ use App\Inspection\SymbolExporter;
  *   php bin/project-inspect symbols <dir> [exclude_csv]
  *   php bin/project-inspect references <dir> [exclude_csv]
  *   php bin/project-inspect index <dir> [exclude_csv]
+ *   php bin/project-inspect facts <dir> [exclude_csv]   (php-facts-1, for framework plugins)
  *
  * exclude_csv: comma-separated relative dir segments to skip (e.g.
  * tests,coverage). Built-ins (vendor, node_modules, .git, …) always skip.
@@ -66,7 +69,11 @@ final class InspectCommand
                 'index' => $this->dirPath($path)
                     ? $this->emit((new SymbolExporter())->exportIndex(realpath($path), $this->excludes($argv)))
                     : $this->usage("index <dir> [exclude_csv]"),
-                default => $this->usage('<skeleton|attributes|method|symbols|references|index> …'),
+                'facts' => $this->dirPath($path)
+                    ? $this->emit((new FactsExporter())->export(
+                        realpath($path), (new PhpFileFinder())->find(realpath($path), $this->excludes($argv))))
+                    : $this->usage("facts <dir> [exclude_csv]"),
+                default => $this->usage('<skeleton|attributes|method|symbols|references|index|facts> …'),
             };
         } catch (\Throwable $e) {
             fwrite(STDERR, 'Error: ' . $e->getMessage() . "\n");

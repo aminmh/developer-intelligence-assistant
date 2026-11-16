@@ -1006,6 +1006,26 @@ def assess_revision(project_id: str, revision_id: str, snapshot: dict, archive_d
     semgrep_findings, semgrep_failures, semgrep_result = _run_static_rules(archive_data, files, custom_rule_sets)
     findings = (findings + semgrep_findings)[:MAX_FINDINGS]
     analyzer_failures.extend(semgrep_failures)
+    # Framework-neutral checks over records that framework plugins provide
+    # (decision: framework-knowledge-lives-in-plugins-over-language-facts).
+    framework_coverage: dict[str, Any] = {"checks": [], "capabilities": []}
+    try:
+        from code_quality.framework_evidence import run_on_archive as run_framework_checks
+        framework_rows, framework_coverage = run_framework_checks(
+            archive_data, files, snapshot.get("source_archive_sha256"))
+    except Exception as exc:  # noqa: BLE001 — a failing check is reported, never fatal
+        framework_rows = []
+        analyzer_failures.append({"name": "framework-checks", "reason": f"Framework checks failed ({type(exc).__name__})."})
+    for capability in framework_coverage.get("capabilities", []):
+        if capability.get("gaps"):
+            analyzer_failures.append({"name": f"framework:{capability['capability']}",
+                                      "reason": " ".join(gap["reason"] for gap in capability["gaps"])[:240]})
+    findings = (findings + [
+        _finding(row["file"], row["line"], row["rule"], row["category"], row["message"])
+        | {"severity": row.get("severity", "warning"), "kind": "finding", "tool": row.get("tool"),
+           "tool_version": row.get("tool_version")}
+        for row in framework_rows if row.get("category") in CATEGORIES
+    ])[:MAX_FINDINGS]
     from code_quality.design_metrics import load_rubric, read_revision_chunks, build_units, select_candidates, score_design
     try:
         design_rubric, design_rubric_hash = load_rubric()
@@ -1217,6 +1237,10 @@ def assess_revision(project_id: str, revision_id: str, snapshot: dict, archive_d
                           "categories": semgrep_result["categories"],
                           "limits": {"timeout_seconds": 90, "output_bytes": 8 * 1024 * 1024,
                                      "findings": MAX_FINDINGS}})
+    if framework_coverage.get("checks"):
+        analyzers.append({"name": "framework-checks", "version": "framework-checks-1",
+                          "checks": framework_coverage["checks"],
+                          "capabilities": framework_coverage["capabilities"]})
     if category_review_context.get("source"):
         analyzers.append({"name": "revision-source-category-context",
                           "version": "local-category-context-1",

@@ -147,6 +147,7 @@ def index_source(workspace: str, snapshot: Snapshot) -> dict:
             "project_id": snapshot.project_id, "commit_sha": snapshot.commit_sha,
             "revision_id": registered.revision_id} if registered.revision_id else None)
     IndexingService._store_repo_map(snapshot.source_archive_sha256, chunks)
+    IndexingService._store_language_facts(snapshot.source_archive_sha256, workspace)
     result = CodePropertyGraph().ingest(
         chunks, snapshot.collection, snapshot=snapshot,
         symbol_definitions=exported["definitions"], symbol_references=exported["references"],

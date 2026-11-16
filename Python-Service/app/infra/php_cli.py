@@ -111,6 +111,25 @@ class PhpCli:
             "references": references if isinstance(references, list) else [],
         }, "php-parser")
 
+    def inspect_facts(
+        self, project_path: str, exclude: Sequence[str] | None = None
+    ) -> dict[str, Any]:
+        """Export language facts for framework plugins (schema ``php-facts-1``)."""
+        args = [project_path]
+        if exclude:
+            args.append(",".join(item for item in exclude if item))
+        result = self.run("project-inspect", ["facts", *args], timeout=900)
+        if result.returncode != 0:
+            raise PhpCliError(
+                result.diagnostics or f"project-inspect facts exited {result.returncode}",
+                result,
+            )
+        payload = _decode_json_object(result.stdout)
+        if not isinstance(payload, dict) or payload.get("schema") != "php-facts-1" \
+                or not isinstance(payload.get("files"), list):
+            raise PhpCliError("project-inspect facts produced unparseable output", result)
+        return payload
+
 
 def _decode_json_array(stdout: str) -> list[dict[str, Any]] | None:
     """Decode the CLI's JSON array, tolerating a leading diagnostic line."""
