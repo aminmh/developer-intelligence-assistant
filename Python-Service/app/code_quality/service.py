@@ -340,6 +340,39 @@ def inventory_archive(archive_data: bytes, exclusion_patterns: list[str] | None 
     return dict(sorted(languages.items())), findings[:MAX_FINDINGS], inventory, scan_stats, analyzer_failures
 
 
+def _run_category_reviews(project_id: str, revision_id: str, snapshot: dict, languages: dict[str, int],
+                          findings: list[dict], coverage: dict[str, dict], design_mode: bool) -> dict[str, Any]:
+    """The per-category model reviews, or why they did not run. Never raises."""
+    from code_quality.category_review import VERSION, load_config, run_reviews
+
+    config = load_config()
+
+    def skipped(reason: str) -> dict[str, Any]:
+        return {"status": "disabled", "version": VERSION, "reason": reason, "config": config.as_dict(), "categories": {}}
+
+    if not config.enabled:
+        return skipped("Category reviews are turned off (code_quality_review.enabled in orchestrator.yml).")
+    if not languages:
+        return skipped("No supported source was found to review.")
+    try:
+        from agent_tools.runtime import _chat_model, tool_status
+        from agent_tools.types import ToolContext
+
+        status = tool_status("search", True)
+        if not status["available"]:
+            return skipped(status["reason"] or "Tool calls are unavailable for the remote model.")
+        categories = [c for c in CATEGORIES if coverage.get(c, {}).get("supported") and not (design_mode and c == "clean_code")]
+        leads = {c: [row for row in findings if row.get("category") == c and row.get("kind") == "finding"] for c in categories}
+        brief = {c: {key: coverage[c].get(key) for key in ("status", "evidence_count", "reason")} for c in categories}
+        model, model_name = _chat_model(0.0, 1.0, None)
+        context = ToolContext(workflow="search", project_id=project_id, revision_id=revision_id,
+                              commit_sha=snapshot.get("commit_sha"))
+        result = run_reviews(categories, leads, brief, context, model, config)
+        return {**result, "version": VERSION, "model": model_name, "scoring_parameters": {"temperature": 0, "top_p": 1}}
+    except Exception as exc:  # noqa: BLE001 — reviews add evidence; their failure never fails the assessment
+        return {**skipped(f"Category reviews failed to start ({type(exc).__name__})."), "status": "unavailable"}
+
+
 def _finding(file: str, line: int, rule: str, category: str, message: str, offset: int = 0) -> dict:
     identifier = "ev_" + sha256(f"{file}:{line}:{rule}:{offset}".encode()).hexdigest()[:16]
     return {"evidence_id": identifier, "kind": "finding", "category": category, "rule": rule,
@@ -1225,6 +1258,14 @@ def assess_revision(project_id: str, revision_id: str, snapshot: dict, archive_d
                         for row in framework_coverage.get("checks", []) if row.get("category")}
     coverage = _category_coverage(languages, evidence, scan_stats, analyzer_failures,
                                   {key: value for key, value in evidence_reasons.items() if value})
+    # Budgeted, tool-using review per covered category (plan Phase 4); its cited findings join the evidence.
+    category_reviews = _run_category_reviews(project_id, revision_id, snapshot, languages, findings, coverage, design_mode)
+    review_findings = [row for review in category_reviews.get("categories", {}).values() for row in review.pop("findings", [])]
+    if review_findings:
+        findings = (review_findings + findings)[:MAX_FINDINGS]
+        evidence = [*review_findings, *evidence]
+        coverage = _category_coverage(languages, evidence, scan_stats, analyzer_failures,
+                                      {key: value for key, value in evidence_reasons.items() if value})
     from code_quality.deterministic_scoring import score_categories
 
     deterministic_categories = score_categories(evidence, coverage, analyzer_failures)
@@ -1461,6 +1502,7 @@ def assess_revision(project_id: str, revision_id: str, snapshot: dict, archive_d
         "overall_score": overall,
         "categories": categories,
         "clean_code_design": design_provenance,
+        "category_reviews": category_reviews,
         "shadow_scoring": {"version": DETERMINISTIC_SCORING_VERSION,
                            "status": "experimental", "categories": deterministic_categories},
         "weights": weights,
