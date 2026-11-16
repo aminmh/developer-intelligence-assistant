@@ -17,7 +17,7 @@ from agent.core.records import ConfigRiskRecord
 NAME = "config-risks"
 VERSION = "config-risks-1"
 MAX_FINDINGS = 100
-_CATEGORIES = {"security", "reliability", "performance", "maintainability", "clean_code"}
+_CATEGORIES = {"security", "reliability", "performance", "maintainability", "clean_code", "testing", "process"}
 _SEVERITIES = {"error", "warning", "info"}
 
 

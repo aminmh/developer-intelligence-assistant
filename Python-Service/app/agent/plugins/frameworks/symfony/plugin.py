@@ -18,7 +18,7 @@ class SymfonyFrameworkPlugin(FrameworkPlugin):
     language = "php"
     capabilities = (Capability.AST_ANALYSIS, Capability.DEPENDENCY_ANALYSIS,
                     Capability.ROUTE_ANALYSIS, Capability.ROUTE_AUTHORIZATION, Capability.TAINT_MODEL,
-                    Capability.CONFIG_RISKS)
+                    Capability.CONFIG_RISKS, Capability.TRANSLATIONS, Capability.TEMPLATES)
 
     def provide(self, capability: Capability, context: "RevisionContext") -> list:
         """Routes, guards and access rules from PHP facts and Symfony configuration; the Psalm taint model.
@@ -37,6 +37,10 @@ class SymfonyFrameworkPlugin(FrameworkPlugin):
             stub = _Path(__file__).with_name("psalm") / "taint.phpstub"
             return [TaintStubRecord(framework="symfony", analyzer="psalm", name="symfony.phpstub",
                                     content=stub.read_text(encoding="utf-8"))]
+        if capability in (Capability.TRANSLATIONS, Capability.TEMPLATES):  # configuration files, no PHP facts
+            from agent.plugins.frameworks.symfony.localization import provide_templates, provide_translations
+
+            return provide_translations(context) if capability == Capability.TRANSLATIONS else provide_templates(context)
         facts = context.facts("php")
         if facts is None:
             raise CapabilityUnavailable("PHP facts are unavailable for this revision, so Symfony routes cannot be read.")

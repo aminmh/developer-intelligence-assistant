@@ -39,12 +39,20 @@ class FrameworkCheck:
     run: Callable[..., Any]
     # when True, run(collections, settings) also receives the project's check settings
     accepts_settings: bool = False
+    # when True, the RevisionContext is passed as the last argument (evidence-file collectors read files)
+    accepts_context: bool = False
+    # when True, the check runs even if no detected plugin provides its capabilities (it has neutral evidence too)
+    runs_without_providers: bool = False
+    # the assessment category the check collects evidence for, when it has one (evidence categories)
+    category: str | None = None
 
 
 def _registered_checks() -> list[FrameworkCheck]:
-    from code_quality import config_risks, route_authorization
+    from code_quality import (accessibility_checks, config_risks, documentation_checks, localization_checks,
+                              process_checks, route_authorization, testing_checks)
 
-    return [route_authorization.check(), config_risks.check()]
+    return [route_authorization.check(), config_risks.check(), process_checks.check(), testing_checks.check(),
+            documentation_checks.check(), localization_checks.check(), accessibility_checks.check()]
 
 
 # Registered framework-neutral checks.
@@ -73,21 +81,27 @@ def run_framework_checks(context: Any, checks: list[FrameworkCheck] | None = Non
     for check in checks:
         own = {capability: collections[capability] for capability in check.capabilities}
         statuses = {collection.status for collection in own.values()}
-        if statuses == {"unavailable"} or not statuses:
+        if (statuses == {"unavailable"} or not statuses) and not check.runs_without_providers:
             check_rows.append({"name": check.name, "version": check.version, "status": "unavailable",
                                "reason": "No detected framework plugin provides "
                                          + ", ".join(c.value for c in check.capabilities) + "."})
             continue
         summary = None
         try:
-            produced = (check.run(own, settings or {}) if check.accepts_settings else check.run(own)) or []
+            arguments: list[Any] = [own]
+            if check.accepts_settings:
+                arguments.append(settings or {})
+            if check.accepts_context:
+                arguments.append(context)
+            produced = check.run(*arguments) or []
             if isinstance(produced, tuple):
                 produced, summary = produced
             produced = list(produced)
         except Exception as exc:  # noqa: BLE001 — a failing check is reported, never fatal
             logger.warning("framework check %s failed: %s", check.name, exc)
             check_rows.append({"name": check.name, "version": check.version, "status": "failed",
-                               "reason": f"{check.name} failed ({type(exc).__name__})."})
+                               "reason": f"{check.name} failed ({type(exc).__name__}).",
+                               **({"category": check.category} if check.category else {})})
             continue
         for finding in produced:
             finding.setdefault("tool", check.name)
@@ -95,7 +109,8 @@ def run_framework_checks(context: Any, checks: list[FrameworkCheck] | None = Non
         findings.extend(produced)
         check_rows.append({"name": check.name, "version": check.version,
                            "status": "partial" if "partial" in statuses or "unavailable" in statuses else "complete",
-                           "findings": len(produced), **({"summary": summary} if summary is not None else {})})
+                           "findings": len(produced), **({"summary": summary} if summary is not None else {}),
+                           **({"category": check.category} if check.category else {})})
     return findings, {"checks": check_rows,
                       "capabilities": [collection.coverage() for collection in collections.values()]}
 

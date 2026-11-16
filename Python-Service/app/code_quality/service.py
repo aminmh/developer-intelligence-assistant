@@ -1091,8 +1091,10 @@ def assess_revision(project_id: str, revision_id: str, snapshot: dict, archive_d
     try:
         from code_quality.framework_evidence import run_on_archive as run_framework_checks
         from code_quality.public_routes import PublicRouteStore
+        # Readable evidence files (CI, docs, translations, templates) join the tree for the evidence-category checks.
+        evidence_paths = [row["path"] for row in (evidence_inventory or {}).get("files", []) if row["readable"]]
         framework_rows, framework_coverage = run_framework_checks(
-            archive_data, files, snapshot.get("source_archive_sha256"),
+            archive_data, list(dict.fromkeys([*files, *evidence_paths])), snapshot.get("source_archive_sha256"),
             settings={"public_routes": PublicRouteStore().patterns(project_id)})
     except Exception as exc:  # noqa: BLE001 — a failing check is reported, never fatal
         framework_rows = []
@@ -1101,12 +1103,15 @@ def assess_revision(project_id: str, revision_id: str, snapshot: dict, archive_d
         if capability.get("gaps"):
             analyzer_failures.append({"name": f"framework:{capability['capability']}",
                                       "reason": " ".join(gap["reason"] for gap in capability["gaps"])[:240]})
-    findings = (findings + [
+    framework_findings = [
         _finding(row["file"], row["line"], row["rule"], row["category"], row["message"])
         | {"severity": row.get("severity", "warning"), "kind": "finding", "tool": row.get("tool"),
            "tool_version": row.get("tool_version")}
         for row in framework_rows if row.get("category") in CATEGORIES
-    ])[:MAX_FINDINGS]
+    ]
+    # Evidence categories are assessed only from their own findings, so the finding limit never drops them.
+    findings = ([row for row in framework_findings if row["category"] in EVIDENCE_CATEGORIES] + findings
+                + [row for row in framework_findings if row["category"] not in EVIDENCE_CATEGORIES])[:MAX_FINDINGS]
     # declare(strict_types=1) coverage from PHP facts: one maintainability finding per revision (plan task 10).
     strict_types_summary = None
     if "php" in languages:
@@ -1215,7 +1220,11 @@ def assess_revision(project_id: str, revision_id: str, snapshot: dict, archive_d
         semantic_evidence.extend(local_category_context)
     coverage_evidence = _coverage_evidence(project_id, revision_id, languages, findings, scan_stats)
     evidence = [*findings, *flow_evidence, *coverage_evidence, *semantic_evidence]
-    coverage = _category_coverage(languages, evidence, scan_stats, analyzer_failures)
+    # Why an evidence category has no findings, from its collector (or its collector's failure).
+    evidence_reasons = {row["category"]: (row.get("summary") or {}).get("reason") or row.get("reason")
+                        for row in framework_coverage.get("checks", []) if row.get("category")}
+    coverage = _category_coverage(languages, evidence, scan_stats, analyzer_failures,
+                                  {key: value for key, value in evidence_reasons.items() if value})
     from code_quality.deterministic_scoring import score_categories
 
     deterministic_categories = score_categories(evidence, coverage, analyzer_failures)

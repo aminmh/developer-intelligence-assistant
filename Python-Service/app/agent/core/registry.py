@@ -179,7 +179,11 @@ class PluginRegistry:
         project = context.project
         result = CapabilityCollection(capability=capability)
         allowed = RECORD_TYPES.get(capability, ())
-        for plugin in self._frameworks.values():
+        # Language plugins join only when they advertise the capability (a language's own tooling,
+        # such as its test runner's configuration); one that does not is not a gap.
+        languages = [plugin for plugin in self._languages.values()
+                     if capability in tuple(getattr(plugin, "capabilities", ()) or ())]
+        for plugin in [*self._frameworks.values(), *languages]:
             try:
                 detection = plugin.detect(project)
             except Exception:  # noqa: BLE001 — a broken detector must not stop collection
@@ -210,6 +214,11 @@ class PluginRegistry:
                 continue
             result.providers.append(plugin.name)
             result.records.extend(records)
+        # A framework that does not provide a capability its language plugin provided is not a gap.
+        covered = {plugin.name for plugin in languages if plugin.name in result.providers}
+        result.gaps = [gap for gap in result.gaps
+                       if not (getattr(self._frameworks.get(gap["framework"]), "language", None) in covered
+                               and gap["reason"].endswith(f"does not provide {capability.value}."))]
         return result
 
 

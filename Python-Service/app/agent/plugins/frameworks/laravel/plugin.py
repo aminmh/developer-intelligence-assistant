@@ -115,6 +115,8 @@ class LaravelFrameworkPlugin(FrameworkPlugin):
         Capability.ROUTE_AUTHORIZATION,
         Capability.TAINT_MODEL,
         Capability.CONFIG_RISKS,
+        Capability.TRANSLATIONS,
+        Capability.TEMPLATES,
         Capability.RUNTIME_INSPECTION,
         Capability.TEST_EXECUTION,
     )
@@ -848,6 +850,14 @@ class LaravelFrameworkPlugin(FrameworkPlugin):
             stub = _Path(__file__).with_name("psalm") / "taint.phpstub"
             return [TaintStubRecord(framework="laravel", analyzer="psalm", name="laravel.phpstub",
                                     content=stub.read_text(encoding="utf-8"))]
+        if capability == Capability.TEMPLATES:
+            from agent.plugins.frameworks.laravel.localization import provide_templates
+
+            return provide_templates(context)
+        if capability == Capability.TRANSLATIONS:  # JSON catalogues need no facts; PHP-array catalogues do
+            from agent.plugins.frameworks.laravel.localization import provide_translations
+
+            return provide_translations(context, context.facts("php"))
         facts = context.facts("php")
         if facts is None:
             raise CapabilityUnavailable("PHP facts are unavailable for this revision, so Laravel routes cannot be read.")
