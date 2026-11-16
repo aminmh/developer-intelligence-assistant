@@ -3,7 +3,7 @@
 Decision: @.archcore/code-quality/framework-knowledge-lives-in-plugins-over-language-facts.adr.md.
 Framework plugins read facts produced by each language's own parser instead of
 parsing source themselves. For PHP that is ``php bin/project-inspect facts``
-(nikic/php-parser, schema ``php-facts-1``; @api/Python-Service/php/src/Inspection/FactsExporter.php).
+(nikic/php-parser, schema ``php-facts-2``; @api/Python-Service/php/src/Inspection/FactsExporter.php).
 
 Facts are stored per revision, keyed by the source archive's SHA-256, under
 ``FACTS_DIR`` (default ``/app/data/facts``) as ``<sha256>.<language>.json.gz``.
@@ -11,8 +11,9 @@ Facts are stored per revision, keyed by the source archive's SHA-256, under
 
 Argument and constant values arrive encoded (see the exporter): JSON scalars,
 ``{"array": [...]}``, ``{"class": FQN}``, ``{"const": {"class", "name"}}``,
-``{"call": {"name", "args"}}``, ``{"concat": [parts]}``, ``{"closure": true}`` or
-``{"expr": text}``.
+``{"call": {"name", "args"}}``, ``{"concat": [parts]}``, ``{"magic": "__DIR__"}``,
+``{"closure": true}`` or ``{"expr": text}``. Files also list ``includes``
+(``require``/``include`` targets with the call whose closure contains them).
 The ``literal_*`` helpers below decode them.
 """
 
@@ -29,7 +30,7 @@ from typing import Any, Iterator
 
 logger = logging.getLogger(__name__)
 
-PHP_FACTS_SCHEMA = "php-facts-1"
+PHP_FACTS_SCHEMA = "php-facts-2"
 _SHA = re.compile(r"[0-9a-f]{64}\Z")
 
 
@@ -84,7 +85,7 @@ def short_name(fqn: str | None) -> str:
 # ── PHP facts ────────────────────────────────────────────────────────────────
 
 class PhpFacts:
-    """Read-only view over one revision's ``php-facts-1`` export."""
+    """Read-only view over one revision's ``php-facts-2`` export."""
 
     language = "php"
 
@@ -154,6 +155,10 @@ class PhpFacts:
             for call in file.get("calls") or []:
                 yield call, file
 
+    def includes(self, path: str) -> list[dict[str, Any]]:
+        """``require``/``include`` statements of one file: ``{line, path, parent}``."""
+        return [item for item in (self.file(path) or {}).get("includes") or [] if isinstance(item, dict)]
+
     def strict_types_ratio(self, prefix: str = "") -> tuple[int, int]:
         files = [f for f in self.files() if str(f.get("path", "")).startswith(prefix) and "parse_error" not in f]
         return sum(1 for f in files if f.get("strict_types")), len(files)
@@ -220,6 +225,8 @@ def export_php_facts(root: str | Path) -> dict[str, Any] | None:
 def facts_for_workspace(root: str | Path, archive_sha256: str | None = None) -> PhpFacts | None:
     """PHP facts for an extracted revision: stored ones when present, else exported (and stored)."""
     stored = load_facts(archive_sha256, "php") if archive_sha256 else None
+    if stored is not None and stored.get("schema") != PHP_FACTS_SCHEMA:
+        stored = None  # exported by an older exporter: export again and replace it
     if stored is None:
         if not has_language_files(root):
             return None

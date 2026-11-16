@@ -5,7 +5,7 @@ Reads only normalized records (decision: framework-knowledge-lives-in-plugins-ov
 (capability ``route_authorization``) from whichever framework plugins the revision uses.
 
 A route is **protected** by a non-public guard on its handler (or the handler's class,
-``Class::*``) or on the route itself, or by the deciding access rule with requirements;
+``Class::*``) or on the route itself (``/path`` or ``METHOD /path``), or by the deciding access rule with requirements;
 **public** when every guard explicitly allows anonymous access, or the deciding rule is
 public and nothing protects it; otherwise **unprotected**, which becomes a Security finding
 at the handler. Access rules are evaluated layer by layer, first non-conditional match per
@@ -68,7 +68,7 @@ def _deciding_rules(rules: list[AccessRuleRecord], path: str, method: str) -> li
 def decide(route: RouteRecord, method: str, guards: list[GuardRecord], rules: list[AccessRuleRecord]) -> dict[str, Any]:
     owner = (route.handler or "").partition("::")[0]
     own = [g for g in guards if g.handler and (g.handler == route.handler or g.handler == f"{owner}::*")]
-    own += [g for g in guards if g.route and g.route == route.path]
+    own += [g for g in guards if g.route and g.route in (route.path, f"{method} {route.path}")]
     mechanisms = sorted({g.kind for g in own if not g.public})
     public_reason = None
     if own and all(g.public for g in own):

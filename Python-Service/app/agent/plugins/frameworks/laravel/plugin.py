@@ -30,6 +30,7 @@ from agent.interfaces.validator import Validator
 from agent.plugins.validators import ArtisanValidator, PhpUnitValidator
 
 if TYPE_CHECKING:
+    from agent.core.revision import RevisionContext
     from projects.domain.types import DomainExtraction
 
 _LARAVEL_REQUIRE = "laravel/framework"
@@ -111,6 +112,7 @@ class LaravelFrameworkPlugin(FrameworkPlugin):
         Capability.AST_ANALYSIS,
         Capability.DEPENDENCY_ANALYSIS,
         Capability.ROUTE_ANALYSIS,
+        Capability.ROUTE_AUTHORIZATION,
         Capability.RUNTIME_INSPECTION,
         Capability.TEST_EXECUTION,
     )
@@ -159,13 +161,17 @@ class LaravelFrameworkPlugin(FrameworkPlugin):
 
         route_table: list[dict] = []
         if route_files:
-            from agent.plugins.frameworks.laravel.routes import (
-                parse_routes_directory,
-            )
+            # PHP facts (real parser, group middleware and route-file loading) when a
+            # subprocess is allowed; the regex DSL parser stays the offline fallback.
+            route_table = (_facts_route_table(root) if runtime_routes else None) or []
+            if not route_table:
+                from agent.plugins.frameworks.laravel.routes import (
+                    parse_routes_directory,
+                )
 
-            route_table = parse_routes_directory(
-                [(p.name, p.read_text(encoding="utf-8", errors="replace")) for p in route_files]
-            )
+                route_table = parse_routes_directory(
+                    [(p.name, p.read_text(encoding="utf-8", errors="replace")) for p in route_files]
+                )
             findings.append(
                 AnalysisFinding(
                     message=f"{len(route_files)} route file(s): "
@@ -822,6 +828,36 @@ class LaravelFrameworkPlugin(FrameworkPlugin):
 
     def get_validators(self) -> list[Validator]:
         return [ArtisanValidator(), PhpUnitValidator()]
+
+    def provide(self, capability: Capability, context: "RevisionContext") -> list:
+        """Routes and authorization guards from PHP facts.
+
+        Decision: framework-knowledge-lives-in-plugins-over-language-facts. No PHP is parsed here.
+        """
+        from agent.interfaces.capabilities import CapabilityUnavailable
+        from agent.plugins.frameworks.laravel.authorization import provide_guards
+        from agent.plugins.frameworks.laravel.routes_from_facts import provide_routes
+
+        facts = context.facts("php")
+        if facts is None:
+            raise CapabilityUnavailable("PHP facts are unavailable for this revision, so Laravel routes cannot be read.")
+        if capability == Capability.ROUTE_ANALYSIS:
+            return provide_routes(context, facts)
+        if capability == Capability.ROUTE_AUTHORIZATION:
+            return provide_guards(facts, provide_routes(context, facts))
+        return []
+
+
+def _facts_route_table(laravel_root: Path) -> list[dict] | None:
+    """``route:list`` shaped rows from PHP facts; None when facts cannot be exported."""
+    from agent.core.facts import facts_for_workspace
+    from agent.core.revision import RevisionContext
+    from agent.plugins.frameworks.laravel.routes_from_facts import provide_routes, route_table
+
+    facts = facts_for_workspace(laravel_root)
+    if facts is None:
+        return None
+    return route_table(provide_routes(RevisionContext.from_directory(laravel_root), facts)) or None
 
 
 def _runtime_routes(laravel_root: Path) -> list[dict] | None:

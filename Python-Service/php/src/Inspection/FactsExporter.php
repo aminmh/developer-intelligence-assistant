@@ -15,7 +15,7 @@ use PhpParser\NodeVisitorAbstract;
 use PhpParser\PrettyPrinter\Standard as PrettyPrinter;
 
 /**
- * Language facts for framework plugins (schema ``php-facts-1``).
+ * Language facts for framework plugins (schema ``php-facts-2``).
  *
  * One pass over a project's PHP files with the real parser. Framework plugins
  * (Python, ``agent/plugins/frameworks``) read these facts instead of parsing
@@ -26,16 +26,17 @@ use PhpParser\PrettyPrinter\Standard as PrettyPrinter;
  * properties including constructor-promoted ones, methods), functions, calls
  * (static, function, ``new``, and method calls on ``$this``, on properties or
  * with literal arguments, each with its fluent chain, its enclosing scope and
- * the call whose closure argument contains it), and the top-level ``return``
- * value (configuration files).
+ * the call whose closure argument contains it), ``require``/``include`` targets
+ * with the call whose closure contains them, and the top-level ``return`` value
+ * (configuration files).
  *
  * Argument values are encoded as JSON scalars, ``{"array": [...]}``,
  * ``{"class": FQN}`` for ``X::class``, ``{"const": {...}}``, ``{"call": {...}}``,
- * ``{"closure": true}`` or a bounded ``{"expr": "..."}``. Nothing is executed.
+ * ``{"concat": [...]}``, ``{"magic": "__DIR__"}``, ``{"closure": true}`` or a bounded ``{"expr": "..."}``. Nothing is executed.
  */
 final class FactsExporter
 {
-    public const SCHEMA = 'php-facts-1';
+    public const SCHEMA = 'php-facts-2';
     public const MAX_CALLS_PER_FILE = 3000;
 
     private PhpAstParser $parser;
@@ -107,6 +108,8 @@ final class FactsVisitor extends NodeVisitorAbstract
     private array $parentStack = [];
     /** @var array<int,true> closures that pushed onto $parentStack */
     private array $pushed = [];
+    /** @var list<array<string,mixed>> */
+    private array $includes = [];
     private mixed $returns = null;
     private bool $hasReturn = false;
 
@@ -124,6 +127,7 @@ final class FactsVisitor extends NodeVisitorAbstract
             'functions' => $this->functions,
             'calls' => $this->calls,
             'calls_truncated' => $this->callsTruncated,
+            'includes' => $this->includes,
         ] + ($this->hasReturn ? ['returns' => $this->returns] : []);
     }
 
@@ -187,6 +191,9 @@ final class FactsVisitor extends NodeVisitorAbstract
                   && !$this->parentStack && $node->expr !== null && !$this->hasReturn) {
             $this->hasReturn = true;
             $this->returns = $this->literal($node->expr, 0);
+        } elseif ($node instanceof Expr\Include_) {
+            $this->includes[] = ['line' => $node->getStartLine(), 'path' => $this->literal($node->expr, 0),
+                                 'parent' => $this->parentStack ? $this->parentStack[count($this->parentStack) - 1] : null];
         } elseif ($node instanceof Expr\Closure || $node instanceof Expr\ArrowFunction) {
             $id = spl_object_id($node);
             if (isset($this->closureParent[$id])) {
@@ -474,6 +481,9 @@ final class FactsVisitor extends NodeVisitorAbstract
             $class = $this->className($expr->class);
             $name = $this->identifier($expr->name);
             return $name === 'class' ? ['class' => $class] : ['const' => ['class' => $class, 'name' => $name]];
+        }
+        if ($expr instanceof Node\Scalar\MagicConst\Dir) {
+            return ['magic' => '__DIR__'];
         }
         if ($expr instanceof Expr\Closure || $expr instanceof Expr\ArrowFunction) {
             return ['closure' => true];

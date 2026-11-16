@@ -32,7 +32,7 @@ class GuardRecord:
 
     framework: str
     handler: str | None                # handler symbol, or None for a route-level guard
-    route: str | None                  # route path when the guard is attached to a route, not a handler
+    route: str | None                  # "/path" or "METHOD /path" when the guard is attached to a route, not a handler
     kind: str                          # "attribute" | "annotation" | "call" | "middleware"
     requirement: str                   # role, permission, ability or expression as written
     public: bool                       # True when the guard explicitly allows anonymous access

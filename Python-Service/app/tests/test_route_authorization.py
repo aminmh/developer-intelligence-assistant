@@ -313,13 +313,7 @@ def test_files_outside_the_assessed_list_are_not_read():
     assert not any("/api/orders" in row["message"] for row in findings)
 
 
-def test_laravel_and_plain_projects_produce_no_symfony_findings():
-    laravel = {"composer.json": '{"require": {"laravel/framework": "^11.0"}}', "routes/api.php": "<?php"}
-    data, names = _archive(laravel)
-    findings, coverage = run_on_archive(data, names, checks=[route_authorization.check()])
-    assert findings == [] and coverage["checks"][0]["status"] == "unavailable"
-    gap = coverage["capabilities"][0]["gaps"][0]
-    assert gap["framework"] == "laravel" and "does not provide" in gap["reason"]
+def test_projects_without_a_route_framework_produce_no_findings():
     data, names = _archive({"main.py": "print(1)"})
     findings, coverage = run_on_archive(data, names, checks=[route_authorization.check()])
     assert findings == [] and coverage["capabilities"][0]["detected_frameworks"] == []
