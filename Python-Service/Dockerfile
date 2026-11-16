@@ -85,6 +85,14 @@ RUN cd /opt/php-lsp && composer install --no-dev --no-interaction --no-progress 
 }
 EOF
 
+# Psalm for PHP taint analysis when no analyzer worker is configured (code_quality/taint_analysis.py),
+# pinned by its lock file (decision: bundled-security-rules-are-redistributable).
+COPY php/psalm/composer.json php/psalm/composer.lock php/psalm/missing-symbols.php /opt/psalm/
+RUN --mount=type=cache,target=/root/.cache/composer cd /opt/psalm \
+    && composer install --no-dev --no-interaction --no-progress --no-scripts --optimize-autoloader \
+    && php vendor/bin/psalm --version
+ENV PSALM_ROOT=/opt/psalm
+
 COPY . .
 
 EXPOSE 9002

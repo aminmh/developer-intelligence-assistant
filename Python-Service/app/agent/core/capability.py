@@ -29,3 +29,4 @@ class Capability(str, Enum):
     TEMPLATES = "templates"
     TEST_CONVENTIONS = "test_conventions"
     CONFIG_RISKS = "config_risks"
+    TAINT_MODEL = "taint_model"

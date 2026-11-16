@@ -19,7 +19,7 @@ MAX_WORKER_ARCHIVE_BYTES = 64 * 1024 * 1024
 MAX_WORKER_RESPONSE_BYTES = 5 * 1024 * 1024
 MAX_WORKER_FINDINGS = 500
 _SHA256 = re.compile(r"^[a-f0-9]{64}$")
-_ALLOWED_ANALYZERS = {"sonarqube", "joern"}
+_ALLOWED_ANALYZERS = {"sonarqube", "joern", "psalm"}
 _ALLOWED_STATUSES = {"complete", "partial", "failed", "unavailable", "disabled"}
 
 
@@ -205,23 +205,37 @@ def _filtered_source_bundle(archive_data: bytes, files: list[str]) -> tuple[byte
     return result, line_counts
 
 
+def _not_selected(name: str) -> dict[str, Any]:
+    reason = "No PHP source to trace." if name == "psalm" else "The analyzer is disabled for this project."
+    return _unavailable(name, reason, "disabled")
+
+
 def run_worker(target: dict[str, Any], settings: dict[str, Any], archive_data: bytes,
                files: list[str], languages: dict[str, int], revision_id: str,
-               commit_sha: str | None, token: str | None) -> dict[str, Any]:
+               commit_sha: str | None, token: str | None,
+               taint_stubs: dict[str, str] | None = None) -> dict[str, Any]:
     if not target.get("source_transfer_consent"):
         reason = "Explicit consent is required before transferring source to the configured analyzer worker."
         return {name: _unavailable(name, reason) for name in _ALLOWED_ANALYZERS}
-    analyzers = [name for name in sorted(_ALLOWED_ANALYZERS)
-                 if settings.get(name if name == "joern" else "sonarqube", {}).get("enabled")]
+    # SonarQube and Joern are opt-in per project; Psalm taint analysis is the bundled PHP baseline.
+    enabled = {"sonarqube": bool(settings.get("sonarqube", {}).get("enabled")),
+               "joern": bool(settings.get("joern", {}).get("enabled")),
+               "psalm": "php" in languages}
+    if enabled["psalm"]:
+        # A worker built before Psalm was added rejects the analyzer and would fail the whole job;
+        # ask first and leave Psalm to the API fallback when the worker does not offer it.
+        try:
+            enabled["psalm"] = get_worker_capabilities(target).get("psalm", {}).get("status") == "ready"
+        except (RemoteWorkerError, AttributeError):
+            enabled["psalm"] = False
+    analyzers = [name for name in sorted(_ALLOWED_ANALYZERS) if enabled[name]]
     if not analyzers:
-        return {name: _unavailable(name, "The analyzer is disabled for this project.", "disabled")
-                for name in _ALLOWED_ANALYZERS}
+        return {name: _not_selected(name) for name in _ALLOWED_ANALYZERS}
     try:
         source_bundle, line_counts = _filtered_source_bundle(archive_data, files)
     except RemoteWorkerError as exc:
         return {name: _unavailable(name, str(exc)) for name in analyzers} | {
-            name: _unavailable(name, "The analyzer is disabled for this project.", "disabled")
-            for name in _ALLOWED_ANALYZERS - set(analyzers)}
+            name: _not_selected(name) for name in _ALLOWED_ANALYZERS - set(analyzers)}
     bundle_sha256 = hashlib.sha256(source_bundle).hexdigest()
     payload = {
         "schema_version": 1,
@@ -241,6 +255,8 @@ def run_worker(target: dict[str, Any], settings: dict[str, Any], archive_data: b
         },
         "sonarqube_token": token if "sonarqube" in analyzers else None,
     }
+    if "psalm" in analyzers and taint_stubs:
+        payload["taint_stubs"] = taint_stubs
     try:
         result = _request(target, "POST", "/v1/jobs", payload, timeout=450)
         if (result.get("schema_version") != 1 or result.get("job_id") != payload["job_id"]
@@ -254,14 +270,13 @@ def run_worker(target: dict[str, Any], settings: dict[str, Any], archive_data: b
         for name in _ALLOWED_ANALYZERS:
             output = outputs.get(name)
             if name not in analyzers:
-                normalized[name] = _unavailable(name, "The analyzer is disabled for this project.", "disabled")
+                normalized[name] = _not_selected(name)
                 continue
             normalized[name] = _validate_result(name, output, set(files), line_counts)
         return normalized
     except RemoteWorkerError as exc:
         return {name: _unavailable(name, str(exc)) for name in analyzers} | {
-            name: _unavailable(name, "The analyzer is disabled for this project.", "disabled")
-            for name in _ALLOWED_ANALYZERS - set(analyzers)}
+            name: _not_selected(name) for name in _ALLOWED_ANALYZERS - set(analyzers)}
 
 
 def _unavailable(name: str, reason: str, status: str = "unavailable") -> dict[str, Any]:

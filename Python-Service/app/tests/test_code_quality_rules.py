@@ -128,4 +128,4 @@ def test_builtin_ruleset_omits_the_non_structural_nested_loop_heuristic():
     rules, _, _, _ = analyzers._rule_document([], include_builtins=True)
 
     assert "builtin-nested-loop" not in rules
-    assert analyzers.BUILTIN_RULESET_VERSION == "code-quality-builtins-5"
+    assert analyzers.BUILTIN_RULESET_VERSION == "code-quality-builtins-6"

@@ -18,9 +18,10 @@ import io
 import logging
 import tempfile
 import zipfile
+from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any, Callable, Iterator
 
 from agent.core.capability import Capability
 
@@ -97,12 +98,9 @@ def run_framework_checks(context: Any, checks: list[FrameworkCheck] | None = Non
                       "capabilities": [collection.coverage() for collection in collections.values()]}
 
 
-def run_on_archive(archive_data: bytes, files: list[str], archive_sha256: str | None = None,
-                   checks: list[FrameworkCheck] | None = None, registry: Any = None) -> tuple[list[dict[str, Any]], dict[str, Any]]:
-    """Extract the inventoried files to a temporary tree and run the framework checks on it."""
-    checks = FRAMEWORK_CHECKS if checks is None else checks
-    if not checks:
-        return [], {"checks": [], "capabilities": []}
+@contextmanager
+def archive_context(archive_data: bytes, files: list[str], archive_sha256: str | None = None) -> Iterator[Any]:
+    """A ``RevisionContext`` over the inventoried files plus manifests and configuration (never secrets)."""
     from agent.core.revision import RevisionContext, is_secret_path
     from code_quality.service import MAX_FILE_BYTES, _safe_archive_path
 
@@ -117,8 +115,40 @@ def run_on_archive(archive_data: bytes, files: list[str], archive_sha256: str | 
                 target = Path(root, relative)
                 target.parent.mkdir(parents=True, exist_ok=True)
                 target.write_bytes(archive.read(member))
-        context = RevisionContext.from_directory(root, archive_sha256=archive_sha256)
+        yield RevisionContext.from_directory(root, archive_sha256=archive_sha256)
+
+
+def run_on_archive(archive_data: bytes, files: list[str], archive_sha256: str | None = None,
+                   checks: list[FrameworkCheck] | None = None, registry: Any = None) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+    """Extract the inventoried files to a temporary tree and run the framework checks on it."""
+    checks = FRAMEWORK_CHECKS if checks is None else checks
+    if not checks:
+        return [], {"checks": [], "capabilities": []}
+    with archive_context(archive_data, files, archive_sha256) as context:
         return run_framework_checks(context, checks, registry)
+
+
+def taint_stubs(archive_data: bytes, files: list[str], analyzer: str = "psalm", language: str = "php",
+                registry: Any = None) -> tuple[dict[str, str], dict[str, Any]]:
+    """``({file name: stub}, coverage)`` of the taint models the detected framework plugins provide.
+
+    Coverage gaps are kept only for detected frameworks of ``language``: a front-end
+    framework is not expected to model PHP taint.
+    """
+    from agent.core.records import TaintStubRecord
+
+    if registry is None:
+        from agent import default_registry
+
+        registry = default_registry()
+    with archive_context(archive_data, files) as context:
+        collection = collect_capabilities(context, {Capability.TAINT_MODEL}, registry)[Capability.TAINT_MODEL]
+    stubs = {record.name: record.content for record in collection.records
+             if isinstance(record, TaintStubRecord) and record.analyzer == analyzer}
+    languages = {name: getattr(plugin, "language", None) for name, plugin in registry.frameworks.items()}
+    coverage = collection.coverage()
+    coverage["gaps"] = [gap for gap in coverage.get("gaps") or [] if languages.get(gap.get("framework")) == language]
+    return stubs, coverage
 
 
 # Non-source files framework plugins read (manifests and configuration); source files come from the inventory.

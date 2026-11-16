@@ -1,0 +1,162 @@
+<?php
+// Psalm taint model for Laravel (capability taint_model; plan task 9d).
+// Written in-house for Developer Assistant; the source and sink choices follow the
+// public Laravel APIs. Declarations only: Psalm parses this file, never runs it.
+// Sources: request data. Sinks: raw SQL, shell commands, outgoing HTTP URLs.
+
+namespace Illuminate\Http {
+    class Request
+    {
+        /** @psalm-taint-source input */
+        public function input($key = null, $default = null) {}
+        /** @psalm-taint-source input */
+        public function query($key = null, $default = null) {}
+        /** @psalm-taint-source input */
+        public function post($key = null, $default = null) {}
+        /** @psalm-taint-source input */
+        public function get(string $key, mixed $default = null): mixed {}
+        /** @psalm-taint-source input */
+        public function all($keys = null) {}
+        /** @psalm-taint-source input */
+        public function only($keys) {}
+        /** @psalm-taint-source input */
+        public function except($keys) {}
+        /** @psalm-taint-source input */
+        public function keys() {}
+        /** @psalm-taint-source input */
+        public function header($key = null, $default = null) {}
+        /** @psalm-taint-source input */
+        public function cookie($key = null, $default = null) {}
+        /** @psalm-taint-source input */
+        public function json($key = null, $default = null) {}
+        /** @psalm-taint-source input */
+        public function getContent(bool $asResource = false) {}
+        /** @psalm-taint-source input */
+        public function string($key, $default = null) {}
+        /** @psalm-taint-source input */
+        public function str($key, $default = null) {}
+        /** @psalm-taint-source input */
+        public function route($param = null, $default = null) {}
+        /** @psalm-taint-source input */
+        public function path() {}
+        /** @psalm-taint-source input */
+        public function fullUrl() {}
+        public function integer($key, $default = 0): int {}
+        public function boolean($key = null, $default = false): bool {}
+        public function has($key): bool {}
+        public function user($guard = null) {}
+    }
+}
+
+namespace Illuminate\Foundation\Http {
+    class FormRequest extends \Illuminate\Http\Request
+    {
+        /** @psalm-taint-source input */
+        public function validated($key = null, $default = null) {}
+        /** @psalm-taint-source input */
+        public function safe(?array $keys = null) {}
+    }
+}
+
+namespace Illuminate\Database\Query {
+    class Builder
+    {
+        /** @psalm-taint-sink sql $sql */
+        public function whereRaw($sql, $bindings = [], $boolean = 'and') {}
+        /** @psalm-taint-sink sql $sql */
+        public function orWhereRaw($sql, $bindings = []) {}
+        /** @psalm-taint-sink sql $sql */
+        public function havingRaw($sql, array $bindings = [], $boolean = 'and') {}
+        /** @psalm-taint-sink sql $sql */
+        public function orHavingRaw($sql, array $bindings = []) {}
+        /** @psalm-taint-sink sql $sql */
+        public function orderByRaw($sql, $bindings = []) {}
+        /** @psalm-taint-sink sql $expression */
+        public function selectRaw($expression, array $bindings = []) {}
+        /** @psalm-taint-sink sql $sql */
+        public function groupByRaw($sql, array $bindings = []) {}
+        /** @psalm-taint-sink sql $expression */
+        public function fromRaw($expression, $bindings = []) {}
+    }
+}
+
+namespace Illuminate\Database\Eloquent {
+    class Builder extends \Illuminate\Database\Query\Builder {}
+    abstract class Model
+    {
+        public static function query(): Builder {}
+        /** @psalm-taint-sink sql $sql */
+        public static function whereRaw($sql, $bindings = [], $boolean = 'and') {}
+        /** @psalm-taint-sink sql $expression */
+        public static function selectRaw($expression, array $bindings = []) {}
+        /** @psalm-taint-sink sql $sql */
+        public static function orderByRaw($sql, $bindings = []) {}
+    }
+}
+
+namespace Illuminate\Support\Facades {
+    class DB
+    {
+        public static function table($table, $as = null): \Illuminate\Database\Query\Builder {}
+        /** @psalm-taint-sink sql $value */
+        public static function raw($value) {}
+        /** @psalm-taint-sink sql $query */
+        public static function select($query, $bindings = [], $useReadPdo = true) {}
+        /** @psalm-taint-sink sql $query */
+        public static function selectOne($query, $bindings = [], $useReadPdo = true) {}
+        /** @psalm-taint-sink sql $query */
+        public static function scalar($query, $bindings = [], $useReadPdo = true) {}
+        /** @psalm-taint-sink sql $query */
+        public static function insert($query, $bindings = []) {}
+        /** @psalm-taint-sink sql $query */
+        public static function update($query, $bindings = []) {}
+        /** @psalm-taint-sink sql $query */
+        public static function delete($query, $bindings = []) {}
+        /** @psalm-taint-sink sql $query */
+        public static function statement($query, $bindings = []) {}
+        /** @psalm-taint-sink sql $query */
+        public static function affectingStatement($query, $bindings = []) {}
+        /** @psalm-taint-sink sql $query */
+        public static function unprepared($query) {}
+        /** @psalm-taint-sink sql $query */
+        public static function cursor($query, $bindings = [], $useReadPdo = true) {}
+    }
+    class Request
+    {
+        /** @psalm-taint-source input */
+        public static function input($key = null, $default = null) {}
+        /** @psalm-taint-source input */
+        public static function query($key = null, $default = null) {}
+        /** @psalm-taint-source input */
+        public static function all($keys = null) {}
+        /** @psalm-taint-source input */
+        public static function get(string $key, mixed $default = null): mixed {}
+    }
+    class Process
+    {
+        /** @psalm-taint-sink shell $command */
+        public static function run($command = null, ?callable $output = null) {}
+        /** @psalm-taint-sink shell $command */
+        public static function start($command = null, ?callable $output = null) {}
+    }
+    class Http
+    {
+        /** @psalm-taint-sink ssrf $url */
+        public static function get(string $url, $query = null) {}
+        /** @psalm-taint-sink ssrf $url */
+        public static function post(string $url, $data = []) {}
+        /** @psalm-taint-sink ssrf $url */
+        public static function put(string $url, $data = []) {}
+        /** @psalm-taint-sink ssrf $url */
+        public static function patch(string $url, $data = []) {}
+        /** @psalm-taint-sink ssrf $url */
+        public static function delete(string $url, $data = []) {}
+        /** @psalm-taint-sink ssrf $url */
+        public static function head(string $url, $query = null) {}
+    }
+}
+
+namespace {
+    /** @psalm-taint-source input */
+    function request($key = null, $default = null) {}
+}

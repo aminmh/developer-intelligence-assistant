@@ -12,6 +12,14 @@ RUN --mount=type=cache,target=/root/.cache/composer cd /opt/php-lsp \
     && composer install --no-dev --no-interaction --no-progress --no-scripts --optimize-autoloader \
     && php vendor/bin/phpactor --version
 
+# Psalm for PHP taint analysis (code_quality/taint_analysis.py), pinned by its lock file
+# (decision: bundled-security-rules-are-redistributable). Same Composer-only stage pattern.
+FROM php-lsp AS php-psalm
+COPY Python-Service/php/psalm/composer.json Python-Service/php/psalm/composer.lock /opt/psalm/
+RUN --mount=type=cache,target=/root/.cache/composer cd /opt/psalm \
+    && composer install --no-dev --no-interaction --no-progress --no-scripts --optimize-autoloader \
+    && php vendor/bin/psalm --version
+
 FROM python:3.12-slim-trixie
 
 ARG TARGETARCH
@@ -124,12 +132,16 @@ RUN apt-get update \
     && php --version
 
 COPY --from=php-lsp /opt/php-lsp /opt/php-lsp
+COPY --from=php-psalm /opt/psalm /opt/psalm
+COPY Python-Service/php/psalm/missing-symbols.php /opt/psalm/missing-symbols.php
+ENV PSALM_ROOT=/opt/psalm
 
 # App code last, so code changes rebuild only these layers, not the downloads above.
 COPY Python-Service/app/code_quality/__init__.py /app/code_quality/__init__.py
 COPY Python-Service/app/code_quality/service.py /app/code_quality/service.py
 COPY Python-Service/app/code_quality/external_analyzers.py /app/code_quality/external_analyzers.py
 COPY Python-Service/app/code_quality/scip_index.py /app/code_quality/scip_index.py
+COPY Python-Service/app/code_quality/taint_analysis.py /app/code_quality/taint_analysis.py
 COPY Python-Service/app/infra/settings.py /app/infra/settings.py
 COPY Python-Service/app/infra/settings_store.py /app/infra/settings_store.py
 COPY Python-Service/app/infra/log_paths.py /app/infra/log_paths.py

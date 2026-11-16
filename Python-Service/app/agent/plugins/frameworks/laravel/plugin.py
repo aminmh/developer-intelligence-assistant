@@ -113,6 +113,7 @@ class LaravelFrameworkPlugin(FrameworkPlugin):
         Capability.DEPENDENCY_ANALYSIS,
         Capability.ROUTE_ANALYSIS,
         Capability.ROUTE_AUTHORIZATION,
+        Capability.TAINT_MODEL,
         Capability.RUNTIME_INSPECTION,
         Capability.TEST_EXECUTION,
     )
@@ -830,7 +831,7 @@ class LaravelFrameworkPlugin(FrameworkPlugin):
         return [ArtisanValidator(), PhpUnitValidator()]
 
     def provide(self, capability: Capability, context: "RevisionContext") -> list:
-        """Routes and authorization guards from PHP facts.
+        """Routes and authorization guards from PHP facts; the Psalm taint model.
 
         Decision: framework-knowledge-lives-in-plugins-over-language-facts. No PHP is parsed here.
         """
@@ -838,6 +839,14 @@ class LaravelFrameworkPlugin(FrameworkPlugin):
         from agent.plugins.frameworks.laravel.authorization import provide_guards
         from agent.plugins.frameworks.laravel.routes_from_facts import provide_routes
 
+        if capability == Capability.TAINT_MODEL:
+            from pathlib import Path as _Path
+
+            from agent.core.records import TaintStubRecord
+
+            stub = _Path(__file__).with_name("psalm") / "taint.phpstub"
+            return [TaintStubRecord(framework="laravel", analyzer="psalm", name="laravel.phpstub",
+                                    content=stub.read_text(encoding="utf-8"))]
         facts = context.facts("php")
         if facts is None:
             raise CapabilityUnavailable("PHP facts are unavailable for this revision, so Laravel routes cannot be read.")

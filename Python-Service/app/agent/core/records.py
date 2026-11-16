@@ -112,5 +112,19 @@ class ConfigRiskRecord:
     details: dict[str, Any] = field(default_factory=dict)
 
 
+@dataclass(frozen=True)
+class TaintStubRecord:
+    """Capability ``taint_model``: a framework's taint sources and sinks for a taint analyzer.
+
+    ``content`` is analyzer input (for ``psalm``, a ``.phpstub`` of declarations with
+    ``@psalm-taint-source`` / ``@psalm-taint-sink`` annotations); it is parsed, never executed.
+    """
+
+    framework: str
+    analyzer: str                      # "psalm"
+    name: str                          # file name, e.g. "laravel.phpstub"
+    content: str
+
+
 def record_dict(record: Any) -> dict[str, Any]:
     return asdict(record)

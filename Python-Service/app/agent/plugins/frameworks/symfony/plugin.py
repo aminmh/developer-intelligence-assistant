@@ -17,10 +17,10 @@ class SymfonyFrameworkPlugin(FrameworkPlugin):
     name = "symfony"
     language = "php"
     capabilities = (Capability.AST_ANALYSIS, Capability.DEPENDENCY_ANALYSIS,
-                    Capability.ROUTE_ANALYSIS, Capability.ROUTE_AUTHORIZATION)
+                    Capability.ROUTE_ANALYSIS, Capability.ROUTE_AUTHORIZATION, Capability.TAINT_MODEL)
 
     def provide(self, capability: Capability, context: "RevisionContext") -> list:
-        """Routes, guards and access rules from PHP facts and Symfony configuration.
+        """Routes, guards and access rules from PHP facts and Symfony configuration; the Psalm taint model.
 
         Decision: framework-knowledge-lives-in-plugins-over-language-facts. No PHP is parsed here.
         """
@@ -28,6 +28,14 @@ class SymfonyFrameworkPlugin(FrameworkPlugin):
         from agent.plugins.frameworks.symfony.authorization import provide_access_rules, provide_guards
         from agent.plugins.frameworks.symfony.routes import provide_routes
 
+        if capability == Capability.TAINT_MODEL:
+            from pathlib import Path as _Path
+
+            from agent.core.records import TaintStubRecord
+
+            stub = _Path(__file__).with_name("psalm") / "taint.phpstub"
+            return [TaintStubRecord(framework="symfony", analyzer="psalm", name="symfony.phpstub",
+                                    content=stub.read_text(encoding="utf-8"))]
         facts = context.facts("php")
         if facts is None:
             raise CapabilityUnavailable("PHP facts are unavailable for this revision, so Symfony routes cannot be read.")

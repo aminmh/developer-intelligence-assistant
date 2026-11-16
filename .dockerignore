@@ -23,3 +23,8 @@
 !analyzer-worker/
 !analyzer-worker/Dockerfile
 !analyzer-worker/worker.py
+!Python-Service/app/code_quality/taint_analysis.py
+!Python-Service/php/psalm/
+!Python-Service/php/psalm/composer.json
+!Python-Service/php/psalm/composer.lock
+!Python-Service/php/psalm/missing-symbols.php

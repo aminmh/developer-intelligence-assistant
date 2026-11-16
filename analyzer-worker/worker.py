@@ -1,4 +1,4 @@
-"""Isolated HTTPS worker for fixed SonarScanner, Joern, SCIP, and LSP indexing jobs."""
+"""Isolated HTTPS worker for fixed SonarScanner, Joern, SCIP, LSP indexing, and Psalm taint jobs."""
 from __future__ import annotations
 
 import asyncio
@@ -22,6 +22,7 @@ from starlette.concurrency import run_in_threadpool
 
 from code_quality.external_analyzers import check_sonarqube_access, run_joern, run_sonarqube
 from code_quality.scip_index import run_scip
+from code_quality.taint_analysis import run_taint_analysis, validate_stubs
 from lsp.jobs import run_lsp
 from code_quality.service import MAX_ARCHIVE_BYTES, MAX_FILE_BYTES, MAX_FILES, MAX_SCAN_BYTES, _safe_archive_path
 
@@ -31,7 +32,7 @@ MAX_ARCHIVE_B64_BYTES = (MAX_ARCHIVE_BYTES * 4 // 3) + 8
 MAX_JOB_FILES = min(MAX_FILES, 20_000)
 _SHA = re.compile(r"^[a-fA-F0-9]{40,64}$")
 _REVISION_ID = re.compile(r"^rev_[0-9a-f]{32}$")
-_ANALYZERS = {"sonarqube", "joern", "scip", "lsp"}
+_ANALYZERS = {"sonarqube", "joern", "scip", "lsp", "psalm"}
 _ALLOWED_SONAR_HOSTS = {
     host.strip().lower().rstrip(".")
     for host in os.environ.get("ANALYZER_ALLOWED_SONAR_HOSTS", "sonarqube").split(",")
@@ -78,7 +79,7 @@ async def _read_bounded_json(request: Request, max_bytes: int = MAX_REQUEST_BYTE
 def _validate_job(payload: dict[str, Any]) -> tuple[str, bytes, list[str], dict[str, int], list[str], dict[str, Any], str | None]:
     allowed_fields = {"schema_version", "job_id", "revision_id", "commit_sha", "archive_base64",
                       "bundle_sha256", "files", "file_line_counts", "languages", "analyzers",
-                      "settings", "sonarqube_token"}
+                      "settings", "sonarqube_token", "taint_stubs"}
     if set(payload) - allowed_fields:
         raise HTTPException(422, "Analyzer job contains unsupported fields.")
     if payload.get("schema_version") != 1:
@@ -153,6 +154,13 @@ def _validate_job(payload: dict[str, Any]) -> tuple[str, bytes, list[str], dict[
         raise HTTPException(422, "SonarQube credential is missing.")
     if "sonarqube" not in requested and token is not None:
         raise HTTPException(422, "SonarQube credential was provided for an unselected analyzer.")
+    if payload.get("taint_stubs") is not None:
+        if "psalm" not in requested:
+            raise HTTPException(422, "Taint stubs were provided for an unselected analyzer.")
+        try:
+            validate_stubs(payload["taint_stubs"])
+        except ValueError as exc:
+            raise HTTPException(422, "Taint stubs are invalid.") from exc
     line_counts = payload.get("file_line_counts")
     if (not isinstance(line_counts, dict) or set(line_counts) != set(files)
             or any(not isinstance(path, str) or type(count) is not int or count < 1
@@ -197,6 +205,9 @@ def _run_job(payload: dict[str, Any]) -> dict[str, Any]:
         elif name == "lsp":
             # Language servers index the bundled source with project-code features off (lsp/indexer.py).
             analyzers[name] = run_lsp(archive, files, languages)
+        elif name == "psalm":
+            # Framework taint stubs come from the API's detected plugins; Psalm parses them, never runs them.
+            analyzers[name] = run_taint_analysis(archive, files, payload.get("taint_stubs"))
     return {"schema_version": 1, "job_id": job_id,
             "revision_id": payload["revision_id"],
             "commit_sha": payload.get("commit_sha"), "bundle_sha256": payload["bundle_sha256"],
@@ -238,6 +249,11 @@ async def capabilities() -> dict[str, Any]:
                         "languages": ["typescript", "javascript", "python"],
                         "versions": {name: found for name, found in scip_tools.items() if found}}
     snapshot["lsp"] = _lsp_capability()
+    from code_quality.taint_analysis import VERSION as psalm_version, available as psalm_available
+    ready = psalm_available()
+    snapshot["psalm"] = {"enabled": True, "analyzer_available": ready, "status": "ready" if ready else "unavailable",
+                         "reason": None if ready else "The pinned Psalm is not installed.",
+                         "languages": ["php"], "version": psalm_version}
     return {"schema_version": 1, "analyzers": snapshot}
 
 

@@ -949,6 +949,19 @@ def assess_revision(project_id: str, revision_id: str, snapshot: dict, archive_d
         effective_worker_target,
     )
     from code_quality.remote_worker import run_worker
+    # Framework taint sources and sinks for Psalm come from the detected framework plugins
+    # (capability taint_model; decision: bundled-security-rules-are-redistributable).
+    taint_stub_files: dict[str, str] = {}
+    if "php" in languages:
+        try:
+            from code_quality.framework_evidence import taint_stubs
+            taint_stub_files, taint_coverage = taint_stubs(archive_data, files)
+            if taint_coverage.get("gaps"):
+                analyzer_failures.append({"name": "framework:taint_model",
+                                          "reason": " ".join(gap["reason"] for gap in taint_coverage["gaps"])[:240]})
+        except Exception as exc:  # noqa: BLE001 — taint analysis still runs on PHP built-ins
+            analyzer_failures.append({"name": "framework:taint_model",
+                                      "reason": f"Framework taint models could not be collected ({type(exc).__name__})."})
     external_settings = ExternalAnalyzerSettingsStore().get(project_id)
     worker_target = effective_worker_target(external_settings)
     worker_failure_reason = None
@@ -956,7 +969,7 @@ def assess_revision(project_id: str, revision_id: str, snapshot: dict, archive_d
         try:
             worker_results = run_worker(
                 worker_target, external_settings, archive_data, files, languages,
-                revision_id, snapshot.get("commit_sha"), sonarqube_token,
+                revision_id, snapshot.get("commit_sha"), sonarqube_token, taint_stub_files,
             )
             worker_identity = "worker-" + str(worker_target["certificate_sha256"]).lower()[:16]
         except Exception:
@@ -1000,7 +1013,28 @@ def assess_revision(project_id: str, revision_id: str, snapshot: dict, archive_d
            "tool_version": row["version"]}
         for row in joern_result.get("findings", [])
     ]
-    findings = (findings + sonar_findings + joern_findings)[:MAX_FINDINGS]
+    # Psalm taint analysis: on the worker when one ran it, otherwise here (worker, API fallback).
+    psalm_result = worker_results.get("psalm")
+    if "php" in languages and (psalm_result is None or psalm_result.get("status") in {"unavailable", "disabled"}):
+        from code_quality.taint_analysis import available as taint_available, run_taint_analysis
+        if taint_available():
+            psalm_result = run_taint_analysis(archive_data, files, taint_stub_files)
+        elif psalm_result is not None and psalm_result.get("status") == "disabled":
+            psalm_result = None  # the worker did not run it and it is not installed here
+    if psalm_result is None:
+        psalm_result = {"name": "psalm", "version": "unknown", "findings": [], "scanned_files": 0, "skipped_files": 0,
+                        "status": "unavailable" if "php" in languages else "disabled",
+                        "reason": "Psalm is not installed here and no analyzer worker ran it."
+                        if "php" in languages else "No PHP source to trace."}
+    if psalm_result["status"] not in {"complete", "disabled"}:
+        analyzer_failures.append({"name": "psalm", "reason": str(psalm_result.get("reason") or "Psalm taint analysis did not complete.")[:240]})
+    psalm_findings = [
+        _finding(row["file"], row["line"], row["rule"], row["category"], row["message"])
+        | {"severity": row["severity"], "kind": "finding", "tool": row["tool"],
+           "tool_version": row["version"]}
+        for row in psalm_result.get("findings", [])
+    ]
+    findings = (findings + sonar_findings + joern_findings + psalm_findings)[:MAX_FINDINGS]
     from code_quality.rules import CustomRuleStore
     custom_rule_sets = CustomRuleStore().enabled(user_id)
     semgrep_findings, semgrep_failures, semgrep_result = _run_static_rules(archive_data, files, custom_rule_sets)
@@ -1281,6 +1315,15 @@ def assess_revision(project_id: str, revision_id: str, snapshot: dict, archive_d
                           "limits": {"execution_seconds": 210, "memory_bytes": 2 * 1024 * 1024 * 1024,
                                      "temporary_file_bytes": 512 * 1024 * 1024,
                                      "files_per_language": 20_000, "findings": 500, "output_bytes": 2_000_000}})
+    if psalm_result["status"] != "disabled":
+        analyzers.append({"name": "psalm", "version": psalm_result.get("version", "unknown"),
+                          "languages": ["php"], "selected_languages": ["php"], "categories": ["security"],
+                          "status": psalm_result["status"], "scanned_files": psalm_result.get("scanned_files", 0),
+                          "skipped_files": psalm_result.get("skipped_files", 0),
+                          "finding_count": len(psalm_result.get("findings", [])),
+                          "taint_models": sorted(taint_stub_files), "reason": psalm_result.get("reason"),
+                          "worker_identity": worker_identity if "psalm" in worker_results else None,
+                          "limits": {"timeout_seconds": 600, "memory_bytes": 2 * 1024 * 1024 * 1024, "findings": 500}})
     analyzers.append({"name": "revision-scoped-semantic-context",
                       "version": semantic_summary["retriever_version"],
                       "languages": sorted(languages), "categories": [category for category in CATEGORIES if not design_mode or category != "clean_code"],
