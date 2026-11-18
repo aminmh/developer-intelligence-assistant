@@ -39,6 +39,12 @@ tools; allow at least 40 GiB of free disk space, four Docker CPUs, and 8 GiB of 
 (16 GiB for analyzers). See the [installation guide](docs/installation.md) for the complete
 requirements, supported versions, configuration, credentials, and recovery instructions.
 
+**Local embedding resources.** The default Ollama `bge-m3` model uses about 1.2 GB of disk
+space. Budget about 4 GiB of available host RAM for one embedding worker, separate from Docker's
+memory allocation. This is a planning estimate; peak usage depends on input length and concurrency.
+A GPU is optional. For the standard setup with a remote chat model, 16 GiB of total host RAM is a
+starting point to test. Allow more memory if you also run the chat model or analyzers locally.
+
 ### AI-assisted installation
 
 Give your AI agent the [installation skill](agent/skills/install-developer-assistant/SKILL.md) and ask it
