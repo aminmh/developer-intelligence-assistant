@@ -99,6 +99,18 @@ _MAX_TEXT_CHARS = 4000
 _QDRANT_UPSERT_MAX_POINTS = 64
 _QDRANT_UPSERT_MAX_BYTES = 8 * 1024 * 1024
 _QDRANT_READBACK_BATCH_SIZE = 512
+# Rows per Neo4j UNWIND write. One transaction per batch keeps a large project's graph under the
+# server's per-transaction memory cap (70% of the heap by default; a 512 MB heap allows ~358 MiB).
+_GRAPH_WRITE_BATCH_SIZE = 1_000
+
+
+def _batched_write(store: Any, cypher: str, rows: List[dict]) -> int:
+    """Run an ``UNWIND $data`` upsert in bounded batches; returns the summed ``count``."""
+    total = 0
+    for offset in range(0, len(rows), _GRAPH_WRITE_BATCH_SIZE):
+        result = store.structured_query(cypher, param_map={"data": rows[offset:offset + _GRAPH_WRITE_BATCH_SIZE]})
+        total += int((result or [{}])[0].get("count") or 0)
+    return total
 _TRACE_LOCK = threading.Lock()
 _TRACE_CACHE: Dict[str, Dict[str, Any]] = {}
 _TRACE_CACHE_LIMIT = 200
@@ -1060,8 +1072,8 @@ class CodePropertyGraph:
                         structure_rows.append({"source_id": src, "target_id": target_id, "kind": kind, "collection": collection_name})
 
         try:
-            result = store.structured_query(_NODE_UPSERT_CYPHER, param_map={"data": node_rows})
-            if strict and (not result or result[0].get("count") != len(node_rows)):
+            written = _batched_write(store, _NODE_UPSERT_CYPHER, node_rows)
+            if strict and written != len(node_rows):
                 raise RuntimeError("Snapshot graph node count mismatch")
         except Exception as exc:
             if strict:
@@ -1075,10 +1087,8 @@ class CodePropertyGraph:
 
         if rel_rows:
             try:
-                result = store.structured_query(
-                    _REL_UPSERT_CYPHER, param_map={"data": rel_rows}
-                )
-                if strict and (not result or result[0].get("count") != len(rel_rows)):
+                written = _batched_write(store, _REL_UPSERT_CYPHER, rel_rows)
+                if strict and written != len(rel_rows):
                     raise RuntimeError("Snapshot graph call count mismatch")
             except Exception as exc:
                 if strict:
@@ -1092,11 +1102,8 @@ class CodePropertyGraph:
 
         if structure_rows:
             try:
-                result = store.structured_query(
-                    _STRUCTURE_REL_UPSERT_CYPHER,
-                    param_map={"data": structure_rows},
-                )
-                if strict and (not result or result[0].get("count") != len(structure_rows)):
+                written = _batched_write(store, _STRUCTURE_REL_UPSERT_CYPHER, structure_rows)
+                if strict and written != len(structure_rows):
                     raise RuntimeError("Snapshot graph structure count mismatch")
             except Exception as exc:
                 if strict:

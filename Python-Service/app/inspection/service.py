@@ -105,6 +105,8 @@ class InspectionService:
 
         nodes = [self._def_node(d, collection) for d in defs]
         node_rows = [n for n in nodes if n is not None]
+        # Edges join only definitions that got a node; anonymous classes and their members get none.
+        noded = {n["id"] for n in node_rows}
         scoped_ids = {}
         if snapshot is not None:
             for record, node in zip(defs, nodes):
@@ -139,9 +141,11 @@ class InspectionService:
         decl_rows = []
         for d in defs:
             src = _node_key_for_record(d)
+            if src not in noded:
+                continue
             for rel in d.get("relations") or []:
                 target = by_fqn.get(rel.get("target", ""))
-                if not target:
+                if not target or _node_key_for_record(target) not in noded:
                     continue
                 decl_rows.append(
                     {
@@ -157,7 +161,7 @@ class InspectionService:
             raise RuntimeError("Snapshot inspection declarations incomplete")
 
         # Use-sites → REFERENCES edges (only when both ends are known).
-        def_keys = {_node_key_for_record(d) for d in defs}
+        def_keys = {_node_key_for_record(d) for d in defs} & noded
         ref_rows = []
         linked = 0
         via_counts: dict[str, int] = {}
@@ -280,6 +284,9 @@ class InspectionService:
             # commonly appear once per migration file.
             return None
         if kind == "method" and canonical_definition(record) is None:
+            return None
+        if kind in ("property", "class_const") and str(record.get("fqn") or "").startswith("::"):
+            # Members of an anonymous class (test doubles, migrations) share the class's lack of identity.
             return None
         fqn = record.get("fqn", "")
         name = record.get("name", "")

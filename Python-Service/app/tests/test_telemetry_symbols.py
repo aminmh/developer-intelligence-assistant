@@ -87,6 +87,11 @@ def test_anonymous_class_methods_are_indexed_without_runtime_identity():
     prepared = prepare_chunks([chunk], Snapshot("pizza", "a" * 40, "c" * 64))[0]
     assert prepared["symbol_id"] is None
     assert prepared["storage_id"]
+    # In a namespace (test doubles such as `new class extends Repository {}`) the class is Ns\(anonymous).
+    namespaced = {**chunk, "class_fqn": "App\\Tests\\Functional\\(anonymous)", "fq_symbol_name": "App\\Tests\\Functional\\(anonymous)::flush",
+                  "file_path": "tests/Functional/WebhookTest.php"}
+    assert from_chunk(namespaced) is None
+    assert prepare_chunks([namespaced], Snapshot("pizza", "a" * 40, "c" * 64))[0]["symbol_id"] is None
 
 
 def test_indexed_chunks_carry_registered_immutable_revision_id(tmp_path, monkeypatch):

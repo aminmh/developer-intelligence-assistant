@@ -81,7 +81,8 @@ def from_chunk(chunk: dict[str, Any]) -> str | None:
     kind = chunk.get("node_type") or chunk.get("type")
     if kind == "method":
         class_name = chunk.get("class_fqn") or chunk.get("parent_symbol") or chunk.get("class")
-        if class_name == "(anonymous)":
+        # Anonymous classes have no stable identity; in a namespace the exporter names them Ns\(anonymous).
+        if isinstance(class_name, str) and (class_name == "(anonymous)" or class_name.endswith("\\(anonymous)")):
             return None
         return normalize({"kind": kind, "class": class_name,
                           "method": chunk.get("method_name") or chunk.get("name")})

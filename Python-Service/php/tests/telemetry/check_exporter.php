@@ -42,6 +42,9 @@ check(!isset($invalidPath['symbol_id']) && isset($invalidPath['symbol_identity_e
 $anonymous = $chunker->chunkSource('<?php $c = new class { public function run() {} };', 'src/source.php');
 $anonymousMethod = $anonymous[0]->toMetadata();
 check(!isset($anonymousMethod['symbol_id']) && !isset($anonymousMethod['symbol_identity_error']), 'Anonymous class method should remain AST-only');
+$namespaced = $chunker->chunkSource('<?php namespace App\\Tests; $c = new class { public function flush() {} };', 'tests/WebhookTest.php');
+$namespacedMethod = $namespaced[0]->toMetadata();
+check(!isset($namespacedMethod['symbol_id']) && !isset($namespacedMethod['symbol_identity_error']), 'Namespaced anonymous class method should remain AST-only');
 $nested = $chunker->chunkSource('<?php namespace App; class Service { public function run() { function helper() {} $a = fn() => 1; } }', 'src/nested.php');
 $nestedIds = array_values(array_filter(array_map(static fn($chunk) => $chunk->toMetadata()['symbol_id'] ?? null, $nested)));
 check(in_array('\\App\\helper', $nestedIds, true), 'Nested named function incorrectly became a method');
