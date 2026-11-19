@@ -114,7 +114,12 @@ def matches(gold: dict[str, Any], row: dict[str, Any]) -> bool:
         return str(row.get("rule", "")).startswith(prefix) and str(row.get("file", "")).startswith(path)
     if row.get("file") != gold["file"] or row.get("category") not in {gold["category"], *gold.get("also_categories", [])}:
         return False
-    return scope == "file" or abs(int(row.get("line") or 0) - int(gold["line"])) <= int(gold.get("tolerance", 3))
+    if scope == "file":
+        return True
+    start = int(row.get("line") or 0)
+    end = int(row.get("end_line") or start)   # review findings cite a range
+    tolerance = int(gold.get("tolerance", 3))
+    return start - tolerance <= int(gold["line"]) <= end + tolerance
 
 
 def score(gold: dict[str, Any], rows: list[dict[str, Any]]) -> dict[str, Any]:
@@ -136,9 +141,21 @@ def score(gold: dict[str, Any], rows: list[dict[str, Any]]) -> dict[str, Any]:
             "by_category": {k: f"{v[0]}/{v[1]}" for k, v in sorted(by_category.items())}, "items": results}
 
 
+def report_findings(report: dict[str, Any]) -> list[dict[str, Any]]:
+    """A saved assessment report's findings (review findings included), plus its route-authorization counts."""
+    rows = [{**row, "stage": row.get("tool") or "report"} for row in report.get("findings") or []]
+    analyzers = (report.get("coverage") or {}).get("analyzers") or []
+    for check in next((a.get("checks") or [] for a in analyzers if a.get("name") == "framework-checks"), []):
+        for key, value in (check.get("summary") or {}).items():
+            if isinstance(value, (int, float)) and not isinstance(value, bool) and value > 0:
+                rows.append({"rule": f"summary:{check['name']}.{key}", "value": value, "stage": "summary"})
+    return rows
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
-    parser.add_argument("--archive", required=True, type=Path)
+    parser.add_argument("--archive", type=Path)
+    parser.add_argument("--report", type=Path, help="score a saved assessment report instead of running the stages")
     parser.add_argument("--gold", required=True, type=Path)
     parser.add_argument("--history", type=Path)
     parser.add_argument("--commit")
@@ -146,8 +163,13 @@ def main() -> int:
     args = parser.parse_args()
     gold = json.loads(args.gold.read_text())
     started = time.monotonic()
-    rows, timings = deterministic_findings(args.archive.read_bytes(), args.history.read_bytes() if args.history else None,
-                                           args.commit or gold.get("commit"))
+    if args.report:
+        rows, timings = report_findings(json.loads(args.report.read_text())), {"report": {"status": "loaded"}}
+    elif args.archive:
+        rows, timings = deterministic_findings(args.archive.read_bytes(), args.history.read_bytes() if args.history else None,
+                                               args.commit or gold.get("commit"))
+    else:
+        parser.error("give --archive or --report")
     result = score(gold, rows)
     result |= {"stages": timings, "seconds": round(time.monotonic() - started, 1), "findings_total": len(rows),
                "findings_by_category": dict(Counter(r.get("category") for r in rows))}

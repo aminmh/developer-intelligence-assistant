@@ -47,3 +47,17 @@ def test_matching_rules():
     result = harness.score({"findings": [line, {**line, "id": "y", "deterministic": False}]},
                            [{"file": "src/A.php", "line": 70, "category": "reliability", "rule": "r", "stage": "semgrep"}])
     assert result["found"] == 2 and result["deterministic_found"] == 1 and result["by_category"] == {"reliability": "2/2"}
+
+
+def test_a_saved_report_is_scored_with_review_ranges_and_route_counts():
+    harness = _harness()
+    report = {"findings": [{"file": "src/A.php", "line": 60, "end_line": 72, "category": "reliability",
+                            "rule": "ai-review-reliability", "tool": "ai-category-review"}],
+              "coverage": {"analyzers": [{"name": "framework-checks", "checks": [
+                  {"name": "route-authorization", "summary": {"access_rule_only": 129, "public": 0}}]}]}}
+    rows = harness.report_findings(report)
+    gold = {"id": "x", "category": "reliability", "scope": "line", "file": "src/A.php", "line": 71, "tolerance": 0,
+            "deterministic": False, "claim": "c"}
+    assert harness.matches(gold, rows[0])  # line 71 lies within the cited range 60-72
+    assert harness.matches({**gold, "scope": "summary", "summary": "route-authorization.access_rule_only"}, rows[1])
+    assert len(rows) == 2  # zero counts are not evidence
