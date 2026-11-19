@@ -127,7 +127,7 @@ def test_run_reviews_shares_one_token_pool(context):
     model = ScriptedModel([_answer([]), _answer([])])
     result = run_reviews(["security", "testing"], {}, {}, context, model, ReviewConfig(enabled=True, parallel=2))
     assert set(result["categories"]) == {"security", "testing"} and result["total_tokens"] == 220
-    assert result["config"]["max_tool_calls"] == 12 and result["status"] == "complete"
+    assert result["config"]["max_tool_calls"] == 20 and result["status"] == "complete"
 
 
 def test_config_is_off_by_default_and_the_environment_can_enable_it(tmp_path, monkeypatch):

@@ -8,11 +8,14 @@ Framework-neutral and read-only (evidence spec clause 3). Reports:
   ``|| true``) (warning);
 * toolchain versions that disagree between manifests, version files, base images and CI images;
 * container builds that copy secret-bearing files, or copy the whole build context while
-  ``.dockerignore`` does not exclude ``.env`` files.
+  ``.dockerignore`` does not exclude ``.env`` files;
+* the same ignored failures in build and analysis scripts (``*.sh``, Makefile);
+* ``vendor/bin/<tool>`` calls for tools no package in ``composer.lock`` installs.
 """
 
 from __future__ import annotations
 
+import json
 import re
 from fnmatch import fnmatchcase
 from typing import Any
@@ -77,6 +80,50 @@ def _ci(context: Any) -> tuple[list[dict[str, Any]], int]:
     return rows, pipelines
 
 
+def _ignored_failures(path: str, text: str) -> list[dict[str, Any]]:
+    rows = []
+    for number, row in enumerate(text.splitlines(), 1):
+        stripped = row.strip().strip("'\"")
+        if stripped.startswith("#"):
+            continue
+        if re.search(r"\|\|\s*(true|exit 0|:)\s*;?\s*$", stripped) and _QUALITY_STEP.search(row):
+            rows.append(finding(path, number, "process-ignored-check-failure", CATEGORY, "warning",
+                                f"{path} ignores a check's failure ('{row.strip()[:120]}'), so analysis or test failures never fail the run."))
+    return rows
+
+
+def _scripts(context: Any) -> list[dict[str, Any]]:
+    """Ignored check failures in build and analysis scripts (CI files are checked in _ci)."""
+    rows = []
+    for path in sorted(files_of_kind(context, "build")):
+        if path.lower().endswith((".sh", ".bash")) or path.rsplit("/", 1)[-1].lower() in ("makefile", "gnumakefile"):
+            rows += _ignored_failures(path, context.read_text(path, 256_000) or "")
+    return rows
+
+
+def _missing_tools(context: Any) -> list[dict[str, Any]]:
+    """``vendor/bin/<tool>`` calls in scripts, Makefiles, CI and composer scripts that no locked package installs."""
+    text = context.read_text("composer.lock", 8_000_000)
+    try:
+        lock = json.loads(text) if text else None
+    except ValueError:
+        lock = None
+    if not isinstance(lock, dict):
+        return []
+    installed = {str(b).rsplit("/", 1)[-1] for row in [*lock.get("packages", []), *lock.get("packages-dev", [])]
+                 if isinstance(row, dict) for b in (row.get("bin") or [])}
+    rows, seen = [], set()
+    paths = sorted({*files_of_kind(context, "build", "ci"), *(["composer.json"] if context.exists("composer.json") else [])})
+    for path in paths:
+        for number, row in enumerate((context.read_text(path, 256_000) or "").splitlines(), 1):
+            for tool in re.findall(r"vendor/bin/([A-Za-z0-9_.\-]+)", row):
+                if tool not in installed and (path, tool) not in seen:
+                    seen.add((path, tool))
+                    rows.append(finding(path, number, "process-missing-tool", CATEGORY, "warning",
+                                        f"{path} runs vendor/bin/{tool}, but no package in composer.lock installs it, so the step fails."))
+    return rows
+
+
 def _ignored(patterns: list[str], probe: str) -> bool:
     result = False
     for pattern in patterns:
@@ -118,6 +165,8 @@ def _containers(context: Any) -> list[dict[str, Any]]:
 def run(collections: dict[Capability, Any], context: Any) -> tuple[list[dict[str, Any]], dict[str, Any]]:
     rows, pipelines = _ci(context)
     rows += _containers(context)
+    rows += _scripts(context)
+    rows += _missing_tools(context)
     declared = declared_versions(context)
     for left, right, text in conflicts(declared):
         rows.append(finding(right.file, right.line, "process-toolchain-version-conflict", CATEGORY, "warning",

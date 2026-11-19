@@ -43,30 +43,41 @@ def summarize_overflow(rows, *, model, context_limit, complete, usage_for):
             + max(256, context_limit // 10) > context_limit
         ):
             raise ValueError("An evidence batch cannot fit the configured model context window.")
-        completion = complete(prompt, system=BATCH_SYSTEM, max_tokens=BATCH_COMPLETION_TOKENS)
-        content, _model, _provider = completion
-        usages.append(usage_for(prompt, BATCH_SYSTEM, content, getattr(completion, "usage", None)))
-        try:
-            if not isinstance(content, str) or len(content) > 24000:
-                raise ValueError("Invalid batch response size")
-            parsed = json.loads(content)
-            items = parsed["items"]
-            expected = {row["evidence_id"] for row in batch}
-            if not isinstance(items, list) or len(items) != len(expected):
-                raise ValueError("Wrong number of batch summaries")
-            by_id = {}
-            for item in items:
-                if not isinstance(item, dict):
-                    raise ValueError("Invalid batch summary")
-                evidence_id, summary = item.get("evidence_id"), item.get("summary")
-                if (evidence_id not in expected or evidence_id in by_id or not isinstance(summary, str)
-                        or not summary.strip() or len(summary) > 200):
-                    raise ValueError("Invalid batch summary citation or content")
-                by_id[evidence_id] = summary
-            for row in batch:
-                summaries.append({"evidence_id": row["evidence_id"], "kind": "batch_summary",
-                                  "category": row.get("category"), "file": row.get("file"),
-                                  "line": row.get("line"), "message": by_id[row["evidence_id"]]})
-        except (ValueError, TypeError, KeyError) as exc:
-            raise ValueError("The evaluator returned invalid evidence batch summaries.") from exc
+        by_id = None
+        for _attempt in range(2):  # one retry: a single malformed reply should not discard the whole assessment
+            completion = complete(prompt, system=BATCH_SYSTEM, max_tokens=BATCH_COMPLETION_TOKENS)
+            content, _model, _provider = completion
+            usages.append(usage_for(prompt, BATCH_SYSTEM, content, getattr(completion, "usage", None)))
+            try:
+                by_id = _validated_summaries(content, batch)
+                break
+            except (ValueError, TypeError, KeyError):
+                by_id = None
+        for row in batch:
+            # Still invalid after the retry: our own deterministic evidence message stands in, never unvalidated model text.
+            message = by_id[row["evidence_id"]] if by_id else " ".join(str(row.get("message") or "").split())[:200]
+            summaries.append({"evidence_id": row["evidence_id"], "kind": "batch_summary",
+                              "category": row.get("category"), "file": row.get("file"),
+                              "line": row.get("line"), "message": message,
+                              **({} if by_id else {"summary_source": "original_message"})})
     return summaries, usages
+
+
+def _validated_summaries(content: object, batch: list[dict]) -> dict[str, str]:
+    """``{evidence_id: summary}`` when the reply covers exactly the batch's items; ValueError otherwise."""
+    if not isinstance(content, str) or len(content) > 24000:
+        raise ValueError("Invalid batch response size")
+    items = json.loads(content)["items"]
+    expected = {row["evidence_id"] for row in batch}
+    if not isinstance(items, list) or len(items) != len(expected):
+        raise ValueError("Wrong number of batch summaries")
+    by_id: dict[str, str] = {}
+    for item in items:
+        if not isinstance(item, dict):
+            raise ValueError("Invalid batch summary")
+        evidence_id, summary = item.get("evidence_id"), item.get("summary")
+        if (evidence_id not in expected or evidence_id in by_id or not isinstance(summary, str)
+                or not summary.strip() or len(summary) > 200):
+            raise ValueError("Invalid batch summary citation or content")
+        by_id[evidence_id] = summary
+    return by_id

@@ -102,7 +102,7 @@ def classify(relative: str) -> str | None:
         return "container"
     if name in _MANIFEST_FILES or _any(name, _MANIFEST_GLOBS):
         return "manifest"
-    if name in _BUILD_FILES:
+    if name in _BUILD_FILES or name.endswith((".sh", ".bash")):  # build and analysis scripts
         return "build"
     if name.endswith(_TRANSLATION_SUFFIXES):
         return "translations"

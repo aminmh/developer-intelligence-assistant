@@ -104,6 +104,11 @@ def read_revision_chunks(project_id: str, revision_id: str, snapshot: dict, file
 
 
 def _components(methods: list[dict], owner: str) -> int:
+    return len(_component_groups(methods, owner))
+
+
+def _component_groups(methods: list[dict], owner: str) -> list[list[dict]]:
+    """LCOM4's connected method groups (shared properties or calls on $this), largest first."""
     methods = [m for m in methods if _name(m.get("method_name") or m.get("name")) != "__construct"]
     parent = list(range(len(methods)))
     def find(i):
@@ -121,7 +126,10 @@ def _components(methods: list[dict], owner: str) -> int:
             receiver, sep, name = str(call).rpartition("::")
             if sep and _name(receiver) in {"$this", "this", "self", "static", _name(owner)} and _name(name) in names:
                 parent[find(i)] = find(names[_name(name)])
-    return len({find(i) for i in range(len(methods))})
+    groups: dict[int, list[dict]] = {}
+    for i, method in enumerate(methods):
+        groups.setdefault(find(i), []).append(method)
+    return sorted(groups.values(), key=lambda group: (-len(group), group[0].get("start_line", 0)))
 
 
 def build_units(chunks: list[dict], rubric: dict) -> list[dict]:
@@ -162,13 +170,14 @@ def build_units(chunks: list[dict], rubric: dict) -> list[dict]:
             classes.update(_name(str(x).rpartition("::")[0]) for x in m.get("called_symbols") or [] if "::" in str(x))
         classes -= {"", owner, "self", "static", "$this", "this", "__unknown", "__function", "__global__"}
         maximum = lambda key: max((int(m.get(key) or 0) for m in ms), default=0)
-        metrics = {"lcom4": _components(ms, owner), "fan_out": len(classes), "method_count": len(ms),
+        groups = _component_groups(ms, owner)
+        metrics = {"lcom4": len(groups), "fan_out": len(classes), "method_count": len(ms),
                    "public_interface_size": sum(m.get("visibility") in (None, "public") for m in ms),
                    "type_switch": maximum("type_checks"), "concrete_dependencies": len(concrete),
                    "unsupported_overrides": len(override), "infrastructure_instantiations": len(infra),
                    "max_cyclomatic": maximum("cyclomatic"), "max_nesting": maximum("max_nesting"),
                    "max_params": maximum("param_count"), "max_method_loc": maximum("loc"), "loc": int(declaration.get("loc") or 1)}
-        units.append({"declaration": declaration, "methods": ms, "related": related, "metrics": metrics,
+        units.append({"declaration": declaration, "methods": ms, "related": related, "metrics": metrics, "groups": groups,
                       "properties": sorted(properties.get(owner, [])),
                       "flagged": {"type_switch": max(ms, key=lambda m: m.get("type_checks") or 0, default=None),
                                   "unsupported_overrides": override[0] if override else None,
@@ -205,10 +214,31 @@ def _candidate(project_id: str, revision_id: str, units: list[dict], rule: dict,
                          "content_hash": item.get("content_hash"),
                          "methods": [m.get("signature", "") for m in units_by_name(units, item).get("methods", [])]} for item in unit["related"]],
             "content_hash": dec.get("content_hash"), "method_hashes": [m.get("content_hash") for m in unit["methods"]]}
+    if rule["principle"] == "SRP":
+        # Signatures alone left the judge "uncertain" on most SRP cards: show how the class splits.
+        card["method_groups"] = _method_groups(unit, rubric)
     evidence_id = "ev_" + digest([project_id, revision_id, rubric["version"], rule["id"], symbol])[:24]
     return {"evidence_id": evidence_id, "principle": rule["principle"], "rule_id": rule["id"], "symbol": symbol,
             "file": dec.get("file_path"), "line": (flagged or dec).get("start_line"),
             "severity": round(severity(unit, rule), 2), "card": card, "card_hash": digest(card), "question": rule["question"]}
+
+
+MAX_CARD_GROUPS = 6
+
+
+def _method_groups(unit: dict, rubric: dict) -> list[dict]:
+    """LCOM4's disconnected method groups: signatures, properties used, and a code excerpt of each group's
+    largest method, sharing twice the rubric's body budget."""
+    groups = (unit.get("groups") or [])[:MAX_CARD_GROUPS]
+    share = max(200, (rubric["limits"]["body_chars"] * 2) // max(1, len(groups)))
+    rows = []
+    for group in groups:
+        largest = max(group, key=lambda m: int(m.get("loc") or 0))
+        code = str(largest.get("code") or "")
+        used = sorted({p for m in group for p in [*(m.get("reads_properties") or []), *(m.get("writes_properties") or [])]})
+        rows.append({"methods": [m.get("signature", "") for m in group][:12], "properties": used[:12],
+                     "excerpt_of": largest.get("signature", ""), "excerpt": code[:share], "excerpt_truncated": len(code) > share})
+    return rows
 
 
 def select_candidates(project_id: str, revision_id: str, units: list[dict], rubric: dict) -> tuple[list[dict], dict]:

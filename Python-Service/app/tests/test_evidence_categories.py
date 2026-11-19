@@ -109,6 +109,7 @@ def test_phpunit_configuration_against_the_installed_phpunit(tmp_path):
               '  <source><include><directory>src</directory></include></source>\n'
               '  <extensions>\n    <bootstrap class="X\\Extension"/>\n  </extensions>\n</phpunit>\n')
     risks = provide_test_config_risks(_context(tmp_path / "old", {"composer.lock": lock, "phpunit.xml.dist": config}))
+    risks = [r for r in risks if r.rule == "phpunit-config-version-mismatch"]  # src/ is absent here too (its own test)
     assert sorted((r.rule, r.line, r.details["setting"]) for r in risks) == [
         ("phpunit-config-version-mismatch", 2, "failOnDeprecation"),
         ("phpunit-config-version-mismatch", 4, "<source>"),
@@ -118,7 +119,7 @@ def test_phpunit_configuration_against_the_installed_phpunit(tmp_path):
     lock11 = json.dumps({"packages-dev": [{"name": "phpunit/phpunit", "version": "11.4.0"}]})
     risks = provide_test_config_risks(_context(tmp_path / "new", {"composer.lock": lock11, "phpunit.xml": config.replace(
         "<source>", "<listeners/><source>")}))
-    assert [r.details["setting"] for r in risks] == ["<listeners>"]
+    assert [r.details["setting"] for r in risks if r.rule == "phpunit-config-version-mismatch"] == ["<listeners>"]
 
 
 def test_the_php_plugin_provides_test_config_risks_through_the_registry(tmp_path):
@@ -271,3 +272,58 @@ def test_a_language_plugin_covers_frameworks_of_its_language(tmp_path):
     assert "php" in tests.providers and not any(gap["framework"] == "symfony" for gap in tests.gaps)
     without_facts = default_registry().collect(Capability.TEST_CONVENTIONS, RevisionContext.from_directory(tmp_path, facts_loader=lambda _l: None))
     assert {gap["framework"] for gap in without_facts.gaps} == {"php", "symfony"}  # nothing provided, so the framework gap stays
+
+
+# ── task 30: general configuration-rot checks ────────────────────────────────
+
+def test_docs_naming_a_bare_file_that_does_not_exist(tmp_path):
+    readme = "# Shop\n\nRead `CONTEXT.md` first, then `composer.json` and `Kernel.php`.\n"
+    context = _context(tmp_path, {"README.md": readme, "composer.json": COMPOSER, "src/Kernel.php": "<?php\n"})
+    findings, _ = documentation_checks.run({}, context)
+    stale = [f for f in findings if f["rule"] == "documentation-missing-path"]
+    assert [(f["line"], "CONTEXT.md" in f["message"]) for f in stale] == [(3, True)]  # Kernel.php exists under src/
+
+
+def test_scripts_that_ignore_check_failures_and_tools_that_are_not_installed(tmp_path):
+    lock = json.dumps({"packages": [], "packages-dev": [{"name": "phpunit/phpunit", "bin": ["phpunit"]},
+                                                         {"name": "phpstan/phpstan", "bin": ["phpstan", "phpstan.phar"]}]})
+    context = _context(tmp_path, {
+        "composer.json": COMPOSER, "composer.lock": lock, ".gitlab-ci.yml": "test:\n  script: [vendor/bin/phpunit]\n",
+        "code-analyze.sh": "#!/bin/sh\n# vendor/bin/phpstan analyse || true\nvendor/bin/phpstan analyse src || true\n",
+        "Makefile": "test:\n\tvendor/bin/paratest\n",
+    })
+    rows = _rules(process_checks.run({}, context)[0])
+    assert ("process-ignored-check-failure", "code-analyze.sh", 3, "warning") in rows
+    assert ("process-missing-tool", "Makefile", 2, "warning") in rows
+    assert not any(rule == "process-missing-tool" and file != "Makefile" for rule, file, _, _ in rows)
+
+
+def test_phpunit_config_paths_that_do_not_exist(tmp_path):
+    from agent.plugins.languages.php.testing import provide_test_config_risks
+
+    config = ('<phpunit>\n  <testsuites><testsuite name="u"><directory>./tests/Unit/</directory></testsuite></testsuites>\n'
+              '  <source><exclude>\n    <directory>./src/Migrations</directory>\n    <file>./src/Kernel.php</file>\n'
+              '  </exclude></source>\n</phpunit>\n')
+    context = _context(tmp_path, {"phpunit.xml.dist": config, "tests/Unit/ATest.php": "<?php\n", "src/Kernel.php": "<?php\n"})
+    risks = provide_test_config_risks(context)
+    assert [(r.rule, r.line, r.details["path"]) for r in risks] == [("phpunit-config-missing-path", 4, "src/Migrations")]
+
+
+def test_a_fixed_document_language_in_a_multi_locale_project(tmp_path):
+    context = _context(tmp_path, {"templates/invoice.twig": '<html lang="en">\n<body></body>\n</html>\n'})
+    templates = [TemplateRecord("fixture", "twig", "templates/invoice.twig")]
+    catalogues = [TranslationRecord("fixture", "messages", locale, f"translations/messages.{locale}.yml", ()) for locale in ("en", "nl")]
+    findings, _ = accessibility_checks.run({Capability.TEMPLATES: _collection(Capability.TEMPLATES, templates),
+                                            Capability.TRANSLATIONS: _collection(Capability.TRANSLATIONS, catalogues)}, context)
+    assert ("accessibility-fixed-lang", "templates/invoice.twig", 1, "warning") in _rules(findings)
+    single, _ = accessibility_checks.run({Capability.TEMPLATES: _collection(Capability.TEMPLATES, templates),
+                                          Capability.TRANSLATIONS: _collection(Capability.TRANSLATIONS, catalogues[:1])}, context)
+    assert "accessibility-fixed-lang" not in {f["rule"] for f in single}
+
+
+def test_docs_citing_a_path_tail_or_a_doc_in_another_folder_are_not_stale(tmp_path):
+    readme = "# App\n\nSee `Admin/Settings.vue` and `33-order.md`.\n"
+    context = _context(tmp_path, {"README.md": readme, "resources/js/pages/Admin/Settings.vue": "<template/>",
+                                  "specs/33-order.md": "# Order\n", "composer.json": COMPOSER})
+    findings, _ = documentation_checks.run({}, context)
+    assert "documentation-missing-path" not in {f["rule"] for f in findings}

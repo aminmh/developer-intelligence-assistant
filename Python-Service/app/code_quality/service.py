@@ -340,6 +340,19 @@ def inventory_archive(archive_data: bytes, exclusion_patterns: list[str] | None 
     return dict(sorted(languages.items())), findings[:MAX_FINDINGS], inventory, scan_stats, analyzer_failures
 
 
+def _design_summary_finding(units: list[dict], provenance: dict, metric_category: dict) -> dict:
+    """The design-metric result as one citeable Architecture finding for the scoring model."""
+    counts = provenance.get("principles") or {}
+    total = lambda key: sum(int(row.get(key) or 0) for row in counts.values())
+    estimated = (provenance.get("unjudged_estimate") or {}).get("units", 0)
+    lowest = min(provenance.get("unit_scores") or [{}], key=lambda row: (row.get("score", 100), -row.get("loc", 0)))
+    message = (f"Class-level design metrics over {len(units)} classes score {metric_category.get('score')}; "
+               f"{total('judged')} judged ({total('violations')} violations, {total('acceptable')} acceptable, "
+               f"{total('uncertain')} uncertain), {estimated} estimated. They do not see layering or module boundaries.")
+    return _finding(lowest.get("file") or "", int(lowest.get("line") or 1), "design-metrics-summary", "clean_code", message) | {
+        "severity": "info", "kind": "finding", "tool": provenance.get("rubric_version"), "tool_version": provenance.get("metric_schema")}
+
+
 def _run_category_reviews(project_id: str, revision_id: str, snapshot: dict, languages: dict[str, int],
                           findings: list[dict], coverage: dict[str, dict], design_mode: bool) -> dict[str, Any]:
     """The per-category model reviews, or why they did not run. Never raises."""
@@ -361,7 +374,7 @@ def _run_category_reviews(project_id: str, revision_id: str, snapshot: dict, lan
         status = tool_status("search", True)
         if not status["available"]:
             return skipped(status["reason"] or "Tool calls are unavailable for the remote model.")
-        categories = [c for c in CATEGORIES if coverage.get(c, {}).get("supported") and not (design_mode and c == "clean_code")]
+        categories = [c for c in CATEGORIES if coverage.get(c, {}).get("supported")]
         leads = {c: [row for row in findings if row.get("category") == c and row.get("kind") == "finding"] for c in categories}
         brief = {c: {key: coverage[c].get(key) for key in ("status", "evidence_count", "reason")} for c in categories}
         model, model_name = _chat_model(0.0, 1.0, None)
@@ -1273,9 +1286,6 @@ def assess_revision(project_id: str, revision_id: str, snapshot: dict, archive_d
         index_available = semantic_summary.get("status") != "unavailable"
         rules_for_evaluator = enabled_business_rules if index_available else []
         score_args = (evidence, coverage, languages, scan_stats, analyzer_failures, rules_for_evaluator)
-        categories, model, provider, token_usage, business_rule_reviews, ai_clean_code_findings = (
-            _score(*score_args, design_mode=True) if design_mode else _score(*score_args)
-        )
         if design_mode:
             from code_quality.design_judge import PROMPT_HASH, judge_candidates
             from runtime.llm import complete_with_model, remote_configured
@@ -1294,7 +1304,6 @@ def assess_revision(project_id: str, revision_id: str, snapshot: dict, archive_d
             clean_category, design_provenance, design_observations = score_design(
                 design_units, candidates, verdicts, principle_counts, design_rubric, design_rubric_hash, design_partial,
             )
-            categories["clean_code"] = clean_category
             design_provenance["judge_model"] = judge_model
             design_provenance["prompt_hash"] = PROMPT_HASH
             design_provenance["judge_call_count"] = len(judge_usages)
@@ -1313,6 +1322,22 @@ def assess_revision(project_id: str, revision_id: str, snapshot: dict, archive_d
                 "reason": "Design candidates are measured from indexed source and reviewed using closed verdicts.",
             }
             flow_summary["php_design_signals"] = php_design_summary
+            # Architecture is scored by the model (decision compute-clean-code-score-from-versioned-metrics,
+            # amended 2026-11-19): the metric result is evidence, with the judged violations, beside reviews.
+            design_summary_row = _design_summary_finding(design_units, design_provenance, clean_category)
+            design_evidence = [*design_observations, design_summary_row]
+            findings = (design_evidence + findings)[:MAX_FINDINGS]
+            evidence = [*design_evidence, *evidence]
+            coverage = _category_coverage(languages, evidence, scan_stats, analyzer_failures,
+                                          {key: value for key, value in evidence_reasons.items() if value})
+            score_args = (evidence, coverage, languages, scan_stats, analyzer_failures, rules_for_evaluator)
+        categories, model, provider, token_usage, business_rule_reviews, ai_clean_code_findings = (
+            _score(*score_args)
+        )
+        if design_mode:
+            categories["clean_code"].update({
+                "score_method": "model-evaluator-with-design-metrics", "design_metric_score": clean_category["score"],
+                "metric_schema": design_rubric["metric_schema"], "rubric_version": design_rubric["version"]})
             if judge_usages:
                 all_usages = [token_usage, *judge_usages]
                 token_usage = {**token_usage, **{
@@ -1321,8 +1346,6 @@ def assess_revision(project_id: str, revision_id: str, snapshot: dict, archive_d
                 }, "estimated": any(item.get("estimated") for item in all_usages),
                     "source": "estimate" if any(item.get("estimated") for item in all_usages) else "provider",
                     "judge_call_count": len(judge_usages)}
-            findings = (findings + design_observations)[:MAX_FINDINGS]
-            evidence.extend(design_observations)
         else:
             categories["clean_code"]["score_method"] = "model-evaluator-legacy"
             design_provenance = {"status": "unavailable", "reason": design_reason,

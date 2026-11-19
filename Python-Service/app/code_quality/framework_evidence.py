@@ -122,17 +122,24 @@ def archive_context(archive_data: bytes, files: list[str], archive_sha256: str |
     from code_quality.service import MAX_FILE_BYTES, _safe_archive_path
 
     selected = set(files)
+    names: list[str] = []
     with tempfile.TemporaryDirectory(prefix="framework-evidence-") as root:
         with zipfile.ZipFile(io.BytesIO(archive_data)) as archive:
             for member in archive.infolist():
                 relative = _safe_archive_path(member.filename)
+                if relative and not member.is_dir():
+                    names.append(relative)
                 if (not relative or member.is_dir() or member.file_size > MAX_FILE_BYTES or is_secret_path(relative)
                         or (relative not in selected and not _is_framework_evidence_file(relative))):
                     continue
                 target = Path(root, relative)
                 target.parent.mkdir(parents=True, exist_ok=True)
                 target.write_bytes(archive.read(member))
-        yield RevisionContext.from_directory(root, archive_sha256=archive_sha256)
+        context = RevisionContext.from_directory(root, archive_sha256=archive_sha256)
+        prefix = context.root.relative_to(Path(root).resolve()).as_posix() if context.root != Path(root).resolve() else ""
+        strip = prefix + "/" if prefix and prefix != "." else ""
+        context.archive_files = frozenset(name[len(strip):] for name in names if name.startswith(strip))
+        yield context
 
 
 def run_on_archive(archive_data: bytes, files: list[str], archive_sha256: str | None = None,

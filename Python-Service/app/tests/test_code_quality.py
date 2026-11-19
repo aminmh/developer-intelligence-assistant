@@ -494,15 +494,34 @@ def test_score_stops_before_model_call_when_required_context_exceeds_configured_
 def test_overflow_batch_rejects_unknown_citations():
     from code_quality.assessment_batches import summarize_overflow
 
+    calls = []
+
     def complete(*_args, **_kwargs):
+        calls.append(1)
         return json.dumps({"items": [{"evidence_id": "invented", "summary": "Unsupported."}]}), "model", "remote"
 
-    with pytest.raises(ValueError, match="invalid evidence batch summaries"):
-        summarize_overflow(
-            [{"evidence_id": "original", "category": "security", "kind": "finding"}],
-            model="unknown", context_limit=0, complete=complete,
-            usage_for=lambda *_args: {"total_tokens": 0},
-        )
+    summaries, usages = summarize_overflow(
+        [{"evidence_id": "original", "category": "security", "kind": "finding", "message": "Shell command built from input."}],
+        model="unknown", context_limit=0, complete=complete,
+        usage_for=lambda *_args: {"total_tokens": 0},
+    )
+    # The invented citation never reaches the evidence: one retry, then the original message stands in.
+    assert len(calls) == 2 and len(usages) == 2
+    assert summaries == [{"evidence_id": "original", "kind": "batch_summary", "category": "security", "file": None,
+                          "line": None, "message": "Shell command built from input.", "summary_source": "original_message"}]
+    assert "Unsupported." not in json.dumps(summaries)
+
+
+def test_overflow_batch_retry_uses_a_valid_second_reply():
+    from code_quality.assessment_batches import summarize_overflow
+
+    replies = [json.dumps({"items": []}), json.dumps({"items": [{"evidence_id": "original", "summary": "Shell risk."}]})]
+    summaries, _ = summarize_overflow(
+        [{"evidence_id": "original", "category": "security", "kind": "finding", "message": "m"}],
+        model="unknown", context_limit=0, complete=lambda *_a, **_k: (replies.pop(0), "model", "remote"),
+        usage_for=lambda *_args: {"total_tokens": 0},
+    )
+    assert summaries[0]["message"] == "Shell risk." and "summary_source" not in summaries[0]
 
 
 def test_rate_limit_413_is_distinguished_from_context_limit():

@@ -80,10 +80,10 @@ CHECKLISTS: dict[str, tuple[str, ...]] = {
 @dataclass(frozen=True)
 class ReviewConfig:
     enabled: bool = False
-    max_tool_calls: int = 12
+    max_tool_calls: int = 20
     max_tokens: int = 60_000
     max_seconds: float = 180.0
-    global_max_tokens: int = 400_000
+    global_max_tokens: int = 600_000
     parallel: int = 3
 
     def as_dict(self) -> dict[str, Any]:

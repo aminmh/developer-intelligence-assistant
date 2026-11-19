@@ -14,7 +14,7 @@ import re
 from typing import Any
 
 from agent.core.capability import Capability
-from agent.core.records import TemplateRecord
+from agent.core.records import TemplateRecord, TranslationRecord
 from code_quality.evidence_checks import capped, files_of_kind, finding, plural
 
 NAME = "accessibility-evidence"
@@ -59,12 +59,17 @@ def _line(text: str, offset: int) -> int:
     return text.count("\n", 0, offset) + 1
 
 
-def _template_rows(path: str, text: str) -> list[dict[str, Any]]:
+def _template_rows(path: str, text: str, locales: list[str] | None = None) -> list[dict[str, Any]]:
     rows = []
     for match in _HTML_OPEN.finditer(text):
+        lang = re.search(r"""\blang\s*=\s*["']([A-Za-z]{2,3}(?:[-_][A-Za-z0-9]+)?)["']""", match.group(0), re.I)
         if not re.search(r"\blang\s*=", match.group(0), re.I):
             rows.append(finding(path, _line(text, match.start()), "accessibility-missing-lang", CATEGORY, "error",
                                 "<html> has no lang attribute, so screen readers cannot choose the right pronunciation."))
+        elif lang and locales and len(locales) > 1:
+            rows.append(finding(path, _line(text, match.start()), "accessibility-fixed-lang", CATEGORY, "warning",
+                                f"<html lang=\"{lang.group(1)}\"> is fixed although the project ships {len(locales)} locales "
+                                f"({', '.join(locales[:4])}); screen readers pronounce other locales' text wrongly."))
     missing_alt = [m for m in _IMG.finditer(text) if not re.search(r"\balt\s*=", m.group(0), re.I)]
     if missing_alt:
         rows.append(finding(path, _line(text, missing_alt[0].start()), "accessibility-image-without-alt", CATEGORY, "error",
@@ -90,6 +95,8 @@ def _template_rows(path: str, text: str) -> list[dict[str, Any]]:
 
 def run(collections: dict[Capability, Any], context: Any) -> tuple[list[dict[str, Any]], dict[str, Any]]:
     templates = {r.file: r.engine for r in collections[Capability.TEMPLATES].records if isinstance(r, TemplateRecord)}
+    translations = collections.get(Capability.TRANSLATIONS)
+    locales = sorted({r.locale for r in (translations.records if translations else []) if isinstance(r, TranslationRecord)})
     for path in files_of_kind(context, "templates"):
         if path.lower().endswith((".html", ".htm", ".xhtml")):
             templates.setdefault(path, "html")
@@ -100,7 +107,7 @@ def run(collections: dict[Capability, Any], context: Any) -> tuple[list[dict[str
         if text is None:
             continue
         checked += 1
-        rows += _template_rows(path, text)
+        rows += _template_rows(path, text, locales)
     engines: dict[str, int] = {}
     for engine in templates.values():
         engines[engine] = engines.get(engine, 0) + 1
@@ -117,5 +124,5 @@ def run(collections: dict[Capability, Any], context: Any) -> tuple[list[dict[str
 def check():
     from code_quality.framework_evidence import FrameworkCheck
 
-    return FrameworkCheck(NAME, VERSION, (Capability.TEMPLATES,), run,
+    return FrameworkCheck(NAME, VERSION, (Capability.TEMPLATES, Capability.TRANSLATIONS), run,
                           accepts_context=True, runs_without_providers=True, category=CATEGORY)

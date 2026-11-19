@@ -12,6 +12,7 @@ from __future__ import annotations
 import json
 import re
 import xml.etree.ElementTree as ElementTree
+from pathlib import PurePosixPath
 from typing import Any
 
 from agent.core.facts import literal_str
@@ -141,11 +142,33 @@ def _line(text: str, needle: str) -> int:
     return 1
 
 
+def _missing_paths(context: RevisionContext, path: str, root: Any, text: str) -> list[ConfigRiskRecord]:
+    """``<directory>``/``<file>`` entries (suites, source, coverage) that do not exist in the revision."""
+    from code_quality.evidence_files import is_excluded_path
+
+    names = getattr(context, "archive_files", None) or context.files  # every file in the revision when known
+    folders = {str(parent) for name in names for parent in PurePosixPath(name).parents}
+    risks, seen = [], set()
+    for element in root.iter():
+        if element.tag not in ("directory", "file") or not (element.text or "").strip():
+            continue
+        target = element.text.strip().removeprefix("./").rstrip("/")
+        if (not target or "*" in target or target.startswith(("/", "..")) or target in seen
+                or is_excluded_path(target + ("/x" if element.tag == "directory" else ""))):
+            continue
+        seen.add(target)
+        present = target in folders if element.tag == "directory" else target in set(names)
+        if not present:
+            risks.append(ConfigRiskRecord(
+                framework=LANGUAGE, rule="phpunit-config-missing-path", category="testing", severity="warning",
+                message=f"{path} lists {element.tag} {target}, which is not in this revision; the setting is stale.",
+                file=path, line=_line(text, f">{element.text.strip()}<"), details={"path": target}))
+    return risks
+
+
 def provide_test_config_risks(context: RevisionContext) -> list[ConfigRiskRecord]:
     path = next((name for name in CONFIG_FILES if context.exists(name)), None)
-    version = installed_version(context, "phpunit/phpunit")
-    major = _major(version)
-    if path is None or major is None:
+    if path is None:
         return []
     text = context.read_text(path, 512_000) or ""
     try:
@@ -154,6 +177,11 @@ def provide_test_config_risks(context: RevisionContext) -> list[ConfigRiskRecord
         return [ConfigRiskRecord(framework=LANGUAGE, rule="phpunit-config-unreadable", category="testing",
                                  severity="warning", message=f"{path} is not well-formed XML, so PHPUnit cannot load it.",
                                  file=path, line=1)]
+    stale = _missing_paths(context, path, root, text)
+    version = installed_version(context, "phpunit/phpunit")
+    major = _major(version)
+    if major is None:
+        return stale
     elements = {element.tag for element in root.iter()}
     attributes = {name for element in root.iter() for name in element.attrib}
     if major < 10:
@@ -180,4 +208,4 @@ def provide_test_config_risks(context: RevisionContext) -> list[ConfigRiskRecord
             framework=LANGUAGE, rule="phpunit-schema-version-mismatch", category="testing", severity="warning",
             message=f"{path} validates against the PHPUnit {pinned.group(1)} schema, but composer.lock installs PHPUnit {version}.",
             file=path, line=_line(text, "noNamespaceSchemaLocation"), details={"installed": version}))
-    return risks
+    return [*risks, *stale]

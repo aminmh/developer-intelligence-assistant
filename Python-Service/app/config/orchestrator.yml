@@ -20,10 +20,10 @@ agent_tools:
 # CODE_QUALITY_REVIEW_ENABLED=true overrides `enabled`.
 code_quality_review:
   enabled: false
-  max_tool_calls: 12        # per category
+  max_tool_calls: 20        # per category (12 stopped 5 of 9 reviews on skiplanner)
   max_tokens: 60000         # per category, prompt + completion
   max_seconds: 180          # per category
-  global_max_tokens: 400000 # all categories of one assessment
+  global_max_tokens: 600000 # all categories of one assessment
   parallel: 3
 
 tools:

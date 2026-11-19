@@ -35,6 +35,8 @@ _NPM_BUILTIN = {"install", "i", "ci", "add", "remove", "uninstall", "update", "u
 _COMMAND = re.compile(r"(?:^|[\s`$>;&|(])(make|composer|npm|yarn|pnpm|bun)\s+(?:(?:run|run-script)\s+)?([A-Za-z0-9:_\-.]+)")
 _INLINE = re.compile(r"`([^`\n]{3,200})`")
 _PATH = re.compile(r"^\.?/?[A-Za-z0-9_.\-]+(?:/[A-Za-z0-9_.\-]+)+/?$")
+# A bare file name (`CONTEXT.md`); present when any file in the revision has that name.
+_BARE_FILE = re.compile(r"^[A-Za-z0-9_\-]+(?:\.[A-Za-z0-9_\-]+)*\.(md|mdx|rst|txt|ya?ml|json|xml|toml|ini|neon|dist|sh|php|py|js|ts)$")
 _VERSION_MENTION = re.compile(r"(?i)\b(PHP|Node(?:\.js)?|Python)\s*(?:version\s*)?(?:>=|≥|v)?\s*(\d+(?:\.\d+)?)(?!\.\d)")
 _TOOLCHAIN = {"php": "php", "node": "node", "node.js": "node", "python": "python"}
 
@@ -72,7 +74,11 @@ def _checkable(token: str) -> bool:
 def _exists(context: Any, files: set[str], folders: set[str], doc: str, reference: str) -> bool:
     reference = reference.strip().removeprefix("./").rstrip("/")
     candidates = {reference, str(PurePosixPath(doc).parent / reference)}
-    return any(c in files or c in folders for c in candidates)
+    if any(c in files or c in folders for c in candidates):
+        return True
+    # Docs often cite the tail of a path (`Admin/Settings.page` for resources/pages/Admin/Settings.page).
+    suffix = "/" + reference
+    return any(path.endswith(suffix) for path in files) or any(folder.endswith(suffix) for folder in folders)
 
 
 def _doc_files(context: Any) -> list[str]:
@@ -83,8 +89,10 @@ def run(collections: dict[Capability, Any], context: Any) -> tuple[list[dict[str
     from agent.core.revision import is_secret_path
 
     docs = _doc_files(context)
-    files = set(context.files)
+    # Existence is checked against every file in the revision, not only the files extracted for checks.
+    files = set(getattr(context, "archive_files", None) or context.files)
     folders = {str(parent) for path in files for parent in PurePosixPath(path).parents if str(parent) != "."}
+    basenames = {PurePosixPath(path).name for path in files}
     make = _make_targets(context)
     composer = _scripts(context, "composer.json")
     package = _scripts(context, "package.json")
@@ -118,6 +126,13 @@ def run(collections: dict[Capability, Any], context: Any) -> tuple[list[dict[str
                                         f"{doc} tells readers to run '{tool} {name}', but {where} defines no '{name}'."))
             for token in ([] if in_fence else _INLINE.findall(row)):
                 token = token.strip()
+                if _BARE_FILE.match(token) and not is_secret_path(token) and "." in token:
+                    checked += 1
+                    if token not in basenames:
+                        stale += 1
+                        rows.append(finding(doc, number, "documentation-missing-path", CATEGORY, "warning",
+                                            f"{doc} refers to {token}, which is not in this revision."))
+                    continue
                 if (not _PATH.match(token) or "://" in token or token.startswith(("vendor/", "node_modules/", "/"))
                         or is_secret_path(token) or re.search(r"[<>{}*$]", token) or not _checkable(token)):
                     continue

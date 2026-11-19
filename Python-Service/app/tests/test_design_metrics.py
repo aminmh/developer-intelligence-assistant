@@ -159,8 +159,14 @@ def test_assessment_uses_metric_score_and_persists_no_card_source(monkeypatch, t
     monkeypatch.setattr(semantic, "retrieve_revision_context", lambda *_, **__: (semantic_summary, []))
     flow_summary = {"status": "complete", "tracer_version": "test", "flow_types": [], "limits": {}}
     monkeypatch.setattr(flow, "retrieve_revision_call_traces", lambda *_, **__: (flow_summary, []))
-    monkeypatch.setattr(service, "_score", lambda *_, **__: ({category: {"assessed": True, "score": 60, "reason": "Fixture", "evidence_ids": []}
-        for category in service.SOURCE_CATEGORIES if category != "clean_code"}, "model", "local", {"total_tokens": 1}, [], []))
+    scored_evidence = []
+
+    def score(evidence, *_args, **_kwargs):  # the model now scores Architecture too, from the design evidence
+        scored_evidence.append(list(evidence))
+        return ({category: {"assessed": True, "score": 60, "reason": "Fixture", "evidence_ids": []}
+                 for category in service.SOURCE_CATEGORIES}, "model", "local", {"total_tokens": 1}, [], [])
+
+    monkeypatch.setattr(service, "_score", score)
     monkeypatch.setattr(llm, "remote_configured", lambda: False)
     judge_calls = []
     def complete(prompt, **_):
@@ -175,8 +181,11 @@ def test_assessment_uses_metric_score_and_persists_no_card_source(monkeypatch, t
     monkeypatch.setattr(context, "build_category_context", lambda *_args, **_kwargs: ({"status": "available", "source": None, "excerpt_count": 0, "categories": {}, "scanned_files": 0, "scanned_bytes": 0, "reason": "fixture"}, []))
     store = ReportStore(tmp_path / "reports.sqlite")
     report = service.assess_revision("pizza", revision, snapshot, b"archive", "alice", store)
-    assert report["categories"]["clean_code"]["score"] == 85
-    assert report["categories"]["clean_code"]["score_method"] == "design-metrics-2"
+    assert report["categories"]["clean_code"]["score"] == 60  # the model's score is official
+    assert report["categories"]["clean_code"]["score_method"] == "model-evaluator-with-design-metrics"
+    assert report["categories"]["clean_code"]["design_metric_score"] == 85  # the metric result is kept as evidence
+    summary = [row for row in scored_evidence[0] if row.get("rule") == "design-metrics-summary"]
+    assert len(summary) == 1 and summary[0]["category"] == "clean_code" and "score 85" in summary[0]["message"]
     assert report["overall_score"] is None  # the evidence categories have no evidence in this fixture
     assert report["clean_code_design"]["unit_count"] == 1
     assert "card" not in report["clean_code_design"]["candidates"][0]
@@ -364,3 +373,20 @@ def test_without_decisive_verdicts_the_default_rate_applies():
     verdicts = {candidates[0]["evidence_id"]: {"verdict": "uncertain", "reason": "Unclear."}}
     _, provenance, _ = score_design(units, candidates, verdicts, counts, rubric, rubric_hash, False)
     assert provenance["unjudged_estimate"]["rates"]["srp-method-count"] == rubric["unjudged_default_rate"]
+
+
+def test_srp_cards_show_the_disconnected_method_groups_with_code():
+    from code_quality.design_metrics import _component_groups, _method_groups
+
+    def method(name, props, loc, code):
+        return {"method_name": name, "signature": f"public function {name}()", "reads_properties": props,
+                "loc": loc, "code": code, "start_line": loc}
+    methods = [method("price", ["amount"], 5, "return $this->amount;"), method("tax", ["amount"], 9, "x" * 5000),
+               method("notify", ["mailer"], 7, "$this->mailer->send();")]
+    groups = _component_groups(methods, "App\\Invoice")
+    assert [[m["method_name"] for m in g] for g in groups] == [["price", "tax"], ["notify"]]
+    rubric, _ = load_rubric()
+    cards = _method_groups({"groups": groups}, rubric)
+    assert cards[0]["properties"] == ["amount"] and cards[0]["excerpt_of"] == "public function tax()"
+    assert cards[0]["excerpt_truncated"] and len(cards[0]["excerpt"]) == rubric["limits"]["body_chars"]
+    assert cards[1]["excerpt"] == "$this->mailer->send();"

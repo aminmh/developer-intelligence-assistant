@@ -49,6 +49,9 @@ class RevisionContext:
     root: Path
     files: tuple[str, ...]
     archive_sha256: str | None = None
+    # Every file name in the revision (relative to ``root``), including files not extracted here;
+    # empty when unknown. Existence checks use it; contents are only ever read from ``files``.
+    archive_files: frozenset[str] = frozenset()
     _facts_loader: Callable[[str], Any] | None = None
     _facts: dict[str, Any] = field(default_factory=dict)
 
