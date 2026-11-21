@@ -112,14 +112,19 @@ def matches(gold: dict[str, Any], row: dict[str, Any]) -> bool:
     if scope.startswith("rule:"):
         prefix, _, path = scope[5:].partition(":")
         return str(row.get("rule", "")).startswith(prefix) and str(row.get("file", "")).startswith(path)
-    if row.get("file") != gold["file"] or row.get("category") not in {gold["category"], *gold.get("also_categories", [])}:
+    if row.get("category") not in {gold["category"], *gold.get("also_categories", [])}:
         return False
     if scope == "file":
-        return True
+        return row.get("file") == gold["file"]
     start = int(row.get("line") or 0)
     end = int(row.get("end_line") or start)   # review findings cite a range
     tolerance = int(gold.get("tolerance", 3))
-    return start - tolerance <= int(gold["line"]) <= end + tolerance
+    # The panel's location, or (with --related) one call hop from it, derived before any run.
+    locations = [(gold["file"], int(gold["line"])), *((r["file"], int(r["line"])) for r in gold.get("related", []) if RELATED)]
+    return any(row.get("file") == file and start - tolerance <= line <= end + tolerance for file, line in locations)
+
+
+RELATED = False  # set by --related: also credit one-call-hop alternate locations
 
 
 def score(gold: dict[str, Any], rows: list[dict[str, Any]]) -> dict[str, Any]:
@@ -160,7 +165,10 @@ def main() -> int:
     parser.add_argument("--history", type=Path)
     parser.add_argument("--commit")
     parser.add_argument("--json", type=Path)
+    parser.add_argument("--related", action="store_true", help="also credit the gold items' one-call-hop alternate locations")
     args = parser.parse_args()
+    global RELATED
+    RELATED = args.related
     gold = json.loads(args.gold.read_text())
     started = time.monotonic()
     if args.report:

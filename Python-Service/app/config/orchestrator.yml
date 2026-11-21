@@ -23,8 +23,13 @@ code_quality_review:
   max_tool_calls: 20        # per category (12 stopped 5 of 9 reviews on skiplanner)
   max_tokens: 60000         # per category, prompt + completion
   max_seconds: 180          # per category
-  global_max_tokens: 600000 # all categories of one assessment
-  parallel: 3
+  global_max_tokens: 1200000 # all loops of one assessment
+  parallel: 5
+  # One loop per checklist question (32 for ten categories), each with its own budget.
+  per_question: true
+  question_tool_calls: 10
+  question_tokens: 30000
+  question_seconds: 150
 
 tools:
   chunk_code:

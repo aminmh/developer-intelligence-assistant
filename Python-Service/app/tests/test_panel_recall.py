@@ -61,3 +61,18 @@ def test_a_saved_report_is_scored_with_review_ranges_and_route_counts():
     assert harness.matches(gold, rows[0])  # line 71 lies within the cited range 60-72
     assert harness.matches({**gold, "scope": "summary", "summary": "route-authorization.access_rule_only"}, rows[1])
     assert len(rows) == 2  # zero counts are not evidence
+
+
+def test_related_locations_count_only_when_asked():
+    harness = _harness()
+    gold = {"id": "s", "category": "security", "scope": "line", "file": "src/Auth.php", "line": 62, "tolerance": 3,
+            "deterministic": False, "claim": "c", "related": [{"file": "src/AuthController.php", "line": 121, "via": "calls verify()"}]}
+    row = {"file": "src/AuthController.php", "line": 117, "end_line": 125, "category": "security", "rule": "ai-review-security"}
+    harness.RELATED = False
+    assert not harness.matches(gold, row)
+    harness.RELATED = True
+    try:
+        assert harness.matches(gold, row)
+        assert not harness.matches(gold, {**row, "category": "performance"})  # the category still has to agree
+    finally:
+        harness.RELATED = False

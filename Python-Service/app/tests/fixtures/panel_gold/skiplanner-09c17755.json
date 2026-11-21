@@ -45,7 +45,44 @@
    "scope": "line",
    "tolerance": 3,
    "deterministic": false,
-   "claim": "A repository reads $_SERVER['HTTP_HOST'] directly."
+   "claim": "A repository reads $_SERVER['HTTP_HOST'] directly.",
+   "related": [
+    {
+     "file": "src/EventListener/EmployeeListener.php",
+     "line": 105,
+     "via": "calls findOneByEmail()"
+    },
+    {
+     "file": "src/Form/EventSubscribers/ClientEventSubscriber.php",
+     "line": 98,
+     "via": "calls findOneByEmail()"
+    },
+    {
+     "file": "src/Form/EventSubscribers/ClientEventSubscriber.php",
+     "line": 119,
+     "via": "calls findOneByEmail()"
+    },
+    {
+     "file": "src/Repository/UserRepository.php",
+     "line": 148,
+     "via": "calls findOneByEmail()"
+    },
+    {
+     "file": "src/Services/Auth/AuthenticationService.php",
+     "line": 40,
+     "via": "calls findOneByEmail()"
+    },
+    {
+     "file": "src/Utils/URL.php",
+     "line": 58,
+     "via": "defines isrequestfromadmin()"
+    },
+    {
+     "file": "src/Repository/UserRepository.php",
+     "line": 210,
+     "via": "defines getrepositorybyclass()"
+    }
+   ]
   },
   {
    "id": "A4",
@@ -204,6 +241,13 @@
    "claim": "rm -rf runs after setDomain(null), so the path resolves to the upload root and deletes every club's files.",
    "also_categories": [
     "security"
+   ],
+   "related": [
+    {
+     "file": "src/Services/Landlord/SportClubRemoverService.php",
+     "line": 63,
+     "via": "calls removeFiles()"
+    }
    ]
   },
   {
@@ -214,7 +258,24 @@
    "scope": "line",
    "tolerance": 3,
    "deterministic": false,
-   "claim": "A repeated webhook re-sends the confirmation e-mail."
+   "claim": "A repeated webhook re-sends the confirmation e-mail.",
+   "related": [
+    {
+     "file": "src/Services/Payment/Webhook/Mollie/Handler/GiftPaymentHandler.php",
+     "line": 48,
+     "via": "calls updateTransactionStatusByPayment()"
+    },
+    {
+     "file": "src/Services/Payment/Webhook/Mollie/Handler/OneTimePaymentHandler.php",
+     "line": 48,
+     "via": "calls updateTransactionStatusByPayment()"
+    },
+    {
+     "file": "src/Services/Payment/Webhook/Mollie/Handler/SubscriptionInstallmentPaymentHandler.php",
+     "line": 96,
+     "via": "calls updateTransactionStatusByPayment()"
+    }
+   ]
   },
   {
    "id": "R3",
@@ -244,7 +305,29 @@
    "scope": "line",
    "tolerance": 3,
    "deterministic": false,
-   "claim": "Refresh-token decoding has no token-purpose check."
+   "claim": "Refresh-token decoding has no token-purpose check.",
+   "related": [
+    {
+     "file": "tests/Functional/Controller/Webhook/MollieControllerTest.php",
+     "line": 149,
+     "via": "calls refresh()"
+    },
+    {
+     "file": "tests/Functional/Controller/Webhook/MollieControllerTest.php",
+     "line": 220,
+     "via": "calls refresh()"
+    },
+    {
+     "file": "tests/Functional/Controller/Webhook/TapControllerTest.php",
+     "line": 93,
+     "via": "calls refresh()"
+    },
+    {
+     "file": "src/Services/TokenManagerService.php",
+     "line": 69,
+     "via": "defines decodetoken()"
+    }
+   ]
   },
   {
    "id": "S3",
@@ -254,7 +337,29 @@
    "scope": "line",
    "tolerance": 3,
    "deterministic": false,
-   "claim": "Refresh tokens carry only an exp claim."
+   "claim": "Refresh tokens carry only an exp claim.",
+   "related": [
+    {
+     "file": "src/Services/Auth/AuthenticationService.php",
+     "line": 78,
+     "via": "calls generateRefreshToken()"
+    },
+    {
+     "file": "src/Services/Auth/TwoFactorAuthenticator.php",
+     "line": 76,
+     "via": "calls generateRefreshToken()"
+    },
+    {
+     "file": "src/Services/TokenManagerService.php",
+     "line": 52,
+     "via": "defines generatetokenwithpayload()"
+    },
+    {
+     "file": "src/Factory/Helper/BookableCommonPropertiesFactory.php",
+     "line": 110,
+     "via": "defines now()"
+    }
+   ]
   },
   {
    "id": "S4",
@@ -264,7 +369,19 @@
    "scope": "line",
    "tolerance": 3,
    "deterministic": false,
-   "claim": "The 2FA code check has no attempt limit."
+   "claim": "The 2FA code check has no attempt limit.",
+   "related": [
+    {
+     "file": "src/Controller/Auth/AuthController.php",
+     "line": 121,
+     "via": "calls verifyCodeByEmail()"
+    },
+    {
+     "file": "src/Services/TranslationService.php",
+     "line": 22,
+     "via": "defines getexceptionmessage()"
+    }
+   ]
   },
   {
    "id": "S5",
@@ -297,7 +414,34 @@
    "tolerance": 3,
    "deterministic": false,
    "claim": "itemsPerPage comes from the query string with no upper bound.",
-   "note": "Expected from the review loop, not a deterministic rule, by the user's later decision: task 9 moved unbounded page sizes to the review checklist (CWE-770)"
+   "note": "Expected from the review loop, not a deterministic rule, by the user's later decision: task 9 moved unbounded page sizes to the review checklist (CWE-770)",
+   "related": [
+    {
+     "file": "src/Controller/Client/ClientCreditPackageController.php",
+     "line": 115,
+     "via": "calls paginate()"
+    },
+    {
+     "file": "src/Controller/Client/DashboardController.php",
+     "line": 65,
+     "via": "calls paginate()"
+    },
+    {
+     "file": "src/Controller/Client/InvoiceController.php",
+     "line": 92,
+     "via": "calls paginate()"
+    },
+    {
+     "file": "src/Controller/Client/MessageController.php",
+     "line": 74,
+     "via": "calls paginate()"
+    },
+    {
+     "file": "src/Controller/Landlord/AdminController.php",
+     "line": 76,
+     "via": "calls paginate()"
+    }
+   ]
   },
   {
    "id": "F2",
@@ -307,7 +451,24 @@
    "scope": "line",
    "tolerance": 3,
    "deterministic": false,
-   "claim": "Each page runs the COUNT query twice."
+   "claim": "Each page runs the COUNT query twice.",
+   "related": [
+    {
+     "file": "src/Services/Paginator/CustomPaginator.php",
+     "line": 59,
+     "via": "calls fetchTotalItemCount()"
+    },
+    {
+     "file": "src/Services/Paginator/CustomPaginator.php",
+     "line": 84,
+     "via": "calls fetchTotalItemCount()"
+    },
+    {
+     "file": "src/Services/BookingQueryBuilder/Products.php",
+     "line": 227,
+     "via": "defines getquery()"
+    }
+   ]
   },
   {
    "id": "F3",
@@ -327,7 +488,19 @@
    "scope": "line",
    "tolerance": 3,
    "deterministic": false,
-   "claim": "Translations are loaded on every request."
+   "claim": "Translations are loaded on every request.",
+   "related": [
+    {
+     "file": "src/Services/TranslationManager.php",
+     "line": 19,
+     "via": "defines addloaders()"
+    },
+    {
+     "file": "src/Services/TranslationManager.php",
+     "line": 24,
+     "via": "defines loadtranslation()"
+    }
+   ]
   },
   {
    "id": "F5",
@@ -480,5 +653,6 @@
    "deterministic": false,
    "claim": "An invalid new password returns 204, so clients cannot tell it failed."
   }
- ]
+ ],
+ "related_source": "One call hop from the revision's PHP facts (scripts/derive_gold_related.py), derived before scoring any run: callers of the enclosing method and definitions called on the line."
 }

@@ -125,9 +125,24 @@ def test_tools_not_offered_are_refused(context):
 
 def test_run_reviews_shares_one_token_pool(context):
     model = ScriptedModel([_answer([]), _answer([])])
-    result = run_reviews(["security", "testing"], {}, {}, context, model, ReviewConfig(enabled=True, parallel=2))
+    result = run_reviews(["security", "testing"], {}, {}, context, model, ReviewConfig(enabled=True, parallel=2, per_question=False))
     assert set(result["categories"]) == {"security", "testing"} and result["total_tokens"] == 220
     assert result["config"]["max_tool_calls"] == 20 and result["status"] == "complete"
+
+
+def test_each_checklist_question_gets_its_own_loop_and_results_merge_per_category(context):
+    from code_quality.category_review import CHECKLISTS
+
+    model = ScriptedModel([])  # every loop answers at once with no findings
+    config = ReviewConfig(enabled=True, parallel=2, question_tool_calls=4)
+    result = run_reviews(["security", "testing"], {}, {}, context, model, config)
+    expected = len(CHECKLISTS["security"]) + len(CHECKLISTS["testing"])
+    assert result["loops"] == expected and len(model.calls) == expected
+    security = result["categories"]["security"]
+    assert [q["question"] for q in security["questions"]] == list(CHECKLISTS["security"])
+    assert security["budget"]["max_tool_calls"] == 4 * len(CHECKLISTS["security"])
+    prompts = {call[0].content for call in model.calls}
+    assert all(any(question in prompt for prompt in prompts) for question in CHECKLISTS["security"])
 
 
 def test_config_is_off_by_default_and_the_environment_can_enable_it(tmp_path, monkeypatch):
