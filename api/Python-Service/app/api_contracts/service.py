@@ -18,6 +18,7 @@ import posixpath
 import re
 import zipfile
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
 from typing import Any, Callable
 
 from api_contracts.fetch import FetchFailed, FetchRefused, fetch_contract, validate_url
@@ -129,7 +130,10 @@ class ContractService:
         except ContractInvalid as exc:
             attempt = self.store.record_failure(source["source_id"], "failed", exc.errors, revision_id)
             return {"outcome": "failed", "version": attempt}
+        previous = self.store.newest_valid_version(source["source_id"], with_model=True)
         version, created = self.store.record_valid(source["source_id"], model, digest, revision_id)
+        if created and previous is not None:
+            self._emit_contract_change(source, previous, version, model)
         return {"outcome": "created" if created else "unchanged", "version": version}
 
     def ingest_upload(self, source_id: str, data: bytes) -> dict[str, Any]:
@@ -185,11 +189,16 @@ class ContractService:
         raise ContractInputError("An upload contract changes when you upload a new document.")
 
     def on_revision_ready(self, project_id: str, source_ref: str) -> int:
-        """Called when a revision finishes indexing. Never raises: indexing must not fail because of a contract."""
+        """Called when a revision finishes indexing. Never raises: indexing must not fail because of a contract.
+
+        Reads repo_path contracts from the revision, then compares the provider's code with its previous
+        revision for changes the contract does not show.
+        """
         handled = 0
         try:
             sources = self.store.list_sources(project_id=project_id, kind="repo_path")
-            if not sources:
+            provides = [row for row in self.store.list_attachments(project_id=project_id) if row["role"] == "provider"]
+            if not sources and not provides:
                 return 0
             revision = self.registry.get(project_id, source_ref)
             if revision.get("state") != "ready" or revision.get("source_kind") == "working_tree":
@@ -201,6 +210,10 @@ class ContractService:
                 except Exception as exc:  # noqa: BLE001 — one broken source must not stop the others
                     log.warning("contract_revision_ingest_failed source=%s error_type=%s",
                                 source["source_id"], type(exc).__name__)
+            try:
+                self.detect_code_drift(project_id, revision)
+            except Exception as exc:  # noqa: BLE001
+                log.warning("contract_code_drift_failed project=%s error_type=%s", project_id, type(exc).__name__)
         except Exception as exc:  # noqa: BLE001
             log.warning("contract_revision_hook_failed project=%s error_type=%s", project_id, type(exc).__name__)
         return handled
@@ -411,6 +424,156 @@ class ContractService:
         old_model, new_model = older.pop("model"), newer.pop("model")
         return {**header, "available": True, "from_version": older, "to_version": newer, "versions": valid,
                 **impact_report(ui_map, old_model, new_model)}
+
+    # ── change events (@.archcore/frontend-assist/contract-change-notifications.spec.md) ──
+
+    def _consumers(self, source_id: str, *, following_only: bool) -> list[dict[str, Any]]:
+        return [row for row in self.store.list_attachments(source_id=source_id) if row["role"] == "consumer"
+                and (not following_only or row["mode"] == "follow_latest")]
+
+    def _emit(self, source: dict[str, Any], kind: str, items: list[dict[str, Any]], **refs: Any) -> dict[str, Any] | None:
+        """Store a change event and push it to following consumers when it can affect them."""
+        from api_contracts.breaking import max_severity, summarize
+        from api_contracts.events import publish_change
+
+        if not items:
+            return None
+        severity = max_severity(items)
+        event = self.store.record_event(source["source_id"], source["project_id"], kind, items,
+                                        max_severity=severity, summary=summarize(items), **refs)
+        if severity in ("breaking", "risky"):
+            publish_change(event, {row["project_id"] for row in self._consumers(source["source_id"], following_only=True)})
+        return event
+
+    def _emit_contract_change(self, source: dict[str, Any], previous: dict[str, Any], version: dict[str, Any],
+                              model: dict[str, Any]) -> None:
+        from api_contracts.breaking import classify
+
+        try:
+            self._emit(source, "contract", classify(previous["model"], model),
+                       from_version_id=previous["version_id"], to_version_id=version["version_id"],
+                       to_revision_id=version.get("revision_id"))
+        except Exception as exc:  # noqa: BLE001 — a new version must be stored even if its event fails
+            log.warning("contract_change_event_failed source=%s error_type=%s", source["source_id"], type(exc).__name__)
+
+    def _previous_ready(self, project_id: str, revision: dict[str, Any]) -> dict[str, Any] | None:
+        """The ready committed or uploaded revision indexed just before ``revision``."""
+        seen = False
+        for row in self.registry.project_revisions(project_id):
+            if row.get("revision_id") == revision.get("revision_id"):
+                seen = True
+                continue
+            if seen and row.get("state") == "ready" and row.get("source_kind") != "working_tree":
+                return row
+        return None
+
+    def detect_code_drift(self, project_id: str, revision: dict[str, Any], *, routes_loader: Any = None) -> list[dict[str, Any]]:
+        """Compare a provider revision's routes and handlers with its previous revision; emit one event per contract."""
+        from api_contracts.code_drift import changed_handlers, drift_items
+
+        source_ids = {row["source_id"] for row in self.store.list_attachments(project_id=project_id)
+                      if row["role"] == "provider"}
+        source_ids |= {row["source_id"] for row in self.store.list_sources(project_id=project_id, kind="repo_path")}
+        previous = self._previous_ready(project_id, revision)
+        if not source_ids or previous is None:
+            return []
+        if routes_loader is None:
+            from projects.backend_routes import routes_for_revision as routes_loader
+        old_routes = routes_loader(project_id, previous["revision_id"])
+        new_routes = routes_loader(project_id, revision["revision_id"])
+        if not new_routes.get("framework"):
+            return []
+        changed = (changed_handlers(Path(old_routes["root"]), Path(new_routes["root"]), new_routes["routes"],
+                                    new_routes["framework"])
+                   if old_routes.get("root") and new_routes.get("root") else set())
+        events = []
+        for source_id in sorted(source_ids):
+            source = self.store.get_source(source_id)
+            version = self.store.newest_valid_version(source_id, with_model=True)
+            if version is None:
+                continue
+            contract_changed = False
+            if source["kind"] == "repo_path" and source["project_id"] == project_id:
+                before = self.store.version_for_revision(source_id, previous["revision_id"]) or {}
+                after = self.store.version_for_revision(source_id, revision["revision_id"]) or {}
+                contract_changed = before.get("version_id") != after.get("version_id")
+            items = drift_items(old_routes, new_routes, version["model"], changed_files=changed,
+                                contract_changed=contract_changed)
+            event = self._emit(source, "code", items, to_version_id=version["version_id"],
+                               from_revision_id=previous["revision_id"], to_revision_id=revision["revision_id"])
+            if event:
+                events.append(event)
+        return events
+
+    def consumer_sources(self, project_id: str) -> list[str]:
+        return sorted({row["source_id"] for row in self.store.list_attachments(project_id=project_id)
+                       if row["role"] == "consumer"})
+
+    def events_for_project(self, project_id: str, user_id: str | None = None, *, after_seq: int = 0,
+                           limit: int = 50) -> dict[str, Any]:
+        """Change events of every contract the project consumes, newest first, with the user's acknowledgements."""
+        from api_contracts.events import headline
+
+        events = self.store.list_events(self.consumer_sources(project_id), after_seq=after_seq, limit=limit,
+                                        with_items=True)
+        acked = self.store.acknowledged(user_id, [row["event_id"] for row in events]) if user_id else set()
+        rows = []
+        for event in events:
+            row = headline(event, project_id)
+            row["item_count"] = len(event["items"])
+            row["acknowledged"] = event["event_id"] in acked
+            rows.append(row)
+        return {"project_id": project_id, "events": rows,
+                "latest_seq": max((row["seq"] for row in rows), default=after_seq)}
+
+    def _event_attachment(self, event: dict[str, Any], project_id: str) -> dict[str, Any]:
+        for row in self._consumers(event["source_id"], following_only=False):
+            if row["project_id"] == project_id:
+                return row
+        raise ContractInputError("This project does not consume the contract that changed.")
+
+    def event_detail(self, event_id: str, project_id: str, *, ui_map_loader: Any = None) -> dict[str, Any]:
+        """One event with every item and what it touches in the consumer project (file and line of each call)."""
+        from api_contracts.conformance import ContractIndex, match_calls
+
+        event = self.store.get_event(event_id)
+        attachment = self._event_attachment(event, project_id)
+        source = self.store.get_source(event["source_id"])
+        by_operation: dict[str, list[dict[str, Any]]] = {}
+        for item in event["items"]:
+            if item.get("operation"):
+                by_operation.setdefault(item["operation"], []).append(item)
+        order = {"breaking": 0, "risky": 1, "safe": 2}
+        try:
+            if event["kind"] == "contract" and event["from_version_id"] and event["to_version_id"]:
+                impact = self.impact(attachment["attachment_id"], event["from_version_id"], event["to_version_id"],
+                                     ui_map_loader=ui_map_loader)
+                entries = impact.get("entries") or []
+                notes = impact.get("notes") or []
+                revision_id = impact.get("revision_id")
+            else:
+                _a, _s, ui_map = self._consumer_inputs(attachment["attachment_id"], None, ui_map_loader)
+                version = self.store.get_version(event["to_version_id"], with_model=True)
+                matched, _prefix = match_calls(ContractIndex(version["model"]), ui_map.get("http_calls") or [])
+                calls: dict[str, list[dict[str, Any]]] = {}
+                for call in ui_map.get("http_calls") or []:
+                    key = (matched.get(call["id"]) or (None, None))[1]
+                    if key in by_operation:
+                        calls.setdefault(key, []).append({"file": call["file"], "line": call["line"],
+                                                          "symbol": call.get("symbol") or "",
+                                                          "request": f"{call['method']} {call['url']}"})
+                entries = [{"operation": key, "change": "code", "parts": [], "schemas": [], "calls": calls.get(key, []),
+                            "components": [], "routes": []} for key in sorted(by_operation)]
+                notes, revision_id = list(ui_map.get("notes") or []), ui_map.get("revision_id")
+        except ContractInputError as exc:
+            entries, notes, revision_id = [], [str(exc)], None
+        for entry in entries:
+            items = by_operation.get(entry["operation"], [])
+            entry["items"] = items
+            entry["severity"] = min((item["severity"] for item in items), key=order.__getitem__, default="risky")
+        return {"event": event, "consumer_project_id": project_id, "attachment_id": attachment["attachment_id"],
+                "contract": {"source_id": source["source_id"], "name": source["name"], "project_id": source["project_id"]},
+                "revision_id": revision_id, "entries": entries, "notes": notes}
 
 
 contract_service = ContractService()

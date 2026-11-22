@@ -7,13 +7,15 @@ import dotenv from 'dotenv';
 import { RAGService } from './src/server/rag';
 import { UploadedFile } from './src/types';
 import { openDocument, complete as completeDockerfile, format as formatDockerfile, closeSession as closeDockerfileSession, closeAllSessions, bridgeStatus } from './src/server/dockerfileLanguageBridge';
-import { installOidcAuth, authRoleFor, authIsGlobalAdmin, authCanRunRuntimeSetup, authProjectsFor, authRemoveProjectMemberships } from './src/server/oidcAuth';
+import { installOidcAuth, authRoleFor, authIsGlobalAdmin, authCanRunRuntimeSetup, authProjectsFor, authRemoveProjectMemberships,
+  authCreateIdeToken, authListIdeTokens, authRevokeIdeToken, authUserForIdeToken } from './src/server/oidcAuth';
 import { registerDataAdminRoutes } from './src/server/dataAdminRoutes';
 import { registerCodeQualityRoutes } from './src/server/codeQualityRoutes';
 import { registerWorkingTreeGrants, registerWorkingTreeUpload, type WorkingTreeDependencies } from './src/server/workingTreeRoutes';
 import { registerSchemaDraftRoutes } from './src/server/schemaDraftRoutes';
 import { registerRuntimeSchemaRoutes } from './src/server/runtimeSchemaRoutes';
 import { registerContractRoutes } from './src/server/contractRoutes';
+import { registerIdeApi, registerIdeTokenRoutes, type IdeDependencies } from './src/server/ideRoutes';
 import { registerFrontendRoutes } from './src/server/frontendRoutes';
 
 dotenv.config();
@@ -269,7 +271,21 @@ async function startServer() {
   };
   // The desktop helper's upload authenticates with its grant, so it is registered before sessions.
   registerWorkingTreeUpload(app, workingTree);
+  // IDE extensions authenticate with a personal IDE token, not a session, so they are registered before sessions too.
+  const ide: IdeDependencies = {
+    apiUrl: PYTHON_API_URL,
+    internalSecret: INTERNAL_SECRET,
+    webOrigin: process.env.WEB_ORIGIN || 'http://localhost:3000',
+    userForToken: (authorization) => authUserForIdeToken(authorization),
+    canAccessProject: (user, projectId) => Boolean(authIsGlobalAdmin(user) || authRoleFor(user, projectId)),
+    getUser: (res) => (res.locals as any).authUser,
+    createToken: (user, name) => authCreateIdeToken(user, name),
+    listTokens: (user) => authListIdeTokens(user),
+    revokeToken: (user, tokenId) => authRevokeIdeToken(user, tokenId),
+  };
+  registerIdeApi(app, ide);
   installOidcAuth(app);
+  registerIdeTokenRoutes(app, ide);
   registerRuntimeSchemaRoutes(app, {
     apiUrl: PYTHON_API_URL,
     internalSecret: INTERNAL_SECRET,

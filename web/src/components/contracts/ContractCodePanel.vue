@@ -4,8 +4,9 @@
  * Plan: .archcore/frontend-assist/frontend-developer-assistance.plan.md (Phase 5)
  */
 import { computed, ref, watch } from 'vue';
-import { CircleAlert, CircleCheck, Copy, Download, LoaderCircle, Wand2 } from 'lucide-vue-next';
+import { CircleCheck, Copy, Download, LoaderCircle, Wand2 } from 'lucide-vue-next';
 import { makeRequest } from '../../ui/makeRequest';
+import { toastMessage } from '../../composables/useToasts';
 import { CODE_TARGETS, lineCount, type CodeTarget, type GeneratedCode } from '../../utils/contractCode';
 
 const props = defineProps<{ sourceId: string; versionId: string; defaultTarget?: CodeTarget }>();
@@ -15,7 +16,7 @@ const baseUrl = ref('');
 const result = ref<GeneratedCode | null>(null);
 const activePath = ref('');
 const loading = ref(false);
-const error = ref('');
+const error = toastMessage('error');
 const copied = ref('');
 
 const hint = computed(() => CODE_TARGETS.find((item) => item.id === target.value)?.hint || '');
@@ -82,7 +83,6 @@ const download = () => {
         <LoaderCircle v-if="loading" class="kb-spin" aria-hidden="true" /><Wand2 v-else aria-hidden="true" />Generate
       </button>
     </div>
-    <p v-if="error" role="alert" class="kb-rev-note" data-tone="bad"><CircleAlert aria-hidden="true" />{{ error }}</p>
 
     <template v-if="result && activeFile">
       <p v-for="note in result.notes" :key="note" class="kb-note">{{ note }}</p>

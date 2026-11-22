@@ -27,6 +27,8 @@ MODES = ("follow_latest", "pinned")
 MAX_SOURCES_PER_PROJECT = 50
 MAX_ATTACHMENTS_PER_PROJECT = 100
 MAX_LISTED_VERSIONS = 100
+MAX_LISTED_EVENTS = 200
+EVENT_KINDS = ("contract", "code")
 
 
 class ContractNotFound(LookupError):
@@ -74,6 +76,16 @@ class ContractStore:
                 role TEXT NOT NULL, mode TEXT NOT NULL, pinned_version_id TEXT, created_by TEXT,
                 created_at TEXT NOT NULL, UNIQUE(source_id, project_id, role))""")
             db.execute("CREATE INDEX IF NOT EXISTS contract_attachments_project ON contract_attachments(project_id)")
+            # What changed for consumers: a new contract version, or provider code that moved without one.
+            # Spec: @.archcore/frontend-assist/contract-change-notifications.spec.md.
+            db.execute("""CREATE TABLE IF NOT EXISTS contract_change_events (
+                seq INTEGER PRIMARY KEY AUTOINCREMENT, event_id TEXT NOT NULL UNIQUE, source_id TEXT NOT NULL,
+                provider_project_id TEXT NOT NULL, kind TEXT NOT NULL, from_version_id TEXT, to_version_id TEXT,
+                from_revision_id TEXT, to_revision_id TEXT, max_severity TEXT, summary TEXT NOT NULL,
+                items TEXT NOT NULL, created_at TEXT NOT NULL)""")
+            db.execute("CREATE INDEX IF NOT EXISTS contract_change_events_source ON contract_change_events(source_id, seq)")
+            db.execute("""CREATE TABLE IF NOT EXISTS contract_change_acks (
+                event_id TEXT NOT NULL, user_id TEXT NOT NULL, acked_at TEXT NOT NULL, PRIMARY KEY(event_id, user_id))""")
 
     def _connect(self) -> sqlite3.Connection:
         db = sqlite3.connect(self.root / "contracts.sqlite", timeout=30)
@@ -134,7 +146,10 @@ class ContractStore:
             if others:
                 raise ContractConflict("Other projects are attached to this contract: "
                                        + ", ".join(sorted(row["project_id"] for row in others)) + ". Detach them first.")
-            for table in ("contract_attachments", "contract_revisions", "contract_versions", "contract_sources"):
+            db.execute("""DELETE FROM contract_change_acks WHERE event_id IN
+                          (SELECT event_id FROM contract_change_events WHERE source_id=?)""", (source_id,))
+            for table in ("contract_change_events", "contract_attachments", "contract_revisions", "contract_versions",
+                          "contract_sources"):
                 db.execute(f"DELETE FROM {table} WHERE source_id=?", (source_id,))
 
     # ── versions ─────────────────────────────────────────────────────────────
@@ -342,6 +357,70 @@ class ContractStore:
                 return None
             return version if version["state"] == "valid" else None
         return self.newest_valid_version(attachment["source_id"], with_model=with_model)
+
+    # ── change events ────────────────────────────────────────────────────────
+
+    @staticmethod
+    def _event(row: sqlite3.Row, *, with_items: bool = True) -> dict[str, Any]:
+        result = {key: row[key] for key in ("seq", "event_id", "source_id", "provider_project_id", "kind",
+                                            "from_version_id", "to_version_id", "from_revision_id", "to_revision_id",
+                                            "max_severity", "created_at")}
+        result["summary"] = _load(row["summary"], {})
+        if with_items:
+            result["items"] = _load(row["items"], [])
+        return result
+
+    def record_event(self, source_id: str, provider_project_id: str, kind: str, items: list[dict[str, Any]], *,
+                     max_severity: str | None, summary: dict[str, int], from_version_id: str | None = None,
+                     to_version_id: str | None = None, from_revision_id: str | None = None,
+                     to_revision_id: str | None = None) -> dict[str, Any]:
+        if kind not in EVENT_KINDS:
+            raise ValueError("kind must be contract or code.")
+        event_id = "ce_" + uuid4().hex
+        with self._connect() as db:
+            db.execute("BEGIN IMMEDIATE")
+            db.execute("""INSERT INTO contract_change_events(event_id, source_id, provider_project_id, kind,
+                          from_version_id, to_version_id, from_revision_id, to_revision_id, max_severity, summary,
+                          items, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                       (event_id, source_id, provider_project_id, kind, from_version_id, to_version_id,
+                        from_revision_id, to_revision_id, max_severity, json.dumps(summary), json.dumps(items), _now()))
+            row = db.execute("SELECT * FROM contract_change_events WHERE event_id=?", (event_id,)).fetchone()
+        return self._event(row)
+
+    def get_event(self, event_id: str) -> dict[str, Any]:
+        with self._connect() as db:
+            row = db.execute("SELECT * FROM contract_change_events WHERE event_id=?", (event_id,)).fetchone()
+        if row is None:
+            raise ContractNotFound("No such contract change.")
+        return self._event(row)
+
+    def list_events(self, source_ids: list[str], *, after_seq: int = 0, limit: int = MAX_LISTED_EVENTS,
+                    with_items: bool = False) -> list[dict[str, Any]]:
+        """Events of the given sources with ``seq`` above ``after_seq``, newest first."""
+        if not source_ids:
+            return []
+        marks = ",".join("?" for _ in source_ids)
+        with self._connect() as db:
+            rows = db.execute(f"""SELECT * FROM contract_change_events WHERE source_id IN ({marks}) AND seq>?
+                                  ORDER BY seq DESC LIMIT ?""",
+                              (*source_ids, after_seq, max(1, min(limit, MAX_LISTED_EVENTS)))).fetchall()
+        return [self._event(row, with_items=with_items) for row in rows]
+
+    def acknowledge(self, event_id: str, user_id: str) -> None:
+        with self._connect() as db:
+            if db.execute("SELECT 1 FROM contract_change_events WHERE event_id=?", (event_id,)).fetchone() is None:
+                raise ContractNotFound("No such contract change.")
+            db.execute("INSERT OR REPLACE INTO contract_change_acks(event_id, user_id, acked_at) VALUES (?, ?, ?)",
+                       (event_id, user_id, _now()))
+
+    def acknowledged(self, user_id: str, event_ids: list[str]) -> set[str]:
+        if not event_ids:
+            return set()
+        marks = ",".join("?" for _ in event_ids)
+        with self._connect() as db:
+            rows = db.execute(f"SELECT event_id FROM contract_change_acks WHERE user_id=? AND event_id IN ({marks})",
+                              (user_id, *event_ids)).fetchall()
+        return {row["event_id"] for row in rows}
 
 
 def default_store() -> ContractStore:
