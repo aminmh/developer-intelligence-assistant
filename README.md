@@ -42,8 +42,15 @@ requirements, supported versions, configuration, credentials, and recovery instr
 **Local embedding resources.** The default Ollama `bge-m3` model uses about 1.2 GB of disk
 space. Budget about 4 GiB of available host RAM for one embedding worker, separate from Docker's
 memory allocation. This is a planning estimate; peak usage depends on input length and concurrency.
-A GPU is optional. For the standard setup with a remote chat model, 16 GiB of total host RAM is a
-starting point to test. Allow more memory if you also run the chat model or analyzers locally.
+A GPU is optional. Allow more memory if you also run the chat model or analyzers locally.
+
+**Measured footprint with hosted models.** With hosted embedding and chat models, the stack uses
+about 1.7 GiB of Docker memory when idle. While indexing a 14,000-chunk PHP project it peaked at about
+3 GiB, including Keycloak and the web app. Indexing runs the PHP language server inside the API
+container, so the API is limited to 1.5 GiB. Neo4j uses a 384 MiB heap and a 256 MiB page cache
+within its 1 GiB limit. Budget memory for your own project's containers too; they used another
+1.2–1.6 GiB in this measurement. A machine with 8 GB of RAM can run the application if Docker gets
+4 GiB. 16 GB is recommended. The installer still checks for 8 GiB of Docker memory and Ollama.
 
 ### AI-assisted installation
 

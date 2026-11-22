@@ -199,8 +199,7 @@ def _embed_cloudflare(texts: list[str], progress: Any = None) -> list[list[float
             },
             method="POST",
         )
-        with urllib.request.urlopen(req, timeout=120) as response:
-            payload = json.loads(response.read().decode("utf-8"))
+        payload = _cloudflare_post(req)
         result = payload.get("result") if isinstance(payload, dict) else None
         rows = result.get("data") if isinstance(result, dict) else None
         if not isinstance(rows, list) or len(rows) != len(batch) or not all(isinstance(row, list) and row for row in rows):
@@ -208,6 +207,34 @@ def _embed_cloudflare(texts: list[str], progress: Any = None) -> list[list[float
         vectors.extend(rows)
         _report_progress(progress, len(batch))
     return vectors
+
+
+# A slow or dropped request is common on large indexing runs; one should not fail the whole revision.
+_TRANSIENT_RETRY_DELAYS = (5.0, 15.0)
+# Workers AI has answered single batches of a long run with 409 and with 401/403 (valid token),
+# then accepted the identical request; a real credential error still fails after the retries.
+_TRANSIENT_STATUSES = {401, 403, 408, 409}
+
+
+def _cloudflare_post(req: urllib.request.Request) -> Any:
+    """POST one embedding batch; retry timeouts, connection errors, 401, 403, 408, 409 and 5xx twice.
+
+    Never retries quota (429), malformed requests (400) or unknown models (404)."""
+    from urllib.error import URLError
+
+    for attempt, delay in enumerate((*_TRANSIENT_RETRY_DELAYS, None)):
+        try:
+            with urllib.request.urlopen(req, timeout=120) as response:
+                return json.loads(response.read().decode("utf-8"))
+        except HTTPError as exc:
+            if (exc.code < 500 and exc.code not in _TRANSIENT_STATUSES) or delay is None:
+                raise
+            exc.close()
+        except (TimeoutError, URLError, ConnectionError):
+            if delay is None:
+                raise
+        time.sleep(delay)
+    raise RuntimeError("unreachable")
 
 
 def _retry_after_seconds(exc: HTTPError) -> float | None:

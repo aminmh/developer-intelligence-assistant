@@ -32,6 +32,18 @@ def source_reference(metadata: dict[str, Any]) -> str:
     return snapshot.reference
 
 
+def runtime_reference(project_id: str, row: dict[str, Any]) -> str | None:
+    """The source key of a registry row: the commit for clean Git revisions, ``wt_<archive>`` for
+    working trees, ``upload_<archive>`` for uploads. Rows merge their metadata, whose
+    ``commit_sha`` is the Git commit, so it alone names the wrong snapshot for working trees and
+    none for uploads; rows without archive identity fall back to it."""
+    try:
+        return source_reference({**row, "project_id": project_id})
+    except (KeyError, TypeError, ValueError):
+        value = row.get("commit_sha")
+        return value if isinstance(value, str) and value else None
+
+
 def source_filter(metadata: dict[str, Any]) -> dict[str, str]:
     reference = source_reference(metadata)
     return {"commit_sha": reference} if metadata.get("commit_sha") else {"source_ref": reference}
@@ -136,14 +148,25 @@ def prepare_chunks(chunks: list[dict[str, Any]], snapshot: Snapshot) -> list[dic
         path = relative_path(chunk.get("file_path") or chunk.get("file"))
         # Non-runtime chunks (class summaries/properties/etc.) need isolation too.
         # This key is deliberately not advertised as a telemetry symbol_id.
-        identity = canonical or "ast:" + json.dumps([
+        ast_identity = "ast:" + json.dumps([
             chunk.get("node_type") or chunk.get("type"),
             chunk.get("fq_symbol_name") or chunk.get("name"), path,
             chunk.get("start_line"), chunk.get("end_line"),
         ], ensure_ascii=False, separators=(",", ":"))
+        identity = canonical or ast_identity
+        if identity in seen and canonical and canonical.startswith("closure@"):
+            # Closures are identified by file and start line, so closures nested on one
+            # line share a runtime ID. The first keeps it; a later one with a different
+            # span is indexed without a runtime ID, and one with the same span is the
+            # same source text and adds nothing.
+            if ast_identity in seen:
+                continue
+            canonical, identity = None, ast_identity
         if identity in seen:
             raise ValueError(f"Ambiguous duplicate identity: {identity}")
         seen.add(identity)
+        if canonical and canonical.startswith("closure@"):
+            seen.add(ast_identity)
         chunk.update(snapshot.metadata())
         chunk.update(symbol_id=canonical, file_path=path, file=path,
                      storage_id=storage_id(snapshot.project_id, snapshot.reference, identity))
