@@ -486,6 +486,43 @@ def _evidence_read(args: dict[str, Any], context: ToolContext) -> dict[str, Any]
     return {**_read_window(root, path, args), "kind": kind}
 
 
+# --- change impact ----------------------------------------------------------------------------------------
+
+def impact_report(args: dict[str, Any], context: ToolContext) -> dict[str, Any]:
+    """The same report ``POST /code-tools/impact`` returns (change-impact spec clause 15)."""
+    from inspection import impact_service
+
+    if not (context.project_id and context.revision_id):
+        return {"coverage": "unavailable", "items": [],
+                "detail": "Change impact needs an indexed project revision; use code_symbol_lookup instead."}
+    try:
+        return impact_service.run_impact(context.project_id, context.revision_id, dict(args))
+    except impact_service.ImpactRequestError as exc:
+        raise ToolCallRejected("invalid_arguments", str(exc)) from exc
+    except impact_service.ImpactUnavailable as exc:
+        return {"coverage": "unavailable", "items": [], "detail": str(exc)}
+
+
+def _impact_items(report: dict[str, Any]) -> list[dict[str, Any]]:
+    """Cited rows for the model (clause 14): impacted symbols, then the routes they handle."""
+    items = [{"path": row["path"], "line": row.get("line"), "symbol": row.get("fqn"), "kind": row.get("kind"),
+              "depth": row.get("depth"), "origin": row.get("origin"), "confirmed": row.get("confirmed"),
+              "test": bool(row.get("test"))}
+             for row in report.get("impacted", []) if row.get("path")]
+    items += [{"path": route["handler_path"], "line": route.get("handler_line"),
+               "symbol": f"{route.get('method')} {route.get('path')}".strip(), "kind": "route",
+               "depth": route.get("depth"), "origin": route.get("source"), "confirmed": None, "test": False}
+              for route in report.get("routes", []) if route.get("handler_path")]
+    return items
+
+
+def _impact(args: dict[str, Any], context: ToolContext) -> dict[str, Any]:
+    report = impact_report(args, context)
+    if "items" in report:
+        return report
+    return {**report, "items": _impact_items(report)}
+
+
 # --- definitions ------------------------------------------------------------------------------------------
 
 def _definition(name: str, description: str, schema: dict[str, Any], handler) -> ToolDefinition:
@@ -551,6 +588,22 @@ NAVIGATION_TOOLS = [
             "max_results": _MAX_RESULTS},
          "required": ["symbol"], "additionalProperties": False},
         _symbol_lookup,
+    ),
+    _definition(
+        "code_impact",
+        "Find what a change affects: the callers, references, implementations, routes, and tests that depend "
+        "on the changed code, walking the symbol graph upstream. Pass exactly one of symbols (names you plan "
+        "to change), diff (a unified diff), or base_revision_id (compare this revision against an older one). "
+        "Each item names its depth from the change and the producer of the edge.",
+        {"type": "object", "properties": {
+            "symbols": {"type": "array", "items": {"type": "string", "minLength": 1, "maxLength": 300},
+                        "minItems": 1, "maxItems": 50},
+            "diff": {"type": "string", "minLength": 1, "maxLength": 204800},
+            "base_revision_id": {"type": "string", "minLength": 1, "maxLength": 200},
+            "depth": {"type": "integer", "minimum": 1, "maximum": 6, "default": 3},
+            "max_nodes": {"type": "integer", "minimum": 1, "maximum": 2000, "default": 300}},
+         "additionalProperties": False},
+        _impact,
     ),
     _definition(
         "code_repo_map",

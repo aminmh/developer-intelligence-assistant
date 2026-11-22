@@ -69,7 +69,8 @@ def _output(result):
 
 def test_all_navigation_tools_are_read_only_builtins():
     assert set(TOOLS) == {"code_text_search", "code_structural_search", "code_read", "code_outline",
-                          "code_symbol_lookup", "code_stats", "code_repo_map", "evidence_files", "evidence_read"}
+                          "code_symbol_lookup", "code_impact", "code_stats", "code_repo_map", "evidence_files",
+                          "evidence_read"}
     assert {t.effect for t in NAVIGATION_TOOLS} == {"read_only"}
 
 
@@ -349,3 +350,44 @@ def test_wrapper_detection_never_skips_project_folders(tmp_path, layout, expecte
     root, prefix = project_root(tmp_path)
 
     assert prefix == expected_prefix and root == tmp_path / expected_prefix if expected_prefix else root == tmp_path
+
+
+# --- code_impact (change impact analysis, spec clause 14) ------------------------------------------
+
+def test_code_impact_items_cite_path_and_line(monkeypatch, project):
+    import agent_tools.navigation as navigation
+
+    report = {"revision_id": "rev_1", "project_id": "pizza", "coverage": "complete",
+              "changed": [{"fqn": "App\\Repo::find", "path": "app/Repo.php", "line": 10}],
+              "impacted": [{"fqn": "App\\Http\\OrderController::show", "kind": "method", "path": "app/Http/OrderController.php",
+                            "line": 20, "depth": 1, "origin": "lsp", "confirmed": None, "test": False,
+                            "edge": {"path": "app/Http/OrderController.php", "line": 22}},
+                           {"fqn": "App\\Ghost::x", "kind": "method", "path": "", "line": 3, "depth": 2,
+                            "origin": "lsp", "confirmed": None, "test": False, "edge": {"path": "", "line": None}}],
+              "routes": [{"source": "static", "method": "GET", "path": "/orders/{id}", "fqn": "App\\Http\\OrderController::show",
+                          "depth": 1, "handler_path": "app/Http/OrderController.php", "handler_line": 20}],
+              "tests": [], "truncated": False, "limit_reached": None}
+    seen = {}
+
+    def fake_run(project_id, revision_id, args):
+        seen.update(project_id=project_id, revision_id=revision_id, args=args)
+        return report
+
+    monkeypatch.setattr("inspection.impact_service.run_impact", fake_run)
+    from agent_tools.types import EFFECT_READ_ONLY
+
+    definition = TOOLS["code_impact"]
+    assert definition.effect == EFFECT_READ_ONLY
+    out = _output(_run("code_impact", {"symbols": ["App\\Repo::find"]}, project, project_id="pizza", revision_id="rev_1"))
+    assert seen == {"project_id": "pizza", "revision_id": "rev_1", "args": {"symbols": ["App\\Repo::find"]}}
+    assert out["items"] == [
+        {"path": "app/Http/OrderController.php", "line": 20, "symbol": "App\\Http\\OrderController::show",
+         "kind": "method", "depth": 1, "origin": "lsp", "confirmed": None, "test": False},
+        {"path": "app/Http/OrderController.php", "line": 20, "symbol": "GET /orders/{id}", "kind": "route",
+         "depth": 1, "origin": "static", "confirmed": None, "test": False}]
+    assert out["impacted"][1]["fqn"] == "App\\Ghost::x"      # the full report stays; uncitable rows get no item
+
+
+def test_code_impact_needs_an_indexed_revision(project):
+    out = _output(_run("code_impact", {"symbols": ["X"]}, project, filename="armaiti-api-develop.zip"))
+    assert out["coverage"] == "unavailable" and out["items"] == []
