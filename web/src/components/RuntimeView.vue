@@ -7,14 +7,13 @@ import { computed, nextTick, onMounted, onUnmounted, ref, watch } from 'vue';
 import ConfirmModal from './ConfirmModal.vue';
 import RemoteHostMonitor from './RemoteHostMonitor.vue';
 import RuntimeSetupWizard from './runtime/RuntimeSetupWizard.vue';
-import OpenDrawioButton from './runtime/OpenDrawioButton.vue';
-import { runtimeSchemaNavigation } from '../utils/runtimeSchema';
 import ToggleCard from './ToggleCard.vue';
 import { makeRequest } from '../ui/makeRequest';
 import { runtimeProjectOptions } from '../utils/runtimeProjects';
 import { subscribeRuntimeUpdates } from '../ui/runtimeEvents';
 import { useUrlTab } from '../composables/useUrlTab';
 import { useProjectScope } from '../composables/useProjectScope';
+import { toast, toastMessage } from '../composables/useToasts';
 import RuleLinksPanel from './code-quality/RuleLinksPanel.vue';
 import RuleImpactResults from './code-quality/RuleImpactResults.vue';
 import { ruleKnowledgePath, ruleRequest, type ImpactResult } from './code-quality/ruleKnowledge';
@@ -46,7 +45,7 @@ const hiddenTraceIds = ref(new Set<string>());
 const deleteTarget = ref<{ key: string; projectId: string; revisionId: string; traceIds: string[] } | null>(null);
 const deletingRequests = ref(false);
 const requestDeleteError = ref('');
-const requestDeleteNotice = ref('');
+const requestDeleteNotice = toastMessage('success');
 const expandedTraceId = ref('');
 const requestDetailTabs = [
   { id: 'overview', label: 'Overview' },
@@ -167,6 +166,7 @@ const loadProjects = async () => {
     applyScope(false);
   } catch (cause: any) {
     error.value = cause?.message || 'Could not load runtime project inventory.';
+    toast.error(error.value);
   } finally {
     loadingProjects.value = false;
   }
@@ -239,6 +239,7 @@ const loadDetail = async () => {
       if (!detail.value || loadedDetailKey.value !== selectedKeyAtStart) {
         detail.value = null;
         error.value = cause?.message || 'Could not load runtime snapshot.';
+        toast.error(error.value);
       }
     }
   } finally {
@@ -357,7 +358,10 @@ const previewFindingDiff = async (traceId: string) => {
     if (!response.ok) throw new Error(data.detail || 'Diff preview failed. Retry the request.');
     if (selected.value?.key === current.key) diffPreviews.value = { ...diffPreviews.value, [key]: data };
   } catch (cause: any) {
-    if (selected.value?.key === current.key) diffErrors.value = { ...diffErrors.value, [key]: cause?.message || 'Diff preview failed. Retry the request.' };
+    if (selected.value?.key === current.key) {
+      diffErrors.value = { ...diffErrors.value, [key]: cause?.message || 'Diff preview failed. Retry the request.' };
+      toast.error(diffErrors.value[key]);
+    }
   } finally {
     if (selected.value?.key === current.key) diffLoading.value = { ...diffLoading.value, [key]: false };
   }
@@ -388,7 +392,10 @@ const checkDiffAgainstRules = async (traceId: string) => {
       { method: 'POST', json: { revision_id: current.revision_id, diff: preview.diff } });
     if (selected.value?.key === current.key) ruleImpacts.value = { ...ruleImpacts.value, [key]: result };
   } catch (cause: any) {
-    if (selected.value?.key === current.key) ruleImpactErrors.value = { ...ruleImpactErrors.value, [key]: cause?.message || 'The diff could not be checked against business rules.' };
+    if (selected.value?.key === current.key) {
+      ruleImpactErrors.value = { ...ruleImpactErrors.value, [key]: cause?.message || 'The diff could not be checked against business rules.' };
+      toast.error(ruleImpactErrors.value[key]);
+    }
   } finally { ruleImpactLoading.value = { ...ruleImpactLoading.value, [key]: false }; }
 };
 
@@ -822,7 +829,6 @@ const setupBannerTone = computed(() => (setupState.value === 'error' ? 'bad' : s
         <ToggleCard v-model="autoRefresh" class="rt-toggle" label="Auto-refresh" description="Live Runtime updates" density="compact" />
 
         <div class="rt-bar-end">
-          <OpenDrawioButton button-class="rt-btn" />
           <div class="rt-group" role="group" aria-label="Runtime setup">
             <button type="button" class="rt-btn" :disabled="loadingSetup || !!savedSetup || showSetupWizard || setupBusy" @click="startRuntimeSetup">
               <RefreshCw v-if="loadingSetup || (setupBusy && activeOperation === 'setup')" class="rt-spin" aria-hidden="true" /><WandSparkles v-else aria-hidden="true" />{{ loadingSetup ? 'Checking setup…' : setupBusy && activeOperation === 'setup' ? 'Setting up…' : 'Set up Runtime' }}
@@ -855,8 +861,7 @@ const setupBannerTone = computed(() => (setupState.value === 'error' ? 'bad' : s
 
       <RuntimeSetupWizard v-if="showSetupWizard" :authorize="getRuntimeHelperAuth" :known-project-ids="knownProjectIds" :indexed-revisions="projects" :inventory-available="!loadingProjects && !error" @close="showSetupWizard = false" @apply="applySetupPlan" />
 
-      <div v-if="error" class="rt-banner" data-tone="bad" role="alert"><AlertTriangle aria-hidden="true" /><span class="rt-banner-text">{{ error }}</span></div>
-      <div v-else-if="!options.length && !loadingProjects && !waitingForFirstReport" class="rt-empty">
+      <div v-if="!error && !options.length && !loadingProjects && !waitingForFirstReport" class="rt-empty">
         <span class="rt-empty-icon"><Server aria-hidden="true" /></span>
         <h2>No Docker containers are reporting yet</h2>
         <p>Start the local host agent and opt in your Compose services. You don't need to upload source code to see containers.</p>
@@ -927,7 +932,6 @@ const setupBannerTone = computed(() => (setupState.value === 'error' ? 'bad' : s
         <section class="rt-card" aria-labelledby="rt-containers-title">
           <div class="rt-sec-head">
             <h2 id="rt-containers-title" class="rt-sec-title"><Container aria-hidden="true" />Containers</h2>
-            <a v-if="selected" class="rt-btn" :href="runtimeSchemaNavigation(runtimePageUrl, selected.project_id, detail.deployments.every(item => item.environment === detail.deployments[0]?.environment) ? detail.deployments[0]?.environment || '' : '')"><Database aria-hidden="true" />Load database schema</a>
             <span v-if="detail.deployments.length" class="rt-tag">{{ detail.deployments.length }} reporting</span>
             <span class="rt-hint rt-m0 rt-push">Deployment reports refresh every 60 seconds at the host agent</span>
           </div>
@@ -944,7 +948,6 @@ const setupBannerTone = computed(() => (setupState.value === 'error' ? 'bad' : s
               <span v-if="isDatabaseContainer(container)" class="rt-tag"><Database aria-hidden="true" />database</span>
               <span v-else-if="container.commit_sha !== detail.commit_sha" class="rt-tag" data-tone="warn"><AlertTriangle aria-hidden="true" />other revision</span>
               <span v-else class="rt-tag" data-tone="ok"><Check aria-hidden="true" />match</span>
-              <a v-if="selected" class="rt-btn" :href="runtimeSchemaNavigation(runtimePageUrl, selected.project_id, container.environment, container.container_id)" :aria-label="`Load database schema from ${container.service}`"><Database aria-hidden="true" />Load schema</a>
             </div>
           </div>
         </section>
@@ -969,7 +972,6 @@ const setupBannerTone = computed(() => (setupState.value === 'error' ? 'bad' : s
             <p class="rt-hint">10 requests per page, up to 50 from the last {{ requestList?.window_hours || detail.telemetry.aggregation_window_hours }} hours. PHP CPU and memory are worker-level estimates.</p>
 
             <p v-if="hideUnmatched404" class="rt-hint">Unmatched 404s are hidden unless marked Error. Stored traces and other response statuses are unchanged. Turn off the filter to review missing pages.</p>
-            <p v-if="requestDeleteNotice" role="status" class="rt-note" data-tone="ok"><CheckCircle2 aria-hidden="true" />{{ requestDeleteNotice }}</p>
             <p v-if="requestListLoading && !requestList" class="rt-hint">Loading recent sampled requests…</p>
             <div v-if="requestListError" class="rt-note" data-tone="bad" role="alert"><AlertTriangle aria-hidden="true" /><span>{{ requestListError }}</span><button type="button" class="rt-link" @click="loadRequestList()">Retry</button></div>
             <p v-if="requestList?.available !== false && requestList?.requests.length && requestList.sampling_ratio != null && requestList.sampling_ratio < 1" class="rt-banner rt-banner-sm" data-tone="warn"><AlertTriangle aria-hidden="true" /><span class="rt-banner-text">The app records {{ formatPercent(requestList.sampling_ratio) }} of requests (head sampling), so real traffic is about {{ Math.round(1 / requestList.sampling_ratio) }}× what's listed here.</span></p>
@@ -1199,13 +1201,11 @@ const setupBannerTone = computed(() => (setupState.value === 'error' ? 'bad' : s
                           <div v-if="selectedFindings[requestAnalysisKey(request.trace_id)]" class="rt-diff-area">
                             <button type="button" class="rt-btn rt-btn-sm" :disabled="diffLoading[requestAnalysisKey(request.trace_id)] || !requestAnalyses[requestAnalysisKey(request.trace_id)].source_available" @click="previewFindingDiff(request.trace_id)"><FileDiff aria-hidden="true" />{{ diffLoading[requestAnalysisKey(request.trace_id)] ? 'Preparing preview…' : 'Preview code diff' }}</button>
                             <p v-if="!requestAnalyses[requestAnalysisKey(request.trace_id)].source_available" class="rt-note" data-tone="warn"><AlertTriangle aria-hidden="true" />No exact-revision source mapping is available, so diff preview is disabled.</p>
-                            <p v-if="diffErrors[requestAnalysisKey(request.trace_id)]" role="alert" class="rt-note" data-tone="bad">{{ diffErrors[requestAnalysisKey(request.trace_id)] }}</p>
                             <div v-if="diffPreviews[requestAnalysisKey(request.trace_id)]" class="rt-diff">
                               <div class="rt-diff-head"><FileCode aria-hidden="true" />Read-only preview · {{ diffPreviews[requestAnalysisKey(request.trace_id)].file_path }} · revision {{ diffPreviews[requestAnalysisKey(request.trace_id)].revision_id }} · {{ diffPreviews[requestAnalysisKey(request.trace_id)].provider }} / {{ diffPreviews[requestAnalysisKey(request.trace_id)].model }}</div>
                               <pre tabindex="0"><span v-for="(line, index) in diffPreviews[requestAnalysisKey(request.trace_id)].diff.split('\n')" :key="index" :data-line="line.startsWith('@@') ? 'hunk' : line.startsWith('+') && !line.startsWith('+++') ? 'add' : line.startsWith('-') && !line.startsWith('---') ? 'remove' : undefined">{{ line || ' ' }}</span></pre>
                               <div class="rt-diff-foot">
                                 <button type="button" class="rt-btn rt-btn-sm" :disabled="ruleImpactLoading[requestAnalysisKey(request.trace_id)]" @click="checkDiffAgainstRules(request.trace_id)"><Scale aria-hidden="true" />{{ ruleImpactLoading[requestAnalysisKey(request.trace_id)] ? 'Checking business rules…' : 'Check against business rules' }}</button>
-                                <p v-if="ruleImpactErrors[requestAnalysisKey(request.trace_id)]" role="alert" class="rt-note" data-tone="bad">{{ ruleImpactErrors[requestAnalysisKey(request.trace_id)] }}</p>
                                 <RuleImpactResults v-if="ruleImpacts[requestAnalysisKey(request.trace_id)]" :result="ruleImpacts[requestAnalysisKey(request.trace_id)]!" :instance-url="null" />
                               </div>
                             </div>

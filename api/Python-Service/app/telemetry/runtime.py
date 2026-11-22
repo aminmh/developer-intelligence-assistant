@@ -298,6 +298,57 @@ def _database_summary(calls: list[dict], request_duration_ms) -> dict:
 SLOW_ROUTE_MIN_REQUESTS = 20
 
 
+def _ai_summary_bucket(row: dict) -> str | None:
+    db_system = str(row.get("db_system") or "").lower()
+    if "mysql" in db_system:
+        return "mysql_queries_ms"
+    if "redis" in db_system:
+        operation = re.sub(r"[^a-z0-9]+", "_", str(row.get("db_operation") or "other").lower()).strip("_")
+        return f"redis_{operation or 'other'}_ms"
+    return None
+
+
+def span_time_breakdown(root: dict | None, children: list[dict], total_ms: float, bucket_of) -> dict[str, float]:
+    """Time inside one request spent in each child-span bucket, counting overlapping time once.
+
+    ``bucket_of`` maps a child span to a bucket name or ``None`` to ignore it. When spans of different
+    buckets overlap, the time goes to the first bucket in name order. Without a root start time,
+    child durations are summed (capped at the request duration).
+    """
+    buckets: dict[str, list[tuple[float, float]]] = {}
+    root_start = _timestamp_epoch_ms((root or {}).get("timestamp"))
+    for row in children:
+        bucket = bucket_of(row)
+        if bucket is None:
+            continue
+        duration_ms = max(0.0, float(row.get("duration_ms") or 0.0))
+        if duration_ms <= 0 or total_ms <= 0:
+            continue
+        start = _timestamp_epoch_ms(row.get("timestamp"))
+        if root_start is None or start is None:
+            buckets.setdefault(bucket, []).append((0.0, min(total_ms, duration_ms)))
+            continue
+        offset = start - root_start
+        begin = max(0.0, offset)
+        end = min(total_ms, offset + duration_ms)
+        if end > begin:
+            buckets.setdefault(bucket, []).append((begin, end))
+
+    spent = {name: 0.0 for name in buckets}
+    if root_start is None:
+        for name, intervals in buckets.items():
+            spent[name] = min(total_ms, sum(end - start for start, end in intervals))
+        return spent
+    boundaries = sorted({point for intervals in buckets.values() for interval in intervals for point in interval})
+    for start, end in zip(boundaries, boundaries[1:]):
+        if end <= start:
+            continue
+        covering = next((name for name in sorted(buckets) if any(left <= start and right >= end for left, right in buckets[name])), None)
+        if covering is not None:
+            spent[covering] += end - start
+    return spent
+
+
 def _ratio(value) -> float | None:
     """Head-sampling ratio from the indexer.sampling.ratio resource attribute; None when unknown."""
     try:
@@ -581,44 +632,8 @@ class ClickHouseRuntime:
         """Build a privacy-shaped, trace-scoped summary from spans and one retained profile."""
         total_ms = max(0.0, float(request.get("duration_ms") or 0.0))
         root = next((row for row in rows if row.get("span_kind") == "Server"), None)
-        buckets: dict[str, list[tuple[float, float]]] = {}
-        root_start = _timestamp_epoch_ms((root or {}).get("timestamp"))
-        for row in rows:
-            if row is root:
-                continue
-            db_system = str(row.get("db_system") or "").lower()
-            if "mysql" in db_system:
-                bucket = "mysql_queries_ms"
-            elif "redis" in db_system:
-                operation = re.sub(r"[^a-z0-9]+", "_", str(row.get("db_operation") or "other").lower()).strip("_")
-                bucket = f"redis_{operation or 'other'}_ms"
-            else:
-                continue
-            duration_ms = max(0.0, float(row.get("duration_ms") or 0.0))
-            if duration_ms <= 0 or total_ms <= 0:
-                continue
-            start = _timestamp_epoch_ms(row.get("timestamp"))
-            if root_start is None or start is None:
-                buckets.setdefault(bucket, []).append((0.0, min(total_ms, duration_ms)))
-                continue
-            offset = start - root_start
-            begin = max(0.0, offset)
-            end = min(total_ms, offset + duration_ms)
-            if end > begin:
-                buckets.setdefault(bucket, []).append((begin, end))
-
-        external_ms = {name: 0.0 for name in buckets}
-        if root_start is None:
-            for name, intervals in buckets.items():
-                external_ms[name] = min(total_ms, sum(end - start for start, end in intervals))
-        else:
-            boundaries = sorted({point for intervals in buckets.values() for interval in intervals for point in interval})
-            for start, end in zip(boundaries, boundaries[1:]):
-                if end <= start:
-                    continue
-                covering = next((name for name in sorted(buckets) if any(left <= start and right >= end for left, right in buckets[name])), None)
-                if covering is not None:
-                    external_ms[covering] += end - start
+        children = [row for row in rows if row is not root]
+        external_ms = span_time_breakdown(root, children, total_ms, _ai_summary_bucket)
         breakdown = {name: round(value, 3) for name, value in sorted(external_ms.items())}
         breakdown["php_app_time_ms"] = round(max(0.0, total_ms - sum(external_ms.values())), 3)
         hotspots, profile_event_type = self._trace_profile_hotspots(project_id, revision_id, trace_id)
@@ -941,7 +956,7 @@ class ClickHouseRuntime:
 
 
 def snapshot_definitions(project_id: str, commit_sha: str) -> list[dict]:
-    """Read the immutable Phase 0 PhpSymbol snapshot; never inspect legacy rows."""
+    """Read the immutable Phase 0 Symbol snapshot; never inspect legacy rows."""
     from inspection.service import InspectionService
     from telemetry.snapshot import storage_id
 
@@ -966,8 +981,11 @@ def _project_runtime(project_id: str, snapshot: dict, registry) -> dict:
     matching = [row for row in deployments if commit_sha and row["commit_sha"] == commit_sha]
     index_available = snapshot.get("state") == "ready"
     index_reason = None
+    from telemetry.snapshot import runtime_reference
+
+    reference = runtime_reference(project_id, snapshot)
     try:
-        definitions = snapshot_definitions(project_id, commit_sha) if index_available and commit_sha else []
+        definitions = snapshot_definitions(project_id, reference) if index_available and reference else []
     except Exception:  # Neo4j/index may be offline while ClickHouse is reachable.
         definitions = []
         index_available = False
@@ -977,11 +995,11 @@ def _project_runtime(project_id: str, snapshot: dict, registry) -> dict:
     telemetry = clickhouse.summary(project_id, revision_id, known_ids) if revision_id else clickhouse._empty(
         "This snapshot has no indexed revision ID yet."
     )
-    if index_available and commit_sha and revision_id:
+    if index_available and reference and revision_id:
         try:
             from inspection.graph import InspectionGraph
             from telemetry.snapshot import storage_id
-            collection = "sym_snapshot_" + storage_id(project_id, commit_sha, "")
+            collection = "sym_snapshot_" + storage_id(project_id, reference, "")
             static_edges = InspectionGraph().static_call_edges(collection)
             observed_edges = {
                 (row.get("caller_symbol_id"), row.get("symbol_id"))
@@ -998,6 +1016,13 @@ def _project_runtime(project_id: str, snapshot: dict, registry) -> dict:
                 "percent": round(100 * len(expected_edges & observed_edges) / len(expected_edges), 1) if expected_edges else None,
                 "basis": "runtime samples within the selected aggregation window",
             }
+            # Share of indexed methods seen running, and routes observed (lsp-first plan, task 18k).
+            try:
+                from inspection.service import InspectionService
+
+                telemetry["runtime_coverage"] = InspectionService().runtime_coverage(collection)
+            except Exception:  # noqa: BLE001 — informational; leave edge coverage intact
+                telemetry["runtime_coverage"] = None
         except Exception:
             telemetry["method_edge_coverage"] = {"observed_edges": 0, "static_edges": 0, "percent": None, "basis": "static graph unavailable"}
     return {

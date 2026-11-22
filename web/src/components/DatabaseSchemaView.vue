@@ -6,6 +6,7 @@ import {
 } from 'lucide-vue-next';
 import { makeRequest } from '../ui/makeRequest';
 import { useProjectScope } from '../composables/useProjectScope';
+import { toastMessage } from '../composables/useToasts';
 import { subscribeRuntimeUpdates } from '../ui/runtimeEvents';
 import type { AnalysisSession, ErdRef, ErdTable, NormalizedSchema, RuntimeProjectRecord, RuntimeSnapshotData, SchemaVisualizationResponse } from '../types';
 import { normalizeSavedSchema, parseSchemaInput, schemaToDbml, schemaToJson, type SchemaInputFormat } from '../utils/erdTransformer';
@@ -31,7 +32,7 @@ const search = ref('');
 const loading = ref(false);
 const loadingAnalyses = ref(false);
 const parsing = ref(false);
-const error = ref('');
+const error = toastMessage('error');
 const selectedTableId = ref('');
 const selectedRefId = ref('');
 const rightPanelOpen = ref(true);
@@ -336,8 +337,7 @@ const tableRuntimeMax = computed(() => Math.max(1, ...tableRuntime.value.map((ro
       <SchemaDraftPanel ref="draftPanel" :schema="schema" :source-type="sourceType" :analysis-id="selectedAnalysisId" :runtime-counts="busyTableCounts" :selection="selectedEntity" @select-entity="selectEditorEntity" />
 
       <div v-if="runtimeError" class="sc-banner" data-tone="warn"><AlertTriangle aria-hidden="true" /><span>{{ runtimeError }}</span></div>
-      <div v-if="error" class="sc-banner" data-tone="bad" role="alert"><AlertTriangle aria-hidden="true" /><span>{{ error }}</span></div>
-      <div v-else-if="loading" class="sc-card sc-loading" role="status"><RefreshCw class="sc-spin" aria-hidden="true" />Loading schema…</div>
+      <div v-if="loading" class="sc-card sc-loading" role="status"><RefreshCw class="sc-spin" aria-hidden="true" />Loading schema…</div>
       <div v-else-if="!schema" class="sc-empty">
         <span class="sc-empty-icon"><Table2 aria-hidden="true" /></span>
         <h2>No schema loaded</h2>

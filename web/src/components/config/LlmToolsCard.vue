@@ -2,6 +2,7 @@
 import { computed, onMounted, ref } from 'vue';
 import { Plus, Save, Trash2, Wrench, ShieldCheck, ShieldAlert, ChevronDown, ChevronUp, Wand2 } from 'lucide-vue-next';
 import { TOOL_WORKFLOWS, parseSchemaText, schemaFromUrlTemplate } from '../../utils/agentTools';
+import { toastMessage } from '../../composables/useToasts';
 
 type Effect = 'read_only' | 'side_effecting';
 type AgentAccess = {
@@ -31,8 +32,8 @@ const hostsText = ref('');
 const effect = ref<Effect>('side_effecting');
 const allWorkflows = ref(true);
 const workflows = ref<string[]>([]);
-const error = ref('');
-const message = ref('');
+const error = toastMessage('error');
+const message = toastMessage('success');
 const testing = ref(false);
 const saving = ref(false);
 
@@ -153,7 +154,8 @@ async function test() {
       method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ filename: 'project.zip' }),
     });
     const d = await r.json().catch(() => ({}));
-    message.value = d.success ? 'Test succeeded' : (d.result?.error || 'Test failed');
+    if (d.success) message.value = 'Test succeeded';
+    else error.value = d.result?.error || 'Test failed';
   } finally {
     testing.value = false;
   }
@@ -174,8 +176,6 @@ onMounted(load);
       </div>
       <button class="px-3 py-2 rounded-lg bg-indigo-600 text-white text-xs font-semibold" @click="add"><Plus class="w-3.5 h-3.5 inline mr-1" />Add tool</button>
     </div>
-    <p v-if="error" class="text-xs text-rose-300" role="alert">{{ error }}</p>
-    <p v-if="message" class="text-xs text-emerald-300" role="status">{{ message }}</p>
 
     <!-- Editor -->
     <div v-if="selected" class="rounded-xl border border-indigo-500/30 bg-slate-950/40 p-4 space-y-3">

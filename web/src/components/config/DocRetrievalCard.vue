@@ -3,6 +3,7 @@ import { ref } from 'vue';
 import { BookOpen, RefreshCw } from 'lucide-vue-next';
 import { RAGConfig } from '../../types';
 import { makeRequest } from '../../ui/makeRequest';
+import { toast } from '../../composables/useToasts';
 
 const { config, updateField } = defineProps<{
   config: RAGConfig;
@@ -10,7 +11,6 @@ const { config, updateField } = defineProps<{
 }>();
 
 const testingDocRetrieval = ref(false);
-const docRetrievalTest = ref<null | { ok: boolean; detail: string }>(null);
 
 const clampNum = (v: string): number => {
   const n = parseInt(v, 10);
@@ -19,7 +19,6 @@ const clampNum = (v: string): number => {
 
 const testDocRetrieval = async () => {
   testingDocRetrieval.value = true;
-  docRetrievalTest.value = null;
   try {
     const res = await makeRequest('/api/docretrieval/test', {
       method: 'POST',
@@ -32,19 +31,13 @@ const testDocRetrieval = async () => {
     });
     const data = await res.json();
     if (data.success) {
-      docRetrievalTest.value = {
-        ok: true,
-        detail: `${data.provider || 'unknown'} · ${(data.chunks || []).length} chunks` +
-          (data.provenance?.length ? ` · ${data.provenance.length} pkg(s)` : ''),
-      };
+      toast.success(`${data.provider || 'unknown'} · ${(data.chunks || []).length} chunks` +
+          (data.provenance?.length ? ` · ${data.provenance.length} pkg(s)` : ''), 'Lookup ok');
     } else {
-      docRetrievalTest.value = {
-        ok: false,
-        detail: (data.warning || 'lookup returned nothing').slice(0, 200),
-      };
+      toast.error((data.warning || 'lookup returned nothing').slice(0, 200), 'Lookup failed');
     }
   } catch (e: any) {
-    docRetrievalTest.value = { ok: false, detail: String(e?.message || e).slice(0, 200) };
+    toast.error(String(e?.message || e).slice(0, 200), 'Lookup failed');
   } finally {
     testingDocRetrieval.value = false;
   }
@@ -186,12 +179,6 @@ const testDocRetrieval = async () => {
         never included verbatim in answers — they ground the model only.
       </p>
 
-      <div v-if="docRetrievalTest" class="text-[10px] font-mono rounded-lg border border-slate-800 px-3 py-2 break-all bg-slate-900/60"
-        :class="docRetrievalTest.ok ? 'text-emerald-300' : 'text-rose-300'">
-        {{ docRetrievalTest.ok ? '✓ lookup ok' : '✗ lookup failed' }}
-        <span class="text-slate-500">—</span>
-        {{ docRetrievalTest.detail }}
-      </div>
     </div>
   </div>
 </template>

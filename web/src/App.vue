@@ -3,8 +3,6 @@ import { computed, defineAsyncComponent, ref, watch, onMounted, onUnmounted } fr
 import {
   Settings,
   X,
-  CheckCircle,
-  AlertTriangle,
   ScrollText,
   Database,
   Network, LayoutPanelLeft,
@@ -23,6 +21,8 @@ import {
 } from 'lucide-vue-next';
 import BrandLogo from './components/BrandLogo.vue';
 import ProjectSwitcher from './components/ProjectSwitcher.vue';
+import ToastStack from './components/ToastStack.vue';
+import { toast } from './composables/useToasts';
 import { useProjectScope } from './composables/useProjectScope';
 import ToggleCard from './components/ToggleCard.vue';
 import type { RAGConfig, SearchMatch, LLMUsage, ContextUsage, ChatBusinessRuleSource, ToolCallView, ToolAvailability, CitationPreview, ApprovalView } from './types';
@@ -302,10 +302,6 @@ watch(
 );
 
 const loading = ref(false);
-const showSuccessToast = ref(false);
-const successMessage = ref('');
-const showErrorToast = ref(false);
-const errorMessage = ref('');
 const orchestrationSteps = ref<PipelineStep[]>([]);
 const generatingAnswer = ref(false);
 let pollTimerId: ReturnType<typeof setTimeout> | null = null;
@@ -343,16 +339,9 @@ const ROUTES = ['code_explain', 'code_refactor', 'debug', 'search', 'knowledge',
 
 const messages = ref<Message[]>([]);
 
+// Every success and error message in the app goes to the shared toast stack.
 const triggerToast = (msg: string, isSuccess = true) => {
-  if (isSuccess) {
-    successMessage.value = msg;
-    showSuccessToast.value = true;
-    setTimeout(() => { showSuccessToast.value = false; }, 3000);
-  } else {
-    errorMessage.value = msg;
-    showErrorToast.value = true;
-    setTimeout(() => { showErrorToast.value = false; }, 4000);
-  }
+  if (isSuccess) toast.success(msg); else toast.error(msg);
 };
 
 const {
@@ -1566,33 +1555,7 @@ onUnmounted(() => narrowQuery?.removeEventListener('change', syncNarrow));
       </div>
     </main>
 
-    <!-- Success toast -->
-    <Transition name="app-toast">
-      <div v-if="showSuccessToast" role="status" aria-live="polite" class="app-toast app-glass pointer-events-auto fixed bottom-6 right-6 z-50 flex w-full max-w-sm items-start gap-3 p-4">
-        <CheckCircle class="h-5 w-5 shrink-0 text-emerald-400" aria-hidden="true" />
-        <div class="flex-1 text-left">
-          <p class="app-toast-title">Done</p>
-          <p class="app-toast-body mt-1">{{ successMessage }}</p>
-        </div>
-        <button type="button" class="app-icon-btn -m-1.5" aria-label="Dismiss" @click="showSuccessToast = false">
-          <X aria-hidden="true" />
-        </button>
-      </div>
-    </Transition>
-
-    <!-- Error toast -->
-    <Transition name="app-toast">
-      <div v-if="showErrorToast" role="alert" class="app-toast app-glass pointer-events-auto fixed bottom-6 right-6 z-50 flex w-full max-w-sm items-start gap-3 p-4" style="border-color: rgb(251 113 133 / 0.35)">
-        <AlertTriangle class="h-5 w-5 shrink-0 text-rose-400" aria-hidden="true" />
-        <div class="flex-1 text-left">
-          <p class="app-toast-title">Something went wrong</p>
-          <p class="app-toast-body mt-1">{{ errorMessage }}</p>
-        </div>
-        <button type="button" class="app-icon-btn -m-1.5" aria-label="Dismiss" @click="showErrorToast = false">
-          <X aria-hidden="true" />
-        </button>
-      </div>
-    </Transition>
+    <ToastStack />
 
   </div>
 </template>

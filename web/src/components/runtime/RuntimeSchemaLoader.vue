@@ -4,6 +4,7 @@ import { Database, ExternalLink, RefreshCw } from 'lucide-vue-next';
 import { makeRequest } from '../../ui/makeRequest';
 import { discoverRuntimeSchema, runtimeSchemaOperation, saveRuntimeSchema, type RuntimeSchemaSsh } from '../../utils/runtimeSchema';
 import type { RuntimeSchemaDiscovery, RuntimeSchemaSource, SavedSchemaDraft } from '../../types';
+import { toast, toastMessage } from '../../composables/useToasts';
 
 const props = defineProps<{
   projectId: string;
@@ -22,15 +23,21 @@ const database = ref('');
 const inspectedDatabase = ref('');
 const schemas = ref<string[]>([]);
 const busy = ref('');
-const error = ref('');
-const message = ref('');
+const message = toastMessage('success');
+const showError = (text: string) => toast.error(`${text} Your current draft and edits are preserved; retry after correcting the issue.`);
 const savedDraft = ref<SavedSchemaDraft | null>(null);
 const sourceKey = (source: RuntimeSchemaSource) => JSON.stringify([source.project_id, source.environment, source.host_id, source.container_id]);
 const source = computed(() => sources.value.find(item => sourceKey(item) === selected.value));
 const databaseGroups = computed(() => ['postgresql', 'mysql', 'mariadb'].map(engine => ({ engine,
   sources: sources.value.filter(item => verification.value[sourceKey(item)]?.discovery?.engine === engine),
 })).filter(group => group.sources.length));
-const unverifiedSources = computed(() => sources.value.filter(item => !verification.value[sourceKey(item)]?.discovery));
+// Containers that are simply not databases (the app, a cache) are not worth a warning; only a
+// database that could not be verified (remote host, missing client, permissions) needs attention.
+const notADatabase = /not a verified PostgreSQL|No supported database engine/i;
+const unverifiedSources = computed(() => sources.value.filter(item => {
+  const entry = verification.value[sourceKey(item)];
+  return !entry?.discovery && !(entry?.error && notADatabase.test(entry.error));
+}));
 const verifiedSelection = computed({ get: () => verification.value[selected.value]?.discovery ? selected.value : '', set: value => { selected.value = value; } });
 const candidateSelection = computed({ get: () => verification.value[selected.value]?.discovery ? '' : selected.value, set: value => { selected.value = value; } });
 let registryRevision = 0;
@@ -68,9 +75,9 @@ watch(schemas, () => { selectionRevision++; }, { deep: true, flush: 'sync' });
 
 async function run(label: string, action: () => Promise<void>, stillCurrent = () => true) {
   if (busy.value) return;
-  busy.value = label; error.value = ''; message.value = '';
+  busy.value = label; message.value = '';
   try { await action(); }
-  catch (cause: any) { if (stillCurrent()) error.value = cause.message || 'The schema operation failed. Check your selection and retry.'; }
+  catch (cause: any) { if (stillCurrent()) showError(cause.message || 'The schema operation failed. Check your selection and retry.'); }
   finally { busy.value = ''; }
 }
 async function findContainers() {
@@ -99,9 +106,10 @@ async function findContainers() {
     const verified = candidates.filter(item => verification.value[sourceKey(item)]?.discovery);
     const preferred = verified.find(item => item.container_id === wantedContainer) || verified[0];
     selected.value = preferred ? sourceKey(preferred) : '';
-    message.value = verified.length
-      ? (discovery.value?.databases.length ? 'Database containers verified. Review the database and schemas before loading.' : 'No readable databases were found. Ensure the database container is included in Runtime setup and its configured database user can read the catalog.')
-      : 'No PostgreSQL, MySQL, or MariaDB container was verified. The database container must be included in Runtime setup and reporting for this project and environment. For a remote host, associate its SSH target below and retry verification.';
+    if (verified.length && discovery.value?.databases.length) message.value = 'Database containers verified. Review the database and schemas before loading.';
+    else toast.info(verified.length
+      ? 'No readable databases were found. Ensure the database container is included in Runtime setup and its configured database user can read the catalog.'
+      : 'No PostgreSQL, MySQL, or MariaDB container was verified. The database container must be included in Runtime setup and reporting for this project and environment. For a remote host, associate its SSH target below and retry verification.');
   }, stillCurrent);
 }
 async function discover(chosenDatabase = '') {
@@ -114,7 +122,8 @@ async function discover(chosenDatabase = '') {
     if (!stillCurrent()) return;
     verification.value[selected.value] = { discovery: result, database: chosenDatabase };
     applyDiscovery(result, chosenDatabase);
-    message.value = result.databases.length ? `${result.engine} ${result.version}. Review the database${result.engine === 'postgresql' ? ' and PostgreSQL schemas' : ''} before loading.` : 'No readable databases were found. Ensure the database container is included in Runtime setup and its configured database user can read the catalog.';
+    if (result.databases.length) message.value = `${result.engine} ${result.version}. Review the database${result.engine === 'postgresql' ? ' and PostgreSQL schemas' : ''} before loading.`;
+    else toast.info('No readable databases were found. Ensure the database container is included in Runtime setup and its configured database user can read the catalog.');
   }, stillCurrent);
 }
 function sshInput(): RuntimeSchemaSsh {
@@ -149,16 +158,16 @@ async function associateHost() {
 function openSavedDraft() {
   if (!savedDraft.value) return;
   // Check before opening a window, so a refusal never flashes a blank window.
-  if (!props.canLoad()) { error.value = 'Close the open Draw.io window or finish the current draft operation, then try again.'; return; }
+  if (!props.canLoad()) { showError('Close the open Draw.io window or finish the current draft operation, then try again.'); return; }
   const reserved = window.open('about:blank', '_blank');
   if (!props.acceptDraft(savedDraft.value, reserved)) {
     reserved?.close();
-    error.value = 'Draw.io was not opened. Save or discard pending draft changes and close any open editor window, then try again.';
+    showError('Draw.io was not opened. Save or discard pending draft changes and close any open editor window, then try again.');
   }
 }
 function loadSchema() {
   if (busy.value || !canExtract.value || !source.value) return;
-  if (!props.canLoad()) { error.value = 'Close the open Draw.io window or finish the current draft operation, then try again.'; return; }
+  if (!props.canLoad()) { showError('Close the open Draw.io window or finish the current draft operation, then try again.'); return; }
   // Reserve while the click still has browser activation; extraction takes time.
   const reserved = window.open('about:blank', '_blank');
   const selection = { source: source.value, database: database.value, schemas: discovery.value?.engine === 'postgresql' ? [...schemas.value] : [] };
@@ -194,11 +203,22 @@ function loadSchema() {
         <label v-if="databaseGroups.length" class="runtime-schema-wide">Verified database container<select v-model="verifiedSelection" class="sc-input"><option disabled value="">Choose a verified database container</option><optgroup v-for="group in databaseGroups" :key="group.engine" :label="group.engine"><option v-for="item in group.sources" :key="sourceKey(item)" :value="sourceKey(item)">{{ item.service }} · {{ item.environment }} · {{ item.container_id.slice(0, 12) }} · host {{ item.host_id.slice(0, 16) }}</option></optgroup></select></label>
         <button v-if="source" type="button" class="sc-btn" @click="discover()">{{ discovery ? 'Refresh database discovery' : 'Verify selected container' }}</button>
       </fieldset>
-      <details v-if="unverifiedSources.length">
-        <summary>Unverified reporting containers and remote host setup</summary>
-        <p class="sc-hint">These reporting containers could not be verified as databases. Select a candidate to see the verification result or associate its reporting host with SSH, then verify again.</p>
-        <fieldset :disabled="!!busy" class="runtime-schema-fields"><legend class="sr-only">Unverified reporting candidates</legend><label class="runtime-schema-wide">Reporting candidate<select v-model="candidateSelection" class="sc-input"><option disabled value="">Choose a reporting candidate</option><option v-for="item in unverifiedSources" :key="sourceKey(item)" :value="sourceKey(item)">{{ item.service }} · {{ item.environment }} · {{ item.container_id.slice(0, 12) }} · unverified</option></select></label></fieldset>
-        <p v-if="source && !discovery" class="sc-hint runtime-schema-id">Verification failed: {{ verification[selected]?.error || 'Database engine has not been verified.' }}</p>
+      <details v-if="unverifiedSources.length" class="runtime-schema-help" :open="!databaseGroups.length">
+        <summary>A database was not verified? Check it or connect a remote host</summary>
+        <p class="sc-hint">These reporting containers could not be verified as databases. Select one to see why. A database on another machine needs its Docker host associated over SSH first.</p>
+        <fieldset :disabled="!!busy" class="runtime-schema-fields"><legend class="sr-only">Unverified reporting candidates</legend><label class="runtime-schema-wide">Container<select v-model="candidateSelection" class="sc-input"><option disabled value="">Choose a container</option><option v-for="item in unverifiedSources" :key="sourceKey(item)" :value="sourceKey(item)">{{ item.service }} · {{ item.environment }} · {{ item.container_id.slice(0, 12) }}</option></select></label></fieldset>
+        <template v-if="source && !discovery">
+          <p class="sc-hint runtime-schema-id">Why: {{ verification[selected]?.error || 'The database engine has not been verified.' }}</p>
+          <p class="sc-hint">Remote Docker host over SSH: uses this computer's SSH configuration and credentials. Verify the scanned host key before confirming.</p>
+          <fieldset :disabled="!!busy" class="runtime-schema-fields"><legend class="sr-only">SSH host association</legend>
+            <label>SSH host or alias<input v-model="sshHost" class="sc-input" autocomplete="off" /></label>
+            <label>SSH user (optional)<input v-model="sshUser" class="sc-input" autocomplete="off" /></label>
+            <label>SSH port<input v-model="sshPort" type="number" min="1" max="65535" class="sc-input" /></label>
+            <button type="button" class="sc-btn" @click="scanHost">Scan SSH fingerprint</button>
+            <template v-if="scanned"><p class="runtime-schema-wide runtime-schema-id">{{ scanned.host }} · {{ scanned.ssh_user || 'SSH configured user' }} · port {{ scanned.ssh_port }}<br />{{ scanned.fingerprint }}</p><label class="runtime-schema-checkbox runtime-schema-wide"><input v-model="confirmed" type="checkbox" />I verified this fingerprint for the selected reporting host.</label><button type="button" class="sc-btn" :disabled="!confirmed" @click="associateHost">Confirm host association</button></template>
+          </fieldset>
+          <button type="button" class="sc-btn" :disabled="!!busy" @click="discover()">Verify again</button>
+        </template>
       </details>
       <p v-if="source" class="sc-hint sc-m0 runtime-schema-id">Host {{ source.host_id }} · image {{ source.image_id }}</p>
       <fieldset v-if="discovery" :disabled="!!busy" class="runtime-schema-fields">
@@ -209,21 +229,8 @@ function loadSchema() {
           <fieldset v-else class="runtime-schema-fields"><legend>PostgreSQL schemas</legend><label v-for="name in discovery.schemas" :key="name" class="runtime-schema-checkbox"><input v-model="schemas" type="checkbox" :value="name" />{{ name }}</label><p v-if="!discovery.schemas.length" class="sc-hint sc-m0">No readable user schemas were found in this database.</p></fieldset>
         </template>
       </fieldset>
-      <details v-if="source">
-        <summary>Associate a remote Docker host over SSH</summary>
-        <p class="sc-hint">Associate this reporting host with an SSH target using this computer's SSH configuration and credentials. This is separate from remote storage settings. Verify the scanned host key before confirming.</p>
-        <fieldset :disabled="!!busy" class="runtime-schema-fields"><legend class="sr-only">SSH host association</legend>
-          <label>SSH host or alias<input v-model="sshHost" class="sc-input" autocomplete="off" /></label>
-          <label>SSH user (optional)<input v-model="sshUser" class="sc-input" autocomplete="off" /></label>
-          <label>SSH port<input v-model="sshPort" type="number" min="1" max="65535" class="sc-input" /></label>
-          <button type="button" class="sc-btn" @click="scanHost">Scan SSH fingerprint</button>
-          <template v-if="scanned"><p class="runtime-schema-wide runtime-schema-id">{{ scanned.host }} · {{ scanned.ssh_user || 'SSH configured user' }} · port {{ scanned.ssh_port }}<br />{{ scanned.fingerprint }}</p><label class="runtime-schema-checkbox runtime-schema-wide"><input v-model="confirmed" type="checkbox" />I verified this fingerprint for the selected reporting host.</label><button type="button" class="sc-btn" :disabled="!confirmed" @click="associateHost">Confirm host association</button></template>
-        </fieldset>
-      </details>
       <div class="sc-row"><button type="button" class="sc-btn" data-variant="primary" :disabled="!!busy || !canExtract" @click="loadSchema"><ExternalLink aria-hidden="true" />Load schema in Draw.io</button><button v-if="savedDraft" type="button" class="sc-btn" :disabled="!!busy" @click="openSavedDraft">Open saved draft in Draw.io</button></div>
       <p v-if="busy" role="status" class="sc-hint sc-m0">{{ busy }}</p>
-      <p v-if="message" role="status" class="sc-hint sc-m0">{{ message }}</p>
-      <p v-if="error" role="alert" class="sc-hint sc-m0" data-tone="bad">{{ error }} Your current draft and edits are preserved; retry after correcting the issue.</p>
     </div>
   </section>
 </template>

@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { computed } from 'vue';
-import { Activity, Check, Database, Layers3, Palette, Save, Wrench } from 'lucide-vue-next';
+import { Activity, Check, Database, KeyRound, Layers3, Palette, Save, Wrench } from 'lucide-vue-next';
 import type { AppearancePreferences, RAGConfig } from '../types';
 import { useUrlTab } from '../composables/useUrlTab';
 import AppearanceCard from './config/AppearanceCard.vue';
@@ -13,14 +13,15 @@ import PreviewCard from './config/PreviewCard.vue';
 import RerankerCard from './config/RerankerCard.vue';
 import LlmToolsCard from './config/LlmToolsCard.vue';
 import RuntimeTelemetryCard from './config/RuntimeTelemetryCard.vue';
+import IdeTokensCard from './config/IdeTokensCard.vue';
 
 const props = defineProps<{
   config: RAGConfig;
   appearance: AppearancePreferences;
 }>();
 
-type ConfigSection = 'appearance' | 'models' | 'retrieval' | 'tools' | 'runtime';
-const activeSection = useUrlTab<ConfigSection>({ values: ['appearance', 'models', 'retrieval', 'tools', 'runtime'], fallback: 'appearance' });
+type ConfigSection = 'appearance' | 'models' | 'retrieval' | 'tools' | 'runtime' | 'ide';
+const activeSection = useUrlTab<ConfigSection>({ values: ['appearance', 'models', 'retrieval', 'tools', 'runtime', 'ide'], fallback: 'appearance' });
 
 const emit = defineEmits<{
   (e: 'saveConfig'): void;
@@ -33,6 +34,7 @@ const sections: Array<{ value: ConfigSection; label: string; description: string
   { value: 'retrieval', label: 'Retrieval and context', description: 'Vector store, reranker, preview', summary: 'Where code is stored and how context is found, ranked and previewed.', icon: Database },
   { value: 'tools', label: 'LLM tools', description: 'Tool access and approvals', summary: '', icon: Wrench },
   { value: 'runtime', label: 'Runtime telemetry', description: 'ClickHouse and collectors', summary: '', icon: Activity },
+  { value: 'ide', label: 'IDE extension', description: 'Tokens for API change alerts', summary: '', icon: KeyRound },
 ];
 
 const current = computed(() => sections.find((section) => section.value === activeSection.value) ?? sections[0]);
@@ -104,6 +106,7 @@ const updateAppearance = <K extends keyof AppearancePreferences>(
 
           <div v-else-if="activeSection === 'tools'" class="st-legacy" data-own-head><LlmToolsCard /></div>
           <div v-else-if="activeSection === 'runtime'" class="st-legacy" data-own-head><RuntimeTelemetryCard /></div>
+          <div v-else-if="activeSection === 'ide'" class="st-legacy" data-own-head><IdeTokensCard /></div>
 
           <div v-if="needsSave" class="st-savebar">
             <Save class="st-savebar-icon" />

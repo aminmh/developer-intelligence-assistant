@@ -5,6 +5,7 @@ import {
 } from 'lucide-vue-next';
 import { makeRequest } from '../ui/makeRequest';
 import { useUrlTab } from '../composables/useUrlTab';
+import { toastMessage } from '../composables/useToasts';
 import DeletionDialog from './data-admin/DeletionDialog.vue';
 import {
   STORE_LABELS, STORE_UNITS, formatBytes, formatCount, readJson,
@@ -17,7 +18,7 @@ const STORES = Object.keys(STORE_LABELS) as StoreName[];
 const panel = useUrlTab<Panel>({ values: ['overview', 'projects', 'stores', 'orphans', 'audit', 'admins'], fallback: 'overview' });
 const globalAdmin = ref(false);
 const loading = ref(false);
-const error = ref('');
+const error = toastMessage('error');
 const summary = ref<{ stores: Record<string, StoreSummary>; orphans: number; projects: number; generated_at?: string } | null>(null);
 const projects = ref<any[]>([]);
 const expanded = ref(new Set<string>());
@@ -181,8 +182,6 @@ onMounted(async () => { await loadOverview(); await loadPanel(); });
           {{ item.label }}
         </button>
       </nav>
-
-      <p v-if="error" class="dm-error dm-banner" role="alert">{{ error }}</p>
 
       <!-- Overview -->
       <section v-if="panel === 'overview'" class="dm-section">

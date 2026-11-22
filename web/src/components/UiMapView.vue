@@ -7,6 +7,7 @@ import { computed, ref, watch } from 'vue';
 import { Activity, Boxes, CircleAlert, CircleCheck, Database, LayoutPanelLeft, LoaderCircle, Route, Search, ShieldCheck, Waypoints } from 'lucide-vue-next';
 import { makeRequest } from '../ui/makeRequest';
 import { useProjectScope } from '../composables/useProjectScope';
+import { toastMessage } from '../composables/useToasts';
 import {
   CHECK_AREAS, componentForScreen, findingsByFile, frameworkLabel, matches, milliseconds, requestsOf, routesOf, storeKindLabel, usedBy, vitalTone,
   type CheckArea, type FrontendChecks, type ScreenViewDetail, type ScreenViews, type UiComponent, type UiMap,
@@ -15,7 +16,7 @@ import {
 const scope = useProjectScope();
 const map = ref<UiMap | null>(null);
 const loading = ref(false);
-const error = ref('');
+const error = toastMessage('error');
 const search = ref('');
 const appRoot = ref('');
 const selectedId = ref('');
@@ -23,7 +24,7 @@ type Section = 'routes' | 'components' | 'requests' | 'checks' | 'live';
 const section = ref<Section>('routes');
 const checks = ref<FrontendChecks | null>(null);
 const checksLoading = ref(false);
-const checksError = ref('');
+const checksError = toastMessage('error');
 const area = ref<CheckArea>('accessibility');
 const live = ref<ScreenViews | null>(null);
 const liveLoading = ref(false);
@@ -152,7 +153,6 @@ const ownersOf = (callId: number) => (map.value?.components || [])
         <p>The UI map is built from an indexed revision. Upload or sync the project in the Knowledge base first.</p>
       </div>
       <p v-else-if="loading" class="kb-note" role="status"><LoaderCircle class="kb-spin" aria-hidden="true" /> Reading the project's routes and components…</p>
-      <p v-else-if="error" role="alert" class="kb-rev-note" data-tone="bad"><CircleAlert aria-hidden="true" />{{ error }}</p>
       <div v-else-if="map && !map.framework" class="kb-empty">
         <div class="kb-empty-icon"><LayoutPanelLeft aria-hidden="true" /></div>
         <h3>No front-end application found</h3>
@@ -213,7 +213,6 @@ const ownersOf = (callId: number) => (map.value?.components || [])
 
             <div v-else-if="section === 'checks'" class="um-rows" role="tabpanel" aria-label="Checks">
               <p v-if="checksLoading" class="kb-note" role="status"><LoaderCircle class="kb-spin" aria-hidden="true" /> Checking the source…</p>
-              <p v-else-if="checksError" role="alert" class="kb-rev-note" data-tone="bad"><CircleAlert aria-hidden="true" />{{ checksError }}</p>
               <template v-else-if="checks">
                 <button v-for="item in CHECK_AREAS" :key="item.id" type="button" class="um-row" :aria-current="area === item.id ? 'true' : undefined" @click="area = item.id">
                   <span class="um-path">{{ item.label }}</span>
