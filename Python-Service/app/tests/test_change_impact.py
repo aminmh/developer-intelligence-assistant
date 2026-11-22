@@ -28,9 +28,15 @@ def _edge(target, caller, rtype="REFERENCES", kind="method_call", origin="lsp", 
 class FakeGraph:
     """In-memory Symbol graph answering the impact queries by Cypher marker."""
 
-    def __init__(self, nodes, edges, *, down=False, fail_upstream=False):
-        self.nodes = {n["fqn"]: n for n in nodes}
+    def __init__(self, nodes, edges, *, down=False, fail_upstream=False, inherited=(), routes=(),
+                 runtime_observed=False, producers=None):
+        self.all_nodes = list(nodes)
+        self.nodes = {n["fqn"]: n for n in nodes if n.get("collection") == COLLECTION}
         self.edges = edges          # rows as the upstream query returns them
+        self.inherited = list(inherited)
+        self.routes = list(routes)
+        self.runtime_observed = runtime_observed
+        self.producers = producers
         self.down = down
         self.fail_upstream = fail_upstream
         self.upstream_calls = []
@@ -44,8 +50,20 @@ class FakeGraph:
             if self.fail_upstream:
                 raise RuntimeError("neo4j went away")
             self.upstream_calls.append(sorted(params["ids"]))
-            rows = [row for row in self.edges if row["target"] in set(params["ids"])]
+            rows = [row for row in self.edges if row["target"] in set(params["ids"])
+                    and row["n"].get("collection", COLLECTION) == params["collection"]]
             return rows[: params["limit"]]
+        if "UNWIND $method_ids AS tid" in cypher:
+            return [row for row in self.inherited if row["target"] in set(params["method_ids"])]
+        if "UNWIND $route_ids AS tid" in cypher:
+            return [row for row in self.routes if row["target"] in set(params["route_ids"])]
+        if "UNWIND $symbol_ids AS sid" in cypher:
+            return [{"n": n} for n in self.all_nodes
+                    if n.get("collection") == params["collection"] and n.get("symbol_id") in set(params["symbol_ids"])]
+        if "runtime_window_hours IS NOT NULL" in cypher:
+            return [{"observed": self.runtime_observed}]
+        if "SymbolCoverage" in cypher:
+            return [{"producers": self.producers}] if self.producers is not None else []
         if "fqn: $fqn" in cypher:
             node = self.nodes.get(params["fqn"])
             return [{"n": node}] if node else []
@@ -231,3 +249,232 @@ def test_impacted_order():
     assert [i["fqn"] for i in report["impacted"]] == [
         "App\\Z::seen", "App\\A::z", "App\\A::y", "App\\B::x", "App\\0::top"]
     assert report["impacted"][0]["confirmed"] is True
+
+
+# === Phase 2: diff and revision-pair inputs, inheritance, routes, tests, runtime, coverage =========
+
+import io
+import zipfile
+
+from inspection.impact import analyze_diff, analyze_revisions, is_test_path
+
+BASE = RevisionRef(project_id="p1", revision_id="r0", collection="sym_base", ready=True)
+
+
+def _sym(fqn, sid, path, line, end_line, collection=COLLECTION, kind="method", **extra):
+    node = _node(fqn, kind=kind, path=path, line=line, symbol_id=sid, end_line=end_line, **extra)
+    node["collection"] = collection
+    if collection != COLLECTION:
+        node["id"] = "base-" + fqn
+    return node
+
+
+def _definitions(nodes):
+    return {n["symbol_id"]: {"symbol_id": n["symbol_id"], "name": n["fqn"], "file": n["file"],
+                             "line": n["line"], "end_line": n["end_line"]} for n in nodes}
+
+
+def _archive(files):
+    buffer = io.BytesIO()
+    with zipfile.ZipFile(buffer, "w") as bundle:
+        for path, text in files.items():
+            bundle.writestr(path, text)
+    return buffer.getvalue()
+
+
+REPO_PHP = "<?php\nclass Repo {\n  function find() {\n    return 1;\n  }\n  function save() {\n    return 2;\n  }\n}\n"
+DIFF = """--- a/app/Repo.php
++++ b/app/Repo.php
+@@ -3,3 +3,3 @@
+   function find() {
+-    return 1;
++    return 3;
+   }
+--- a/app/Notes.md
++++ b/app/Notes.md
+@@ -1,1 +1,1 @@
+-old
++new
+"""
+
+
+# --- T7: diff input -------------------------------------------------------------------------------
+
+def test_diff_maps_to_changed_symbols():
+    find = _sym("App\\Repo::find", "s-find", "app/Repo.php", 3, 5)
+    save = _sym("App\\Repo::save", "s-save", "app/Repo.php", 6, 8)
+    caller = _node("App\\Svc::run", path="app/Svc.php")
+    graph = FakeGraph([find, save, caller], [_edge("App\\Repo::find", caller)])
+    report = analyze_diff(_query(graph), REVISION, DIFF, _definitions([find, save]))
+    assert [(c["fqn"], c["change"]) for c in report["changed"]] == [("App\\Repo::find", "modified")]
+    assert [i["fqn"] for i in report["impacted"]] == ["App\\Svc::run"]
+    assert report["unresolved"] == [{"input": "app/Notes.md:1-1", "reason": "no_symbol"}]
+
+
+def test_diff_without_hunks_errors():
+    graph = FakeGraph([], [])
+    with pytest.raises(ImpactError, match="unified diff"):
+        analyze_diff(_query(graph), REVISION, "just some text", {})
+    with pytest.raises(ImpactError, match="200 KB"):
+        analyze_diff(_query(graph), REVISION, "x" * (200 * 1024 + 1), {})
+
+
+# --- T8: revision pair ----------------------------------------------------------------------------
+
+def test_revision_pair_detects_added_removed_changed():
+    base_find = _sym("App\\Repo::find", "s-find", "app/Repo.php", 3, 5, collection="sym_base")
+    base_save = _sym("App\\Repo::save", "s-save", "app/Repo.php", 6, 8, collection="sym_base")
+    base_gone = _sym("App\\Repo::gone", "s-gone", "app/Old.php", 2, 3, collection="sym_base")
+    head_find = _sym("App\\Repo::find", "s-find", "app/Repo.php", 3, 5)
+    head_save = _sym("App\\Repo::save", "s-save", "app/Repo.php", 6, 8)
+    head_new = _sym("App\\Repo::fresh", "s-new", "app/New.php", 2, 3)
+    old_user = _node("App\\Legacy::use", path="app/Legacy.php")
+    old_user["collection"] = "sym_base"
+    old_user["id"] = "base-App\\Legacy::use"
+    graph = FakeGraph([base_find, base_save, base_gone, head_find, head_save, head_new, old_user],
+                      [{**_edge("App\\Repo::gone", old_user), "target": "base-App\\Repo::gone"}])
+    base_files = {"app/Repo.php": REPO_PHP, "app/Old.php": "<?php\nfunction gone() {\n}\n"}
+    head_files = {"app/Repo.php": REPO_PHP.replace("return 1;", "return 9;"),
+                  "app/New.php": "<?php\nfunction fresh() {\n}\n"}
+    report = analyze_revisions(
+        _query(graph), REVISION, BASE,
+        head_definitions=_definitions([head_find, head_save, head_new]),
+        base_definitions=_definitions([base_find, base_save, base_gone]),
+        head_archive=lambda: _archive(head_files), base_archive=lambda: _archive(base_files))
+    assert sorted((c["fqn"], c["change"]) for c in report["changed"]) == [
+        ("App\\Repo::find", "modified"), ("App\\Repo::fresh", "added"), ("App\\Repo::gone", "removed")]
+    legacy = [i for i in report["impacted"] if i["fqn"] == "App\\Legacy::use"]
+    assert legacy and legacy[0]["revision_id"] == "r0"     # found through the base graph
+    assert report["base_revision_id"] == "r0"
+
+
+def test_base_revision_without_graph_unavailable():
+    head = _sym("App\\Repo::find", "s-find", "app/Repo.php", 3, 5)
+    report = analyze_revisions(
+        _query(FakeGraph([head], [])), REVISION, BASE,
+        head_definitions=_definitions([head]), base_definitions={},
+        head_archive=lambda: _archive({"app/Repo.php": REPO_PHP}), base_archive=lambda: b"")
+    assert report["coverage"] == "unavailable" and report["unavailable_revision"] == "r0"
+    assert report["impacted"] == []
+    with pytest.raises(ImpactError, match="not ready"):
+        analyze_revisions(_query(FakeGraph([head], [])), REVISION, RevisionRef("p1", "r0", "sym_base", ready=False),
+                          head_definitions=_definitions([head]), base_definitions={},
+                          head_archive=lambda: b"", base_archive=lambda: b"")
+
+
+# --- T9: inherited methods ------------------------------------------------------------------------
+
+def test_inherited_method_callers_on_subclasses():
+    method = _node("App\\Base::save", path="app/Base.php")
+    via_sub = _node("App\\Ctl::store", path="app/Ctl.php")
+    graph = FakeGraph([method, via_sub], [], inherited=[
+        {**_edge("App\\Base::save", via_sub, origin="php-parser"), "to_member": "save", "via_class": "App\\Child"}])
+    report = analyze_symbols(_query(graph), REVISION, ["App\\Base::save"])
+    item = report["impacted"][0]
+    assert item["fqn"] == "App\\Ctl::store" and item["edge"]["via_class"] == "App\\Child"
+
+
+# --- T10: routes ----------------------------------------------------------------------------------
+
+def test_routes_from_runtime_and_static_sources():
+    nodes, edges = _chain()          # Repo::find <- Svc::run <- Ctl::show <- Router::dispatch
+    invokable = _node("App\\Http\\Ping::__invoke", path="app/Ping.php")
+    edges.append(_edge("App\\Repo::find", invokable))
+    graph = FakeGraph([*nodes, invokable], edges, routes=[
+        {"target": "id-App\\Ctl::show", "method": "GET", "route": "/orders/{id}"}])
+    static = [{"method": "POST", "path": "/orders/{id}", "action": "App\\Ctl@show"},
+              {"method": "GET", "path": "/ping", "action": "App\\Http\\Ping"},
+              {"method": "GET", "path": "/home", "action": "Closure"}]
+    report = analyze_symbols(_query(graph), REVISION, ["App\\Repo::find"], static_routes=static)
+    routes = {(r["source"], r["method"], r["path"], r["fqn"], r["depth"]) for r in report["routes"]}
+    assert routes == {("runtime", "GET", "/orders/{id}", "App\\Ctl::show", 2),
+                      ("static", "POST", "/orders/{id}", "App\\Ctl::show", 2),
+                      ("static", "GET", "/ping", "App\\Http\\Ping::__invoke", 1)}
+
+
+# --- T11: tests and runtime confirmation ----------------------------------------------------------
+
+def test_tests_collected_and_walk_stops():
+    target = _node("App\\Repo::find", path="app/Repo.php")
+    test = _node("Tests\\RepoTest::testFind", path="tests/Unit/RepoTest.php")
+    runner = _node("Tests\\Suite::all", path="tests/Suite.php")
+    graph = FakeGraph([target, test, runner], [_edge("App\\Repo::find", test), _edge("Tests\\RepoTest::testFind", runner)])
+    report = analyze_symbols(_query(graph), REVISION, ["App\\Repo::find"])
+    assert [t["fqn"] for t in report["tests"]] == ["Tests\\RepoTest::testFind"]
+    assert [i["fqn"] for i in report["impacted"]] == ["Tests\\RepoTest::testFind"]
+    assert report["impacted"][0]["test"] is True
+    assert all(is_test_path(p) for p in ("tests/A.php", "src/FooTest.php", "pkg/test_x.py", "x_test.go",
+                                         "web/a.spec.ts", "web/a.test.ts", "web/__tests__/a.js", "spec/a_spec.rb"))
+    assert not any(is_test_path(p) for p in ("app/Testimonial.php", "app/Contest.php", "src/latest.py"))
+
+
+def test_runtime_confirmation_marks():
+    target = _node("App\\Svc::run")
+    seen = _node("App\\A::seen", path="app/A.php")
+    never = _node("App\\B::never", path="app/B.php")
+    edges = [_edge("App\\Svc::run", seen), _edge("App\\Svc::run", never),
+             _edge("App\\Svc::run", seen, rtype="RUNTIME_CALLS", kind=None, origin=None)]
+    observed = analyze_symbols(_query(FakeGraph([target, seen, never], edges, runtime_observed=True)),
+                               REVISION, ["App\\Svc::run"])
+    marks = {i["fqn"]: (i["confirmed"], i["origin"]) for i in observed["impacted"]}
+    assert marks == {"App\\A::seen": (True, "lsp"), "App\\B::never": (False, "lsp")}
+    assert observed["runtime"] == {"observed": True}
+    blind = analyze_symbols(_query(FakeGraph([target, never], edges[1:2])), REVISION, ["App\\Svc::run"])
+    assert blind["impacted"][0]["confirmed"] is None
+
+
+# --- T12: producer coverage -----------------------------------------------------------------------
+
+def test_partial_producer_coverage_reported():
+    nodes, edges = _chain()
+    partial = analyze_symbols(_query(FakeGraph(nodes, edges, producers={
+        "lsp": {"status": "partial", "languages": ["php"]}, "scip": {"status": "complete", "languages": ["python"]}})),
+        REVISION, ["App\\Repo::find"])
+    assert partial["coverage"] == "partial" and partial["coverage_reasons"] == ["lsp_partial"]
+    assert partial["producers"]["lsp"]["status"] == "partial"
+    complete = analyze_symbols(_query(FakeGraph(nodes, edges, producers={
+        "lsp": {"status": "unavailable", "languages": []}})), REVISION, ["App\\Repo::find"])
+    assert complete["coverage"] == "complete" and complete["coverage_reasons"] == []
+
+
+def test_partial_producer_coverage_recorded_from_exports():
+    from lsp.jobs import record_producer
+
+    index = {"definitions": [], "references": []}
+    stamped = record_producer(index, "lsp", {"status": "partial", "languages": {"php": {"status": "partial"}}})
+    stamped = record_producer(stamped, "scip", {"status": "complete", "languages": {"python": {}}})
+    assert stamped["producers"] == {"lsp": {"status": "partial", "languages": ["php"]},
+                                    "scip": {"status": "complete", "languages": ["python"]}}
+    assert "producers" not in index          # the input export is not mutated
+
+
+def test_partial_producer_coverage_written_with_the_graph():
+    from inspection.service import InspectionService
+
+    class Graph:
+        def __init__(self):
+            self.coverage = None
+
+        def upsert_nodes(self, rows):
+            return len(rows)
+
+        def upsert_references(self, rows):
+            return len(rows)
+
+        def upsert_declaration_relations(self, rows):
+            return len(rows)
+
+        def upsert_coverage(self, collection, producers):
+            self.coverage = (collection, producers)
+            return 1
+
+        def _get_store(self):
+            return None
+
+    graph = Graph()
+    definitions = [{"kind": "class", "name": "A", "fqn": "App\\A", "file": "/p/app/A.php", "line": 1,
+                    "end_line": 3, "relations": []}]
+    producers = {"lsp": {"status": "partial", "languages": ["php"]}}
+    InspectionService(graph=graph).index("/p", "proj", exported={
+        "definitions": definitions, "references": [], "producers": producers})
+    assert graph.coverage == ("sym_proj", producers)

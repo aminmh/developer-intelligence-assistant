@@ -127,6 +127,7 @@ class IndexingService:
         snapshot: Any = None,
         vector_collection_name: str | None = None,
         force_reindex: bool = False,
+        symbol_producers: dict[str, Any] | None = None,
     ) -> None:
         logger.info("Background indexing started: collection=%s count=%s", collection_name, len(chunks))
         self.write_status(download_id, "embedding", len(chunks), 0, collection_name)
@@ -163,6 +164,7 @@ class IndexingService:
                     symbol_definitions,
                     symbol_references,
                     snapshot,
+                    producers=symbol_producers,
                 )
                 return result
 
@@ -187,6 +189,8 @@ class IndexingService:
                     if current.get("state") != "ready":
                         registry.transition(snapshot, "indexing")
                         registry.finish_job(snapshot.project_id, snapshot.reference, success=True)
+                        from api_contracts.service import contract_service
+                        contract_service.on_revision_ready(snapshot.project_id, snapshot.reference)
                     from index.embedding_rebuild import activate_generation
                     activate_generation(collection_name, vector_collection_name)
             else:
@@ -286,6 +290,7 @@ class IndexingService:
                     snapshot=snapshot,
                     vector_collection_name=vector_collection_name,
                     force_reindex=force_reindex,
+                    symbol_producers=index.get("producers"),
                 )
             else:
                 self.index_chunks_background(
@@ -335,11 +340,14 @@ class IndexingService:
             return index
         logger.info("SCIP added %s definitions and %s references for %s (%s)", len(export["definitions"]),
                     len(export["references"]), identity["project_id"], export["languages"])
+        from lsp.jobs import record_producer
+
         definitions = list(index.get("definitions") or [])
         known = {(d.get("kind"), d.get("fqn")) for d in definitions}
         definitions += [d for d in export["definitions"] if (d.get("kind"), d.get("fqn")) not in known]
-        return {"definitions": definitions,
-                "references": [*(index.get("references") or []), *export["references"]]}
+        return record_producer({**index, "definitions": definitions,
+                                "references": [*(index.get("references") or []), *export["references"]]},
+                               "scip", export)
 
     @staticmethod
     def _with_lsp(index: dict[str, Any], zip_data: bytes, workdir: str,
@@ -416,6 +424,7 @@ class IndexingService:
         definitions: list[dict[str, Any]] | None,
         references: list[dict[str, Any]] | None,
         snapshot: Any = None,
+        producers: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         """Best-effort precise symbol graph indexing alongside vectors."""
         if not workspace_path or not definitions and not references:
@@ -430,6 +439,7 @@ class IndexingService:
                 exported={
                     "definitions": definitions or [],
                     "references": references or [],
+                    **({"producers": producers} if producers else {}),
                 },
                 snapshot=snapshot,
             )

@@ -227,7 +227,11 @@ def test_unavailable_everywhere_keeps_parser_export(lsp_env, workdir):
     calls, state = lsp_env
     state["worker"] = {"status": "unavailable", "definitions": [], "references": []}
     state["api"] = {"status": "unavailable", "definitions": [], "references": []}
-    assert _with_lsp(workdir) is PARSER
+    out = _with_lsp(workdir)
+    # The parser export stands; only the LSP outcome is noted for change impact coverage (F8).
+    assert {key: value for key, value in out.items() if key != "producers"} == PARSER
+    assert out["producers"] == {"lsp": {"status": "unavailable", "languages": []}}
+    assert "producers" not in PARSER
     assert calls == {"worker": 1, "api": 1}
 
 
