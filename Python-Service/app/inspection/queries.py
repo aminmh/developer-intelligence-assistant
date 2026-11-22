@@ -97,6 +97,23 @@ RETURN c AS n, r.calls AS calls, r.last_seen AS last_seen, r.sources AS sources,
 ORDER BY c.file, c.line
 """
 
+# Everything that depends on a set of symbols, one hop up, in one read (change impact,
+# @.archcore/agent-tools/change-impact-analysis.spec.md clause 6): references and calls,
+# types that implement or extend a target, and runtime calls recorded on this revision.
+_UPSTREAM = """
+UNWIND $ids AS tid
+MATCH (t:Symbol {id: tid})<-[r]-(c:Symbol)
+WHERE t.collection = $collection AND c.collection = $collection
+  AND (type(r) = 'REFERENCES'
+       OR (type(r) = 'DECLARES' AND r.kind IN ['implements', 'extends'])
+       OR (type(r) = 'RUNTIME_CALLS' AND r.revision_id IS NOT NULL
+           AND coalesce(r.revision_id, '') = coalesce(t.revision_id, '')))
+RETURN tid AS target, c AS n, type(r) AS rtype, r.kind AS rkind, r.file AS file, r.line AS line,
+       r.to_member AS to_member, r.origin AS origin
+ORDER BY c.file, c.line, r.line
+LIMIT $limit
+"""
+
 _RUNTIME_COVERAGE = """
 MATCH (s:Symbol {collection: $collection})
 WHERE s.kind IN ['method', 'function'] AND s.symbol_id IS NOT NULL
@@ -230,6 +247,47 @@ class SymbolGraphQuery:
 
             get_exception_logger().warning("Symbol query failed: %s", exc)
             return []
+
+    def available(self) -> bool:
+        """Whether the graph store can be reached at all."""
+        return self._graph._get_store() is not None
+
+    def upstream(self, collection: str, ids: list[str], limit: int = 50_000) -> list[dict[str, Any]] | None:
+        """Symbols one hop upstream of ``ids``; None when the graph cannot be read.
+
+        Unlike the other queries a read failure is not folded into an empty result,
+        so change impact can report ``coverage: unavailable`` instead of "no dependents".
+        """
+        store = self._graph._get_store()
+        if store is None:
+            return None
+        if not ids:
+            return []
+        try:
+            rows = store.structured_query(_UPSTREAM, param_map={
+                "collection": collection, "ids": list(ids), "limit": int(limit)}) or []
+        except Exception as exc:  # noqa: BLE001 — reported as unavailable coverage
+            from infra.exception_logger import get_exception_logger
+
+            get_exception_logger().warning("Upstream symbol query failed: %s", exc)
+            return None
+        out = []
+        for row in rows:
+            if not isinstance(row, dict) or not row.get("target"):
+                continue
+            item = _node_row(row.get("n") or {})
+            if not item.get("id"):
+                item["id"] = node_key(item["kind"], item["fqn"], item["name"])
+            rtype = row.get("rtype") or "REFERENCES"
+            if rtype == "RUNTIME_CALLS":
+                ref = {"kind": "runtime_call", "file": item.get("file", ""), "line": item.get("line"),
+                       "to_member": None, "origin": "runtime"}
+            else:
+                ref = _edge_ref(row)
+            item["ref"] = {**ref, "relation": rtype}
+            item["target"] = row["target"]
+            out.append(item)
+        return out
 
     def resolve_by_fqn(self, collection: str, fqn: str) -> list[dict[str, Any]]:
         rows = self._run(_MATCH_NODE_BY_FQN, {"collection": collection, "fqn": fqn})
