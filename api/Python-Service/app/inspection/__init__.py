@@ -2,7 +2,7 @@
 
 Tier-2/Tier-4 code-intelligence services backed by the native PHP exporter
 (bin/project-inspect over nikic/php-parser) and a project symbol graph in
-Neo4j (label ``PhpSymbol``, collection ``sym_<stem>`` — separate from the
+Neo4j (label ``Symbol``, collection ``sym_<stem>`` — separate from the
 conceptual-search CodeSymbol/``chunk_code_*`` index by design).
 
 Modules:

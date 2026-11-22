@@ -22,6 +22,7 @@ import stat
 import tempfile
 from dataclasses import dataclass, field
 from pathlib import Path, PurePosixPath
+from typing import Callable
 
 from agent_tools.types import ToolCallRejected, ToolContext
 
@@ -70,11 +71,15 @@ class SourceRoot:
     archive_sha256: str | None = None  # the revision's verified source archive
 
     def is_excluded(self, relative: str) -> bool:
-        from code_quality.exclusions import matches_exclusion
         from code_quality.service import _is_excluded_source_path
 
         if is_secret_path(relative) or _is_excluded_source_path(relative):
             return True
+        return self.matches_exclusion_patterns(relative)
+
+    def matches_exclusion_patterns(self, relative: str) -> bool:
+        from code_quality.exclusions import matches_exclusion
+
         if not self.exclusion_patterns:
             return False
         # Project exclusion patterns may be written against the archive layout.
@@ -88,8 +93,10 @@ class SourceRoot:
         except (ValueError, OSError):
             return None
 
-    def resolve_file(self, relative: str) -> Path:
-        """Resolve a model-supplied relative path to a readable file inside the root."""
+    def resolve_file(self, relative: str, excluded: Callable[[str], bool] | None = None) -> Path:
+        """Resolve a model-supplied relative path to a readable file inside the root.
+
+        ``excluded`` replaces :meth:`is_excluded` for readers with their own rules (evidence files)."""
         text = str(relative or "").strip().replace("\\", "/")
         while text.startswith("./"):
             text = text[2:]
@@ -102,7 +109,7 @@ class SourceRoot:
         rel = self.relative(candidate)
         if rel is None:
             raise ToolCallRejected("invalid_path", "The path is outside the project.")
-        if self.is_excluded(rel):
+        if (excluded or self.is_excluded)(rel):
             raise ToolCallRejected("excluded_path", f"{rel} is excluded from code tools (dependency, build, or cache path).")
         if not candidate.is_file():
             raise ToolCallRejected("not_found", f"No file named {rel} in the project.")

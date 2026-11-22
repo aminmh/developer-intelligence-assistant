@@ -21,7 +21,14 @@ import re
 from typing import Any
 
 from inspection import cli as php_cli
-from inspection.graph import InspectionGraph, canonical_definition, node_key, node_properties
+from inspection.graph import (
+    InspectionGraph,
+    canonical_definition,
+    default_origin,
+    language_for_path,
+    node_key,
+    node_properties,
+)
 from telemetry.snapshot import Snapshot, storage_id
 from inspection.queries import SymbolGraphQuery
 
@@ -98,6 +105,8 @@ class InspectionService:
 
         nodes = [self._def_node(d, collection) for d in defs]
         node_rows = [n for n in nodes if n is not None]
+        # Edges join only definitions that got a node; anonymous classes and their members get none.
+        noded = {n["id"] for n in node_rows}
         scoped_ids = {}
         if snapshot is not None:
             for record, node in zip(defs, nodes):
@@ -132,9 +141,11 @@ class InspectionService:
         decl_rows = []
         for d in defs:
             src = _node_key_for_record(d)
+            if src not in noded:
+                continue
             for rel in d.get("relations") or []:
                 target = by_fqn.get(rel.get("target", ""))
-                if not target:
+                if not target or _node_key_for_record(target) not in noded:
                     continue
                 decl_rows.append(
                     {
@@ -150,7 +161,7 @@ class InspectionService:
             raise RuntimeError("Snapshot inspection declarations incomplete")
 
         # Use-sites → REFERENCES edges (only when both ends are known).
-        def_keys = {_node_key_for_record(d) for d in defs}
+        def_keys = {_node_key_for_record(d) for d in defs} & noded
         ref_rows = []
         linked = 0
         via_counts: dict[str, int] = {}
@@ -172,7 +183,7 @@ class InspectionService:
                     "file": r.get("file", ""),
                     "line": r.get("line", 0),
                     "to_member": r.get("to_member"),
-                    "origin": r.get("origin") or "php-parser",
+                    "origin": r.get("origin") or default_origin(language_for_path(r.get("file"))),
                 }
             )
             linked += 1
@@ -256,6 +267,9 @@ class InspectionService:
     ) -> dict[str, Any]:
         return self._query.call_hierarchy(collection, fqn, name=name)
 
+    def runtime_coverage(self, collection: str) -> dict[str, Any]:
+        return self._query.runtime_coverage(collection)
+
     # --- record mapping helpers --------------------------------------------
 
     def _def_node(self, record: dict[str, Any], collection: str) -> dict | None:
@@ -270,6 +284,9 @@ class InspectionService:
             # commonly appear once per migration file.
             return None
         if kind == "method" and canonical_definition(record) is None:
+            return None
+        if kind in ("property", "class_const") and str(record.get("fqn") or "").startswith("::"):
+            # Members of an anonymous class (test doubles, migrations) share the class's lack of identity.
             return None
         fqn = record.get("fqn", "")
         name = record.get("name", "")
@@ -300,6 +317,9 @@ class InspectionService:
         if kind in ("static_call", "method_call") and member:
             # Target is a method on a known class.
             return node_key("method", f"{to_fqn}::{member}", member)
+        if kind == "property_fetch" and member:
+            # Target is a property node (`Owner::$name`); LSP indexing emits these.
+            return node_key("property", f"{to_fqn}::{member}", member)
         # new / instanceof / catch / class_const / function_call → def record.
         target = by_fqn.get(to_fqn)
         if target is None:

@@ -34,11 +34,67 @@ _NOT_FOUND_HINTS = (
 )
 
 
+_NAMESPACE_RE = re.compile(r"(?m)^\s*namespace\s+([A-Za-z_\\][A-Za-z0-9_\\]*)\s*[;{]")
+
+# Settings for an index-time run (see IndexingAdapter in lsp/base.py). Phpactor
+# loads the project's vendor/autoload.php when `composer.enable` is on, which
+# runs project code; every external tool integration is off as well.
+_INDEX_SETTINGS: Dict[str, Any] = {
+    "composer.enable": False,
+    "indexer.enabled_watchers": [],
+    "language_server_phpstan.enabled": False,
+    "language_server_psalm.enabled": False,
+    "language_server_php_cs_fixer.enabled": False,
+    "php_code_sniffer.enabled": False,
+    "prophecy.enabled": False,
+    "behat.enabled": False,
+    "symfony.enabled": False,
+    "language_server.diagnostics_on_open": False,
+    "language_server.diagnostics_on_update": False,
+    "language_server.diagnostics_on_save": False,
+}
+
+
 class Adapter:
-    """PHP validator: Phpactor language server + PHPStan, lint-php fallback."""
+    """PHP validator: Phpactor language server + PHPStan, lint-php fallback.
+
+    Also an IndexingAdapter: phpactor feeds the symbol graph at index time.
+    """
 
     name = "php"
     fence_tags = ["php"]
+    extensions = [".php"]
+
+    # ─── Index-time symbol driver ────────────────────────────────────────────
+
+    def index_settings(self) -> Dict[str, Any]:
+        return dict(_INDEX_SETTINGS)
+
+    def prepare_argv(self, server_argv: List[str], settings: Dict[str, Any]) -> Optional[List[str]]:
+        """Build phpactor's own index first, so `references` finds every use site.
+
+        `server_argv` ends with the `language-server` sub-command; the same
+        executable runs `index:build` with the index settings as `--config-extra`.
+        """
+        base = [part for part in server_argv if part != "language-server"]
+        return [*base, "index:build", "--no-interaction", f"--config-extra={json.dumps(settings)}"]
+
+    def namespace_of(self, text: str) -> str:
+        match = _NAMESPACE_RE.search(text)
+        return match.group(1).strip("\\") if match else ""
+
+    def qualify(self, namespace: str, name: str) -> str:
+        return f"{namespace}\\{name}" if namespace else name
+
+    def declaration_kind(self, kind: str, line: str, name: str) -> Optional[str]:
+        """phpactor reports traits as classes; the declaration keyword says which."""
+        match = re.search(r"\b(trait|interface|enum|class)\s+" + re.escape(name) + r"\b", line)
+        return match.group(1) if match else None
+
+    def member_name(self, kind: str, name: str) -> str:
+        if kind == "property" and not name.startswith("$"):
+            return "$" + name
+        return name
 
     def wrap(self, code: str) -> Tuple[str, int]:
         stripped = code.lstrip()

@@ -139,7 +139,15 @@ def index_source(workspace: str, snapshot: Snapshot) -> dict:
                     "revision_id": registered.revision_id,
                     "source_archive_sha256": snapshot.source_archive_sha256}
         exported = IndexingService._with_scip(exported, _workspace_archive(workspace), identity)
+    if not snapshot.dirty:
+        # Language servers (origin `lsp`): the consented worker for registered revisions, else this process.
+        from lsp.jobs import enrich_export
+
+        exported = enrich_export(exported, workspace, identity={
+            "project_id": snapshot.project_id, "commit_sha": snapshot.commit_sha,
+            "revision_id": registered.revision_id} if registered.revision_id else None)
     IndexingService._store_repo_map(snapshot.source_archive_sha256, chunks)
+    IndexingService._store_language_facts(snapshot.source_archive_sha256, workspace)
     result = CodePropertyGraph().ingest(
         chunks, snapshot.collection, snapshot=snapshot,
         symbol_definitions=exported["definitions"], symbol_references=exported["references"],

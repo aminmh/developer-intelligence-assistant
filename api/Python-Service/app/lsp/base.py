@@ -77,6 +77,43 @@ class LanguageAdapter(Protocol):
         ...
 
 
+class IndexingAdapter(Protocol):
+    """Optional adapter part for the index-time symbol driver (`lsp/indexer.py`).
+
+    A language adapter that implements these members can feed the symbol graph.
+    Settings MUST turn off every server feature that runs project code, loads the
+    project's dependencies, or reaches the network (external-analyzer spec 32-33).
+    """
+
+    extensions: List[str]
+
+    def index_settings(self) -> Dict[str, Any]:
+        """`initializationOptions` for an indexing run (features off, no project code)."""
+        ...
+
+    def prepare_argv(self, server_argv: List[str], settings: Dict[str, Any]) -> Optional[List[str]]:
+        """Optional command run once before the server starts (e.g. building the
+        server's own index); None when the server needs no preparation."""
+        ...
+
+    def namespace_of(self, text: str) -> str:
+        """Namespace prefix of a source file, or '' when the language has none."""
+        ...
+
+    def qualify(self, namespace: str, name: str) -> str:
+        """Fully qualified name of a top-level symbol in that namespace."""
+        ...
+
+    def member_name(self, kind: str, name: str) -> str:
+        """Graph name for a member, e.g. PHP properties keep their `$`."""
+        ...
+
+    def declaration_kind(self, kind: str, line: str, name: str) -> Optional[str]:
+        """Optional: correct a type's graph kind from its declaration line (a PHP
+        `trait` arrives as an LSP class); None keeps the LSP kind."""
+        ...
+
+
 # ─── Shared validation flow ───────────────────────────────────────────────────
 
 def validate_with_lsp(

@@ -86,7 +86,7 @@ def _patch_aggregation(monkeypatch, clickhouse):
     import inspection.graph
 
     class Graph:
-        def upsert_runtime_facts(self, _collection, _facts):
+        def upsert_runtime_facts(self, _collection, _facts, revision_id=None):
             pass
 
     monkeypatch.setattr(aggregation, "default_registry", lambda: _AggregationRegistry())
