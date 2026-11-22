@@ -12,6 +12,12 @@ type Store = {
   memberships: Array<{ project_id: string; subject: string; role: Role }>;
   /** Subjects with full access to every project and to data management. */
   global_admins: string[];
+  /** Personal tokens IDE extensions use to read contract changes as their owner. Only a hash is kept. */
+  ide_tokens: IdeTokenRow[];
+};
+type IdeTokenRow = {
+  token_id: string; token_sha256: string; user: User; name: string;
+  created_at: string; expires_at: string; last_used_at: string | null;
 };
 
 const COOKIE = 'devassistant_session';
@@ -29,12 +35,13 @@ const secureCookie = process.env.SESSION_COOKIE_SECURE !== 'false';
 const developmentUser: User = { sub: 'local-development', name: 'Local development' };
 const developmentMode = () => process.env.NODE_ENV === 'development';
 
-function emptyStore(): Store { return { sessions: {}, flows: {}, memberships: [], global_admins: [] }; }
+function emptyStore(): Store { return { sessions: {}, flows: {}, memberships: [], global_admins: [], ide_tokens: [] }; }
 function readStore(): Store {
   try {
     const parsed = JSON.parse(fs.readFileSync(storePath, 'utf8')) as Partial<Store>;
     const store = { ...emptyStore(), ...parsed };
     if (!Array.isArray(store.global_admins)) store.global_admins = [];
+    if (!Array.isArray(store.ide_tokens)) store.ide_tokens = [];
     return store;
   } catch { return emptyStore(); }
 }
@@ -286,6 +293,8 @@ export function installOidcAuth(app: express.Express): void {
       if (!authCanRunRuntimeSetup(user)) return res.status(403).json({ error: 'Operator or administrator access is required to set up Runtime.' });
       return next();
     }
+    // A user manages their own IDE tokens; the routes check ownership and the application origin.
+    if (req.path === '/ide-tokens' || req.path.startsWith('/ide-tokens/')) return next();
     const safeRequest = ['GET', 'HEAD'].includes(req.method);
     if (req.path.startsWith('/data-admin') && !safeRequest && !authIsGlobalAdmin(user)) {
       return res.status(403).json({ error: 'Global administrator access required.' });
@@ -330,6 +339,70 @@ export function requestProjectScope(requestPath: string, bodyProject: unknown, q
 }
 
 export function authRoleFor(user: User, projectId: string): Role | null { return roleFor(user, projectId); }
+
+// ── IDE tokens (@.archcore/frontend-assist/ide-tokens-are-personal-read-only-bearer-tokens.adr.md) ──
+
+export const IDE_TOKEN_TTL_MS = 90 * 24 * 60 * 60 * 1000;
+export const MAX_IDE_TOKENS_PER_USER = 20;
+const IDE_TOKEN = /^ide_([0-9a-f]{24})\.([A-Za-z0-9_-]{43})$/;
+const sha256 = (value: string) => crypto.createHash('sha256').update(value).digest('hex');
+const publicToken = ({ token_sha256: _hash, user: _user, ...row }: IdeTokenRow) => row;
+
+/** `Bearer ide_<id>.<secret>` → its parts, or null. */
+export function parseIdeToken(header: string | undefined): { tokenId: string; token: string } | null {
+  const match = /^Bearer (\S+)$/.exec(header || '');
+  const parts = match && IDE_TOKEN.exec(match[1]);
+  return parts ? { tokenId: parts[1], token: match![1] } : null;
+}
+
+/** A new token for the user. The token text is returned once and never stored. */
+export function authCreateIdeToken(user: User, name: string): { token: string; row: ReturnType<typeof publicToken> } {
+  const store = readStore();
+  const now = Date.now();
+  store.ide_tokens = store.ide_tokens.filter((row) => Date.parse(row.expires_at) > now);
+  if (store.ide_tokens.filter((row) => row.user.sub === user.sub).length >= MAX_IDE_TOKENS_PER_USER) {
+    throw new Error(`You already have ${MAX_IDE_TOKENS_PER_USER} IDE tokens. Revoke one first.`);
+  }
+  const tokenId = crypto.randomBytes(12).toString('hex');
+  const token = `ide_${tokenId}.${crypto.randomBytes(32).toString('base64url')}`;
+  const row: IdeTokenRow = { token_id: tokenId, token_sha256: sha256(token), user: { sub: user.sub, email: user.email, name: user.name },
+    name: name.trim().slice(0, 80) || 'IDE', created_at: new Date(now).toISOString(),
+    expires_at: new Date(now + IDE_TOKEN_TTL_MS).toISOString(), last_used_at: null };
+  store.ide_tokens.push(row);
+  writeStore(store);
+  return { token, row: publicToken(row) };
+}
+
+export function authListIdeTokens(user: User): Array<ReturnType<typeof publicToken>> {
+  return readStore().ide_tokens.filter((row) => row.user.sub === user.sub).map(publicToken);
+}
+
+export function authRevokeIdeToken(user: User, tokenId: string): boolean {
+  const store = readStore();
+  const kept = store.ide_tokens.filter((row) => !(row.token_id === tokenId && row.user.sub === user.sub));
+  if (kept.length === store.ide_tokens.length) return false;
+  store.ide_tokens = kept;
+  writeStore(store);
+  return true;
+}
+
+/** The user an `Authorization: Bearer ide_…` header acts for, or null when missing, wrong, expired, or revoked. */
+export function authUserForIdeToken(header: string | undefined): User | null {
+  const parsed = parseIdeToken(header);
+  if (!parsed) return null;
+  const store = readStore();
+  const row = store.ide_tokens.find((candidate) => candidate.token_id === parsed.tokenId);
+  if (!row || Date.parse(row.expires_at) <= Date.now()) return null;
+  const expected = Buffer.from(row.token_sha256, 'hex');
+  const given = Buffer.from(sha256(parsed.token), 'hex');
+  if (expected.length !== given.length || !crypto.timingSafeEqual(expected, given)) return null;
+  // Recorded at most once a minute, so a long-lived stream does not rewrite the store constantly.
+  if (!row.last_used_at || Date.now() - Date.parse(row.last_used_at) > 60_000) {
+    row.last_used_at = new Date().toISOString();
+    writeStore(store);
+  }
+  return row.user;
+}
 export function authStoreSnapshot(): Store { return readStore(); }
 /** Projects the user holds any role in (global admins see every project through other checks). */
 export function authProjectsFor(user: User | null | undefined): string[] {

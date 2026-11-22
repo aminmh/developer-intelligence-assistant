@@ -14,6 +14,7 @@ from typing import Annotated, Any
 
 from fastapi import APIRouter, Header, HTTPException, Request
 from fastapi.concurrency import run_in_threadpool
+from fastapi.responses import StreamingResponse
 
 from api_contracts.model import MAX_DOCUMENT_BYTES
 from api_contracts.service import ContractInputError, contract_service
@@ -129,6 +130,57 @@ def read_revision_version(source_id: str, revision_id: str, x_internal_secret: S
     _authorize(x_internal_secret)
     _guard(lambda: contract_service.store.get_source(source_id))
     return _guard(lambda: contract_service.version_for_revision(source_id, revision_id))
+
+
+# ── change events (@.archcore/frontend-assist/contract-change-notifications.spec.md) ──
+# The web server checks that the caller may read every project named here.
+
+_MAX_STREAM_PROJECTS = 20
+
+
+@router.get("/events/stream", summary="Live contract change events for consumer projects (server-sent events)")
+async def stream_events(projects: str = "", x_internal_secret: Secret = None) -> StreamingResponse:
+    _authorize(x_internal_secret)
+    from api_contracts.events import change_events
+
+    wanted = sorted({_project(part.strip()) for part in projects.split(",") if part.strip()})
+    if not wanted or len(wanted) > _MAX_STREAM_PROJECTS:
+        raise HTTPException(400, f"Name between 1 and {_MAX_STREAM_PROJECTS} projects.")
+    return StreamingResponse(change_events(wanted), media_type="text/event-stream",
+                             headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
+
+
+@router.get("/projects/{project_id}/events", summary="Change events of the contracts a project consumes, newest first")
+def list_events(project_id: str, after: int = 0, limit: int = 50, user_id: str | None = None,
+                x_internal_secret: Secret = None) -> dict[str, Any]:
+    _authorize(x_internal_secret)
+    return _guard(lambda: contract_service.events_for_project(_project(project_id), user_id, after_seq=max(0, after),
+                                                              limit=limit))
+
+
+def _project_event(project_id: str, event_id: str) -> dict[str, Any]:
+    event = _guard(lambda: contract_service.store.get_event(event_id))
+    if event["source_id"] not in contract_service.consumer_sources(project_id):
+        raise HTTPException(404, "No such contract change for this project.")
+    return event
+
+
+@router.get("/projects/{project_id}/events/{event_id}", summary="One change event and what it touches in the project")
+def read_event(project_id: str, event_id: str, x_internal_secret: Secret = None) -> dict[str, Any]:
+    _authorize(x_internal_secret)
+    _project_event(_project(project_id), event_id)
+    return _guard(lambda: contract_service.event_detail(event_id, project_id))
+
+
+@router.post("/projects/{project_id}/events/{event_id}/ack", summary="Mark a change event as seen by a user")
+def acknowledge_event(project_id: str, event_id: str, body: dict, x_internal_secret: Secret = None) -> dict[str, Any]:
+    _authorize(x_internal_secret)
+    _project_event(_project(project_id), event_id)
+    user = body.get("user_id")
+    if not isinstance(user, str) or not user or len(user) > 200:
+        raise HTTPException(400, "user_id is required.")
+    _guard(lambda: contract_service.store.acknowledge(event_id, user))
+    return {"acknowledged": True}
 
 
 # ── one project's contracts ──────────────────────────────────────────────────

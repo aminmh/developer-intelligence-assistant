@@ -7,6 +7,7 @@ import { computed, ref, watch } from 'vue';
 import { CircleAlert, CircleCheck, Info, LoaderCircle, TriangleAlert } from 'lucide-vue-next';
 import { makeRequest } from '../../ui/makeRequest';
 import { useProjectScope } from '../../composables/useProjectScope';
+import { toast } from '../../composables/useToasts';
 import { versionLabel, type ContractVersion } from '../../utils/apiContracts';
 import {
   changeLabel, findingGroups, severityLabel,
@@ -39,7 +40,7 @@ const run = async (work: () => Promise<void>) => {
   const current = ++sequence;
   loading.value = true; error.value = '';
   try { await work(); }
-  catch (cause: any) { if (current === sequence) error.value = cause?.message || 'The contract check is unavailable.'; }
+  catch (cause: any) { if (current === sequence) { error.value = cause?.message || 'The contract check is unavailable.'; toast.error(error.value); } }
   finally { if (current === sequence) loading.value = false; }
 };
 const read = async (path: string, query: URLSearchParams) => {
@@ -82,7 +83,7 @@ const icons = { error: CircleAlert, warning: TriangleAlert, info: Info };
       <button v-if="role === 'provider'" type="button" role="tab" :aria-selected="tab === 'runtime'" @click="open('runtime')">Live traffic</button>
     </div>
     <p v-if="loading" class="kb-note" role="status"><LoaderCircle class="kb-spin" aria-hidden="true" /> Checking the project against the contract…</p>
-    <p v-else-if="error" role="alert" class="kb-rev-note" data-tone="bad"><CircleAlert aria-hidden="true" />{{ error }}</p>
+    <template v-else-if="error" />
 
     <template v-else-if="tab === 'findings' && report">
       <p v-if="!report.available" class="kb-rev-note" data-tone="warn"><CircleAlert aria-hidden="true" />{{ report.notes.join(' ') }}</p>

@@ -5,8 +5,9 @@
  * Spec: .archcore/frontend-assist/api-contract-sources-and-versions.spec.md
  */
 import { computed, ref, watch } from 'vue';
-import { CircleAlert, CircleCheck, ClipboardCheck, Code2, FileJson, Link2, LoaderCircle, Plus, RefreshCw, Trash2, UploadCloud, Unplug, ListTree } from 'lucide-vue-next';
+import { CircleAlert, ClipboardCheck, Code2, FileJson, Link2, LoaderCircle, Plus, RefreshCw, Trash2, UploadCloud, Unplug, ListTree } from 'lucide-vue-next';
 import { makeRequest } from '../../ui/makeRequest';
+import { toastMessage } from '../../composables/useToasts';
 import ContractCheckPanel from './ContractCheckPanel.vue';
 import ContractCodePanel from './ContractCodePanel.vue';
 import {
@@ -22,8 +23,8 @@ const attachments = ref<ContractAttachment[]>([]);
 const attachable = ref<SourceSummary[]>([]);
 const loading = ref(false);
 const busy = ref('');
-const message = ref('');
-const error = ref('');
+const message = toastMessage('success');
+const error = toastMessage('error');
 
 // New source form
 const kind = ref<SourceKind>('upload');
@@ -178,8 +179,6 @@ const setMode = (row: ContractAttachment, value: string) => act(`mode:${row.atta
   <section class="kb-rules" aria-labelledby="api-contracts-heading">
     <p v-if="!project" class="kb-rev-note" data-tone="warn"><CircleAlert aria-hidden="true" />Choose a project in the header to manage its API contracts.</p>
     <template v-else>
-      <p v-if="message" role="status" class="kb-rev-note" data-tone="ok"><CircleCheck aria-hidden="true" />{{ message }}</p>
-      <p v-if="error" role="alert" class="kb-rev-note" data-tone="bad"><CircleAlert aria-hidden="true" />{{ error }}</p>
       <input ref="fileInput" type="file" accept=".json,.yaml,.yml,application/json,text/yaml" class="sr-only" tabindex="-1" aria-hidden="true" @change="onFileChosen" />
 
       <div class="kb-two">

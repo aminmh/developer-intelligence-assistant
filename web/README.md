@@ -134,8 +134,10 @@ database container once. Discovery verifies PostgreSQL, MySQL or MariaDB
 from the inspected container, and defaults to its configured database and PostgreSQL
 `public` schema when available.
 
-For a remote reporting host, use the loader's SSH association controls, inspect and
-confirm its fingerprint, and use an account with existing Docker access. The helper
+Databases on the same machine need no extra setup. For a database on a remote Docker host, the
+loader shows a troubleshooting section ("A database was not verified?") only when a database
+container could not be verified; use its SSH association controls, inspect and
+confirm the fingerprint, and use an account with existing Docker access. The helper
 reuses Runtime's SSH agent and OS-stored credentials; schema host associations are
 separate from ClickHouse storage settings. Directly reachable SSH hosts are supported.
 The container needs an installed `psql`, `mysql` or `mariadb` client and usable
