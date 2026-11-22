@@ -19,6 +19,23 @@ php:
     language_id: php
     validate_dir: /tmp/lsp-validate/php
     timeout: 10
+  # Index-time symbol driver (lsp/indexer.py): feeds the symbol graph with
+  # origin `lsp`. Limits bound one run; hitting one reports coverage `partial`.
+  index:
+    enabled: ${LSP_INDEX_PHP:-true}
+    prepare_timeout: 300       # seconds for the adapter's prepare step (phpactor index:build)
+    # Seconds per references/implementation request. The most-used methods are the
+    # slowest (pizza-builder: ApiResponse::successResponse > 5 s), and they carry
+    # the most valuable edges, so this stays generous; run_timeout bounds the run.
+    request_timeout: 15
+    run_timeout: 900           # seconds for the whole run
+    max_files: 5000
+    max_definitions: 20000
+    max_references: 50000
+    # Framework entry points: the framework calls them, so a project-wide
+    # references search finds nothing useful and scans every file (Phase 0:
+    # the seeders' run() took 47 of 75 s on pizza-builder).
+    skip_reference_names: [run, handle, boot, register, up, down, __invoke]
 
 # Example — a future language. Enable + provide an adapter to activate.
 # python:

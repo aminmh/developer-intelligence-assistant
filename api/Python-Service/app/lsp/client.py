@@ -7,6 +7,11 @@ analysis), so `validate_many` waits until diagnostics settle before returning.
 
 This client is language-agnostic: binary, arguments, and language id come from
 the per-language config (`config/lsps.yml`).
+
+Workspace mode (``root_uri`` set to a source tree) serves the index-time symbol
+driver (`lsp/indexer.py`): `document_symbols`, `references` and `implementations`
+query the server, and `initialization_options`, `env` and `cwd` let the adapter
+turn off features that would run project code.
 """
 
 from __future__ import annotations
@@ -28,6 +33,10 @@ class LspConnectionError(Exception):
     """Raised when the language server cannot be reached or misbehaves."""
 
 
+class LspTimeoutError(LspConnectionError):
+    """Raised when one request gets no answer in time; the server is still running."""
+
+
 def encode_message(payload: Dict[str, Any]) -> bytes:
     body = json.dumps(payload).encode("utf-8")
     return b"Content-Length: %d\r\n\r\n" % len(body) + body
@@ -45,6 +54,10 @@ class LspClient:
         validate_dir: str = "/tmp/lsp-validate",
         timeout: float = 10.0,
         settle: float = 2.0,
+        root_uri: Optional[str] = None,
+        initialization_options: Optional[Dict[str, Any]] = None,
+        env: Optional[Dict[str, str]] = None,
+        cwd: Optional[str] = None,
     ) -> None:
         self._binary = binary
         self._args = list(args or [])
@@ -53,7 +66,12 @@ class LspClient:
         self._validate_dir = validate_dir
         self._timeout = timeout
         self._settle = settle
-        self._root_uri = "file://" + validate_dir
+        self._root_uri = root_uri or "file://" + validate_dir
+        self._workspace = root_uri is not None
+        self._initialization_options = initialization_options
+        self._env = env
+        self._cwd = cwd
+        self.capabilities: Dict[str, Any] = {}
 
         self._proc: Optional[subprocess.Popen] = None
         self._lock = threading.RLock()
@@ -74,12 +92,16 @@ class LspClient:
         return cmd
 
     def _spawn(self) -> None:
-        Path(self._validate_dir).mkdir(parents=True, exist_ok=True)
+        if not self._workspace:
+            Path(self._validate_dir).mkdir(parents=True, exist_ok=True)
         self._proc = subprocess.Popen(
             self._spawn_command(),
             stdin=subprocess.PIPE,
             stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
+            # Workspace runs are long; an unread stderr pipe could fill and block the server.
+            stderr=subprocess.DEVNULL if self._workspace else subprocess.PIPE,
+            env=self._env,
+            cwd=self._cwd,
         )
         self._reader_stop.clear()
         self._diagnostics.clear()
@@ -150,8 +172,12 @@ class LspClient:
                 params["_t"] = time.time()
                 self._diagnostics.setdefault(uri, []).append(params)
         elif msg.get("method") and "id" in msg:
-            # Server -> client request (e.g. workspace/configuration): acknowledge.
-            self._write({"jsonrpc": "2.0", "id": msg["id"], "result": None})
+            # Server -> client request: acknowledge. workspace/configuration expects one
+            # entry per requested item; null means "use your defaults".
+            result: Any = None
+            if msg["method"] == "workspace/configuration":
+                result = [None] * len((msg.get("params") or {}).get("items") or [])
+            self._write({"jsonrpc": "2.0", "id": msg["id"], "result": result})
 
     def _write(self, msg: Dict[str, Any]) -> None:
         with self._write_lock:
@@ -176,31 +202,93 @@ class LspClient:
                     return queue[0]
                 if self._proc is not None and self._proc.poll() is not None:
                     raise LspConnectionError("LSP process exited")
-                time.sleep(0.05)
-            raise LspConnectionError(f"LSP request {method} timed out")
+                time.sleep(0.005)
+            self._pending.pop(rid, None)
+            # Ask the server to stop working on it, so later requests do not queue behind it.
+            try:
+                self._write({"jsonrpc": "2.0", "method": "$/cancelRequest", "params": {"id": rid}})
+            except LspConnectionError:
+                pass
+            raise LspTimeoutError(f"LSP request {method} timed out")
 
     def _ensure_started(self) -> None:
         with self._lock:
             if self._proc is not None and self._proc.poll() is None:
                 return
             self._spawn()
-            init = self._request(
-                "initialize",
-                {
-                    "processId": os.getpid(),
-                    "rootUri": self._root_uri,
-                    "capabilities": {
-                        "textDocument": {
-                            "synchronization": {"didOpen": True},
-                            "publishDiagnostics": {"relatedInformation": True},
-                        }
-                    },
+            params: Dict[str, Any] = {
+                "processId": os.getpid(),
+                "rootUri": self._root_uri,
+                "capabilities": {
+                    "textDocument": {
+                        "synchronization": {"didOpen": True},
+                        "publishDiagnostics": {"relatedInformation": True},
+                        "documentSymbol": {"hierarchicalDocumentSymbolSupport": True},
+                    }
                 },
-                timeout=min(30.0, self._timeout + 15.0),
-            )
+            }
+            if self._workspace:
+                params["workspaceFolders"] = [{"uri": self._root_uri, "name": "workspace"}]
+            if self._initialization_options is not None:
+                params["initializationOptions"] = self._initialization_options
+            init = self._request("initialize", params, timeout=min(30.0, self._timeout + 15.0))
             if not init or "result" not in init:
                 raise LspConnectionError("LSP initialize failed")
+            self.capabilities = (init.get("result") or {}).get("capabilities") or {}
             self._write({"jsonrpc": "2.0", "method": "initialized", "params": {}})
+
+    # ─── Workspace queries (index-time driver) ───────────────────────────────
+
+    def start(self) -> Dict[str, Any]:
+        """Start the server if needed and return its capabilities."""
+        self._ensure_started()
+        return self.capabilities
+
+    def supports(self, capability: str) -> bool:
+        """True when the server advertised ``<capability>Provider`` (e.g. ``references``)."""
+        return bool(self.capabilities.get(f"{capability}Provider"))
+
+    def request(self, method: str, params: Any, timeout: Optional[float] = None) -> Any:
+        """Send one request and return its ``result``; raises on an LSP error response."""
+        response = self._request(method, params, timeout=timeout)
+        if "error" in response:
+            error = response.get("error") or {}
+            raise LspConnectionError(f"{method} failed: {str(error.get('message') or error)[:300]}")
+        return response.get("result")
+
+    def notify(self, method: str, params: Any) -> None:
+        self._write({"jsonrpc": "2.0", "method": method, "params": params})
+
+    def open_document(self, uri: str, text: str) -> None:
+        self.notify(
+            "textDocument/didOpen",
+            {"textDocument": {"uri": uri, "languageId": self._language_id, "version": 1, "text": text}},
+        )
+
+    def close_document(self, uri: str) -> None:
+        self.notify("textDocument/didClose", {"textDocument": {"uri": uri}})
+
+    def document_symbols(self, uri: str, timeout: Optional[float] = None) -> List[Dict[str, Any]]:
+        return self.request("textDocument/documentSymbol", {"textDocument": {"uri": uri}}, timeout) or []
+
+    def references(self, uri: str, line: int, character: int, timeout: Optional[float] = None) -> List[Dict[str, Any]]:
+        """Use sites of the symbol at a 0-based position, without its declaration."""
+        return self.request(
+            "textDocument/references",
+            {"textDocument": {"uri": uri}, "position": {"line": line, "character": character},
+             "context": {"includeDeclaration": False}},
+            timeout,
+        ) or []
+
+    def implementations(self, uri: str, line: int, character: int, timeout: Optional[float] = None) -> List[Dict[str, Any]]:
+        result = self.request(
+            "textDocument/implementation",
+            {"textDocument": {"uri": uri}, "position": {"line": line, "character": character}},
+            timeout,
+        )
+        if isinstance(result, dict):  # a single Location
+            return [result]
+        return result or []
 
     # ─── Validation ──────────────────────────────────────────────────────────
 
@@ -282,6 +370,8 @@ class LspClient:
             return results
 
     def shutdown(self) -> None:
+        if self._proc is None:
+            return
         try:
             self._write({"jsonrpc": "2.0", "id": "shutdown", "method": "shutdown", "params": None})
             self._write({"jsonrpc": "2.0", "method": "exit", "params": None})

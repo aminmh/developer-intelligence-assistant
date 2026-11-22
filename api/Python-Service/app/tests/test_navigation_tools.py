@@ -69,7 +69,7 @@ def _output(result):
 
 def test_all_navigation_tools_are_read_only_builtins():
     assert set(TOOLS) == {"code_text_search", "code_structural_search", "code_read", "code_outline",
-                          "code_symbol_lookup", "code_stats", "code_repo_map"}
+                          "code_symbol_lookup", "code_stats", "code_repo_map", "evidence_files", "evidence_read"}
     assert {t.effect for t in NAVIGATION_TOOLS} == {"read_only"}
 
 
@@ -198,7 +198,7 @@ def test_symbol_lookup_relativizes_paths_and_skips_excluded(monkeypatch, project
 
     definition = _output(_run("code_symbol_lookup", {"symbol": "User"}, project, **kwargs))
     assert definition["items"] == [{"path": "app/Models/User.php", "line": 4, "kind": "class",
-                                    "symbol": "App\\Models\\User", "origin": "php-parser"}]
+                                    "symbol": "App\\Models\\User", "origin": "php-parser", "language": "php"}]
 
     refs = _output(_run("code_symbol_lookup", {"symbol": "User", "relation": "references"}, project, **kwargs))
     assert [i["path"] for i in refs["items"]] == ["app/Http/Controllers/UserController.php"]

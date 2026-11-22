@@ -108,6 +108,66 @@ class LspRegistry:
                 )
             return self._clients[lang]
 
+    # ─── Index-time symbol driver ────────────────────────────────────────────
+
+    def index_config(self, lang: str) -> Dict[str, Any]:
+        cfg = self._lang_config(lang).get("index")
+        return cfg if isinstance(cfg, dict) else {}
+
+    def index_enabled(self, lang: str) -> bool:
+        raw = resolve_env(self.index_config(lang).get("enabled", False))
+        enabled = raw if isinstance(raw, bool) else str(raw).strip().lower() in ("1", "true", "yes", "on")
+        return self.is_enabled(lang) and enabled
+
+    def index_languages(self) -> List[str]:
+        return [lang for lang in self.languages() if self.index_enabled(lang)]
+
+    def server_argv(self, lang: str) -> List[str]:
+        """Full server command: interpreter (if any), binary, args."""
+        lsp = self._lang_config(lang).get("lsp") or {}
+        binary = resolve_env(lsp.get("binary") or "")
+        if not binary:
+            return []
+        args = [resolve_env(a) for a in lsp.get("args") or []]
+        interpreter = resolve_env(lsp.get("interpreter")) if lsp.get("interpreter") else None
+        return [interpreter, binary, *args] if interpreter else [binary, *args]
+
+    def server_installed(self, lang: str) -> bool:
+        """True when the configured server binary (and interpreter, if any) can be found."""
+        import shutil
+
+        lsp = self._lang_config(lang).get("lsp") or {}
+        binary = resolve_env(lsp.get("binary") or "")
+        interpreter = resolve_env(lsp.get("interpreter")) if lsp.get("interpreter") else None
+        found = bool(binary) and (os.path.isfile(binary) or shutil.which(binary) is not None)
+        return found and (interpreter is None or shutil.which(interpreter) is not None)
+
+    def index_workspace(self, lang: str, root: str) -> Dict[str, Any]:
+        """Index one extracted revision for one language (origin `lsp`). Never raises.
+
+        Each run starts its own server process with isolated HOME/XDG directories;
+        the long-lived validation client is not reused.
+        """
+        from lsp.indexer import IndexLimits, index_workspace
+
+        unavailable = {"name": "lsp", "origin": "lsp", "language": lang, "status": "unavailable",
+                       "definitions": [], "references": [], "truncated": False, "stats": {},
+                       "limits_reached": []}
+        if not self.index_enabled(lang):
+            return {**unavailable, "reason": f"LSP indexing is not enabled for {lang}."}
+        argv = self.server_argv(lang)
+        if not argv:
+            return {**unavailable, "reason": f"No language server is configured for {lang}."}
+        try:
+            adapter = self.adapter(lang)
+        except Exception as exc:  # noqa: BLE001 - adapter import failures become coverage
+            return {**unavailable, "reason": f"Adapter for {lang} could not load: {exc}"[:300]}
+        lsp = self._lang_config(lang).get("lsp") or {}
+        return index_workspace(
+            root, adapter, argv, resolve_env(lsp.get("language_id")) or lang,
+            IndexLimits.from_config({k: resolve_env(v) for k, v in self.index_config(lang).items()}),
+        )
+
     def validate(self, lang: str, code: str, filename: Optional[str] = None) -> Dict[str, Any]:
         """Validate a snippet for one language. Returns
         {valid, errors, warnings, source}."""

@@ -7,7 +7,7 @@ so a call becomes an edge only when its target is a definition found here.
 
 Each run returns chunks in the shape the JS/TS producer uses (Qdrant + the
 ``CodeSymbol`` graph) and a symbol export in the shape the PHP inspector uses
-(the ``PhpSymbol`` graph behind ``code_symbol_lookup``). Every edge it emits
+(the ``Symbol`` graph behind ``code_symbol_lookup``). Every edge it emits
 carries origin ``tree-sitter``.
 
 Symbol identities must be plain identifiers (``telemetry/symbols.py``), so a

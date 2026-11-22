@@ -46,7 +46,9 @@ def test_inspect_index_decodes_definitions_and_references(monkeypatch):
     result = PhpCli("/php").inspect_index("/workspace", exclude=["tests"])
 
     assert result["definitions"][0]["fqn"] == "App\\CommentService"
-    assert result["references"] == [{"kind": "new"}]
+    # The parser's export names its producer, so the symbol graph can rank edges (scip > lsp > parser).
+    assert result["references"] == [{"kind": "new", "origin": "php-parser"}]
+    assert result["definitions"][0]["origin"] == "php-parser"
 
 
 def test_run_translates_start_and_timeout_errors(monkeypatch):

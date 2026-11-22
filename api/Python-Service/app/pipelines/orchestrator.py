@@ -1042,8 +1042,11 @@ class Orchestrator:
             return {"success": False, "error": index["error"]}
         if index is None:
             from infra.php_tools import run_code_index
+            from lsp.jobs import enrich_export
 
             index = run_code_index(workspace_path)
+            # PHP: language-server edges (origin `lsp`) on top of the parser's export.
+            index = enrich_export(index, workspace_path, identity=args.get("snapshot_identity"))
         definitions = index.get("definitions", [])
         references = index.get("references", [])
         symbol_index: dict[str, Any] = {

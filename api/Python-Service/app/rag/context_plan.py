@@ -5,7 +5,7 @@ question is anchored to, decide WHICH existing persisted indexes it should be
 grounded from:
 
   * Qdrant collections ``chunk_code_<stem>`` / ``proj_knowledge_<stem>``,
-  * the Neo4j ``sym_<stem>`` PhpSymbol graph (presence only, ``has_sym``).
+  * the Neo4j ``sym_<stem>`` Symbol graph (presence only, ``has_sym``).
 
 Saved ``analysis_sessions`` rows are the authority for what was persisted;
 guarded Qdrant/Neo4j probes confirm what still exists. The ``knowledge`` route

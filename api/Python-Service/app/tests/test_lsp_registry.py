@@ -133,3 +133,28 @@ def test_resolve_env():
     assert resolve_env("${TEST_LSP_BIN}") == "/somewhere/bin"
     assert resolve_env("${UNSET_VAR_XYZ:-/default/bin}") == "/default/bin"
     assert resolve_env("plain") == "plain"
+
+
+def test_index_config_and_server_argv(tmp_path, monkeypatch):
+    cfg = tmp_path / "lsps.yml"
+    cfg.write_text(
+        "php:\n  enabled: true\n  adapter: php\n  lsp:\n    binary: /opt/phpactor\n    interpreter: php\n"
+        "    args: [language-server]\n  index:\n    enabled: ${LSP_INDEX_PHP:-true}\n    request_timeout: 3\n"
+        "go:\n  enabled: true\n  lsp:\n    binary: gopls\n"
+    )
+    reg = LspRegistry(str(cfg))
+    assert reg.server_argv("php") == ["php", "/opt/phpactor", "language-server"]
+    assert reg.index_languages() == ["php"]
+    monkeypatch.setenv("LSP_INDEX_PHP", "false")
+    assert not reg.index_enabled("php")
+    result = reg.index_workspace("php", str(tmp_path))
+    assert result["status"] == "unavailable" and "not enabled" in result["reason"]
+
+
+def test_live_config_enables_php_indexing_with_limits():
+    from lsp import registry as live
+
+    cfg = live.index_config("php")
+    assert live.index_enabled("php")
+    assert float(cfg["request_timeout"]) > 0 and float(cfg["run_timeout"]) > 0
+    assert "run" in cfg["skip_reference_names"]

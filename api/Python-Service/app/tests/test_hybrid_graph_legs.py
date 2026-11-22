@@ -117,7 +117,7 @@ class FakeStore:
             return self._q_has_knowledge(p)
         if "CALLS" in cypher:
             return self._q_calls(p)
-        if "PhpSymbol" in cypher:
+        if ":Symbol" in cypher:
             return self._q_sym(p)
         return []
 

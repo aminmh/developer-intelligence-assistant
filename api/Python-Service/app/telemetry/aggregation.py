@@ -10,7 +10,7 @@ from uuid import NAMESPACE_URL, uuid5
 
 from telemetry.registry import default_registry
 from telemetry.runtime import ClickHouseRuntime, runtime_sampling_policy, snapshot_definitions
-from telemetry.snapshot import storage_id
+from telemetry.snapshot import runtime_reference, storage_id
 from telemetry.rollups import roll_up_closed_hours
 from telemetry.span_schema import SPAN_SCOPE
 
@@ -266,8 +266,10 @@ def aggregate_runtime() -> dict:
     unresolved_rows: list[dict] = []
     for project in registry.runtime_projects():
         project_id = project.get("project_id")
-        commit_sha = project.get("commit_sha")
         revision_id = project.get("revision_id")
+        # The revision's own snapshot (commit, working tree or upload): runtime facts must
+        # never land on another revision's graph (lsp-first plan, task 18j).
+        commit_sha = runtime_reference(project_id, project) if project_id else None
         if project.get("state") != "ready" or not project_id or not commit_sha or not revision_id:
             continue
         pair = (project_id, revision_id)
@@ -292,7 +294,7 @@ def aggregate_runtime() -> dict:
                     continue
                 collection = "sym_snapshot_" + storage_id(project_id, commit_sha, "")
                 facts = _graph_facts(project_id, revision_id, commit_sha, collection, definitions, telemetry)
-                graph.upsert_runtime_facts(collection, facts)
+                graph.upsert_runtime_facts(collection, facts, revision_id=revision_id)
                 now = _clickhouse_datetime(datetime.now(timezone.utc))
                 for row in telemetry.get("symbols", []):
                     symbol_id = row.get("symbol_id")
