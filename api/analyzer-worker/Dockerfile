@@ -1,4 +1,25 @@
 # syntax=docker/dockerfile:1.7
+
+# phpactor for LSP indexing (lsp/indexer.py), built with Composer in its own stage so the
+# worker image itself carries no Composer. The PHP packages match the worker stage below.
+FROM python:3.12-slim-trixie AS php-lsp
+RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
+    --mount=type=cache,target=/var/lib/apt/lists,sharing=locked \
+    rm -f /etc/apt/apt.conf.d/docker-clean && apt-get update \
+    && apt-get install -y --no-install-recommends ca-certificates php-cli php-mbstring php-xml composer unzip
+COPY Python-Service/php/lsp/composer.json Python-Service/php/lsp/composer.lock /opt/php-lsp/
+RUN --mount=type=cache,target=/root/.cache/composer cd /opt/php-lsp \
+    && composer install --no-dev --no-interaction --no-progress --no-scripts --optimize-autoloader \
+    && php vendor/bin/phpactor --version
+
+# Psalm for PHP taint analysis (code_quality/taint_analysis.py), pinned by its lock file
+# (decision: bundled-security-rules-are-redistributable). Same Composer-only stage pattern.
+FROM php-lsp AS php-psalm
+COPY Python-Service/php/psalm/composer.json Python-Service/php/psalm/composer.lock /opt/psalm/
+RUN --mount=type=cache,target=/root/.cache/composer cd /opt/psalm \
+    && composer install --no-dev --no-interaction --no-progress --no-scripts --optimize-autoloader \
+    && php vendor/bin/psalm --version
+
 FROM python:3.12-slim-trixie
 
 ARG TARGETARCH
@@ -13,7 +34,8 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
     HOME=/tmp \
     TMPDIR=/tmp \
     SETTINGS_DB_PATH=/tmp/analyzer-settings.db \
-    TELEMETRY_SNAPSHOT_ROOT=/tmp/analyzer-snapshots
+    TELEMETRY_SNAPSHOT_ROOT=/tmp/analyzer-snapshots \
+    LOG_DIR=/tmp/analyzer-logs
 
 RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
     --mount=type=cache,target=/var/lib/apt/lists,sharing=locked \
@@ -110,14 +132,48 @@ RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
     && apt-get install -y --no-install-recommends php-cli php-mbstring php-xml \
     && php --version
 
+# Betterleaks for secrets in Git history (code_quality/history_secrets.py): Git reads the history
+# from a bundle the API sends; the scanner runs with no network and validation off.
+ARG BETTERLEAKS_VERSION=1.9.0
+RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
+    --mount=type=cache,target=/var/lib/apt/lists,sharing=locked \
+    set -eux; \
+    apt-get update; \
+    apt-get install -y --no-install-recommends git; \
+    case "${TARGETARCH}" in \
+      amd64) arch=x64; sum=f8b185a39ffcece2a1ca82bf3a4e7435cd81963ffd16b7a9128daf75f35f6de7 ;; \
+      arm64) arch=arm64; sum=1d39116e0a58dc94574715e2aa12a2dbd5062f193eee3fec011fef6ba06bd13b ;; \
+      *) echo "Unsupported worker architecture: ${TARGETARCH}" >&2; exit 1 ;; \
+    esac; \
+    curl --fail --location --retry 3 --output /tmp/betterleaks.tgz \
+      "https://github.com/betterleaks/betterleaks/releases/download/v${BETTERLEAKS_VERSION}/betterleaks_${BETTERLEAKS_VERSION}_linux_${arch}.tar.gz"; \
+    echo "${sum}  /tmp/betterleaks.tgz" | sha256sum --check; \
+    mkdir /tmp/betterleaks; \
+    tar -xzf /tmp/betterleaks.tgz -C /tmp/betterleaks; \
+    install -m 0755 /tmp/betterleaks/betterleaks /usr/local/bin/betterleaks; \
+    install -D -m 0644 /tmp/betterleaks/LICENSE /usr/share/licenses/betterleaks/LICENSE; \
+    rm -rf /tmp/betterleaks /tmp/betterleaks.tgz; \
+    git --version; \
+    betterleaks version
+
+COPY --from=php-lsp /opt/php-lsp /opt/php-lsp
+COPY --from=php-psalm /opt/psalm /opt/psalm
+COPY Python-Service/php/psalm/missing-symbols.php /opt/psalm/missing-symbols.php
+ENV PSALM_ROOT=/opt/psalm
+
 # App code last, so code changes rebuild only these layers, not the downloads above.
 COPY Python-Service/app/code_quality/__init__.py /app/code_quality/__init__.py
 COPY Python-Service/app/code_quality/service.py /app/code_quality/service.py
 COPY Python-Service/app/code_quality/external_analyzers.py /app/code_quality/external_analyzers.py
 COPY Python-Service/app/code_quality/scip_index.py /app/code_quality/scip_index.py
+COPY Python-Service/app/code_quality/taint_analysis.py /app/code_quality/taint_analysis.py
+COPY Python-Service/app/code_quality/history_secrets.py /app/code_quality/history_secrets.py
 COPY Python-Service/app/infra/settings.py /app/infra/settings.py
 COPY Python-Service/app/infra/settings_store.py /app/infra/settings_store.py
 COPY Python-Service/app/infra/log_paths.py /app/infra/log_paths.py
+COPY Python-Service/app/infra/exception_logger.py /app/infra/exception_logger.py
+COPY Python-Service/app/lsp/ /app/lsp/
+COPY Python-Service/app/config/lsps.yml /app/config/lsps.yml
 COPY analyzer-worker/worker.py /opt/analyzer-worker/worker.py
 
 RUN useradd --system --uid 10001 --create-home --home-dir /tmp/analyzer analyzer \

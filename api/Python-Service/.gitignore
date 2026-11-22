@@ -6,6 +6,7 @@ data/
 tmp
 php/vendor
 php/lsp/vendor
+php/psalm/vendor
 workspaces/
 app/config/domain_dictionary.txt
 app/snapshots/

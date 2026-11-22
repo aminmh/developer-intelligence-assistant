@@ -8,6 +8,9 @@ LanguagePlugin interface.
 
 from __future__ import annotations
 
+from typing import TYPE_CHECKING
+
+from agent.core.capability import Capability
 from agent.core.types import (
     AnalysisFinding,
     AnalysisResult,
@@ -21,20 +24,39 @@ from agent.interfaces.language import LanguagePlugin
 from agent.interfaces.validator import Validator
 from agent.plugins.validators import PhpLspValidator
 
+if TYPE_CHECKING:
+    from agent.core.revision import RevisionContext
+
 _PHP_MARKERS = ("composer.json", "artisan")
 _PHP_EXTENSIONS = (".php", ".php3", ".php4", ".php5", ".phtml")
 
 
 class PhpLanguagePlugin(LanguagePlugin):
     name = "php"
+    # Language tooling the framework-neutral Code Quality checks read (PHPUnit is PHP's test runner,
+    # whatever the framework): test classes, and test configuration against the installed PHPUnit.
+    capabilities = (Capability.TEST_CONVENTIONS, Capability.CONFIG_RISKS)
+
+    def provide(self, capability: Capability, context: "RevisionContext") -> list:
+        from agent.interfaces.capabilities import CapabilityUnavailable
+        from agent.plugins.languages.php.testing import provide_test_config_risks, provide_tests
+
+        if capability == Capability.CONFIG_RISKS:
+            return provide_test_config_risks(context)
+        if capability == Capability.TEST_CONVENTIONS:
+            facts = context.facts("php")
+            if facts is None:
+                raise CapabilityUnavailable("PHP facts are unavailable for this revision, so PHPUnit tests cannot be listed.")
+            return provide_tests(context, facts)
+        return []
 
     @property
     def extensions(self) -> list[str]:
         return list(_PHP_EXTENSIONS)
 
     def __init__(self, lsp_registry: object | None = None) -> None:
-        # TODO(scope-B): pull the live LspRegistry via the DI container
-        # instead of the lazy import below.
+        # Injected by register_builtins from the DI container (``lsp_registry``);
+        # None keeps validation structural (hermetic tests).
         self._lsp_registry = lsp_registry
 
     # -- detection ---------------------------------------------------------

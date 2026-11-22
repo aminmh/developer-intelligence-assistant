@@ -5,6 +5,9 @@ explicitly, which keeps tests isolated and future remote execution possible.
 
 TODO(scope-B): the Agent itself is resolved from this container — registered
 llm/repository/registry implementations get injected on construction.
+
+``default_container()`` registers the live service objects plugins depend on
+(today: ``lsp_registry``, the process-wide LSP registry from ``lsp``).
 """
 
 from __future__ import annotations
@@ -53,3 +56,16 @@ class Container:
             return self.resolve(key)
         except KeyError:
             return default
+
+
+def _live_lsp_registry(_container: Container) -> Any:
+    from lsp import registry
+
+    return registry
+
+
+def default_container() -> Container:
+    """Container with the live services builtin plugins use (lsp-first plan, task 19)."""
+    container = Container()
+    container.register("lsp_registry", _live_lsp_registry)
+    return container

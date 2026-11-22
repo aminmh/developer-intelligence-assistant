@@ -19,7 +19,7 @@ MAX_WORKER_ARCHIVE_BYTES = 64 * 1024 * 1024
 MAX_WORKER_RESPONSE_BYTES = 5 * 1024 * 1024
 MAX_WORKER_FINDINGS = 500
 _SHA256 = re.compile(r"^[a-f0-9]{64}$")
-_ALLOWED_ANALYZERS = {"sonarqube", "joern"}
+_ALLOWED_ANALYZERS = {"sonarqube", "joern", "psalm"}
 _ALLOWED_STATUSES = {"complete", "partial", "failed", "unavailable", "disabled"}
 
 
@@ -205,23 +205,37 @@ def _filtered_source_bundle(archive_data: bytes, files: list[str]) -> tuple[byte
     return result, line_counts
 
 
+def _not_selected(name: str) -> dict[str, Any]:
+    reason = "No PHP source to trace." if name == "psalm" else "The analyzer is disabled for this project."
+    return _unavailable(name, reason, "disabled")
+
+
 def run_worker(target: dict[str, Any], settings: dict[str, Any], archive_data: bytes,
                files: list[str], languages: dict[str, int], revision_id: str,
-               commit_sha: str | None, token: str | None) -> dict[str, Any]:
+               commit_sha: str | None, token: str | None,
+               taint_stubs: dict[str, str] | None = None) -> dict[str, Any]:
     if not target.get("source_transfer_consent"):
         reason = "Explicit consent is required before transferring source to the configured analyzer worker."
         return {name: _unavailable(name, reason) for name in _ALLOWED_ANALYZERS}
-    analyzers = [name for name in sorted(_ALLOWED_ANALYZERS)
-                 if settings.get(name if name == "joern" else "sonarqube", {}).get("enabled")]
+    # SonarQube and Joern are opt-in per project; Psalm taint analysis is the bundled PHP baseline.
+    enabled = {"sonarqube": bool(settings.get("sonarqube", {}).get("enabled")),
+               "joern": bool(settings.get("joern", {}).get("enabled")),
+               "psalm": "php" in languages}
+    if enabled["psalm"]:
+        # A worker built before Psalm was added rejects the analyzer and would fail the whole job;
+        # ask first and leave Psalm to the API fallback when the worker does not offer it.
+        try:
+            enabled["psalm"] = get_worker_capabilities(target).get("psalm", {}).get("status") == "ready"
+        except (RemoteWorkerError, AttributeError):
+            enabled["psalm"] = False
+    analyzers = [name for name in sorted(_ALLOWED_ANALYZERS) if enabled[name]]
     if not analyzers:
-        return {name: _unavailable(name, "The analyzer is disabled for this project.", "disabled")
-                for name in _ALLOWED_ANALYZERS}
+        return {name: _not_selected(name) for name in _ALLOWED_ANALYZERS}
     try:
         source_bundle, line_counts = _filtered_source_bundle(archive_data, files)
     except RemoteWorkerError as exc:
         return {name: _unavailable(name, str(exc)) for name in analyzers} | {
-            name: _unavailable(name, "The analyzer is disabled for this project.", "disabled")
-            for name in _ALLOWED_ANALYZERS - set(analyzers)}
+            name: _not_selected(name) for name in _ALLOWED_ANALYZERS - set(analyzers)}
     bundle_sha256 = hashlib.sha256(source_bundle).hexdigest()
     payload = {
         "schema_version": 1,
@@ -241,6 +255,8 @@ def run_worker(target: dict[str, Any], settings: dict[str, Any], archive_data: b
         },
         "sonarqube_token": token if "sonarqube" in analyzers else None,
     }
+    if "psalm" in analyzers and taint_stubs:
+        payload["taint_stubs"] = taint_stubs
     try:
         result = _request(target, "POST", "/v1/jobs", payload, timeout=450)
         if (result.get("schema_version") != 1 or result.get("job_id") != payload["job_id"]
@@ -254,14 +270,40 @@ def run_worker(target: dict[str, Any], settings: dict[str, Any], archive_data: b
         for name in _ALLOWED_ANALYZERS:
             output = outputs.get(name)
             if name not in analyzers:
-                normalized[name] = _unavailable(name, "The analyzer is disabled for this project.", "disabled")
+                normalized[name] = _not_selected(name)
                 continue
             normalized[name] = _validate_result(name, output, set(files), line_counts)
         return normalized
     except RemoteWorkerError as exc:
         return {name: _unavailable(name, str(exc)) for name in analyzers} | {
-            name: _unavailable(name, "The analyzer is disabled for this project.", "disabled")
-            for name in _ALLOWED_ANALYZERS - set(analyzers)}
+            name: _not_selected(name) for name in _ALLOWED_ANALYZERS - set(analyzers)}
+
+
+def run_history_job(target: dict[str, Any], history: bytes, revision_id: str, commit_sha: str) -> dict[str, Any]:
+    """Scan a revision's history artifact for committed secrets on the worker (plan task 12).
+
+    Raises RemoteWorkerError when the worker cannot run it (no consent, an older worker without the
+    scanner, transport errors); the caller then falls back to the API's own scanner.
+    """
+    from code_quality import history_secrets
+
+    if not target.get("source_transfer_consent"):
+        raise RemoteWorkerError("Explicit consent is required before transferring source to the analyzer worker.")
+    capability = get_worker_capabilities(target).get("betterleaks")
+    if not isinstance(capability, dict) or capability.get("status") != "ready":
+        raise RemoteWorkerError("The analyzer worker does not offer the history secret scan.")
+    digest = hashlib.sha256(history).hexdigest()
+    payload = {"schema_version": 1, "job_id": str(uuid4()), "revision_id": revision_id, "commit_sha": commit_sha,
+               "history_base64": base64.b64encode(history).decode("ascii"), "history_sha256": digest}
+    result = _request(target, "POST", "/v1/history-scan", payload, timeout=history_secrets.TIMEOUT_SECONDS + 60)
+    if (result.get("schema_version") != 1 or result.get("job_id") != payload["job_id"]
+            or result.get("revision_id") != revision_id or result.get("commit_sha") != commit_sha
+            or result.get("history_sha256") != digest):
+        raise RemoteWorkerError("The analyzer worker returned a result for a different job.")
+    try:
+        return history_secrets.validate_result(result.get("result"))
+    except ValueError as exc:
+        raise RemoteWorkerError(str(exc)) from exc
 
 
 def _unavailable(name: str, reason: str, status: str = "unavailable") -> dict[str, Any]:
@@ -413,3 +455,98 @@ def run_scip_job(target: dict[str, Any], archive_data: bytes, files: list[str], 
                           for k, v in list(coverage.items())[:8]},
             "truncated": bool(output.get("truncated")) or len(output["definitions"]) > MAX_SCIP_DEFINITIONS
             or len(output["references"]) > MAX_SCIP_REFERENCES}
+
+
+# --- LSP indexer (language servers feed the symbol graph) ------------------------------------------------
+
+MAX_LSP_RESPONSE_BYTES = 32 * 1024 * 1024
+MAX_LSP_DEFINITIONS = 20_000
+MAX_LSP_REFERENCES = 50_000
+MAX_LSP_RELATIONS = 50
+_LSP_DEFINITION_KINDS = {"class", "interface", "trait", "enum", "method", "property", "class_const", "function",
+                         "const"}
+_LSP_REFERENCE_KINDS = {"method_call", "function_call", "class_reference", "class_const", "property_fetch", "new"}
+_LSP_RELATION_KINDS = {"extends", "implements", "uses_trait"}
+
+
+def lsp_inventory(archive_data: bytes, extensions: dict[str, list[str]]) -> tuple[list[str], dict[str, int]]:
+    """Source files of a revision archive for the LSP-indexed languages, and counts per language."""
+    from code_quality.service import MAX_FILE_BYTES, _is_excluded_source_path, _safe_archive_path
+
+    by_suffix = {suffix: language for language, suffixes in extensions.items() for suffix in suffixes}
+    files: list[str] = []
+    languages: dict[str, int] = {}
+    with zipfile.ZipFile(io.BytesIO(archive_data)) as archive:
+        for member in sorted(archive.infolist(), key=lambda item: item.filename):
+            try:
+                path = _safe_archive_path(member.filename)
+            except (ValueError, TypeError):
+                continue
+            language = by_suffix.get(os.path.splitext(path)[1].lower())
+            if language is None or member.is_dir() or member.file_size > MAX_FILE_BYTES or _is_excluded_source_path(path):
+                continue
+            files.append(path)
+            languages[language] = languages.get(language, 0) + 1
+    return files, languages
+
+
+def _lsp_definition(record: Any, files: set[str]) -> dict[str, Any] | None:
+    clean = _scip_record(record, files, {"kind": str, "fqn": str, "name": str, "owner": str, "file": str,
+                                         "line": int, "end_line": int}, _LSP_DEFINITION_KINDS)
+    if clean is None or not clean.get("fqn"):
+        return None
+    clean["origin"] = "lsp"
+    relations = record.get("relations")
+    if relations is not None:
+        if (not isinstance(relations, list) or len(relations) > MAX_LSP_RELATIONS
+                or any(not isinstance(r, dict) or r.get("kind") not in _LSP_RELATION_KINDS
+                       or not isinstance(r.get("target"), str) or len(r["target"]) > 500 for r in relations)):
+            return None
+        clean["relations"] = [{"kind": r["kind"], "target": r["target"]} for r in relations]
+    return clean
+
+
+def run_lsp_job(target: dict[str, Any], archive_data: bytes, files: list[str], languages: dict[str, int],
+                revision_id: str, commit_sha: str | None) -> dict[str, Any]:
+    """Index a revision with language servers on the worker; returns a validated symbol export."""
+    if not target.get("source_transfer_consent"):
+        raise RemoteWorkerError("Explicit consent is required before transferring source to the analyzer worker.")
+    source_bundle, line_counts = _filtered_source_bundle(archive_data, files)
+    bundle_sha256 = hashlib.sha256(source_bundle).hexdigest()
+    payload = {
+        "schema_version": 1, "job_id": str(uuid4()), "revision_id": revision_id, "commit_sha": commit_sha,
+        "archive_base64": base64.b64encode(source_bundle).decode("ascii"), "bundle_sha256": bundle_sha256,
+        "files": files, "file_line_counts": line_counts, "languages": languages, "analyzers": ["lsp"],
+        "settings": {"sonarqube": {"enabled": False}, "joern": {"enabled": False}}, "sonarqube_token": None,
+    }
+    # The worker's own run limit is 900 s (config/lsps.yml); allow transfer on top.
+    result = _request(target, "POST", "/v1/jobs", payload, timeout=960, max_bytes=MAX_LSP_RESPONSE_BYTES)
+    if (result.get("job_id") != payload["job_id"] or result.get("revision_id") != revision_id
+            or result.get("bundle_sha256") != bundle_sha256):
+        raise RemoteWorkerError("The analyzer worker returned a result for a different job.")
+    output = (result.get("analyzers") or {}).get("lsp")
+    if not isinstance(output, dict) or not isinstance(output.get("definitions"), list) \
+            or not isinstance(output.get("references"), list):
+        raise RemoteWorkerError("The analyzer worker returned no LSP result.")
+    selected = set(files)
+    definitions = [d for d in (_lsp_definition(r, selected) for r in output["definitions"][:MAX_LSP_DEFINITIONS]) if d]
+    references = []
+    for record in output["references"][:MAX_LSP_REFERENCES]:
+        clean = _scip_record(record, selected, {"scope": str, "kind": str, "to_fqn": str, "to_member": str,
+                                                "file": str, "line": int}, _LSP_REFERENCE_KINDS)
+        if clean and clean.get("scope") and clean.get("to_fqn"):
+            clean["origin"] = "lsp"
+            references.append(clean)
+    coverage = output.get("languages") if isinstance(output.get("languages"), dict) else {}
+    languages_out = {str(k)[:40]: {"status": str((v or {}).get("status"))[:20],
+                                   **({"reason": str(v["reason"])[:300]} if isinstance(v, dict) and v.get("reason") else {})}
+                     for k, v in list(coverage.items())[:8]}
+    truncated = (bool(output.get("truncated")) or len(output["definitions"]) > MAX_LSP_DEFINITIONS
+                 or len(output["references"]) > MAX_LSP_REFERENCES)
+    from lsp.jobs import overall_status
+
+    status = overall_status(languages_out)
+    if status == "complete" and truncated:
+        status = "partial"
+    return {"name": "lsp", "origin": "lsp", "status": status, "languages": languages_out,
+            "definitions": definitions, "references": references, "truncated": truncated}

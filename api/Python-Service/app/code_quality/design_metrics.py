@@ -11,7 +11,7 @@ import yaml
 
 from telemetry.snapshot import Snapshot, validate_project_id, validate_revision_id
 
-RUBRIC_PATH = Path(__file__).parent / "rubrics" / "clean-code-rubric-1.yml"
+RUBRIC_PATH = Path(__file__).parent / "rubrics" / "clean-code-rubric-2.yml"
 
 
 def canonical(value: Any) -> str:
@@ -26,12 +26,16 @@ def load_rubric(path: Path = RUBRIC_PATH) -> tuple[dict, str]:
     try:
         data = path.read_bytes()
         rubric = yaml.safe_load(data)
-        if not isinstance(rubric, dict) or rubric.get("version") != "clean-code-rubric-1" or rubric.get("metric_schema") != "code-metrics-1" or rubric.get("score_method") != "design-metrics-1":
+        if not isinstance(rubric, dict) or rubric.get("version") != "clean-code-rubric-2" or rubric.get("metric_schema") != "code-metrics-1" or rubric.get("score_method") != "design-metrics-2":
             raise ValueError("invalid rubric identity")
         limits = rubric["limits"]
-        for key in ("candidates_per_principle", "candidates_total", "body_chars", "reason_chars", "max_chunks", "completion_tokens", "request_token_limit_fallback"):
+        for key in ("min_candidates_per_principle", "max_candidates", "judge_input_tokens", "body_chars", "reason_chars",
+                    "max_chunks", "completion_tokens", "request_token_limit_fallback"):
             if type(limits[key]) is not int or limits[key] <= 0:
                 raise ValueError("invalid rubric limit")
+        rate = rubric.get("unjudged_default_rate")
+        if type(rate) not in (int, float) or not 0 <= rate <= 1:
+            raise ValueError("invalid unjudged default rate")
         if not isinstance(rubric["rules"], list) or not rubric["rules"]:
             raise ValueError("missing rules")
         ids = set()
@@ -100,6 +104,11 @@ def read_revision_chunks(project_id: str, revision_id: str, snapshot: dict, file
 
 
 def _components(methods: list[dict], owner: str) -> int:
+    return len(_component_groups(methods, owner))
+
+
+def _component_groups(methods: list[dict], owner: str) -> list[list[dict]]:
+    """LCOM4's connected method groups (shared properties or calls on $this), largest first."""
     methods = [m for m in methods if _name(m.get("method_name") or m.get("name")) != "__construct"]
     parent = list(range(len(methods)))
     def find(i):
@@ -117,7 +126,10 @@ def _components(methods: list[dict], owner: str) -> int:
             receiver, sep, name = str(call).rpartition("::")
             if sep and _name(receiver) in {"$this", "this", "self", "static", _name(owner)} and _name(name) in names:
                 parent[find(i)] = find(names[_name(name)])
-    return len({find(i) for i in range(len(methods))})
+    groups: dict[int, list[dict]] = {}
+    for i, method in enumerate(methods):
+        groups.setdefault(find(i), []).append(method)
+    return sorted(groups.values(), key=lambda group: (-len(group), group[0].get("start_line", 0)))
 
 
 def build_units(chunks: list[dict], rubric: dict) -> list[dict]:
@@ -158,13 +170,14 @@ def build_units(chunks: list[dict], rubric: dict) -> list[dict]:
             classes.update(_name(str(x).rpartition("::")[0]) for x in m.get("called_symbols") or [] if "::" in str(x))
         classes -= {"", owner, "self", "static", "$this", "this", "__unknown", "__function", "__global__"}
         maximum = lambda key: max((int(m.get(key) or 0) for m in ms), default=0)
-        metrics = {"lcom4": _components(ms, owner), "fan_out": len(classes), "method_count": len(ms),
+        groups = _component_groups(ms, owner)
+        metrics = {"lcom4": len(groups), "fan_out": len(classes), "method_count": len(ms),
                    "public_interface_size": sum(m.get("visibility") in (None, "public") for m in ms),
                    "type_switch": maximum("type_checks"), "concrete_dependencies": len(concrete),
                    "unsupported_overrides": len(override), "infrastructure_instantiations": len(infra),
                    "max_cyclomatic": maximum("cyclomatic"), "max_nesting": maximum("max_nesting"),
                    "max_params": maximum("param_count"), "max_method_loc": maximum("loc"), "loc": int(declaration.get("loc") or 1)}
-        units.append({"declaration": declaration, "methods": ms, "related": related, "metrics": metrics,
+        units.append({"declaration": declaration, "methods": ms, "related": related, "metrics": metrics, "groups": groups,
                       "properties": sorted(properties.get(owner, [])),
                       "flagged": {"type_switch": max(ms, key=lambda m: m.get("type_checks") or 0, default=None),
                                   "unsupported_overrides": override[0] if override else None,
@@ -172,40 +185,106 @@ def build_units(chunks: list[dict], rubric: dict) -> list[dict]:
     return sorted(units, key=lambda u: (u["declaration"].get("file_path", ""), u["declaration"].get("start_line", 0), u["declaration"].get("fq_symbol_name", "")))
 
 
+def severity(unit: dict, rule: dict) -> float:
+    """How far a unit exceeds a rule's threshold, weighted by the rule's penalty (the ranking key)."""
+    value = unit["metrics"].get(rule["metric"], 0)
+    ratio = value / rule["threshold"] if rule["threshold"] else value + 1
+    return ratio * rule["penalty"]
+
+
+def exceeds(unit: dict, rule: dict) -> bool:
+    return (unit["declaration"]["node_type"] in rule["applies_to"] and unit["metrics"].get(rule["metric"], 0) > rule["threshold"]
+            and unit["metrics"]["method_count"] >= rule.get("min_method_count", 0))
+
+
+def _candidate(project_id: str, revision_id: str, units: list[dict], rule: dict, unit: dict, rubric: dict) -> dict:
+    dec = unit["declaration"]
+    symbol = dec["fq_symbol_name"]
+    flagged = unit["flagged"].get(rule["metric"])
+    body = (flagged or {}).get("code", "")
+    declaration_line = str(dec.get("code") or dec.get("signature") or "").splitlines()
+    card = {"symbol": symbol, "declaration": declaration_line[0] if declaration_line else "",
+            "methods": [m.get("signature", "") for m in unit["methods"]],
+            "properties": unit["properties"],
+            "constructor_dependencies": dec.get("constructor_dependencies") or [],
+            "metric": rule["metric"], "value": unit["metrics"][rule["metric"]], "threshold": rule["threshold"],
+            "flagged_method": (flagged or {}).get("signature"), "body": body[:rubric["limits"]["body_chars"]],
+            "body_truncated": len(body) > rubric["limits"]["body_chars"],
+            "related": [{"symbol": item.get("fq_symbol_name"), "signature": item.get("signature"),
+                         "content_hash": item.get("content_hash"),
+                         "methods": [m.get("signature", "") for m in units_by_name(units, item).get("methods", [])]} for item in unit["related"]],
+            "content_hash": dec.get("content_hash"), "method_hashes": [m.get("content_hash") for m in unit["methods"]]}
+    if rule["principle"] == "SRP":
+        # Signatures alone left the judge "uncertain" on most SRP cards: show how the class splits.
+        card["method_groups"] = _method_groups(unit, rubric)
+    evidence_id = "ev_" + digest([project_id, revision_id, rubric["version"], rule["id"], symbol])[:24]
+    return {"evidence_id": evidence_id, "principle": rule["principle"], "rule_id": rule["id"], "symbol": symbol,
+            "file": dec.get("file_path"), "line": (flagged or dec).get("start_line"),
+            "severity": round(severity(unit, rule), 2), "card": card, "card_hash": digest(card), "question": rule["question"]}
+
+
+MAX_CARD_GROUPS = 6
+
+
+def _method_groups(unit: dict, rubric: dict) -> list[dict]:
+    """LCOM4's disconnected method groups: signatures, properties used, and a code excerpt of each group's
+    largest method, sharing twice the rubric's body budget."""
+    groups = (unit.get("groups") or [])[:MAX_CARD_GROUPS]
+    share = max(200, (rubric["limits"]["body_chars"] * 2) // max(1, len(groups)))
+    rows = []
+    for group in groups:
+        largest = max(group, key=lambda m: int(m.get("loc") or 0))
+        code = str(largest.get("code") or "")
+        used = sorted({p for m in group for p in [*(m.get("reads_properties") or []), *(m.get("writes_properties") or [])]})
+        rows.append({"methods": [m.get("signature", "") for m in group][:12], "properties": used[:12],
+                     "excerpt_of": largest.get("signature", ""), "excerpt": code[:share], "excerpt_truncated": len(code) > share})
+    return rows
+
+
 def select_candidates(project_id: str, revision_id: str, units: list[dict], rubric: dict) -> tuple[list[dict], dict]:
-    candidates, counts = [], {}
+    """Threshold-exceeding units ranked by severity across all model-judged rules (rubric 2).
+
+    Each principle first gets up to ``min_candidates_per_principle`` of its most severe units, then
+    the rest follow in severity order while the judge's estimated input stays within
+    ``judge_input_tokens`` (and ``max_candidates``). The others are counted as unjudged."""
+    limits = rubric["limits"]
+    counts: dict[str, dict] = {}
+    pool = []
     for rule in rubric["rules"]:
         if rule["judge"] != "model":
             continue
-        principle = rule["principle"]
-        counts.setdefault(principle, {"exceeding": 0, "judged": 0, "violations": 0, "acceptable": 0, "uncertain": 0, "unjudged": 0})
-        exceeding = [u for u in units if u["declaration"]["node_type"] in rule["applies_to"] and u["metrics"].get(rule["metric"], 0) > rule["threshold"] and u["metrics"]["method_count"] >= rule.get("min_method_count", 0)]
-        exceeding.sort(key=lambda u: (-(u["metrics"][rule["metric"]] / rule["threshold"] if rule["threshold"] else float("inf")), u["declaration"].get("file_path", ""), u["declaration"].get("start_line", 0), u["declaration"].get("fq_symbol_name", "")))
-        counts[principle]["exceeding"] += len(exceeding)
-        for unit in exceeding:
-            if sum(c["principle"] == principle for c in candidates) >= rubric["limits"]["candidates_per_principle"] or len(candidates) >= rubric["limits"]["candidates_total"]:
-                counts[principle]["unjudged"] += 1
-                continue
-            dec = unit["declaration"]
-            symbol = dec["fq_symbol_name"]
-            flagged = unit["flagged"].get(rule["metric"])
-            body = (flagged or {}).get("code", "")
-            declaration_line = str(dec.get("code") or dec.get("signature") or "").splitlines()
-            card = {"symbol": symbol, "declaration": declaration_line[0] if declaration_line else "",
-                    "methods": [m.get("signature", "") for m in unit["methods"]],
-                    "properties": unit["properties"],
-                    "constructor_dependencies": dec.get("constructor_dependencies") or [],
-                    "metric": rule["metric"], "value": unit["metrics"][rule["metric"]], "threshold": rule["threshold"],
-                    "flagged_method": (flagged or {}).get("signature"), "body": body[:rubric["limits"]["body_chars"]],
-                    "body_truncated": len(body) > rubric["limits"]["body_chars"],
-                    "related": [{"symbol": item.get("fq_symbol_name"), "signature": item.get("signature"),
-                                 "content_hash": item.get("content_hash"),
-                                 "methods": [m.get("signature", "") for m in units_by_name(units, item).get("methods", [])]} for item in unit["related"]],
-                    "content_hash": dec.get("content_hash"), "method_hashes": [m.get("content_hash") for m in unit["methods"]]}
-            evidence_id = "ev_" + digest([project_id, revision_id, rubric["version"], rule["id"], symbol])[:24]
-            candidates.append({"evidence_id": evidence_id, "principle": principle, "rule_id": rule["id"], "symbol": symbol,
-                               "file": dec.get("file_path"), "line": (flagged or dec).get("start_line"),
-                               "card": card, "card_hash": digest(card), "question": rule["question"]})
+        counts.setdefault(rule["principle"], {"exceeding": 0, "judged": 0, "violations": 0, "acceptable": 0,
+                                              "uncertain": 0, "unjudged": 0, "estimated": 0})
+        for unit in units:
+            if exceeds(unit, rule):
+                counts[rule["principle"]]["exceeding"] += 1
+                dec = unit["declaration"]
+                pool.append((severity(unit, rule), dec.get("file_path", ""), dec.get("start_line", 0),
+                             dec.get("fq_symbol_name", ""), rule["id"], rule, unit))
+    pool.sort(key=lambda item: (-item[0], item[1], item[2], item[3], item[4]))
+    chosen: dict[int, dict] = {}
+    per_principle: dict[str, int] = {}
+    used = 0
+
+    def take(index: int) -> None:
+        nonlocal used
+        _, _, _, _, _, rule, unit = pool[index]
+        candidate = _candidate(project_id, revision_id, units, rule, unit, rubric)
+        cost = (len(canonical(candidate["card"])) + len(candidate["question"])) // 4 + 40
+        if len(chosen) < limits["max_candidates"] and used + cost <= limits["judge_input_tokens"]:
+            chosen[index] = candidate
+            used += cost
+            per_principle[rule["principle"]] = per_principle.get(rule["principle"], 0) + 1
+
+    for index, item in enumerate(pool):   # every principle's most severe units first
+        if per_principle.get(item[5]["principle"], 0) < limits["min_candidates_per_principle"]:
+            take(index)
+    for index in range(len(pool)):        # then by severity, within the judge budget
+        if index not in chosen:
+            take(index)
+    candidates = [chosen[index] for index in sorted(chosen)]
+    for principle, row in counts.items():
+        row["unjudged"] = row["exceeding"] - per_principle.get(principle, 0)
     return candidates, counts
 
 
@@ -213,22 +292,43 @@ def units_by_name(units: list[dict], item: dict) -> dict:
     return next((u for u in units if u["declaration"] is item), {})
 
 
+def _violation_rates(candidates: list[dict], verdicts: dict, rubric: dict) -> dict[str, float]:
+    """Per rule: the share of decisive verdicts that were violations (rule, else principle, else the rubric default)."""
+    def rate(rows: list[dict]) -> float | None:
+        decisive = [verdicts[c["evidence_id"]]["verdict"] for c in rows if verdicts[c["evidence_id"]]["verdict"] != "uncertain"]
+        return round(sum(v == "violation" for v in decisive) / len(decisive), 3) if decisive else None
+
+    rates = {}
+    for rule in rubric["rules"]:
+        if rule["judge"] == "model":
+            by_rule = rate([c for c in candidates if c["rule_id"] == rule["id"]])
+            by_principle = rate([c for c in candidates if c["principle"] == rule["principle"]])
+            rates[rule["id"]] = next(r for r in (by_rule, by_principle, float(rubric["unjudged_default_rate"])) if r is not None)
+    return rates
+
+
 def score_design(units: list[dict], candidates: list[dict], verdicts: dict, counts: dict, rubric: dict, rubric_hash: str, partial: bool) -> tuple[dict, dict, list[dict]]:
     by_unit_rule = {(c["symbol"], c["rule_id"]): verdicts[c["evidence_id"]] for c in candidates}
+    rates = _violation_rates(candidates, verdicts, rubric)
     unit_scores = []
     for unit in units:
         declaration, metrics = unit["declaration"], unit["metrics"]
-        score = 100
+        score, estimated = 100.0, []
         for rule in rubric["rules"]:
-            if (declaration["node_type"] not in rule["applies_to"] or metrics.get(rule["metric"], 0) <= rule["threshold"]
-                    or metrics["method_count"] < rule.get("min_method_count", 0)):
+            if not exceeds(unit, rule):
                 continue
             verdict = by_unit_rule.get((declaration["fq_symbol_name"], rule["id"]))
             if rule["judge"] == "none" or (verdict and verdict["verdict"] == "violation"):
                 score -= rule["penalty"]
+            elif rule["judge"] == "model" and verdict is None:
+                # Unjudged: the rule's penalty scaled by the violation rate the judge found (rubric 2).
+                score -= rule["penalty"] * rates[rule["id"]]
+                estimated.append(rule["id"])
+                counts[rule["principle"]]["estimated"] = counts[rule["principle"]].get("estimated", 0) + 1
         unit_scores.append({"symbol": declaration["fq_symbol_name"], "file": declaration.get("file_path"),
                             "line": declaration.get("start_line"), "loc": max(1, metrics["loc"]),
-                            "score": max(0, score), "metrics": metrics})
+                            "score": round(max(0.0, score), 2), "metrics": metrics,
+                            **({"estimated_rules": estimated} if estimated else {})})
     total_loc = sum(u["loc"] for u in unit_scores)
     score = int(sum(u["score"] * u["loc"] for u in unit_scores) / total_loc + 0.5)
     observations = []
@@ -254,9 +354,15 @@ def score_design(units: list[dict], candidates: list[dict], verdicts: dict, coun
                   "rules": [{k: r[k] for k in ("id", "principle", "metric", "threshold", "penalty", "judge")} for r in rubric["rules"]],
                   "limits": rubric["limits"], "candidates": persisted_candidates, "principles": counts,
                   "unit_count": len(unit_scores), "total_loc": total_loc, "unit_scores": unit_scores,
+                  "unjudged_estimate": {"method": "judged-violation-rate", "rates": rates,
+                                        "units": sum(1 for u in unit_scores if u.get("estimated_rules")),
+                                        "default_rate": rubric["unjudged_default_rate"]},
                   "clean_code_hash": clean_hash}
     category = {"assessed": True, "score": score, "score_method": rubric["score_method"],
-                "reason": "Calculated from revision-scoped design metrics and bounded candidate verdicts.",
+                "reason": ("Calculated from revision-scoped design metrics and bounded candidate verdicts"
+                           + (f"; {sum(1 for u in unit_scores if u.get('estimated_rules'))} units over a judged threshold "
+                              "were not judged and carry an estimated penalty from the judged violation rate."
+                              if any(u.get("estimated_rules") for u in unit_scores) else ".")),
                 "evidence_ids": [row["evidence_id"] for row in observations],
                 "confidence": "low" if uncertain else "high", "assessment_status": "provisional" if uncertain else "scored",
                 "confidence_reasons": ["Some candidates or indexed chunks could not be fully assessed."] if uncertain else [],

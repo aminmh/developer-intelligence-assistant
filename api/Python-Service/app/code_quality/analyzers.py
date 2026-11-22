@@ -18,7 +18,7 @@ from code_quality.rules import validate_rule_yaml
 from code_quality.service import AssessmentError, MAX_FINDINGS
 
 SEMGREP_VERSION = "1.181.0"
-BUILTIN_RULESET_VERSION = "code-quality-builtins-5"
+BUILTIN_RULESET_VERSION = "code-quality-builtins-6"
 TIMEOUT_SECONDS = 90
 MAX_OUTPUT_BYTES = 8 * 1024 * 1024
 MAX_RESULT_COUNT = MAX_FINDINGS // 2

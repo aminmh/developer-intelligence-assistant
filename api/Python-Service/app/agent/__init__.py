@@ -16,7 +16,7 @@ Roadmap (spec phases, marked as TODO in code):
       pip-installable external packages (spec §6, §23).
 """
 
-from agent.core.di import Container
+from agent.core.di import Container, default_container
 from agent.core.registry import PluginRegistry
 from agent.core.types import Project
 from agent.detection import detect_project
@@ -31,8 +31,9 @@ __all__ = [
 ]
 
 
-def default_registry() -> PluginRegistry:
-    """Registry with builtin plugins registered (convenience entry point)."""
+def default_registry(container: Container | None = None) -> PluginRegistry:
+    """Registry with builtin plugins registered and wired to live services
+    (convenience entry point; pass a ``Container`` to substitute them)."""
     registry = PluginRegistry()
-    register_builtins(registry)
+    register_builtins(registry, container if container is not None else default_container())
     return registry

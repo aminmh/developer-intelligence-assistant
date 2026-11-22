@@ -1,7 +1,8 @@
 <script setup lang="ts">
 import { computed, onMounted, ref, watch } from 'vue';
-import { AlertCircle, CheckCircle2, LoaderCircle, Play, Plus, Save, Trash2 } from 'lucide-vue-next';
+import { LoaderCircle, Play, Plus, Save, Trash2 } from 'lucide-vue-next';
 import { makeRequest } from '../../ui/makeRequest';
+import { toastMessage } from '../../composables/useToasts';
 
 type RuleSet = { rule_id: string; title: string; yaml: string; enabled: boolean; updated_at: string; content_hash: string };
 type Preview = { revision_id: string; commit_sha?: string; scanned_files: number; truncated?: boolean; reason?: string; findings: Array<{ rule: string; category: string; severity: string; file: string; line: number; message: string }> };
@@ -14,8 +15,8 @@ const ruleYaml = ref('rules:\n  - id: avoid-select-star\n    message: Avoid sele
 const loading = ref(false);
 const saving = ref(false);
 const previewing = ref(false);
-const error = ref('');
-const message = ref('');
+const error = toastMessage('error');
+const message = toastMessage('success');
 const previewResult = ref<Preview | null>(null);
 const selected = computed(() => rules.value.find((item) => item.rule_id === selectedId.value) || null);
 
@@ -93,8 +94,6 @@ watch(() => [props.projectId, props.revisionId], () => { previewResult.value = n
         <div><h2 class="text-xl font-semibold">Custom analyzer rules</h2><p class="mt-1 max-w-3xl text-sm leading-relaxed text-slate-400">Write offline Semgrep YAML rules for supported languages. Enabled rules run during assessment; previews scan the selected immutable revision and do not create a report.</p></div>
         <span class="rounded-full border border-indigo-400/20 bg-indigo-400/5 px-3 py-1 text-xs text-indigo-200">Built-in rules are read-only</span>
       </div>
-      <div v-if="error" role="alert" class="mt-4 flex items-start gap-2 rounded-lg border border-rose-500/30 bg-rose-500/10 p-3 text-sm text-rose-200"><AlertCircle :size="16" class="mt-0.5 shrink-0" /><span>{{ error }}</span></div>
-      <div v-if="message" role="status" class="mt-4 flex items-start gap-2 rounded-lg border border-emerald-500/20 bg-emerald-500/5 p-3 text-sm text-emerald-200"><CheckCircle2 :size="16" class="mt-0.5 shrink-0" /><span>{{ message }}</span></div>
       <div class="mt-5 grid gap-5 xl:grid-cols-[minmax(15rem,0.8fr)_minmax(0,1.5fr)]">
         <aside class="space-y-3">
           <div class="flex items-center justify-between gap-2"><h3 class="font-semibold">Your rule sets</h3><button type="button" class="inline-flex min-h-9 items-center gap-1.5 rounded-lg border border-slate-700 px-3 text-sm hover:bg-slate-800" @click="newRule"><Plus :size="15" />New</button></div>

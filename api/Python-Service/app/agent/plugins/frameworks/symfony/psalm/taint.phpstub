@@ -1,0 +1,145 @@
+<?php
+// Psalm taint model for Symfony and Doctrine (capability taint_model; plan task 9d).
+// Written in-house for Developer Assistant; the source and sink choices follow the
+// public Symfony/Doctrine APIs. Declarations only: Psalm parses this file, never runs it.
+// Sources: request data. Sinks: raw SQL / DQL, shell command lines, outgoing HTTP URLs.
+
+namespace Symfony\Component\HttpFoundation {
+    class ParameterBag
+    {
+        /** @psalm-taint-source input */
+        public function get(string $key, mixed $default = null): mixed {}
+        /** @psalm-taint-source input */
+        public function all(?string $key = null): array {}
+        /** @psalm-taint-source input */
+        public function keys(): array {}
+        /** @psalm-taint-source input */
+        public function getString(string $key, string $default = ''): string {}
+        /** @psalm-taint-source input */
+        public function getAlnum(string $key, string $default = ''): string {}
+        /** @psalm-taint-source input */
+        public function getAlpha(string $key, string $default = ''): string {}
+        /** @psalm-taint-source input */
+        public function filter(string $key, mixed $default = null, int $filter = \FILTER_DEFAULT, mixed $options = []): mixed {}
+        public function getInt(string $key, int $default = 0): int {}
+        public function getBoolean(string $key, bool $default = false): bool {}
+        public function has(string $key): bool {}
+    }
+    class InputBag extends ParameterBag {}
+    class FileBag extends ParameterBag {}
+    class ServerBag extends ParameterBag {}
+    class HeaderBag
+    {
+        /** @psalm-taint-source input */
+        public function get(string $key, ?string $default = null): ?string {}
+        /** @psalm-taint-source input */
+        public function all(?string $key = null): array {}
+        public function has(string $key): bool {}
+    }
+    class Request
+    {
+        public InputBag $query;
+        public InputBag $request;
+        public ParameterBag $attributes;
+        public InputBag $cookies;
+        public FileBag $files;
+        public ServerBag $server;
+        public HeaderBag $headers;
+        /** @psalm-taint-source input */
+        public function get(string $key, mixed $default = null): mixed {}
+        /** @psalm-taint-source input */
+        public function getContent(bool $asResource = false) {}
+        /** @psalm-taint-source input */
+        public function toArray(): array {}
+        public function getPayload(): InputBag {}
+        /** @psalm-taint-source input */
+        public function getPathInfo(): string {}
+        /** @psalm-taint-source input */
+        public function getRequestUri(): string {}
+        /** @psalm-taint-source input */
+        public function getQueryString(): ?string {}
+        /** @psalm-taint-source input */
+        public function getHost(): string {}
+        public function getMethod(): string {}
+    }
+    class RequestStack
+    {
+        public function getCurrentRequest(): ?Request {}
+        public function getMainRequest(): ?Request {}
+    }
+}
+
+namespace Symfony\Component\Process {
+    class Process
+    {
+        /** @psalm-taint-sink shell $command */
+        public static function fromShellCommandline(string $command, ?string $cwd = null, ?array $env = null, mixed $input = null, ?float $timeout = 60): static {}
+    }
+}
+
+namespace Symfony\Contracts\HttpClient {
+    interface HttpClientInterface
+    {
+        /** @psalm-taint-sink ssrf $url */
+        public function request(string $method, string $url, array $options = []);
+    }
+}
+
+namespace Doctrine\DBAL {
+    class Connection
+    {
+        /** @psalm-taint-sink sql $sql */
+        public function executeQuery(string $sql, array $params = [], array $types = [], mixed $qcp = null) {}
+        /** @psalm-taint-sink sql $sql */
+        public function executeStatement(string $sql, array $params = [], array $types = []) {}
+        /** @psalm-taint-sink sql $sql */
+        public function executeUpdate(string $sql, array $params = [], array $types = []) {}
+        /** @psalm-taint-sink sql $query */
+        public function fetchAllAssociative(string $query, array $params = [], array $types = []): array {}
+        /** @psalm-taint-sink sql $query */
+        public function fetchAssociative(string $query, array $params = [], array $types = []) {}
+        /** @psalm-taint-sink sql $query */
+        public function fetchOne(string $query, array $params = [], array $types = []): mixed {}
+        /** @psalm-taint-sink sql $query */
+        public function fetchFirstColumn(string $query, array $params = [], array $types = []): array {}
+        /** @psalm-taint-sink sql $query */
+        public function fetchAllKeyValue(string $query, array $params = [], array $types = []): array {}
+        /** @psalm-taint-sink sql $sql */
+        public function prepare(string $sql) {}
+        /** @psalm-taint-sink sql $sql */
+        public function query(string $sql) {}
+        /** @psalm-taint-sink sql $sql */
+        public function exec(string $sql) {}
+    }
+}
+
+namespace Doctrine\ORM {
+    interface EntityManagerInterface
+    {
+        /** @psalm-taint-sink sql $dql */
+        public function createQuery(string $dql = '');
+        /** @psalm-taint-sink sql $sql */
+        public function createNativeQuery(string $sql, mixed $rsm);
+        public function createQueryBuilder(): QueryBuilder;
+        public function getConnection(): \Doctrine\DBAL\Connection;
+    }
+    class QueryBuilder
+    {
+        /** @psalm-taint-sink sql $predicates */
+        public function where(mixed ...$predicates): static {}
+        /** @psalm-taint-sink sql $where */
+        public function andWhere(mixed ...$where): static {}
+        /** @psalm-taint-sink sql $where */
+        public function orWhere(mixed ...$where): static {}
+        /** @psalm-taint-sink sql $having */
+        public function having(mixed ...$having): static {}
+        /** @psalm-taint-sink sql $sort */
+        public function orderBy(string $sort, ?string $order = null): static {}
+        /** @psalm-taint-sink sql $sort */
+        public function addOrderBy(string $sort, ?string $order = null): static {}
+        /** @psalm-taint-sink sql $select */
+        public function select(mixed ...$select): static {}
+        /** @psalm-taint-sink sql $select */
+        public function addSelect(mixed ...$select): static {}
+    }
+}

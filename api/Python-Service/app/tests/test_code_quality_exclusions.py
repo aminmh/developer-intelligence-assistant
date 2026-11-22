@@ -84,6 +84,9 @@ def test_assessment_shares_filtered_inventory_and_persists_exclusion_provenance(
     archive = _zip_sources({
         "src/Keep.php": "<?php\nreturn true;\n",
         "src/Legacy/Controller.php": "<?php\nreturn false;\n",
+        "src/Legacy/README.md": "# Old\n",
+        "README.md": "# Pizza\n",
+        ".env": "DB_PASSWORD=x\n",
     })
     seen = {}
 
@@ -113,7 +116,7 @@ def test_assessment_shares_filtered_inventory_and_persists_exclusion_provenance(
             category: {"assessed": True, "score": 60, "reason": f"Reviewed {category} source context.",
                        "evidence_ids": [next(row["evidence_id"] for row in evidence
                                              if row.get("category") == category and row.get("kind") != "coverage")]}
-            for category in service.CATEGORIES
+            for category in service.SOURCE_CATEGORIES
         }
         return categories, "test-model", "test-provider", None, [], []
 
@@ -128,6 +131,9 @@ def test_assessment_shares_filtered_inventory_and_persists_exclusion_provenance(
     assert seen == {"static": ["src/Keep.php"], "semantic": ["src/Keep.php"], "flow": ["src/Keep.php"]}
     assert report["coverage"]["user_exclusion_patterns"] == ["src/Legacy"]
     assert report["coverage"]["user_excluded_files"] == 1
+    evidence = report["coverage"]["evidence_files"]  # plan task 13: excluded paths stay out, secrets by name only
+    assert evidence["by_kind"] == {"docs": 1, "secret": 1} and evidence["excluded_files"] == 1
+    assert {(row["path"], row["readable"]) for row in evidence["files"]} == {("README.md", True), (".env", False)}
     assert store.get_report("pizza", report["report_id"]) == report
 
 

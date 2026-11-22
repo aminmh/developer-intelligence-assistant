@@ -253,7 +253,7 @@ def test_assessment_sends_snippets_to_model_but_does_not_persist_source(monkeypa
             category: {"assessed": True, "score": 60, "reason": f"Reviewed {category} source context.",
                        "evidence_ids": [next(row["evidence_id"] for row in evidence
                                              if row.get("category") == category and row.get("kind") != "coverage")]}
-            for category in service.CATEGORIES
+            for category in service.SOURCE_CATEGORIES
         }
         return categories, "model", "local", {"total_tokens": 1}, [], []
 
@@ -277,7 +277,7 @@ def test_assessment_sends_snippets_to_model_but_does_not_persist_source(monkeypa
     assert "context_snippet" not in saved_context
 
 
-def test_assessment_persists_all_five_cited_scores_and_equal_weight_overall(monkeypatch, tmp_path):
+def test_assessment_scores_overall_only_when_all_ten_categories_are_assessed(monkeypatch, tmp_path):
     import code_quality.external_analyzers as external
     import code_quality.flow_tracing as flow_tracing
     import code_quality.outline as outline
@@ -337,5 +337,14 @@ def test_assessment_persists_all_five_cited_scores_and_equal_weight_overall(monk
     assert all(report["categories"][category]["evidence_ids"] == [f"ev_{category}"] for category in values)
     assert all(report["shadow_scoring"]["categories"][category]["deterministic_evidence_ids"] for category in values)
     assert report["shadow_scoring"]["status"] == "experimental"
+    # The five evidence categories had no collected evidence: unassessed with a reason, so no overall score.
+    assert report["overall_score"] is None
+    assert report["categories"]["testing"] == {"assessed": False, "score": None, "evidence_ids": [],
+                                               "reason": "No testing evidence was found in this revision.",
+                                               "assessment_status": "unavailable"}
+    assert report["weights"] == {category: 10 for category in service.CATEGORIES}
+    values.update(dict(zip(service.EVIDENCE_CATEGORIES, (90, 80, 70, 60, 50))))  # all ten assessed
+    report = assess_revision(PROJECT, REVISION, _snapshot(), b"archive", "alice",
+                             ReportStore(tmp_path / "reports.sqlite"))
     assert report["overall_score"] == 70
     assert report["coverage"]["semantic_context"]["category_search"] == semantic_summary["category_search"]

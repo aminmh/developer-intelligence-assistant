@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { computed, ref, watch } from 'vue';
 import { AlertTriangle, Check, ExternalLink, LoaderCircle, Scale, X } from 'lucide-vue-next';
+import { toast } from '../../composables/useToasts';
 import { outlineHref, ruleKnowledgePath, ruleRequest, symbolLabel, syncedAgo, type RuleLink, type RuleLinkState } from './ruleKnowledge';
 
 // Shows the business rules linked to the code a developer is looking at (methods, routes or tables).
@@ -50,7 +51,7 @@ const setState = async (link: RuleLink, state: RuleLinkState) => {
       method: 'PUT', json: { doc_id: link.doc_id, symbol_id: link.symbol_id, state, ...(props.revisionId ? { revision_id: props.revisionId } : {}) },
     });
     links.value = links.value.map((item) => item.doc_id === link.doc_id && item.symbol_id === link.symbol_id ? { ...item, ...data.link } : item);
-  } catch (cause: any) { error.value = cause?.message || 'The link could not be saved.'; }
+  } catch (cause: any) { toast.error(cause?.message || 'The link could not be saved.'); }
   finally { saving.value = ''; }
 };
 

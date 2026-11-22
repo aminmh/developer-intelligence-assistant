@@ -257,3 +257,15 @@ test('viewers can read benchmark results but cannot configure targets or start r
     assert.equal(read.statusCode, 200);
   } finally { globalThis.fetch = originalFetch; }
 });
+
+test('benchmark time breakdown shares are of k6 latency and skip empty parts', async () => {
+  const { breakdownSegments } = await import('../src/components/code-quality/performance/timeBreakdown');
+  const row = { route: '/pizzas/{pizza}', traced: 2, server_ms: 80, server_p95_ms: 100, database_ms: 20, cache_ms: 0,
+    external_ms: 10, app_ms: 50, app_cpu_ms: 20, client_ms: 110, network_queue_ms: 30 };
+  const segments = breakdownSegments(row);
+  assert.deepEqual(segments.map((part) => part.key), ['database_ms', 'external_ms', 'app_ms', 'network_queue_ms']);
+  assert.equal(Math.round(segments[0].share * 1000), 182);
+  const serverOnly = breakdownSegments({ ...row, client_ms: null, network_queue_ms: null });
+  assert.equal(serverOnly.at(-1)?.key, 'app_ms');
+  assert.equal(serverOnly.at(-1)?.share, 50 / 80);
+});

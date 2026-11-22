@@ -853,6 +853,39 @@ async def put_project_exclusions(project_id: str, request: Request) -> dict:
         raise HTTPException(422, str(exc) or "Assessment exclusion settings are invalid.") from exc
 
 
+@router.get("/projects/{project_id}/public-routes")
+def get_project_public_routes(project_id: str, request: Request) -> dict:
+    """Routes the project declares intentionally public (code_quality/public_routes.py)."""
+    _authorize(request)
+    try:
+        validate_project_id(project_id)
+    except ValueError as exc:
+        raise HTTPException(422, "Invalid project identity.") from exc
+    from code_quality.public_routes import PublicRouteStore
+
+    return {"patterns": PublicRouteStore().patterns(project_id)}
+
+
+@router.put("/projects/{project_id}/public-routes")
+async def put_project_public_routes(project_id: str, request: Request) -> dict:
+    _authorize(request)
+    from code_quality.public_routes import PublicRouteStore
+
+    try:
+        validate_project_id(project_id)
+        raw = await request.body()
+        if len(raw) > MAX_EXCLUSION_REQUEST_BYTES:
+            raise HTTPException(413, "Public route settings exceed the size limit.")
+        payload = json.loads(raw)
+        if not isinstance(payload, dict):
+            raise ValueError("Public route settings must be an object.")
+        return {"patterns": PublicRouteStore().save(project_id, payload.get("patterns"))}
+    except HTTPException:
+        raise
+    except (ValueError, TypeError, json.JSONDecodeError) as exc:
+        raise HTTPException(422, str(exc) or "Public route settings are invalid.") from exc
+
+
 @router.get("/projects/{project_id}/reports")
 def list_reports(project_id: str, request: Request) -> dict:
     _authorize(request)
@@ -1087,7 +1120,8 @@ async def performance_run_traces(project_id: str, run_id: str, request: Request)
     result = PerformanceStore().get_run(user_id, project_id, _performance_uuid(run_id, "run"))
     if result is None:
         raise HTTPException(404, "Performance run was not found.")
-    return await run_in_threadpool(benchmark_traces, project_id, result.get("revision_id"), result["run_id"])
+    return await run_in_threadpool(benchmark_traces, project_id, result.get("revision_id"), result["run_id"],
+                                  route_results=result.get("route_results"))
 
 
 @router.post("/projects/{project_id}/performance/compare")

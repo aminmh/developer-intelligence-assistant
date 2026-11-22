@@ -1,7 +1,8 @@
 <script setup lang="ts">
 import { computed, onBeforeUnmount, ref, watch } from 'vue';
-import { AlertCircle, CheckCircle2, LoaderCircle, Play, Square } from 'lucide-vue-next';
+import { LoaderCircle, Play, Square } from 'lucide-vue-next';
 import { makeRequest } from '../../ui/makeRequest';
+import { toast, toastMessage } from '../../composables/useToasts';
 import TargetForm from './performance/TargetForm.vue';
 import RoutePicker from './performance/RoutePicker.vue';
 import RunResult from './performance/RunResult.vue';
@@ -31,8 +32,8 @@ const baselineId = ref('');
 const canOperate = ref(true);
 const saving = ref(false);
 const starting = ref(false);
-const error = ref('');
-const message = ref('');
+const error = toastMessage('error');
+const message = toastMessage('success');
 let pollTimer: ReturnType<typeof setTimeout> | null = null;
 let loadSequence = 0;
 
@@ -201,7 +202,7 @@ const cancelRun = async () => {
   if (!job.value) return;
   try {
     await perfRequest(projectPath(props.projectId, `/runs/${encodeURIComponent(job.value.run_id)}`), { method: 'DELETE' });
-    message.value = 'Stopping the benchmark; its partial result will be saved.';
+    toast.info('Stopping the benchmark; its partial result will be saved.');
   } catch (cause: any) { error.value = cause?.message || 'The benchmark could not be cancelled.'; }
 };
 const toggleBaseline = (run: Run) => {
@@ -229,8 +230,6 @@ onBeforeUnmount(stopPolling);
           </select>
         </label>
       </div>
-      <div v-if="error" role="alert" class="mt-4 flex items-start gap-2 rounded-lg border border-rose-500/30 bg-rose-500/10 p-3 text-sm text-rose-200"><AlertCircle :size="16" class="mt-0.5 shrink-0" /><span>{{ error }}</span></div>
-      <div v-if="message" role="status" class="mt-4 flex items-start gap-2 rounded-lg border border-emerald-500/20 bg-emerald-500/5 p-3 text-sm text-emerald-200"><CheckCircle2 :size="16" class="mt-0.5 shrink-0" /><span>{{ message }}</span></div>
       <p v-if="!canOperate" class="mt-4 rounded-lg border border-slate-700 p-3 text-sm text-slate-400">You have view access to this project: you can read and compare results, but only operators change targets or start benchmarks.</p>
 
       <div class="mt-5 grid gap-6 xl:grid-cols-[minmax(0,1.1fr)_minmax(20rem,0.9fr)]">
@@ -259,7 +258,7 @@ onBeforeUnmount(stopPolling);
       </div>
     </div>
 
-    <div class="grid gap-5 xl:grid-cols-[minmax(0,1fr)_20rem]">
+    <div class="grid gap-5 2xl:grid-cols-[minmax(0,1fr)_20rem]">
       <div class="min-w-0 space-y-5">
         <RunResult v-if="selectedRun" :project-id="projectId" :run="selectedRun" :production="routes" :baseline="baselineId === selectedRun.run_id"
           :can-operate="canOperate" @baseline="toggleBaseline(selectedRun)" @deleted="runDeleted" />
@@ -275,11 +274,11 @@ onBeforeUnmount(stopPolling);
           <li v-for="item in failedJobs" :key="item.run_id" class="rounded-lg border border-rose-500/20 bg-rose-500/5 p-2 text-xs text-rose-200">Failed {{ new Date(item.started_at).toLocaleString() }}: {{ item.error }}</li>
         </ul>
         <div v-if="filteredHistory.length" class="mt-3 max-h-[36rem] space-y-2 overflow-y-auto pr-1">
-          <button v-for="run in filteredHistory" :key="run.run_id" type="button" class="w-full rounded-xl border p-3 text-left transition" :class="selectedRun?.run_id === run.run_id ? 'border-indigo-400/50 bg-indigo-500/10' : 'border-slate-800 bg-slate-950/40 hover:border-slate-700'" @click="selectedRun = run">
+          <button v-for="run in filteredHistory" :key="run.run_id" type="button" class="w-full rounded-xl border p-3 text-left transition" :class="selectedRun?.run_id === run.run_id ? 'border-indigo-400/60 bg-indigo-400/15 ring-1 ring-indigo-400/30' : 'border-slate-800 bg-slate-950/40 hover:border-slate-700'" @click="selectedRun = run">
             <span class="flex items-center justify-between gap-2 text-sm font-medium"><span class="truncate">{{ run.target_name }}</span>
               <span class="shrink-0 rounded-full px-1.5 py-0.5 text-[10px]" :class="run.complete ? 'bg-emerald-500/10 text-emerald-200' : 'bg-amber-500/10 text-amber-200'">{{ run.complete ? 'complete' : 'partial' }}</span></span>
-            <span class="mt-1 block text-xs text-slate-400">rev {{ shortRevision(run) }} · {{ run.routes.length }} routes · {{ workloadLabel(run.workload) }}</span>
-            <span class="mt-1 block text-[11px] text-slate-500">{{ new Date(run.created_at).toLocaleString() }}{{ run.run_id === baselineId ? ' · baseline' : '' }}</span>
+            <span class="mt-1 block text-xs text-slate-300">rev {{ shortRevision(run) }} · {{ run.routes.length }} routes · {{ workloadLabel(run.workload) }}</span>
+            <span class="mt-1 block text-[11px] text-slate-400">{{ new Date(run.created_at).toLocaleString() }}{{ run.run_id === baselineId ? ' · baseline' : '' }}</span>
           </button>
         </div>
         <p v-else class="mt-4 text-sm leading-relaxed text-slate-500">Finished runs appear here with their revision, target, routes and workload.</p>

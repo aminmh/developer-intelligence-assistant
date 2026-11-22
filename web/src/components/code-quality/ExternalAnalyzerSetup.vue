@@ -1,7 +1,8 @@
 <script setup lang="ts">
 import { computed, ref, watch } from 'vue';
-import { AlertCircle, CheckCircle2, Copy, Info, LoaderCircle, Save, ShieldCheck, Trash2, Wrench, X } from 'lucide-vue-next';
+import { CheckCircle2, Copy, Info, LoaderCircle, Save, ShieldCheck, Trash2, Wrench, X } from 'lucide-vue-next';
 import { makeRequest } from '../../ui/makeRequest';
+import { toast, toastMessage } from '../../composables/useToasts';
 import ToggleCard from '../ToggleCard.vue';
 
 type Settings = {
@@ -20,21 +21,20 @@ const developerModeLoaded = ref(false);
 const developerModeSaving = ref(false);
 const workerCheck = ref<'idle' | 'checking' | 'ready' | 'failed'>('idle');
 const sonarCheck = ref<'idle' | 'checking' | 'ready' | 'failed'>('idle');
-const sonarCheckMessage = ref('');
 const verifiedWorkerTarget = ref('');
 const workerIdentity = () => `${settings.value.worker.endpoint.trim()}|${settings.value.worker.certificate_sha256.trim().toLowerCase()}`;
 const setupGuideOpen = ref(false);
 const copiedGuideItem = ref('');
-const copyError = ref('');
+const copyError = toastMessage('error');
 const workerFingerprintLoading = ref(false);
-const workerFingerprintMessage = ref('');
-const workerFingerprintError = ref('');
+const workerFingerprintMessage = toastMessage('success');
+const workerFingerprintError = toastMessage('error');
 const token = ref('');
 const tokenSaved = ref(false);
 const loading = ref(false);
 const saving = ref(false);
-const error = ref('');
-const message = ref('');
+const error = toastMessage('error');
+const message = toastMessage('success');
 const workerReady = computed(() => deploymentMode.value === 'production'
   ? capabilities.value.worker?.status === 'ready'
   : (developerMode.value.enabled && settings.value.worker.enabled && settings.value.worker.source_transfer_consent
@@ -202,7 +202,7 @@ const checkWorker = async () => {
   } catch (cause: any) { workerCheck.value = 'failed'; error.value = cause?.message || 'The analyzer worker could not be verified.'; }
 };
 const checkSonarAccess = async () => {
-  sonarCheck.value = 'checking'; sonarCheckMessage.value = ''; error.value = ''; message.value = '';
+  sonarCheck.value = 'checking'; error.value = ''; message.value = '';
   try {
     const data = await request(basePath() + '/sonarqube/check', {
       method: 'POST', headers: { 'Content-Type': 'application/json' },
@@ -215,10 +215,10 @@ const checkSonarAccess = async () => {
     sonarCheck.value = 'ready';
     const version = typeof data.server_version === 'string' && data.server_version !== 'unknown'
       ? ` (SonarQube ${data.server_version})` : '';
-    sonarCheckMessage.value = `Project result access verified${version}. No source was uploaded; analysis-write permission was not tested.`;
+    toast.success(`Project result access verified${version}. No source was uploaded; analysis-write permission was not tested.`);
   } catch (cause: any) {
     sonarCheck.value = 'failed';
-    sonarCheckMessage.value = cause?.message || 'SonarQube project access could not be verified.';
+    toast.error(cause?.message || 'SonarQube project access could not be verified.');
   }
 };
 const saveToken = async () => {
@@ -227,13 +227,13 @@ const saveToken = async () => {
   try {
     if (!settings.value.sonarqube.credential_id) await save();
     await request(basePath() + '/credential', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ token: token.value }) });
-    token.value = ''; tokenSaved.value = true; sonarCheck.value = 'idle'; sonarCheckMessage.value = ''; message.value = 'SonarQube token saved in the host OS credential store.';
+    token.value = ''; tokenSaved.value = true; sonarCheck.value = 'idle'; message.value = 'SonarQube token saved in the host OS credential store.';
   } catch (cause: any) { error.value = cause?.message || 'SonarQube token could not be saved.'; }
   finally { saving.value = false; }
 };
 const removeToken = async () => {
   saving.value = true; error.value = ''; message.value = '';
-  try { await request(basePath() + '/credential', { method: 'DELETE' }); tokenSaved.value = false; sonarCheck.value = 'idle'; sonarCheckMessage.value = ''; message.value = 'Saved SonarQube token removed from the OS credential store.'; }
+  try { await request(basePath() + '/credential', { method: 'DELETE' }); tokenSaved.value = false; sonarCheck.value = 'idle'; message.value = 'Saved SonarQube token removed from the OS credential store.'; }
   catch (cause: any) { error.value = cause?.message || 'SonarQube token could not be removed.'; }
   finally { saving.value = false; }
 };
@@ -241,10 +241,10 @@ watch(() => props.projectId, () => { token.value = ''; workerCheck.value = 'idle
 watch(() => [settings.value.worker.endpoint, settings.value.worker.certificate_sha256], () => {
   const current = workerIdentity();
   if (current !== verifiedWorkerTarget.value) workerCheck.value = 'idle';
-  sonarCheck.value = 'idle'; sonarCheckMessage.value = '';
+  sonarCheck.value = 'idle';
 });
 watch(() => [settings.value.sonarqube.server_url, settings.value.sonarqube.project_key], () => {
-  sonarCheck.value = 'idle'; sonarCheckMessage.value = '';
+  sonarCheck.value = 'idle';
 });
 </script>
 
@@ -305,7 +305,6 @@ watch(() => [settings.value.sonarqube.server_url, settings.value.sonarqube.proje
                 <p class="mt-1 text-xs text-slate-400">Only the selected revision is sent to the worker. The worker runs Joern and SonarScanner and removes temporary source after the job.</p>
               </li>
             </ol>
-            <p v-if="copyError" role="alert" class="text-xs text-rose-200">{{ copyError }}</p>
           </section>
           <div class="mt-4 grid gap-4 md:grid-cols-2">
             <label class="text-sm font-medium text-slate-300">Worker HTTPS address<input v-model="settings.worker.endpoint" type="url" maxlength="2048" placeholder="https://WORKER_IP_ADDRESS:9443" class="mt-1.5 min-h-10 w-full rounded-lg border border-slate-700 bg-slate-900 px-3 text-sm outline-none focus:border-indigo-400" /></label>
@@ -319,8 +318,6 @@ watch(() => [settings.value.sonarqube.server_url, settings.value.sonarqube.proje
                 </button>
                 <span class="text-xs font-normal text-slate-400">Verifies the worker’s CA and hostname before reading its fingerprint; source is not sent.</span>
               </div>
-              <p v-if="workerFingerprintMessage" role="status" aria-live="polite" class="mt-2 text-xs font-normal text-emerald-200">{{ workerFingerprintMessage }}</p>
-              <p v-if="workerFingerprintError" role="alert" class="mt-2 text-xs font-normal text-rose-200">{{ workerFingerprintError }}</p>
             </div>
             <div class="md:col-span-2"><ToggleCard :model-value="settings.worker.source_transfer_consent" label="Consent to source transfer to the configured analyzer worker" description="Selected source files are sent only after mutual-TLS identity verification. SonarQube upload requires separate consent." @update:model-value="settings.worker.source_transfer_consent = $event" /></div>
           </div>
@@ -351,7 +348,6 @@ watch(() => [settings.value.sonarqube.server_url, settings.value.sonarqube.proje
           </label>
           <p v-if="capabilities.sonarqube?.reason" class="mt-3 text-xs text-amber-200">{{ capabilities.sonarqube.reason }}</p>
           <div class="mt-3 flex flex-wrap items-center gap-2"><button type="button" :disabled="saving || !token.trim()" class="min-h-9 rounded-lg border border-slate-700 px-3 text-sm text-slate-200 disabled:opacity-50" @click="saveToken">Save token</button><button v-if="tokenSaved" type="button" :disabled="saving" class="inline-flex min-h-9 items-center gap-2 rounded-lg border border-rose-500/30 px-3 text-sm text-rose-200 disabled:opacity-50" @click="removeToken"><Trash2 :size="14" />Remove saved token</button><button type="button" :disabled="saving || sonarCheck === 'checking' || !canCheckSonar" class="inline-flex min-h-9 items-center gap-2 rounded-lg border border-indigo-400/30 px-3 text-sm text-indigo-100 hover:bg-indigo-400/10 disabled:cursor-not-allowed disabled:opacity-50" @click="checkSonarAccess"><LoaderCircle v-if="sonarCheck === 'checking'" class="motion-safe:animate-spin" :size="14" /><ShieldCheck v-else :size="14" />{{ sonarCheck === 'checking' ? 'Checking access…' : 'Test SonarQube access' }}</button></div>
-          <p v-if="sonarCheckMessage" :role="sonarCheck === 'failed' ? 'alert' : 'status'" class="mt-2 text-xs leading-relaxed" :class="sonarCheck === 'ready' ? 'text-emerald-200' : 'text-rose-200'">{{ sonarCheckMessage }}</p>
           <p v-if="tokenSaved && sonarCheck === 'idle'" class="mt-2 text-xs text-slate-500">Checks access to existing project results with the saved token. Does not upload source, run an assessment, or use the configured AI model.</p>
           <div class="mt-4"><ToggleCard :model-value="settings.sonarqube.enabled" :disabled="!canEnableSonar || (deploymentMode === 'developer' && !developerMode.enabled)" label="Enable SonarQube during assessment" description="Run the configured SonarScanner for this project" @update:model-value="settings.sonarqube.enabled = $event" /></div>
         </div>
@@ -362,8 +358,6 @@ watch(() => [settings.value.sonarqube.server_url, settings.value.sonarqube.proje
         </div>
         <div class="flex justify-end"><button type="button" :disabled="saving" class="inline-flex min-h-10 items-center gap-2 rounded-lg bg-indigo-500 px-4 text-sm font-semibold text-white hover:bg-indigo-400 disabled:opacity-50" @click="save"><LoaderCircle v-if="saving" class="motion-safe:animate-spin" :size="15" /><Save v-else :size="15" />{{ saving ? 'Saving…' : 'Save analyzer settings' }}</button></div>
       </div>
-      <div v-if="error" role="alert" class="mt-4 flex items-start gap-2 rounded-lg border border-rose-500/30 bg-rose-500/10 p-3 text-sm text-rose-200"><AlertCircle :size="16" class="mt-0.5 shrink-0" /><span>{{ error }}</span></div>
-      <div v-if="message" role="status" class="mt-4 flex items-start gap-2 rounded-lg border border-emerald-500/20 bg-emerald-500/5 p-3 text-sm text-emerald-200"><CheckCircle2 :size="16" /><span>{{ message }}</span></div>
       <p class="mt-5 flex items-start gap-2 border-t border-slate-800 pt-4 text-xs leading-relaxed text-slate-500"><ShieldCheck :size="14" class="mt-0.5 shrink-0" />Integrations are optional. Unsupported languages, unavailable tools, partial scans, and execution limits must remain visible in each report.</p>
     </div>
   </section>

@@ -1,4 +1,4 @@
-"""Isolated HTTPS worker for fixed SonarScanner, Joern, and SCIP jobs."""
+"""Isolated HTTPS worker for fixed SonarScanner, Joern, SCIP, LSP indexing, Psalm taint and history secret-scan jobs."""
 from __future__ import annotations
 
 import asyncio
@@ -22,6 +22,9 @@ from starlette.concurrency import run_in_threadpool
 
 from code_quality.external_analyzers import check_sonarqube_access, run_joern, run_sonarqube
 from code_quality.scip_index import run_scip
+from code_quality.taint_analysis import run_taint_analysis, validate_stubs
+from code_quality import history_secrets
+from lsp.jobs import run_lsp
 from code_quality.service import MAX_ARCHIVE_BYTES, MAX_FILE_BYTES, MAX_FILES, MAX_SCAN_BYTES, _safe_archive_path
 
 logger = logging.getLogger("analyzer_worker")
@@ -30,7 +33,7 @@ MAX_ARCHIVE_B64_BYTES = (MAX_ARCHIVE_BYTES * 4 // 3) + 8
 MAX_JOB_FILES = min(MAX_FILES, 20_000)
 _SHA = re.compile(r"^[a-fA-F0-9]{40,64}$")
 _REVISION_ID = re.compile(r"^rev_[0-9a-f]{32}$")
-_ANALYZERS = {"sonarqube", "joern", "scip"}
+_ANALYZERS = {"sonarqube", "joern", "scip", "lsp", "psalm"}
 _ALLOWED_SONAR_HOSTS = {
     host.strip().lower().rstrip(".")
     for host in os.environ.get("ANALYZER_ALLOWED_SONAR_HOSTS", "sonarqube").split(",")
@@ -77,7 +80,7 @@ async def _read_bounded_json(request: Request, max_bytes: int = MAX_REQUEST_BYTE
 def _validate_job(payload: dict[str, Any]) -> tuple[str, bytes, list[str], dict[str, int], list[str], dict[str, Any], str | None]:
     allowed_fields = {"schema_version", "job_id", "revision_id", "commit_sha", "archive_base64",
                       "bundle_sha256", "files", "file_line_counts", "languages", "analyzers",
-                      "settings", "sonarqube_token"}
+                      "settings", "sonarqube_token", "taint_stubs"}
     if set(payload) - allowed_fields:
         raise HTTPException(422, "Analyzer job contains unsupported fields.")
     if payload.get("schema_version") != 1:
@@ -152,6 +155,13 @@ def _validate_job(payload: dict[str, Any]) -> tuple[str, bytes, list[str], dict[
         raise HTTPException(422, "SonarQube credential is missing.")
     if "sonarqube" not in requested and token is not None:
         raise HTTPException(422, "SonarQube credential was provided for an unselected analyzer.")
+    if payload.get("taint_stubs") is not None:
+        if "psalm" not in requested:
+            raise HTTPException(422, "Taint stubs were provided for an unselected analyzer.")
+        try:
+            validate_stubs(payload["taint_stubs"])
+        except ValueError as exc:
+            raise HTTPException(422, "Taint stubs are invalid.") from exc
     line_counts = payload.get("file_line_counts")
     if (not isinstance(line_counts, dict) or set(line_counts) != set(files)
             or any(not isinstance(path, str) or type(count) is not int or count < 1
@@ -193,6 +203,12 @@ def _run_job(payload: dict[str, Any]) -> dict[str, Any]:
         elif name == "scip":
             # Needs no settings: it reads only the bundled source and never builds the project.
             analyzers[name] = run_scip(archive, files, languages)
+        elif name == "lsp":
+            # Language servers index the bundled source with project-code features off (lsp/indexer.py).
+            analyzers[name] = run_lsp(archive, files, languages)
+        elif name == "psalm":
+            # Framework taint stubs come from the API's detected plugins; Psalm parses them, never runs them.
+            analyzers[name] = run_taint_analysis(archive, files, payload.get("taint_stubs"))
     return {"schema_version": 1, "job_id": job_id,
             "revision_id": payload["revision_id"],
             "commit_sha": payload.get("commit_sha"), "bundle_sha256": payload["bundle_sha256"],
@@ -233,7 +249,31 @@ async def capabilities() -> dict[str, Any]:
                         "reason": None if not missing else "Not installed: " + ", ".join(missing),
                         "languages": ["typescript", "javascript", "python"],
                         "versions": {name: found for name, found in scip_tools.items() if found}}
+    snapshot["lsp"] = _lsp_capability()
+    from code_quality.taint_analysis import VERSION as psalm_version, available as psalm_available
+    ready = psalm_available()
+    snapshot["psalm"] = {"enabled": True, "analyzer_available": ready, "status": "ready" if ready else "unavailable",
+                         "reason": None if ready else "The pinned Psalm is not installed.",
+                         "languages": ["php"], "version": psalm_version}
+    history_ready = history_secrets.available()
+    snapshot["betterleaks"] = {"enabled": True, "analyzer_available": history_ready,
+                               "status": "ready" if history_ready else "unavailable",
+                               "reason": None if history_ready else "The pinned Betterleaks scanner or Git is not installed.",
+                               "version": history_secrets.VERSION, "endpoint": "/v1/history-scan"}
     return {"schema_version": 1, "analyzers": snapshot}
+
+
+def _lsp_capability() -> dict[str, Any]:
+    from lsp import registry
+    from lsp.jobs import language_extensions
+
+    languages = sorted(language_extensions(registry))
+    missing = [lang for lang in languages if not registry.server_installed(lang)]
+    ready = bool(languages) and not missing
+    return {"enabled": True, "analyzer_available": ready, "status": "ready" if ready else "unavailable",
+            "reason": None if ready else ("Language server not installed for: " + ", ".join(missing) if missing
+                                          else "No language has LSP indexing enabled."),
+            "languages": languages}
 
 
 @app.post("/v1/sonarqube/check")
@@ -269,6 +309,48 @@ async def submit_job(request: Request) -> dict[str, Any]:
             raise HTTPException(500, "The analyzer job failed; retry the assessment.") from exc
     logger.info("analyzer_job_finished job_id=%s", result["job_id"])
     return result
+
+
+def _validate_history_job(payload: dict[str, Any]) -> tuple[str, str, str, bytes]:
+    if set(payload) != {"schema_version", "job_id", "revision_id", "commit_sha", "history_base64", "history_sha256"}:
+        raise HTTPException(422, "History scan job contains unsupported or missing fields.")
+    if payload.get("schema_version") != 1:
+        raise HTTPException(422, "Unsupported history scan job schema.")
+    try:
+        job_id = str(UUID(payload.get("job_id", "")))
+    except (ValueError, TypeError, AttributeError) as exc:
+        raise HTTPException(422, "History scan job identity is invalid.") from exc
+    revision_id, commit_sha = payload.get("revision_id"), payload.get("commit_sha")
+    if not isinstance(revision_id, str) or not _REVISION_ID.fullmatch(revision_id):
+        raise HTTPException(422, "History scan revision identity is invalid.")
+    if not isinstance(commit_sha, str) or not re.fullmatch(r"[0-9a-f]{40}|[0-9a-f]{64}", commit_sha):
+        raise HTTPException(422, "History scan commit is invalid.")
+    encoded, digest = payload.get("history_base64"), payload.get("history_sha256")
+    if not isinstance(encoded, str) or len(encoded) > (history_secrets.MAX_HISTORY_BYTES + 1024 * 1024) * 4 // 3 + 8:
+        raise HTTPException(413, "History artifact exceeds the transfer limit.")
+    try:
+        data = base64.b64decode(encoded, validate=True)
+    except (ValueError, binascii.Error) as exc:
+        raise HTTPException(422, "History artifact is malformed.") from exc
+    if not isinstance(digest, str) or hashlib.sha256(data).hexdigest() != digest:
+        raise HTTPException(422, "History artifact digest does not match its contents.")
+    try:
+        history_secrets.unpack_history(data, commit_sha)
+    except ValueError as exc:
+        raise HTTPException(422, str(exc)) from exc
+    return job_id, revision_id, commit_sha, data
+
+
+@app.post("/v1/history-scan")
+async def submit_history_scan(request: Request) -> dict[str, Any]:
+    """Scan a Git-synchronized revision's recent history for committed secrets (Betterleaks, no network)."""
+    payload = await _read_bounded_json(request)
+    job_id, revision_id, commit_sha, data = _validate_history_job(payload)
+    async with _job_slots:
+        result = await run_in_threadpool(history_secrets.run_history_scan, data, commit_sha)
+    logger.info("history_scan_finished job_id=%s status=%s", job_id, result["status"])
+    return {"schema_version": 1, "job_id": job_id, "revision_id": revision_id, "commit_sha": commit_sha,
+            "history_sha256": payload["history_sha256"], "result": result}
 
 
 def serve() -> None:

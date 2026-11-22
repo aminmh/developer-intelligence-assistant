@@ -279,3 +279,32 @@ def test_client_and_server_errors_make_a_run_partial_and_throughput_uses_the_mea
     assert complete is False
     assert any("client errors" in reason for reason in reasons) and any("server errors" in reason for reason in reasons)
     assert results[0]["throughput_rps"] == 20.0
+
+
+def test_time_breakdown_splits_server_time_and_adds_network_gap_from_k6():
+    spans = [
+        # Trace 1: 100 ms request; two overlapping MySQL queries (10-40, 30-50 ms) count 40 ms; 10 ms Redis; 20 ms HTTP call.
+        {"trace_id": "t1", "span_kind": "Server", "timestamp": "2026-11-16 10:00:00.000", "duration_ms": 100.0,
+         "route": "/pizzas/{pizza}", "php_cpu_time_us": 30000},
+        {"trace_id": "t1", "span_kind": "Client", "timestamp": "2026-11-16 10:00:00.010", "duration_ms": 30.0, "db_system": "mysql"},
+        {"trace_id": "t1", "span_kind": "Client", "timestamp": "2026-11-16 10:00:00.030", "duration_ms": 20.0, "db_system": "mysql"},
+        {"trace_id": "t1", "span_kind": "Client", "timestamp": "2026-11-16 10:00:00.060", "duration_ms": 10.0, "db_system": "redis"},
+        {"trace_id": "t1", "span_kind": "Client", "timestamp": "2026-11-16 10:00:00.075", "duration_ms": 20.0, "db_system": ""},
+        # Trace 2: 60 ms request with no child spans.
+        {"trace_id": "t2", "span_kind": "Server", "timestamp": "2026-11-16 10:00:01.000", "duration_ms": 60.0,
+         "route": "/pizzas/{pizza}", "php_cpu_time_us": 10000},
+    ]
+    route_results = [{"path": "/pizzas/1", "template": "/pizzas/{pizza}", "count": 300, "latency_ms": {"avg": 100.0}},
+                     {"path": "/pizzas/2", "template": "/pizzas/{pizza}", "count": 100, "latency_ms": {"avg": 140.0}}]
+    [row] = performance.time_breakdown(spans, route_results)
+    assert row["route"] == "/pizzas/{pizza}" and row["traced"] == 2
+    assert row["server_ms"] == 80.0
+    assert row["database_ms"] == 20.0 and row["cache_ms"] == 5.0 and row["external_ms"] == 10.0
+    assert row["app_ms"] == 45.0 and row["app_cpu_ms"] == 20.0
+    assert row["client_ms"] == 110.0 and row["network_queue_ms"] == 30.0
+
+
+def test_time_breakdown_without_k6_match_leaves_network_gap_empty():
+    spans = [{"trace_id": "t1", "span_kind": "Server", "timestamp": "2026-11-16 10:00:00", "duration_ms": 50.0, "route": "/menu"}]
+    [row] = performance.time_breakdown(spans, [{"path": "/other", "template": "/other", "count": 5, "latency_ms": {"avg": 9}}])
+    assert row["app_ms"] == 50.0 and row["client_ms"] is None and row["network_queue_ms"] is None and row["app_cpu_ms"] is None
