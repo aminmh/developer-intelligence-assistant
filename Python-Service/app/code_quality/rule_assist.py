@@ -80,8 +80,35 @@ IMPACT_TASK = (
 )
 
 
+# Rules linked to symbols this many hops upstream of the change are reviewed too (change-impact spec 16).
+INDIRECT_DEPTH = 2
+
+
+def _graph_impact(revision: Revision, diff: str) -> dict[str, Any] | None:
+    """The diff's impact on the revision's symbol graph, or None when the graph cannot say."""
+    from inspection import impact_service
+    from inspection.impact import RevisionRef, analyze_diff
+
+    project_id = revision.snapshot["project_id"]
+    ref = RevisionRef(project_id, revision.revision_id,
+                      impact_service._collection(project_id, revision.snapshot), ready=True)
+    report = analyze_diff(impact_service._graph_query(), ref, diff, revision.definitions, depth=INDIRECT_DEPTH)
+    return None if report.get("coverage") == "unavailable" else report
+
+
+def _indirect_symbols(report: dict[str, Any] | None, touched: list[str]) -> dict[str, list[str]]:
+    """Canonical id -> via path for symbols impacted within INDIRECT_DEPTH that the diff did not touch."""
+    found: dict[str, list[str]] = {}
+    for row in (report or {}).get("impacted", []):
+        symbol_id = row.get("canonical_symbol_id")
+        if symbol_id and symbol_id not in touched and int(row.get("depth") or 99) <= INDIRECT_DEPTH:
+            found.setdefault(symbol_id, list(row.get("via") or []))
+    return found
+
+
 def check_impact(project_id: str, revision: Revision, diff: str, *, index: RuleIndex | None = None,
-                 model_call: Callable[..., Any] | None = None) -> dict[str, Any]:
+                 model_call: Callable[..., Any] | None = None,
+                 impact_lookup: Callable[[Revision, str], dict[str, Any] | None] | None = None) -> dict[str, Any]:
     if not isinstance(diff, str) or not diff.strip():
         raise RuleAssistError("Paste a unified diff (for example from git diff) and retry.")
     if len(diff.encode("utf-8")) > MAX_DIFF_BYTES:
@@ -90,20 +117,51 @@ def check_impact(project_id: str, revision: Revision, diff: str, *, index: RuleI
     hunks, touched = changed_symbols(diff, revision.definitions)
     if not hunks:
         raise RuleAssistError("No diff hunks were found. Paste a unified diff and retry.")
-    links = [link for link in index.links(project_id, symbol_ids=touched, states=("confirmed", "manual", "suggested"))]
+    impact_error = None
+    try:
+        report = (impact_lookup or _graph_impact)(revision, diff)
+    except Exception as exc:  # noqa: BLE001 — rules of touched symbols are still reviewed
+        logger.warning("business_rule_impact_lookup_failed error_type=%s", type(exc).__name__)
+        report, impact_error = None, "The symbol graph could not be read, so only rules of changed symbols were checked."
+    indirect = _indirect_symbols(report, touched)
+    # The changed symbol each impacted path ends at, so its hunks go to the model with the rule.
+    changed_by_fqn = {row.get("fqn"): row.get("canonical_symbol_id") for row in (report or {}).get("changed", [])}
+    links = [link for link in index.links(project_id, symbol_ids=[*touched, *indirect],
+                                          states=("confirmed", "manual", "suggested"))]
     rule_links: dict[str, list[dict]] = {}
     for link in links:
         rule_links.setdefault(link["doc_id"], []).append(link)
-    base = {"revision_id": revision.revision_id, "changed_symbols": touched,
-            "hunks": [{key: hunk[key] for key in ("id", "file", "start", "end", "symbol_ids")} for hunk in hunks]}
+    base = {"revision_id": revision.revision_id, "changed_symbols": touched, "impacted_symbols": sorted(indirect),
+            "hunks": [{key: hunk[key] for key in ("id", "file", "start", "end", "symbol_ids")} for hunk in hunks],
+            **({"impact_unavailable": impact_error} if impact_error else {})}
     if not rule_links:
         return {**base, "reviews": [], "reason": "No business rule is linked to the changed code."}
+
+    def direct(doc_id: str) -> bool:
+        return any(link["symbol_id"] in touched for link in rule_links[doc_id])
+
+    # Direct links first, then confirmed ones (spec clause 17 keeps the 12-rule cap).
     ordered = sorted(rule_links, key=lambda doc_id: (
+        not direct(doc_id),
         not any(link["state"] in {"confirmed", "manual"} for link in rule_links[doc_id]), doc_id))[:MAX_IMPACT_RULES]
     documents = {doc_id: index.document(project_id, doc_id) for doc_id in ordered}
     documents = {doc_id: doc for doc_id, doc in documents.items() if doc}
-    relevant_hunks = [hunk for hunk in hunks if set(hunk["symbol_ids"]) & {
-        link["symbol_id"] for doc_id in documents for link in rule_links[doc_id]}]
+    reached: set[str] = set()
+    for doc_id in documents:
+        for link in rule_links[doc_id]:
+            if link["symbol_id"] in indirect:
+                via = indirect[link["symbol_id"]]
+                reached.add(changed_by_fqn.get(via[-1]) if via else None)
+            else:
+                reached.add(link["symbol_id"])
+    relevant_hunks = [hunk for hunk in hunks if set(hunk["symbol_ids"]) & reached]
+
+    def linked(link: dict) -> dict[str, Any]:
+        item = {"symbol_id": link["symbol_id"], "confirmed": link["state"] in {"confirmed", "manual"}}
+        if link["symbol_id"] in indirect:
+            item.update(indirect=True, via=indirect[link["symbol_id"]])
+        return item
+
     from telemetry.analysis import _source_context
     try:
         source = _source_context(revision.archive_loader(), revision.definitions,
@@ -111,9 +169,8 @@ def check_impact(project_id: str, revision: Revision, diff: str, *, index: RuleI
     except Exception:
         source = {}
     prompt = {"task": IMPACT_TASK,
-              "rules": [{**_rule_for_prompt(doc), "linked_symbols": [
-                  {"symbol_id": link["symbol_id"], "confirmed": link["state"] in {"confirmed", "manual"}}
-                  for link in rule_links[doc_id]]} for doc_id, doc in documents.items()],
+              "rules": [{**_rule_for_prompt(doc), "linked_symbols": [linked(link) for link in rule_links[doc_id]]}
+                        for doc_id, doc in documents.items()],
               "hunks": [{key: hunk[key] for key in ("id", "file", "symbol_ids", "text")} for hunk in relevant_hunks],
               "source_before_change": [{"symbol_id": key, "file": value["file"], "source": value["source"]}
                                        for key, value in source.items()]}
@@ -134,6 +191,9 @@ def check_impact(project_id: str, revision: Revision, diff: str, *, index: RuleI
             "The model's answer did not cite the supplied change, so this rule needs a manual check.",
             "hunk_ids": cited if valid else [],
             "confirmed": any(link["state"] in {"confirmed", "manual"} for link in rule_links[doc_id]),
+            "indirect": not direct(doc_id),
+            **({"via": [indirect[link["symbol_id"]] for link in rule_links[doc_id] if link["symbol_id"] in indirect]}
+               if not direct(doc_id) else {}),
         })
     order = {verdict: position for position, verdict in enumerate(("may_break", "changes_behaviour", "unclear", "unaffected"))}
     reviews.sort(key=lambda item: (order[item["verdict"]], not item["confirmed"], item["title"].casefold()))

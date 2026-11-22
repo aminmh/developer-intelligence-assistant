@@ -478,3 +478,17 @@ def test_partial_producer_coverage_written_with_the_graph():
     InspectionService(graph=graph).index("/p", "proj", exported={
         "definitions": definitions, "references": [], "producers": producers})
     assert graph.coverage == ("sym_proj", producers)
+
+
+# === Phase 4: canonical ids for business-rule links ================================================
+
+def test_canonical_symbol_id_in_impacted_and_changed_rows():
+    find = _sym("App\\Repo::find", "s-find", "app/Repo.php", 3, 5)
+    caller = _sym("App\\Svc::run", "s-run", "app/Svc.php", 20, 30)
+    report = analyze_symbols(_query(FakeGraph([find, caller], [_edge("App\\Repo::find", caller)])), REVISION,
+                             ["App\\Repo::find"])
+    assert report["changed"][0]["canonical_symbol_id"] == "s-find"
+    assert report["impacted"][0]["canonical_symbol_id"] == "s-run"
+    assert report["impacted"][0]["symbol_id"] == "id-App\\Svc::run"      # the graph node id stays
+    bare = analyze_symbols(_query(FakeGraph(*_chain())), REVISION, ["App\\Repo::find"])
+    assert bare["impacted"][0]["canonical_symbol_id"] is None

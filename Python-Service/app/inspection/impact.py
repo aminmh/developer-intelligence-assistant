@@ -86,9 +86,9 @@ def _empty_report(revision: RevisionRef, depth: int, max_nodes: int) -> dict[str
 
 
 def _changed_row(row: dict[str, Any], change: str, revision: RevisionRef) -> dict[str, Any]:
-    return {"symbol_id": _symbol_id(row), "fqn": row.get("fqn", ""), "kind": row.get("kind", ""),
-            "language": row.get("language"), "path": row.get("file", ""), "line": row.get("line"),
-            "change": change, "revision_id": revision.revision_id}
+    return {"symbol_id": _symbol_id(row), "canonical_symbol_id": row.get("symbol_id"), "fqn": row.get("fqn", ""),
+            "kind": row.get("kind", ""), "language": row.get("language"), "path": row.get("file", ""),
+            "line": row.get("line"), "change": change, "revision_id": revision.revision_id}
 
 
 # --- inputs -----------------------------------------------------------------------------------------
@@ -359,9 +359,11 @@ def _impacted_row(key: str, row: dict[str, Any], parents: dict[str, str | None],
     if ref.get("via_class"):
         edge["via_class"] = ref["via_class"]
     return {
-        "symbol_id": key, "fqn": row.get("fqn", ""), "kind": row.get("kind", ""),
-        "language": row.get("language"), "path": row.get("file", ""), "line": row.get("line"),
-        "depth": row["_depth"], "via": _via(key, parents, fqns), "origin": origin, "edge": edge,
+        # symbol_id is the graph node (scoped per revision); canonical_symbol_id is stable across
+        # revisions and is what business-rule links and runtime facts key on.
+        "symbol_id": key, "canonical_symbol_id": row.get("symbol_id"), "fqn": row.get("fqn", ""),
+        "kind": row.get("kind", ""), "language": row.get("language"), "path": row.get("file", ""),
+        "line": row.get("line"), "depth": row["_depth"], "via": _via(key, parents, fqns), "origin": origin, "edge": edge,
         "confirmed": confirmed, "test": row["_test"], "revision_id": revision.revision_id,
         "canonical": row.get("symbol_id") or row.get("fqn"),
     }

@@ -197,3 +197,86 @@ def test_vectors_are_not_built_when_rule_text_must_stay_local(index, monkeypatch
     def embed(texts, **kwargs):
         raise AssertionError("rule text must not reach a remote embedding provider")
     assert rule_search.refresh_rule_vectors(PROJECT, index=index, embed=embed)["status"] == "keyword_only"
+
+
+# ----- impact check over impacted symbols (change-impact spec clauses 16-17) ------------------
+
+STORE = "App\\OrderController::store"
+CHECKOUT = "App\\Checkout::submit"
+
+
+def _impact(*impacted):
+    """An impact report for DIFF: store changed, plus the given (canonical id, depth, via) rows."""
+    return {"coverage": "complete",
+            "changed": [{"fqn": STORE, "canonical_symbol_id": STORE}],
+            "impacted": [{"fqn": sid, "canonical_symbol_id": sid, "depth": depth, "via": via}
+                         for sid, depth, via in impacted]}
+
+
+def test_impact_check_includes_rules_of_callers(index):
+    index.set_link_state(PROJECT, DOC, CHECKOUT, "confirmed", "u")
+    index.set_link_state(PROJECT, OTHER, "App\\Far::away", "confirmed", "u")
+    lookup_calls = []
+
+    def lookup(revision, diff):
+        lookup_calls.append(revision.revision_id)
+        return _impact((CHECKOUT, 1, [CHECKOUT, STORE]), ("App\\Far::away", 3, ["App\\Far::away", "x", "y", STORE]))
+
+    model = _model({"reviews": [{"doc_id": DOC, "verdict": "may_break", "reason": "Checkout relies on approval.",
+                                 "hunk_ids": ["h1"]}]})
+    result = check_impact(PROJECT, _revision(), DIFF, index=index, model_call=model, impact_lookup=lookup)
+    assert lookup_calls == [_revision().revision_id]
+    assert [rule["doc_id"] for rule in model.calls[0]["prompt"]["rules"]] == [DOC]     # depth 3 is too far
+    assert [hunk["id"] for hunk in model.calls[0]["prompt"]["hunks"]] == ["h1"]
+    assert result["reviews"][0]["verdict"] == "may_break"
+    assert result["impacted_symbols"] == [CHECKOUT]
+
+
+def test_impact_check_includes_rules_of_callers_falls_back_to_touched_symbols(index):
+    index.set_link_state(PROJECT, DOC, STORE, "confirmed", "u")
+
+    def broken(revision, diff):
+        raise RuntimeError("graph down")
+
+    model = _model({"reviews": [{"doc_id": DOC, "verdict": "unaffected", "reason": "fine", "hunk_ids": []}]})
+    result = check_impact(PROJECT, _revision(), DIFF, index=index, model_call=model, impact_lookup=broken)
+    assert [r["doc_id"] for r in result["reviews"]] == [DOC] and result["impacted_symbols"] == []
+    assert "impact_unavailable" in result
+
+
+def test_indirect_rule_links_carry_via_and_rank_after_direct(index, monkeypatch):
+    import code_quality.rule_assist as rule_assist
+
+    index.set_link_state(PROJECT, DOC, STORE, "manual", "u")              # direct
+    index.set_link_state(PROJECT, OTHER, CHECKOUT, "confirmed", "u")      # indirect only
+    lookup = lambda revision, diff: _impact((CHECKOUT, 1, [CHECKOUT, STORE]))
+
+    monkeypatch.setattr(rule_assist, "MAX_IMPACT_RULES", 1)
+    capped = _model({"reviews": []})
+    check_impact(PROJECT, _revision(), DIFF, index=index, model_call=capped, impact_lookup=lookup)
+    assert [rule["doc_id"] for rule in capped.calls[0]["prompt"]["rules"]] == [DOC]
+
+    monkeypatch.setattr(rule_assist, "MAX_IMPACT_RULES", 12)
+    model = _model({"reviews": [{"doc_id": OTHER, "verdict": "changes_behaviour", "reason": "r", "hunk_ids": ["h1"]},
+                                {"doc_id": DOC, "verdict": "may_break", "reason": "r", "hunk_ids": ["h1"]}]})
+    result = check_impact(PROJECT, _revision(), DIFF, index=index, model_call=model, impact_lookup=lookup)
+    rules = {rule["doc_id"]: rule for rule in model.calls[0]["prompt"]["rules"]}
+    assert rules[OTHER]["linked_symbols"] == [{"symbol_id": CHECKOUT, "confirmed": True, "indirect": True,
+                                               "via": [CHECKOUT, STORE]}]
+    assert rules[DOC]["linked_symbols"] == [{"symbol_id": STORE, "confirmed": True}]
+    reviews = {review["doc_id"]: review for review in result["reviews"]}
+    assert reviews[OTHER]["indirect"] is True and reviews[OTHER]["via"] == [[CHECKOUT, STORE]]
+    assert reviews[DOC]["indirect"] is False and "via" not in reviews[DOC]
+
+
+def test_indirect_rule_links_default_lookup_degrades_without_a_graph(monkeypatch):
+    import code_quality.rule_assist as rule_assist
+    from inspection import impact_service
+
+    class Down:
+        def available(self):
+            return False
+
+    monkeypatch.setattr(impact_service, "_graph_query", lambda: Down())
+    monkeypatch.setattr(impact_service, "_collection", lambda project_id, row: "sym_snapshot_x")
+    assert rule_assist._graph_impact(_revision(), DIFF) is None
