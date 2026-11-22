@@ -11,6 +11,7 @@ import { installOidcAuth, authRoleFor, authIsBootstrapAdmin, authCanRunRuntimeSe
 import { registerCodeQualityRoutes } from './src/server/codeQualityRoutes';
 import { registerWorkingTreeGrants, registerWorkingTreeUpload, type WorkingTreeDependencies } from './src/server/workingTreeRoutes';
 import { registerSchemaDraftRoutes } from './src/server/schemaDraftRoutes';
+import { codeImpactBodyParser, registerCodeImpactRoutes } from './src/server/codeImpactRoutes';
 
 dotenv.config();
 
@@ -222,6 +223,8 @@ async function startServer() {
 
   // Set large JSON limit for uploading larger documents (including base64 PDF strings,
   // and extracted plain text handed back by python-api's large-file TUS pipeline)
+  // Impact requests carry at most a 200 KB diff, so they get their own cap before the general parser.
+  app.use('/api/code/impact', codeImpactBodyParser());
   app.use(express.json({ limit: '100mb', verify: (req, _res, buf) => {
     if ((req as any).path === '/api/code-quality/github/webhook') (req as any).rawBody = Buffer.from(buf);
   } }));
@@ -267,6 +270,11 @@ async function startServer() {
   registerWorkingTreeUpload(app, workingTree);
   installOidcAuth(app);
   registerWorkingTreeGrants(app, workingTree);
+  registerCodeImpactRoutes(app, {
+    apiUrl: PYTHON_API_URL,
+    getUser: (res) => (res.locals as any).authUser,
+    canReadProject: (user, projectId) => Boolean(user && (authIsBootstrapAdmin(user) || authRoleFor(user, projectId))),
+  });
   registerSchemaDraftRoutes(app, {
     apiUrl: PYTHON_API_URL,
     internalSecret: INTERNAL_SECRET,
