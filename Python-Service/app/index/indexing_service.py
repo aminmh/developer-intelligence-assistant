@@ -11,6 +11,29 @@ from typing import Any
 from infra.php_tools import extract_zip_safely, run_code_parse
 from infra.settings import settings
 
+_libc: Any = None
+
+
+def release_memory() -> None:
+    """Collect garbage and hand freed heap pages back to the OS (glibc only; best-effort).
+
+    An index job allocates hundreds of MiB of chunks in a worker thread; without a trim the
+    API keeps that memory resident after the job ends.
+    """
+    import ctypes
+    import gc
+
+    global _libc
+    gc.collect()
+    if _libc is False:
+        return
+    try:
+        if _libc is None:
+            _libc = ctypes.CDLL("libc.so.6")
+        _libc.malloc_trim(0)
+    except (OSError, AttributeError):
+        _libc = False
+
 logger = logging.getLogger("download_jobs")
 
 
@@ -282,6 +305,9 @@ class IndexingService:
             self.write_status(download_id, "error", 0, 0, collection_name, error=error)
         finally:
             shutil.rmtree(workdir, ignore_errors=True)
+            # Drop this job's chunks and symbol export before returning freed memory to the OS.
+            chunks = index = definitions = references = zip_data = None  # noqa: F841
+            release_memory()
 
     @staticmethod
     def _with_scip(index: dict[str, Any], zip_data: bytes, identity: dict[str, Any]) -> dict[str, Any]:

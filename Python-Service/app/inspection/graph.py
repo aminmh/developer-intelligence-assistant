@@ -217,6 +217,19 @@ def node_key(kind: str, fqn: str, name: str | None = None) -> str:
     return hashlib.sha1(raw.encode("utf-8")).hexdigest()
 
 
+# Node upserts, reference/call edges and every inspection query match Symbol by id;
+# without this index each lookup scans every Symbol node.
+_SYMBOL_INDEX_CYPHER = "CREATE RANGE INDEX symbol_id IF NOT EXISTS FOR (n:Symbol) ON (n.id)"
+
+
+def _ensure_symbol_index(store: Any) -> None:
+    """Create the Symbol id index. Best-effort: graph writes still work without it."""
+    try:
+        store.structured_query(_SYMBOL_INDEX_CYPHER, param_map={})
+    except Exception as exc:  # noqa: BLE001 — a missing index only slows lookups
+        get_exception_logger().warning("Symbol graph: id index could not be created: %s", exc)
+
+
 def migrate_legacy_labels(store: Any) -> int:
     """Relabel every legacy ``PhpSymbol`` node to ``Symbol`` in bounded batches.
 
@@ -257,6 +270,7 @@ class InspectionGraph:
                     sanitize_query_output=False,
                 )
                 self._migrate_legacy(self._store)
+                _ensure_symbol_index(self._store)
             except Exception as exc:  # noqa: BLE001 — connectivity failure is reported, not fatal
                 get_exception_logger().error(
                     "Inspection graph: Neo4j connect failed: %s", exc

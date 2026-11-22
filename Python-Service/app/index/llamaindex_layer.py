@@ -100,8 +100,21 @@ _QDRANT_UPSERT_MAX_POINTS = 64
 _QDRANT_UPSERT_MAX_BYTES = 8 * 1024 * 1024
 _QDRANT_READBACK_BATCH_SIZE = 512
 # Rows per Neo4j UNWIND write. One transaction per batch keeps a large project's graph under the
-# server's per-transaction memory cap (70% of the heap by default; a 512 MB heap allows ~358 MiB).
+# server's per-transaction memory cap (70% of the heap by default; the 384 MB heap allows ~268 MiB).
 _GRAPH_WRITE_BATCH_SIZE = 1_000
+
+
+# Every graph write and neighbour lookup finds nodes by id; without this index each
+# lookup scans every CodeSymbol node.
+_GRAPH_INDEX_CYPHER = "CREATE RANGE INDEX code_symbol_id IF NOT EXISTS FOR (n:CodeSymbol) ON (n.id)"
+
+
+def _ensure_graph_indexes(store: Any) -> None:
+    """Create the CodeSymbol id index once per store. Best-effort: writes still work without it."""
+    try:
+        store.structured_query(_GRAPH_INDEX_CYPHER)
+    except Exception as exc:  # noqa: BLE001 — a missing index only slows lookups
+        get_exception_logger().warning("Neo4j CodeSymbol id index could not be created: %s", exc)
 
 
 def _batched_write(store: Any, cypher: str, rows: List[dict]) -> int:
@@ -815,6 +828,8 @@ class CodePropertyGraph:
                 )
                 self._graph_store_failed = True
                 self._graph_store = None
+            else:
+                _ensure_graph_indexes(self._graph_store)
         return self._graph_store
 
     def _get_qdrant(self) -> QdrantClient:
@@ -1195,9 +1210,32 @@ class CodePropertyGraph:
             except Exception:
                 pass
 
-        points: List[PointStruct] = []
+        # Points are upserted as soon as a size-capped batch fills, so memory stays flat
+        # however many chunks a revision has.
+        batch: List[PointStruct] = []
+        batch_bytes = 0
+        ingested = 0
         embed_fails = 0
         vector_size: Optional[int] = None
+
+        def flush_batch() -> bool:
+            nonlocal ingested, batch, batch_bytes
+            if not batch:
+                return True
+            try:
+                qdrant.upsert(collection_name=collection_name, wait=True, points=batch)
+            except Exception as exc:
+                get_exception_logger().error(
+                    "Qdrant upsert failed for collection %s (batch_size=%s): %s",
+                    collection_name,
+                    len(batch),
+                    exc,
+                )
+                return False
+            ingested += len(batch)
+            batch = []
+            batch_bytes = 0
+            return True
 
         embeddable = [(chunk, build_embeddable_text(chunk)) for chunk in chunks]
         embeddable = [(chunk, text) for chunk, text in embeddable if text.strip()]
@@ -1205,8 +1243,9 @@ class CodePropertyGraph:
         hashes = {id(chunk): embed_hash(text) for chunk, text in embeddable}
         reused = self._reusable_vectors(qdrant, reuse_from or [], profile, set(hashes.values()), collection_name)
 
-        def add_point(chunk: Dict[str, Any], embedding: List[float]) -> None:
-            nonlocal vector_size
+        def add_point(chunk: Dict[str, Any], embedding: List[float]) -> bool:
+            """Queue one point, flushing first when the batch is full; False once an upsert fails."""
+            nonlocal vector_size, batch_bytes
             if vector_size is None:
                 vector_size = len(embedding)
                 try:
@@ -1217,20 +1256,35 @@ class CodePropertyGraph:
                 except Exception:
                     pass
                 ensure_payload_indexes(qdrant, collection_name)
-            points.append(PointStruct(
+            point = PointStruct(
                 id=_point_id_for(_chunk_node_id(chunk)),
                 vector=embedding,
                 payload={**_payload(chunk, collection_name), "embed_hash": hashes[id(chunk)],
                          "embed_profile": profile},
-            ))
+            )
+            # Payload size dominates these requests; the vector estimate
+            # keeps the cap safe without depending on pydantic internals.
+            point_bytes = len(json.dumps(point.payload or {}, ensure_ascii=False, default=str).encode("utf-8"))
+            point_bytes += len(point.vector) * 8 + 512
+            if batch and (
+                len(batch) >= _QDRANT_UPSERT_MAX_POINTS
+                or batch_bytes + point_bytes > _QDRANT_UPSERT_MAX_BYTES
+            ):
+                if not flush_batch():
+                    return False
+            batch.append(point)
+            batch_bytes += point_bytes
+            return True
 
         missing = []
         for chunk, text in embeddable:
             vector = reused.get(hashes[id(chunk)])
             if vector is not None:
-                add_point(chunk, vector)
+                if not add_point(chunk, vector):
+                    return ingested, embed_fails
             else:
                 missing.append((chunk, text))
+        reused.clear()
         self._last_vector_stats["reused"] = len(embeddable) - len(missing)
         if progress_callback and len(missing) < len(embeddable):
             progress_callback("embedding", len(embeddable) - len(missing), len(embeddable))
@@ -1239,7 +1293,7 @@ class CodePropertyGraph:
         embeddable = missing
         batch_size = 96
         for offset in range(0, len(embeddable), batch_size):
-            batch = embeddable[offset:offset + batch_size]
+            chunk_batch = embeddable[offset:offset + batch_size]
 
             def report_embedding_progress(amount: int) -> None:
                 nonlocal completed
@@ -1252,16 +1306,16 @@ class CodePropertyGraph:
                 progress_callback("embedding", completed, embeddable_total)
             try:
                 vectors = embed_texts(
-                    [text for _, text in batch],
+                    [text for _, text in chunk_batch],
                     input_type="search_document",
                     progress=report_embedding_progress,
                 )
-                if len(vectors) != len(batch):
+                if len(vectors) != len(chunk_batch):
                     raise RuntimeError("Embedding provider returned an incomplete batch")
             except EmbeddingProviderError:
                 raise
             except Exception as exc:
-                embed_fails += len(batch)
+                embed_fails += len(chunk_batch)
                 if self._last_embedding_error is None:
                     status = getattr(exc, "code", None)
                     self._last_embedding_error = (
@@ -1271,56 +1325,15 @@ class CodePropertyGraph:
                     )
                 continue
 
-            for (chunk, _), embedding in zip(batch, vectors):
-                add_point(chunk, embedding)
+            for (chunk, _), embedding in zip(chunk_batch, vectors):
+                if not add_point(chunk, embedding):
+                    return ingested, embed_fails
                 self._last_vector_stats["embedded"] += 1
 
         if progress_callback:
             progress_callback("upserting", completed, embeddable_total)
-
-        if points:
-            ingested = 0
-            batch: List[PointStruct] = []
-            batch_bytes = 0
-
-            def flush_batch() -> bool:
-                nonlocal ingested, batch, batch_bytes
-                if not batch:
-                    return True
-                try:
-                    qdrant.upsert(collection_name=collection_name, wait=True, points=batch)
-                except Exception as exc:
-                    get_exception_logger().error(
-                        "Qdrant upsert failed for collection %s (batch_size=%s): %s",
-                        collection_name,
-                        len(batch),
-                        exc,
-                    )
-                    return False
-                ingested += len(batch)
-                batch = []
-                batch_bytes = 0
-                return True
-
-            for point in points:
-                # Payload size dominates these requests; the vector estimate
-                # keeps the cap safe without depending on pydantic internals.
-                point_bytes = len(json.dumps(point.payload or {}, ensure_ascii=False, default=str).encode("utf-8"))
-                point_bytes += len(point.vector) * 8 + 512
-                if batch and (
-                    len(batch) >= _QDRANT_UPSERT_MAX_POINTS
-                    or batch_bytes + point_bytes > _QDRANT_UPSERT_MAX_BYTES
-                ):
-                    if not flush_batch():
-                        return ingested, embed_fails
-                batch.append(point)
-                batch_bytes += point_bytes
-
-            if not flush_batch():
-                return ingested, embed_fails
-            return ingested, embed_fails
-
-        return len(points), embed_fails
+        flush_batch()
+        return ingested, embed_fails
 
     # --- retrieval ----------------------------------------------------------
 

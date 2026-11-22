@@ -4,7 +4,9 @@ services:
     container_name: python_api
     extra_hosts:
       - "host.docker.internal:host-gateway"
-    mem_limit: 1g
+    # Indexing runs phpactor inside this container when no analyzer worker exists
+    # (~400 MiB next to ~450 MiB of chunks for a 14k-chunk PHP revision).
+    mem_limit: 1536m
     # asyncio loop (not uvloop) so ragas's nest_asyncio can patch the event loop.
     command: ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "9002", "--loop", "asyncio"]
     environment:
@@ -273,7 +275,10 @@ services:
     mem_limit: 1g
     environment:
       NEO4J_AUTH: ${NEO4J_USER:-neo4j}/${NEO4J_PASSWORD:-password}
-      NEO4J_server_memory_heap_max__size: 512m
+      # Heap + page cache must leave room for JVM/off-heap use (~300 MiB) inside
+      # mem_limit. Graph writes are 1,000 structure-only rows, so 384m is ample.
+      NEO4J_server_memory_heap_max__size: 384m
+      NEO4J_server_memory_pagecache_size: 256m
     healthcheck:
       test: ["CMD-SHELL", "cypher-shell -u \"$${NEO4J_USER:-neo4j}\" -p \"$${NEO4J_PASSWORD:-password}\" 'RETURN 1' >/dev/null"]
       interval: 10s
