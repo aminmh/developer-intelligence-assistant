@@ -1,7 +1,7 @@
 # Runtime telemetry pipeline and aggregation
 
 Phase 3 joins Collector processing, project and immutable-revision scoped rollups, the
-`PhpSymbol` graph, exception search, and live UI invalidation.
+`Symbol` graph (label `PhpSymbol` before 2026-11-15), exception search, and live UI invalidation.
 
 ## Data path
 
@@ -16,7 +16,7 @@ Phase 3 joins Collector processing, project and immutable-revision scoped rollup
    tail-sampling policy, then writes retained traces to `otel_traces`.
 4. The API periodically reads the pre-tail table over the configured rolling
    window. It updates runtime properties and `RUNTIME_CALLS`, `HANDLED_BY`, and
-   `QUERIES` facts on the indexed `PhpSymbol` snapshot identified by its
+   `QUERIES` facts on the indexed `Symbol` snapshot identified by its
    revision, and stores normalized exception signatures in the
    `runtime_exceptions` Qdrant collection.
 5. The API publishes a project-free `runtime.updated` SSE invalidation after

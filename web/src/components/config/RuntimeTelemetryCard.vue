@@ -1,23 +1,24 @@
 <script setup lang="ts">
-import { Activity, CheckCircle2, RefreshCw, Save, Server, ShieldCheck } from 'lucide-vue-next';
+import { Activity, RefreshCw, Save, Server, ShieldCheck } from 'lucide-vue-next';
 import { onMounted, ref, watch } from 'vue';
 import ToggleCard from '../ToggleCard.vue';
+import { toastMessage } from '../../composables/useToasts';
 import { makeRequest } from '../../ui/makeRequest';
 import type { RuntimeStorageTarget, RuntimeTelemetrySettings } from '../../types';
 
 const settings = ref<RuntimeTelemetrySettings | null>(null);
 const loading = ref(false);
 const saving = ref(false);
-const error = ref('');
-const savedMessage = ref('');
+const error = toastMessage('error');
+const savedMessage = toastMessage('success');
 const p95WindowHours = ref(24);
 const refreshMinutes = ref(5);
 const storage = ref<RuntimeStorageTarget | null>(null);
 const remoteSetupOpen = ref(false);
 const storageLoading = ref(false);
 const storageSaving = ref(false);
-const storageError = ref('');
-const storageMessage = ref('');
+const storageError = toastMessage('error');
+const storageMessage = toastMessage('success');
 const fingerprint = ref('');
 const fingerprintConfirmed = ref(false);
 const sshConfigMessage = ref('');
@@ -361,7 +362,6 @@ onMounted(async () => {
       </div>
       <button type="button" @click="refresh" :disabled="loading" class="rounded-lg border border-slate-700 px-2 py-1 text-[10px] text-slate-300 hover:bg-slate-800"><RefreshCw class="mr-1 inline h-3 w-3" :class="loading ? 'animate-spin' : ''" />Refresh</button>
     </div>
-    <div v-if="error" class="rounded-xl border border-rose-500/20 bg-rose-500/5 p-3 text-xs text-rose-300">{{ error }}</div>
     <div class="rounded-xl border border-slate-800 bg-slate-950/40 p-4 space-y-4">
       <div class="flex items-center gap-2"><Server class="h-4 w-4 text-cyan-300" /><h4 class="text-xs font-semibold text-white">ClickHouse storage</h4></div>
       <div class="grid gap-2 sm:grid-cols-3" role="group" aria-label="Runtime ClickHouse storage mode">
@@ -435,8 +435,6 @@ onMounted(async () => {
           <li>Provisioning supports Ubuntu and Debian. The SSH account needs sudo access; test SSH and sudo before installation.</li>
         </ol>
       </details>
-      <div v-if="storageError" class="rounded-lg border border-rose-500/20 bg-rose-500/5 p-3 text-[11px] text-rose-300">{{ storageError }}</div>
-      <div v-if="storageMessage" class="flex items-start gap-2 text-[11px] text-emerald-300"><CheckCircle2 class="mt-0.5 h-3.5 w-3.5 shrink-0" />{{ storageMessage }}</div>
     </div>
     <div v-if="settings" class="grid gap-3 sm:grid-cols-2">
       <div class="rounded-xl border border-slate-800 bg-slate-950/40 p-3">
@@ -470,7 +468,6 @@ onMounted(async () => {
             <input v-model.number="refreshMinutes" type="number" min="1" max="60" class="w-28 rounded-lg border border-slate-700 bg-slate-900 px-2 py-1.5 text-xs text-slate-100" />
           </label>
           <button type="button" @click="savePolicy" :disabled="saving || loading" class="rounded-lg border border-cyan-500/30 px-3 py-1.5 text-[10px] text-cyan-200 hover:bg-cyan-500/10 disabled:opacity-50"><Save class="mr-1 inline h-3 w-3" />{{ saving ? 'Saving…' : 'Save policy' }}</button>
-          <span v-if="savedMessage" class="text-[10px] text-emerald-300">{{ savedMessage }}</span>
         </div>
         <p class="mt-2 text-[10px] text-slate-500">Window: 1 to {{ settings.aggregation_retention_hours }} hours. Refresh: 1 to 60 minutes.</p>
       </div>

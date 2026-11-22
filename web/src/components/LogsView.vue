@@ -1,18 +1,19 @@
 <script setup lang="ts">
 import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue';
 import {
-  AlertTriangle, Bug, Check, ChevronDown, ChevronsDown, CircleAlert, Copy, FileWarning, FilterX,
+  AlertTriangle, Bug, Check, ChevronDown, ChevronsDown, Copy, FileWarning, FilterX,
   GitFork, MessageSquareCode, RefreshCw, ScrollText, Search, SearchX, Trash2,
 } from 'lucide-vue-next';
 import ConfirmModal from './ConfirmModal.vue';
 import type { DeveloperLogEvent, DeveloperLogType, DeveloperLogsResponse } from '../types';
 import { makeRequest } from '../ui/makeRequest';
+import { toastMessage } from '../composables/useToasts';
 
 type Severity = DeveloperLogEvent['severity'];
 
 const events = ref<DeveloperLogEvent[]>([]);
 const loading = ref(false);
-const error = ref('');
+const error = toastMessage('error');
 const search = ref('');
 const type = ref<DeveloperLogType | ''>('');
 const severity = ref<Severity | ''>('');
@@ -273,8 +274,6 @@ onBeforeUnmount(() => {
           <button v-if="from || to" type="button" class="lg-link" @click="from = ''; to = ''">Clear range</button>
         </div>
       </div>
-
-      <div v-if="error" class="lg-error" role="alert"><CircleAlert />{{ error }}</div>
 
       <div v-if="!events.length && loading" class="lg-stream lg-empty">
         <RefreshCw class="lg-spin lg-empty-spin" />

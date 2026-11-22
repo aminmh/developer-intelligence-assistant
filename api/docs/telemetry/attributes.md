@@ -70,7 +70,7 @@ by Developer Assistant, `indexer.code_dirty=false`, and
 `indexer.schema.version=indexer-telemetry-v2`. The PHP installer selects a ready
 revision and verifies the target Git checkout internally. Git SHA remains
 internal source/deployment provenance. The runtime summary joins
-`indexer.symbol_id` to the exact immutable `PhpSymbol` snapshot for that
+`indexer.symbol_id` to the exact immutable `Symbol` snapshot for that
 project/revision. Caller, route, and table relationships are inferred only
 within a shared trace ID; they remain observations, not static graph edges.
 

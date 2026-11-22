@@ -5,6 +5,7 @@ import { AlertTriangle, Check, ChevronDown, Download, ExternalLink, Eye, FileCod
 import { attachmentFilename } from '../utils/migrationPreview';
 import type { NormalizedSchema, StructuredSchemaDraft, SavedSchemaDraft } from '../types';
 import { makeRequest } from '../ui/makeRequest';
+import { toast, toastMessage } from '../composables/useToasts';
 import { importDraftSchema } from '../utils/schemaDraft';
 import { cacheRejectedLayout, cachedRejectedLayout, editorUrl, MAX_LAYOUT_BYTES, mayReplaceRejectedLayout, readEditorEvent, readEditorSelection, rejectedLayoutStored, storeRejectedLayout, validLayout, type SchemaSelection } from '../utils/drawioBridge';
 import { createDrawioDiagram, initializeDrawioMetadata, rebuildDrawioDiagram, schemaFromDrawio } from '../utils/drawioDiagram';
@@ -38,8 +39,8 @@ let saveQueue: Promise<void> = Promise.resolve();
 const queuedEditorSaves = ref(0);
 let editorPreview: { xml: string; draftId: string; revision: number; request: MigrationRequest; preview: Preview } | null = null;
 const busy = ref(false);
-const message = ref('');
-const error = ref('');
+const message = toastMessage('success');
+const error = toastMessage('error');
 const draftRecoveryWarning = ref('');
 const rejectedRecoveryWarning = ref('');
 const dirty = computed(() => !!current.value && (text.value !== savedText.value || layout.value !== savedLayout.value));
@@ -217,8 +218,9 @@ function queueEditorSave(draftId: string, schema: unknown, xml: string, editor: 
     rememberEdits();
     message.value = dirty.value ? 'Draft saved; newer edits remain unsaved.' : 'Draw.io changes saved to the draft.';
   }).catch((cause: any) => {
-    error.value = `${cause.message || 'Could not save the Draw.io draft.'} Your edits remain available for recovery.`;
-    if (popup === editor && editorReady) editor.postMessage(JSON.stringify({ action: 'schema-draft-save-result', ok: false, error: error.value }), origin);
+    const failure = `${cause.message || 'Could not save the Draw.io draft.'} Your edits remain available for recovery.`;
+    error.value = failure;
+    if (popup === editor && editorReady) editor.postMessage(JSON.stringify({ action: 'schema-draft-save-result', ok: false, error: failure }), origin);
     rememberEdits();
   }).finally(() => { queuedEditorSaves.value--; });
 }
@@ -228,8 +230,8 @@ function onEditorMessage(event: MessageEvent) {
   const selection = readEditorSelection(event, origin, popup);
   if (selection && editorReady) {
     const exists = selection.kind === 'table' ? props.schema?.tables.some(table => table.id === selection.id) : props.schema?.refs.some(ref => ref.id === selection.id);
-    if (exists) { emit('selectEntity', selection); message.value = 'Selection shown in the original schema details.'; }
-    else message.value = 'This selection is not present in the original schema details.';
+    if (exists) { emit('selectEntity', selection); toast.info('Selection shown in the original schema details.'); }
+    else toast.info('This selection is not present in the original schema details.');
     return;
   }
   const inspectionRequest = readInspectionRequest(event, origin, popup);
@@ -256,12 +258,14 @@ function onEditorMessage(event: MessageEvent) {
     sendRuntimeCounts();
     message.value = 'Draw.io is open. Save there to update the draft.';
   } else if (messageData.event === 'oversize' && editorReady) {
-    error.value = 'The editor message exceeds the size limit and was not retained. Reduce the diagram size in Draw.io and save again; the last valid draft is preserved.';
-    popup.postMessage(JSON.stringify({ action: 'schema-draft-save-result', ok: false, error: error.value }), origin);
+    const failure = 'The editor message exceeds the size limit and was not retained. Reduce the diagram size in Draw.io and save again; the last valid draft is preserved.';
+    error.value = failure;
+    popup.postMessage(JSON.stringify({ action: 'schema-draft-save-result', ok: false, error: failure }), origin);
   } else if (messageData.event === 'invalid' && editorReady) {
     rememberRejectedLayout(messageData.xml);
-    error.value = 'The diagram XML is invalid or contains a forbidden document type. The last valid draft is preserved; correct the diagram or download it for recovery.';
-    popup.postMessage(JSON.stringify({ action: 'schema-draft-save-result', ok: false, error: error.value }), origin);
+    const failure = 'The diagram XML is invalid or contains a forbidden document type. The last valid draft is preserved; correct the diagram or download it for recovery.';
+    error.value = failure;
+    popup.postMessage(JSON.stringify({ action: 'schema-draft-save-result', ok: false, error: failure }), origin);
   } else if (messageData.event === 'save' && editorReady) {
     try {
       const schema = schemaFromDrawio(messageData.xml, editorSchemaBaseline, true);
@@ -271,11 +275,11 @@ function onEditorMessage(event: MessageEvent) {
       rememberEdits(); error.value = ''; rememberRejectedLayout('');
       if (current.value) queueEditorSave(current.value.id, schema, messageData.xml, popup, origin);
       if (messageData.exit) { popup.close(); closeEditor(); }
-      message.value = 'Saving the schema and diagram to the draft…';
     } catch (cause: any) {
       rememberRejectedLayout(messageData.xml);
-      error.value = `${cause.message || 'Could not read the diagram.'} The last valid schema and layout are preserved. Correct the diagram and save again, or download the rejected diagram for recovery.`;
-      popup.postMessage(JSON.stringify({ action: 'schema-draft-save-result', ok: false, error: error.value }), origin);
+      const failure = `${cause.message || 'Could not read the diagram.'} The last valid schema and layout are preserved. Correct the diagram and save again, or download the rejected diagram for recovery.`;
+      error.value = failure;
+      popup.postMessage(JSON.stringify({ action: 'schema-draft-save-result', ok: false, error: failure }), origin);
     }
   } else if (messageData.event === 'exit' && editorReady) {
     closeEditor();
@@ -375,7 +379,8 @@ async function refresh() {
   try { rows.value = (await request('/api/schema-drafts')).drafts; }
   catch (cause: any) { error.value = cause.message || 'Could not load drafts.'; }
 }
-function adopt(draft: Draft, recover = false) {
+function adopt(draft: Draft, recover = false): boolean {
+  let recovered = false;
   const sameDraft = current.value?.id === draft.id;
   if (!sameDraft && current.value && rejectedRecoveryWarning.value) cacheRejectedLayout(current.value.id, '');
   current.value = draft; selected.value = draft.id;
@@ -404,9 +409,11 @@ function adopt(draft: Draft, recover = false) {
         if (typeof pending.layout === 'string') layout.value = pending.layout;
         current.value = { ...draft, revision: pending.revision };
         message.value = 'Recovered unsaved edits from this browser tab. Save them or copy them before discarding.';
+        recovered = true;
       }
     } catch { error.value = 'Could not restore local draft recovery.'; }
   }
+  return recovered;
 }
 function canReplace() {
   if (queuedEditorSaves.value || migrationBusy.value) { error.value = 'Wait for the current save or migration request to finish.'; return false; }
@@ -422,7 +429,7 @@ async function openDraft(id = selected.value) {
   try {
     const draft = await request(`/api/schema-drafts/${encodeURIComponent(id)}`);
     if (current.value && dirty.value) clearRecovery(current.value.id);
-    adopt(draft, true); if (!message.value) message.value = 'Draft opened.';
+    if (!adopt(draft, true)) message.value = 'Draft opened.';
   }
   catch (cause: any) { error.value = cause.message || 'Could not open draft.'; }
   finally { busy.value = false; }
@@ -446,6 +453,8 @@ async function deleteDraft(id = selected.value) {
   } catch (cause: any) { error.value = cause.message || 'Could not delete draft.'; }
   finally { busy.value = false; }
 }
+const restrictedTables = computed(() => (current.value?.provenance?.coverage.warnings ?? [])
+  .map(warning => /for (\S+) before editing/.exec(warning)?.[1] ?? warning).join(', '));
 function draftLabel(row: DraftRow & { provenance?: { database?: string; environment?: string; extracted_at?: string } }) {
   const when = row.provenance?.extracted_at ? new Date(row.provenance.extracted_at).toLocaleString() : '';
   return row.provenance
@@ -499,8 +508,11 @@ onUnmounted(() => { closeEditor(); window.removeEventListener('beforeunload', wa
       <div v-if="current?.provenance" class="sc-banner" :data-tone="current.provenance.coverage.complete ? 'run' : 'warn'">
         <div>
           <p class="sc-m0">Runtime baseline: {{ current.provenance.engine }} {{ current.provenance.engine_version }} · {{ current.provenance.database }} · {{ current.provenance.project_id }} / {{ current.provenance.environment }}</p>
-          <p class="sc-hint sc-m0">Container {{ current.provenance.container_id.slice(0, 12) }} · extracted {{ current.provenance.extracted_at }}. Catalog inspection may retain unsupported features as table notes.</p>
-          <ul v-if="current.provenance.coverage.warnings.length"><li v-for="warning in current.provenance.coverage.warnings" :key="warning">{{ warning }}</li></ul>
+          <p class="sc-hint sc-m0">Container {{ current.provenance.container_id.slice(0, 12) }} · extracted {{ new Date(current.provenance.extracted_at).toLocaleString() }}</p>
+          <details v-if="current.provenance.coverage.warnings.length" class="sc-m0">
+            <summary>{{ current.provenance.coverage.warnings.length }} tables keep catalog notes, so migrations are restricted for them</summary>
+            <p class="sc-hint">Features this editor cannot model (such as engine options, collations or checks) stay as read-only notes on the table. Review them before editing: {{ restrictedTables }}.</p>
+          </details>
         </div>
       </div>
 
@@ -591,8 +603,7 @@ onUnmounted(() => { closeEditor(); window.removeEventListener('beforeunload', wa
         </section>
       </div>
 
-      <p v-if="message" role="status" class="sc-hint" data-tone="ok">{{ message }}</p>
-      <p v-if="error" role="alert" class="sc-hint" data-tone="bad">{{ error }}</p>
+      <p v-if="queuedEditorSaves" role="status" class="sc-hint">Saving the schema and diagram to the draft…</p>
       <p v-if="draftRecoveryWarning" role="alert" class="sc-hint" data-tone="warn">{{ draftRecoveryWarning }}</p>
       <p v-if="rejectedRecoveryWarning" role="alert" class="sc-hint" data-tone="warn">{{ rejectedRecoveryWarning }}</p>
     </div>

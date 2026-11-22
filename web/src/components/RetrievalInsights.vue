@@ -3,6 +3,7 @@ import { onMounted, ref } from 'vue';
 import { ChevronDown, ChevronUp, CircleAlert, CircleCheck, CircleX, Database, GitBranch, Loader2, Sparkles, Wrench } from 'lucide-vue-next';
 import type { RetrievalInsights } from '../types';
 import { describeAgentRun, describeToolCall, describeToolError, describeTraceRevision, traceArguments } from '../utils/agentTools';
+import { toast } from '../composables/useToasts';
 
 // `open` renders the details straight away, without the toggle (used inside the chat toolbar panel).
 const props = defineProps<{ queryId: string; open?: boolean }>();
@@ -26,6 +27,7 @@ const load = async () => {
     insights.value = data.insights;
   } catch (cause: any) {
     error.value = cause?.message || 'Retrieval insights unavailable.';
+    toast.error(error.value);
   } finally {
     loading.value = false;
   }
@@ -82,10 +84,7 @@ const modeClasses = (mode: RetrievalInsights['mode']) => {
         Inspecting retrieval path…
       </div>
 
-      <div v-else-if="error" class="flex items-center gap-2 py-2 text-[10px] text-slate-400 font-mono">
-        <CircleAlert class="w-3.5 h-3.5 text-amber-400 shrink-0" />
-        <span>{{ error }}</span>
-      </div>
+      <template v-else-if="error" />
 
       <template v-else-if="insights">
         <div v-if="insights.available === false" class="flex items-start gap-2 py-2 text-[10px] text-slate-400 font-mono">

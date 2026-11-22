@@ -3,6 +3,7 @@ import { ref, computed, watch, onMounted } from 'vue';
 import { Zap, RefreshCw, CheckCircle, AlertTriangle } from 'lucide-vue-next';
 import { RAGConfig } from '../../types';
 import { makeRequest } from '../../ui/makeRequest';
+import { toast } from '../../composables/useToasts';
 
 const { config, updateField } = defineProps<{
   config: RAGConfig;
@@ -53,8 +54,11 @@ const testEmbeddingConnection = async () => {
       status_code: Number(data.status_code) || null,
       retry_after_seconds: Number(data.retry_after_seconds) || null,
     };
+    if (embeddingResult.value.ok) toast.success(embeddingLabel.value);
+    else toast.error(embeddingLabel.value);
   } catch (error: any) {
     embeddingResult.value = { ok: false, latency_ms: 0, detail: String(error) };
+    toast.error(embeddingLabel.value);
   } finally {
     testingEmbedding.value = false;
   }
@@ -73,7 +77,10 @@ const rebuildRouteFeedback = async () => {
       const status = await statusResponse.json();
       if (!statusResponse.ok) throw new Error(status.detail || 'Could not read rebuild progress.');
       feedbackRebuild.value = status;
-      if (status.status === 'done') return;
+      if (status.status === 'done') {
+        if (status.stage !== 'empty') toast.success(`Rebuilt ${status.indexed} routing corrections using Cohere.`);
+        return;
+      }
       if (status.status === 'error') throw new Error(status.error || 'Route-feedback rebuild failed.');
     }
     throw new Error('Route-feedback rebuild timed out. Check the API service before retrying.');
@@ -82,6 +89,7 @@ const rebuildRouteFeedback = async () => {
       ...(feedbackRebuild.value || { total: 0, indexed: 0 }),
       status: 'error', stage: 'error', error: error?.message || 'Route-feedback rebuild failed.',
     };
+    toast.error(error?.message || 'Route-feedback rebuild failed.');
   } finally {
     rebuildingFeedback.value = false;
   }
@@ -140,8 +148,11 @@ const testRemoteConnection = async () => {
       detail: String(data.detail ?? data.error ?? 'request failed'),
       model: String(data.model ?? ''),
     };
+    if (remoteResult.value.ok) toast.success(remoteLabel.value);
+    else toast.error(remoteLabel.value);
   } catch (err) {
     remoteResult.value = { ok: false, latency_ms: 0, detail: String(err), model: '' };
+    toast.error(remoteLabel.value);
   } finally {
     testingRemote.value = false;
   }
@@ -157,7 +168,6 @@ const lmstudioModels = ref<{ id: string; engine: string; type?: string; quantiza
 const lmSelectedModel = ref('');
 const lmEmbeddingModels = computed(() => lmstudioModels.value.filter((m) => m.type === 'embeddings'));
 const lmSelectedEmbedding = ref('');
-const lmStatus = ref<{ ok: boolean; text: string } | null>(null);
 const loadingLmModels = ref(false);
 const loadingLmLoad = ref(false);
 // True while fetchLmModels() is auto-selecting a default that was NOT the
@@ -183,12 +193,11 @@ watch(
 
 const fetchLmModels = async () => {
   loadingLmModels.value = true;
-  lmStatus.value = null;
   try {
     const res = await makeRequest('/api/lmstudio/models');
     const data = await res.json();
     if (!data.success) {
-      lmStatus.value = { ok: false, text: data.detail || 'Unable to list models.' };
+      toast.error(data.detail || 'Unable to list models.');
       lmstudioModels.value = [];
       return;
     }
@@ -213,10 +222,10 @@ const fetchLmModels = async () => {
       lmSelectedEmbedding.value = embedPick;
     }
     if (!lmstudioModels.value.length) {
-      lmStatus.value = { ok: false, text: 'No models found on the LM Studio server.' };
+      toast.error('No models found on the LM Studio server.');
     }
   } catch (err) {
-    lmStatus.value = { ok: false, text: String(err) };
+    toast.error(String(err));
     lmstudioModels.value = [];
   } finally {
     loadingLmModels.value = false;
@@ -231,16 +240,15 @@ watch(lmSelectedEmbedding, (value, oldValue) => {
   if (!value || value === oldValue) return;
   updateField('ollamaEmbedModel', value);
   updateField('embeddingBaseUrl', config.llmRemoteBaseUrl || config.embeddingBaseUrl);
-  lmStatus.value = { ok: true, text: `Embedding model set to ${value} — embeddings now served by this server.` };
+  toast.success(`Embedding model set to ${value} — embeddings now served by this server.`);
 });
 
 const loadLmModel = async () => {
   if (!lmSelectedModel.value) {
-    lmStatus.value = { ok: false, text: 'Select a model first.' };
+    toast.error('Select a model first.');
     return;
   }
   loadingLmLoad.value = true;
-  lmStatus.value = null;
   try {
     const res = await makeRequest('/api/lmstudio/load', {
       method: 'POST',
@@ -249,13 +257,13 @@ const loadLmModel = async () => {
     });
     const data = await res.json();
     if (!data.success) {
-      lmStatus.value = { ok: false, text: data.detail || 'Load failed.' };
+      toast.error(data.detail || 'Load failed.');
       return;
     }
     updateField('llmRemoteModel', lmSelectedModel.value);
-    lmStatus.value = { ok: true, text: `Loaded into engine${data.status ? ` (${data.status})` : ''} — set as chat model.` };
+    toast.success(`Loaded into engine${data.status ? ` (${data.status})` : ''} — set as chat model.`);
   } catch (err) {
-    lmStatus.value = { ok: false, text: String(err) };
+    toast.error(String(err));
   } finally {
     loadingLmLoad.value = false;
   }
@@ -319,8 +327,7 @@ onMounted(() => {
           </div>
           <div v-if="feedbackRebuild && feedbackRebuild.status !== 'error'" role="status" aria-live="polite" class="space-y-1.5">
             <p v-if="feedbackRebuild.stage === 'empty'" class="text-[10px] text-slate-400">No routing feedback saved yet. There’s nothing to rebuild. To save a correction in Chat, select “wrong route?” below a response and choose the correct route.</p>
-            <p v-else-if="feedbackRebuild.status === 'done'" class="text-[10px] text-emerald-300">Rebuilt {{ feedbackRebuild.indexed }} routing corrections using Cohere.</p>
-            <div v-else class="flex justify-between text-[9px] text-slate-400">
+            <div v-else-if="feedbackRebuild.status !== 'done'" class="flex justify-between text-[9px] text-slate-400">
               <span>{{ feedbackRebuild.stage === 'upserting' ? 'Saving feedback vectors…' : (feedbackRebuild.stage === 'activating' ? 'Activating feedback vectors…' : `Embedding feedback: ${feedbackRebuild.indexed}/${feedbackRebuild.total}`) }}</span>
               <span v-if="feedbackRebuild.total">{{ Math.round((feedbackRebuild.indexed / feedbackRebuild.total) * 100) }}%</span>
             </div>
@@ -328,7 +335,6 @@ onMounted(() => {
               <div class="h-full bg-cyan-500 transition-all duration-300" :style="{ width: `${(feedbackRebuild.indexed / feedbackRebuild.total) * 100}%` }"></div>
             </div>
           </div>
-          <p v-if="feedbackRebuild?.status === 'error'" role="alert" class="text-[10px] text-rose-300">{{ feedbackRebuild.error }}</p>
         </div>
       </div>
       <div v-else-if="config.embeddingProvider === 'cloudflareWorkersAI'" class="space-y-3">
@@ -542,11 +548,6 @@ onMounted(() => {
           </p>
         </div>
 
-        <p v-if="lmStatus" class="text-[10px] font-mono" :class="lmStatus.ok ? 'text-emerald-300' : 'text-amber-300'">
-          <CheckCircle v-if="lmStatus.ok" class="w-3 h-3 inline mr-1" />
-          <AlertTriangle v-else class="w-3 h-3 inline mr-1" />
-          {{ lmStatus.text }}
-        </p>
         <p class="text-[9px] text-slate-600">
           Selecting a model pre-loads it into the LM Studio engine (MLX for mlx-format models) and sets it as the chat model. The configured chat model is pre-loaded automatically when the list refreshes.
         </p>

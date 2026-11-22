@@ -3,6 +3,7 @@ import { computed, onMounted, ref } from 'vue';
 import { CheckCircle2, FolderGit2, RefreshCw, ShieldCheck, X } from 'lucide-vue-next';
 import { phpRuntimeSetupCommand, runtimeSetupReadiness } from '../../utils/runtimeProjects';
 import type { RuntimeProjectRecord } from '../../types';
+import { toast } from '../../composables/useToasts';
 
 // Browser wizard for local Runtime setup. Every step talks to the desktop helper on this
 // computer; nothing changes until Apply, and the helper then asks for approval in a native
@@ -57,7 +58,7 @@ const helper = async <T,>(path: string, body: Record<string, unknown> = {}): Pro
 const guard = async (work: () => Promise<void>) => {
   loading.value = true;
   error.value = '';
-  try { await work(); } catch (cause: any) { error.value = cause?.message || 'Runtime setup failed.'; } finally { loading.value = false; }
+  try { await work(); } catch (cause: any) { error.value = cause?.message || 'Runtime setup failed.'; toast.error(error.value); } finally { loading.value = false; }
 };
 
 const loadProjects = () => guard(async () => {
@@ -123,8 +124,6 @@ onMounted(loadProjects);
       <li v-for="(label, key) in { project: '1. Project', services: '2. Services', review: '3. Review' }" :key="key"
           class="rounded-full border px-2.5 py-1" :class="step === key ? 'border-emerald-400/50 text-emerald-200' : 'border-slate-700 text-slate-500'" :aria-current="step === key ? 'step' : undefined">{{ label }}</li>
     </ol>
-
-    <p v-if="error" role="alert" class="mt-3 rounded-lg border border-rose-500/25 bg-rose-950/20 p-3 text-xs text-rose-300">{{ error }}</p>
 
     <aside v-if="details && step !== 'project'" class="mt-4 rounded-lg border border-cyan-500/25 bg-cyan-500/5 p-3 text-xs leading-5 text-slate-300" aria-label="Request tracing readiness">
       <h5 class="font-semibold text-white">{{ readiness.status === 'ready' ? 'Matching source revision is indexed' : readiness.status === 'unknown' ? 'Source indexing could not be checked' : readiness.status === 'mismatch' ? 'This Git commit is not indexed' : 'Source indexing is needed for request tracing' }}</h5>
