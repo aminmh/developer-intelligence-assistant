@@ -111,6 +111,17 @@ Code is indexed into Qdrant *and* a Neo4j property graph. Retrieval does a vecto
 walks the graph to pull callee/caller neighbours of the top hits, merges and reranks. If the graph
 is unavailable it degrades to vector-only search.
 
+### Change impact analysis
+See what a change affects before you make it. Give the symbols you plan to change, a unified diff,
+or an older revision to compare against, and the assistant walks the indexed symbol graph upstream:
+callers, references, implementations, callers through subclasses that inherit the method, and calls
+seen at runtime. The report lists each affected symbol with its distance from the change and the
+producer of the edge (SCIP, language server, parser, or runtime), the routes that reach it, and the
+tests that cover it. Coverage is reported as partial when a limit stops the walk or when language-server
+or SCIP indexing did not finish. The model uses it through the read-only `code_impact` tool; the same
+report is available from `POST /api/code/impact`. Business-rule impact checks also review rules linked
+to code up to two calls away from the change. Diff and revision comparisons need revisions with a commit.
+
 ### Intent & entity extraction
 Before answering, an LLM extracts structured intent and entities (file, class, method, error code,
 framework) via Instructor + Pydantic (`app/intent.py`), used to filter retrieval and enrich the prompt.

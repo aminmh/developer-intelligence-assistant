@@ -108,6 +108,20 @@ def run_lsp(archive_data: bytes, files: List[str], languages: Dict[str, int], re
         return index_directory(root, wanted, registry)
 
 
+def record_producer(index: Dict[str, Any], name: str, export: Optional[Dict[str, Any]]) -> Dict[str, Any]:
+    """Note a precise producer's outcome on the export so the graph keeps it (change impact F8).
+
+    ``producers[name] = {status, languages}``; the input export is left unchanged.
+    """
+    if not export:
+        return index
+    languages = export.get("languages") or {}
+    names = sorted(languages) if isinstance(languages, (dict, list, tuple, set)) else []
+    producers = {**(index.get("producers") or {}),
+                 name: {"status": str(export.get("status") or "unavailable"), "languages": names}}
+    return {**index, "producers": producers}
+
+
 def merge_into(index: Dict[str, Any], export: Optional[Dict[str, Any]]) -> Dict[str, Any]:
     """Combine an LSP export with the parser (and SCIP) export.
 
@@ -202,4 +216,4 @@ def enrich_export(index: Dict[str, Any], workdir: str, zip_data: Optional[bytes]
     log.info("LSP (%s) %s: %s definitions, %s references for %s (%s)", export.get("where"), export.get("status"),
              len(export.get("definitions") or []), len(export.get("references") or []),
              (identity or {}).get("project_id"), export.get("languages"))
-    return merge_into(index, export)
+    return record_producer(merge_into(index, export), "lsp", export)

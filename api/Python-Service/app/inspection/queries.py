@@ -97,6 +97,69 @@ RETURN c AS n, r.calls AS calls, r.last_seen AS last_seen, r.sources AS sources,
 ORDER BY c.file, c.line
 """
 
+# Everything that depends on a set of symbols, one hop up, in one read (change impact,
+# @.archcore/agent-tools/change-impact-analysis.spec.md clause 6): references and calls,
+# types that implement or extend a target, and runtime calls recorded on this revision.
+_UPSTREAM = """
+UNWIND $ids AS tid
+MATCH (t:Symbol {id: tid})<-[r]-(c:Symbol)
+WHERE t.collection = $collection AND c.collection = $collection
+  AND (type(r) = 'REFERENCES'
+       OR (type(r) = 'DECLARES' AND r.kind IN ['implements', 'extends'])
+       OR (type(r) = 'RUNTIME_CALLS' AND r.revision_id IS NOT NULL
+           AND coalesce(r.revision_id, '') = coalesce(t.revision_id, '')))
+RETURN tid AS target, c AS n, type(r) AS rtype, r.kind AS rkind, r.file AS file, r.line AS line,
+       r.to_member AS to_member, r.origin AS origin
+ORDER BY c.file, c.line, r.line
+LIMIT $limit
+"""
+
+# Callers that reach a changed method through a class that inherits it without overriding it
+# (clause 9), or through its own class node with `to_member` (parser edges): rows shaped
+# like _UPSTREAM's, plus the class the reference names.
+_INHERITED_CALLERS = """
+UNWIND $method_ids AS tid
+MATCH (m:Symbol {id: tid})
+WHERE m.collection = $collection AND m.kind = 'method' AND m.owner IS NOT NULL
+MATCH (owner:Symbol {collection: $collection, fqn: m.owner})
+MATCH p = (sub:Symbol {collection: $collection})-[:DECLARES*0..5]->(owner)
+WHERE all(x IN relationships(p) WHERE x.kind = 'extends')
+  AND (sub = owner OR NOT EXISTS {
+        MATCH (o:Symbol {collection: $collection, owner: sub.fqn, name: m.name}) WHERE o.kind = 'method' })
+MATCH (sub)<-[r:REFERENCES]-(c:Symbol {collection: $collection})
+WHERE r.to_member = m.name
+RETURN DISTINCT tid AS target, c AS n, 'REFERENCES' AS rtype, r.kind AS rkind, r.file AS file,
+       r.line AS line, r.to_member AS to_member, r.origin AS origin, sub.fqn AS via_class
+LIMIT $limit
+"""
+
+_RESOLVE_BY_SYMBOL_IDS = """
+UNWIND $symbol_ids AS sid
+MATCH (s:Symbol {collection: $collection, symbol_id: sid})
+RETURN s AS n ORDER BY s.file, s.line
+"""
+
+# Runtime routes handled by any of the given symbols (clause 10).
+_ROUTES_FOR = """
+UNWIND $route_ids AS tid
+MATCH (route:RuntimeRoute {collection: $collection})-[:HANDLED_BY]->(s:Symbol {id: tid})
+WHERE route.revision_id IS NULL OR s.revision_id IS NULL OR route.revision_id = s.revision_id
+RETURN tid AS target, route.method AS method, route.route AS route
+ORDER BY route.route, route.method
+"""
+
+_RUNTIME_OBSERVED = """
+MATCH (s:Symbol {collection: $collection})
+WHERE s.runtime_window_hours IS NOT NULL
+RETURN count(s) > 0 AS observed
+"""
+
+# Producer status per collection (LSP, SCIP), written with the graph (change impact F8).
+_PRODUCER_COVERAGE = """
+MATCH (c:SymbolCoverage {collection: $collection})
+RETURN c.producers AS producers
+"""
+
 _RUNTIME_COVERAGE = """
 MATCH (s:Symbol {collection: $collection})
 WHERE s.kind IN ['method', 'function'] AND s.symbol_id IS NOT NULL
@@ -208,6 +271,27 @@ def _edge_ref(row: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def _upstream_rows(rows: list[Any]) -> list[dict[str, Any]]:
+    """Upstream query rows -> dependents with the edge that reaches each target."""
+    out = []
+    for row in rows:
+        if not isinstance(row, dict) or not row.get("target"):
+            continue
+        item = _node_row(row.get("n") or {})
+        if not item.get("id"):
+            item["id"] = node_key(item["kind"], item["fqn"], item["name"])
+        rtype = row.get("rtype") or "REFERENCES"
+        if rtype == "RUNTIME_CALLS":
+            ref = {"kind": "runtime_call", "file": item.get("file", ""), "line": item.get("line"),
+                   "to_member": None, "origin": "runtime"}
+        else:
+            ref = _edge_ref(row)
+        item["ref"] = {**ref, "relation": rtype, **({"via_class": row["via_class"]} if row.get("via_class") else {})}
+        item["target"] = row["target"]
+        out.append(item)
+    return out
+
+
 class SymbolGraphQuery:
     """Read-side wrapper over the inspection graph store."""
 
@@ -230,6 +314,72 @@ class SymbolGraphQuery:
 
             get_exception_logger().warning("Symbol query failed: %s", exc)
             return []
+
+    def available(self) -> bool:
+        """Whether the graph store can be reached at all."""
+        return self._graph._get_store() is not None
+
+    def upstream(self, collection: str, ids: list[str], limit: int = 50_000) -> list[dict[str, Any]] | None:
+        """Symbols one hop upstream of ``ids``; None when the graph cannot be read.
+
+        Unlike the other queries a read failure is not folded into an empty result,
+        so change impact can report ``coverage: unavailable`` instead of "no dependents".
+        """
+        rows = self._run_strict(_UPSTREAM, {"collection": collection, "ids": list(ids), "limit": int(limit)},
+                                bool(ids))
+        return None if rows is None else _upstream_rows(rows)
+
+    def inherited_callers(self, collection: str, method_ids: list[str],
+                          limit: int = 50_000) -> list[dict[str, Any]] | None:
+        """Callers of methods through non-overriding subclasses; None when the graph cannot be read."""
+        rows = self._run_strict(_INHERITED_CALLERS, {"collection": collection, "method_ids": list(method_ids),
+                                                     "limit": int(limit)}, bool(method_ids))
+        return None if rows is None else _upstream_rows(rows)
+
+    def resolve_by_symbol_ids(self, collection: str, symbol_ids: list[str]) -> list[dict[str, Any]]:
+        if not symbol_ids:
+            return []
+        rows = self._run(_RESOLVE_BY_SYMBOL_IDS, {"collection": collection, "symbol_ids": list(symbol_ids)})
+        return [_node_row(row["n"]) for row in rows if row.get("n")]
+
+    def routes_for(self, collection: str, ids: list[str]) -> list[dict[str, Any]]:
+        if not ids:
+            return []
+        rows = self._run(_ROUTES_FOR, {"collection": collection, "route_ids": list(ids)})
+        return [{"target": row["target"], "method": row.get("method") or "", "route": row.get("route") or ""}
+                for row in rows if isinstance(row, dict) and row.get("target")]
+
+    def runtime_observed(self, collection: str) -> bool:
+        rows = self._run(_RUNTIME_OBSERVED, {"collection": collection})
+        return bool(rows and rows[0].get("observed"))
+
+    def producer_coverage(self, collection: str) -> dict[str, Any] | None:
+        """``{producer: {status, languages}}`` recorded at index time, or None when never recorded."""
+        rows = self._run(_PRODUCER_COVERAGE, {"collection": collection})
+        value = rows[0].get("producers") if rows else None
+        if isinstance(value, str):
+            import json
+
+            try:
+                value = json.loads(value)
+            except ValueError:
+                return None
+        return value if isinstance(value, dict) else None
+
+    def _run_strict(self, cypher: str, params: dict[str, Any], wanted: bool) -> list[Any] | None:
+        """Like ``_run`` but a read failure is None, not an empty result."""
+        store = self._graph._get_store()
+        if store is None:
+            return None
+        if not wanted:
+            return []
+        try:
+            return store.structured_query(cypher, param_map=params) or []
+        except Exception as exc:  # noqa: BLE001 — reported as unavailable coverage
+            from infra.exception_logger import get_exception_logger
+
+            get_exception_logger().warning("Impact graph query failed: %s", exc)
+            return None
 
     def resolve_by_fqn(self, collection: str, fqn: str) -> list[dict[str, Any]]:
         rows = self._run(_MATCH_NODE_BY_FQN, {"collection": collection, "fqn": fqn})

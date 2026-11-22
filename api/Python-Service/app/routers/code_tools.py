@@ -53,3 +53,24 @@ def read_citation(body: dict) -> dict[str, Any]:
     except ToolCallRejected as exc:
         raise HTTPException(_STATUS.get(exc.code, 400), exc.message) from exc
     return {"success": True, "highlight_line": line, **result}
+
+
+@router.post("/code-tools/impact", tags=["Code Intelligence"],
+             summary="Report what depends on changed symbols, a diff, or the change since another revision")
+def read_impact(body: dict) -> dict[str, Any]:
+    """Change impact over the revision's symbol graph (@.archcore/agent-tools/change-impact-analysis.spec.md).
+
+    Body: ``project_id``, ``revision_id`` (or ``revision``: an id or ``latest``; default ``latest``) and
+    exactly one of ``symbols``, ``diff``, ``base_revision_id``; optional ``depth`` and ``max_nodes``.
+    Returns the same report as the ``code_impact`` agent tool.
+    """
+    from inspection.impact_service import INPUT_KINDS, ImpactRequestError, ImpactUnavailable, run_impact
+
+    revision_id = body.get("revision_id") or body.get("revision") or "latest"
+    args = {key: body[key] for key in (*INPUT_KINDS, "depth", "max_nodes") if key in body}
+    try:
+        return run_impact(body.get("project_id"), str(revision_id), args)
+    except ImpactRequestError as exc:
+        raise HTTPException(422, str(exc)) from exc
+    except ImpactUnavailable as exc:
+        raise HTTPException(409, str(exc)) from exc

@@ -21,6 +21,7 @@ the target definition exists in the same indexed set — no dangling nodes.
 from __future__ import annotations
 
 import hashlib
+import json
 from typing import Any
 
 from infra.exception_logger import get_exception_logger
@@ -84,6 +85,13 @@ RETURN caller.fqn AS caller, callee.fqn AS callee, 'runtime_call' AS kind, 'runt
        null AS file, null AS line
 ORDER BY caller, callee
 LIMIT $limit
+"""
+
+# One node per collection; producers is a JSON string (Neo4j properties cannot hold maps).
+_COVERAGE_UPSERT_CYPHER = """
+MERGE (c:SymbolCoverage {collection: $collection})
+SET c.producers = $producers
+RETURN count(c) AS count
 """
 
 _RUNTIME_SYMBOLS_CYPHER = """
@@ -306,6 +314,19 @@ class InspectionGraph:
             return _first_count(result)
         except Exception as exc:  # noqa: BLE001 — graph writes degrade to counts
             get_exception_logger().error("Inspection graph node upsert failed: %s", exc)
+            return 0
+
+    def upsert_coverage(self, collection: str, producers: dict[str, Any]) -> int:
+        """Record each precise producer's status for ``collection`` (change impact F8)."""
+        store = self._get_store()
+        if store is None or not producers:
+            return 0
+        try:
+            result = store.structured_query(_COVERAGE_UPSERT_CYPHER, param_map={
+                "collection": collection, "producers": json.dumps(producers, sort_keys=True)})
+            return _first_count(result)
+        except Exception as exc:  # noqa: BLE001 — coverage is advisory; the graph stands without it
+            get_exception_logger().warning("Symbol coverage upsert failed: %s", exc)
             return 0
 
     def upsert_references(self, rows: list[dict[str, Any]]) -> int:
