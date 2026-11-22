@@ -87,6 +87,33 @@ RUN --mount=type=cache,target=/root/.cache/composer cd /opt/php-lsp && composer 
 }
 EOF
 
+# Psalm for PHP taint analysis when no analyzer worker is configured (code_quality/taint_analysis.py),
+# pinned by its lock file (decision: bundled-security-rules-are-redistributable).
+COPY php/psalm/composer.json php/psalm/composer.lock php/psalm/missing-symbols.php /opt/psalm/
+RUN --mount=type=cache,target=/root/.cache/composer cd /opt/psalm \
+    && composer install --no-dev --no-interaction --no-progress --no-scripts --optimize-autoloader \
+    && php vendor/bin/psalm --version
+ENV PSALM_ROOT=/opt/psalm
+
+# Betterleaks for secrets in Git history when no analyzer worker runs it (code_quality/history_secrets.py),
+# pinned by version and checksum (decision: bundled-security-rules-are-redistributable).
+ARG BETTERLEAKS_VERSION=1.9.0
+RUN set -eu; \
+    case "${TARGETARCH:-$(dpkg --print-architecture)}" in \
+      arm64) arch=arm64; sum=1d39116e0a58dc94574715e2aa12a2dbd5062f193eee3fec011fef6ba06bd13b ;; \
+      amd64) arch=x64; sum=f8b185a39ffcece2a1ca82bf3a4e7435cd81963ffd16b7a9128daf75f35f6de7 ;; \
+      *) echo "unsupported architecture for betterleaks" >&2; exit 1 ;; \
+    esac; \
+    curl -fsSLo /tmp/betterleaks.tgz \
+      "https://github.com/betterleaks/betterleaks/releases/download/v${BETTERLEAKS_VERSION}/betterleaks_${BETTERLEAKS_VERSION}_linux_${arch}.tar.gz"; \
+    echo "${sum}  /tmp/betterleaks.tgz" | sha256sum -c -; \
+    mkdir /tmp/betterleaks; \
+    tar -xzf /tmp/betterleaks.tgz -C /tmp/betterleaks; \
+    install -m 0755 /tmp/betterleaks/betterleaks /usr/local/bin/betterleaks; \
+    install -D -m 0644 /tmp/betterleaks/LICENSE /usr/share/licenses/betterleaks/LICENSE; \
+    rm -rf /tmp/betterleaks /tmp/betterleaks.tgz; \
+    betterleaks version
+
 COPY . .
 
 EXPOSE 9002

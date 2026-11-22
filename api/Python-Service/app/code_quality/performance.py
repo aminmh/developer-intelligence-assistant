@@ -930,18 +930,96 @@ def export_script(report: dict) -> str:
                         thresholds=report.get("thresholds") or target.get("thresholds"), export=True)
 
 
-def benchmark_traces(project_id: str, revision_id: str | None, run_id: str, limit: int = 15) -> dict:
-    """Slowest Runtime-traced requests the benchmark generated (tagged with its run id)."""
+BREAKDOWN_TRACE_LIMIT = 300
+BREAKDOWN_SPAN_LIMIT = 30000
+_CACHE_SYSTEMS = ("redis", "memcache", "valkey")
+
+
+def _breakdown_bucket(row: dict) -> str | None:
+    db_system = str(row.get("db_system") or "").lower()
+    if db_system:
+        return "cache_ms" if any(name in db_system for name in _CACHE_SYSTEMS) else "database_ms"
+    if row.get("span_kind") in ("Client", "Producer"):
+        return "external_ms"
+    return None
+
+
+def _client_latency_by_route(route_results: list[dict] | None) -> dict[str, float]:
+    """Request-weighted mean k6 latency per route template."""
+    totals: dict[str, list[float]] = {}
+    for item in route_results or []:
+        template = item.get("template") or item.get("path")
+        avg = (item.get("latency_ms") or {}).get("avg")
+        count = item.get("count") or 0
+        if not template or not isinstance(avg, (int, float)) or count <= 0:
+            continue
+        total = totals.setdefault(template, [0.0, 0.0])
+        total[0] += avg * count
+        total[1] += count
+    return {template: weighted / count for template, (weighted, count) in totals.items() if count}
+
+
+def time_breakdown(spans: list[dict], route_results: list[dict] | None = None) -> list[dict]:
+    """Average time per route split into database, cache, outbound calls and application code.
+
+    Spans are grouped by trace; each trace's first Server span is the request. Overlapping child spans
+    count once. When k6 measured the same route, the gap between its mean latency and the mean
+    server time is reported as network and queueing time (proxy, worker wait, transfer).
+    """
+    from telemetry.runtime import span_time_breakdown
+    traces: dict[str, list[dict]] = {}
+    for span in spans:
+        traces.setdefault(span.get("trace_id") or "", []).append(span)
+    parts = ("database_ms", "cache_ms", "external_ms")
+    per_route: dict[str, dict] = {}
+    for trace_id, rows in traces.items():
+        servers = sorted((row for row in rows if row.get("span_kind") == "Server"), key=lambda row: str(row.get("timestamp") or ""))
+        if not trace_id or not servers:
+            continue
+        root = servers[0]
+        total_ms = max(0.0, float(root.get("duration_ms") or 0.0))
+        spent = span_time_breakdown(root, [row for row in rows if row is not root], total_ms, _breakdown_bucket)
+        route = root.get("route") or "unknown route"
+        bucket = per_route.setdefault(route, {"traced": 0, "server": [], "cpu": [], **{part: 0.0 for part in parts}})
+        bucket["traced"] += 1
+        bucket["server"].append(total_ms)
+        for part in parts:
+            bucket[part] += spent.get(part, 0.0)
+        cpu_us = root.get("php_cpu_time_us")
+        if isinstance(cpu_us, (int, float)) and cpu_us >= 0:
+            bucket["cpu"].append(cpu_us / 1000)
+    client = _client_latency_by_route(route_results)
+    result = []
+    for route, bucket in per_route.items():
+        traced = bucket["traced"]
+        server = sorted(bucket["server"])
+        server_ms = sum(server) / traced
+        row = {"route": route, "traced": traced, "server_ms": round(server_ms, 3),
+               "server_p95_ms": round(server[min(len(server) - 1, int(0.95 * len(server)))], 3)}
+        for part in parts:
+            row[part] = round(bucket[part] / traced, 3)
+        row["app_ms"] = round(max(0.0, server_ms - sum(row[part] for part in parts)), 3)
+        row["app_cpu_ms"] = round(sum(bucket["cpu"]) / len(bucket["cpu"]), 3) if bucket["cpu"] else None
+        client_ms = client.get(route)
+        row["client_ms"] = round(client_ms, 3) if client_ms is not None else None
+        row["network_queue_ms"] = round(max(0.0, client_ms - server_ms), 3) if client_ms is not None else None
+        result.append(row)
+    return sorted(result, key=lambda row: row["client_ms"] if row["client_ms"] is not None else row["server_ms"], reverse=True)
+
+
+def benchmark_traces(project_id: str, revision_id: str | None, run_id: str, limit: int = 15,
+                     route_results: list[dict] | None = None) -> dict:
+    """Slowest Runtime-traced requests the benchmark generated (tagged with its run id), plus where their time went."""
     if not revision_id:
-        return {"available": False, "reason": "This run is not linked to an indexed revision.", "requests": [], "routes": []}
+        return {"available": False, "reason": "This run is not linked to an indexed revision.", "requests": [], "routes": [], "breakdown": []}
     try:
         UUID(run_id)
     except ValueError:
-        return {"available": False, "reason": "Invalid run.", "requests": [], "routes": []}
+        return {"available": False, "reason": "Invalid run.", "requests": [], "routes": [], "breakdown": []}
     from telemetry.runtime import ClickHouseRuntime
     runtime = ClickHouseRuntime()
     if not runtime.configured:
-        return {"available": False, "reason": "ClickHouse is not configured.", "requests": [], "routes": []}
+        return {"available": False, "reason": "ClickHouse is not configured.", "requests": [], "routes": [], "breakdown": []}
     table = f"`{runtime.database}`.`{runtime.table}`"
     from telemetry.span_schema import SPAN_SCOPE
     where = SPAN_SCOPE + " AND SpanKind = 'Server' AND SpanAttributes['indexer.benchmark_run_id'] = {run_id:String}"
@@ -957,7 +1035,22 @@ def benchmark_traces(project_id: str, revision_id: str | None, run_id: str, limi
             project_id, revision_id, {"param_run_id": run_id})
     except Exception as exc:
         logger.warning("benchmark_trace_lookup_failed project=%s error_type=%s", project_id, type(exc).__name__)
-        return {"available": False, "reason": "Runtime telemetry is unavailable.", "requests": [], "routes": []}
+        return {"available": False, "reason": "Runtime telemetry is unavailable.", "requests": [], "routes": [], "breakdown": []}
+    breakdown: list[dict] = []
+    if slowest:
+        try:
+            spans = runtime.rows(
+                f"SELECT TraceId AS trace_id, SpanKind AS span_kind, toString(Timestamp) AS timestamp, "
+                f"toFloat64(Duration) / 1e6 AS duration_ms, SpanAttributes['http.route'] AS route, "
+                f"SpanAttributes['db.system.name'] AS db_system, "
+                f"toInt64OrNull(SpanAttributes['indexer.php.cpu_time_us']) AS php_cpu_time_us FROM {table} "
+                f"WHERE {SPAN_SCOPE} AND (SpanKind IN ('Server', 'Client', 'Producer') OR SpanAttributes['db.system.name'] != '') "
+                f"AND TraceId IN (SELECT TraceId FROM {table} WHERE {where} ORDER BY Timestamp LIMIT {BREAKDOWN_TRACE_LIMIT}) "
+                f"LIMIT {BREAKDOWN_SPAN_LIMIT}",
+                project_id, revision_id, {"param_run_id": run_id})
+            breakdown = time_breakdown(spans, route_results)
+        except Exception as exc:
+            logger.warning("benchmark_breakdown_lookup_failed project=%s error_type=%s", project_id, type(exc).__name__)
     reason = None if slowest else ("No traced requests carry this run's id. The application needs the Indexr OpenTelemetry "
                                    "library with benchmark tagging, and sampled requests must reach Runtime.")
-    return {"available": bool(slowest), "reason": reason, "requests": slowest, "routes": routes}
+    return {"available": bool(slowest), "reason": reason, "requests": slowest, "routes": routes, "breakdown": breakdown}

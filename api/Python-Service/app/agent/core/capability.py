@@ -21,3 +21,12 @@ class Capability(str, Enum):
     LINTING = "linting"
     DATABASE_INSPECTION = "database_inspection"
     CONTAINER_INSPECTION = "container_inspection"
+    # Capability providers for framework-neutral Code Quality checks
+    # (decision: framework-knowledge-lives-in-plugins-over-language-facts).
+    # ROUTE_ANALYSIS above provides RouteRecord rows.
+    ROUTE_AUTHORIZATION = "route_authorization"
+    TRANSLATIONS = "translations"
+    TEMPLATES = "templates"
+    TEST_CONVENTIONS = "test_conventions"
+    CONFIG_RISKS = "config_risks"
+    TAINT_MODEL = "taint_model"

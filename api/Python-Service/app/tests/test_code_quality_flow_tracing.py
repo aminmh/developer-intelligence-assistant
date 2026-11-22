@@ -56,10 +56,14 @@ def test_call_trace_is_deterministic_revision_scoped_and_cited():
                "$_POST['value']; exec($value);"),
     ]
 
-    summary, evidence = build_call_traces(PROJECT, REVISION, _snapshot(), chunks, BUSINESS_FILES)
-    repeated_summary, repeated_evidence = build_call_traces(PROJECT, REVISION, _snapshot(), chunks, BUSINESS_FILES)
+    edges = [{"caller": "App\\Controller::create", "callee": "App\\Service::save", "origin": "lsp"}]
+    summary, evidence = build_call_traces(PROJECT, REVISION, _snapshot(), chunks, BUSINESS_FILES, graph_edges=edges)
+    repeated_summary, repeated_evidence = build_call_traces(PROJECT, REVISION, _snapshot(), chunks, BUSINESS_FILES,
+                                                            graph_edges=edges)
 
     assert summary["status"] == "complete"
+    assert summary["edge_source"] == "symbol_graph" and summary["edge_origins"] == ["lsp"]
+    assert evidence[0]["trace"]["edges"][0]["origin"] == "lsp"
     assert summary["node_count"] == 2
     assert summary["edge_count"] == 1
     assert summary["trace_count"] == 1
@@ -124,7 +128,7 @@ def test_assessment_sends_trace_excerpts_but_persists_only_citations(monkeypatch
     from io import BytesIO
     import zipfile
 
-    source = "<?php class Controller {}"
+    source = "<?php declare(strict_types=1); class Controller {}"  # strict, so no maintainability finding
     archive_buffer = BytesIO()
     with zipfile.ZipFile(archive_buffer, "w") as archive:
         archive.writestr("src/Controller.php", source)
@@ -180,7 +184,7 @@ def test_assessment_sends_trace_excerpts_but_persists_only_citations(monkeypatch
             category: {"assessed": True, "score": 60, "reason": f"Reviewed {category} source context.",
                        "evidence_ids": [next(row["evidence_id"] for row in evidence
                                              if row.get("category") == category and row.get("kind") != "coverage")]}
-            for category in service.CATEGORIES
+            for category in service.SOURCE_CATEGORIES
         }
         return categories, "model", "local", {"total_tokens": 1}, [], []
 
@@ -191,8 +195,8 @@ def test_assessment_sends_trace_excerpts_but_persists_only_citations(monkeypatch
     assert any(row.get("context_snippet") == private_snippet for row in model_input["evidence"])
     assert report["coverage"]["semantic_flow_tracing"] == trace_summary
     assert report["coverage"]["php_design_signals"] == local_design_summary
-    assert all(report["categories"][category]["assessed"] for category in service.CATEGORIES)
-    assert report["overall_score"] == 60
+    assert all(report["categories"][category]["assessed"] for category in service.SOURCE_CATEGORIES)
+    assert report["overall_score"] is None  # no evidence-category evidence in this fixture
     assert report["shadow_scoring"]["version"] == "deterministic-category-score-1"
     assert report["coverage"]["category_review_context"]["status"] == "available"
     local_context_categories = {row["category"] for row in model_input["evidence"]
@@ -259,3 +263,52 @@ def test_request_input_reaching_raw_sql_or_commands_is_still_traced():
         _, evidence = build_call_traces(PROJECT, REVISION, _snapshot(), chunks, BUSINESS_FILES)
         assert len(evidence) == 1, (source, sink)
         assert [node["symbol"] for node in evidence[0]["trace"]["nodes"]] == ["App\\Controller::create", "App\\Service::save"]
+
+
+# ─── Phase 3a of the LSP-first plan: edges from the symbol graph ────────────
+
+def _two_chunks(calls=()):
+    return [
+        _chunk("App\\Controller::create", "src/Controller.php", 10,
+               "$value = $_POST['value']; return $this->save($value);", list(calls)),
+        _chunk("App\\Service::save", "src/Service.php", 20, "$db->query($value);"),
+    ]
+
+
+def test_without_graph_edges_chunk_calls_are_used_and_coverage_is_partial():
+    summary, evidence = build_call_traces(PROJECT, REVISION, _snapshot(), _two_chunks(["App\\Service::save"]),
+                                          BUSINESS_FILES)
+    assert summary["edge_source"] == "chunk_calls"
+    assert summary["status"] == "partial" and "graph_edges_unavailable" in summary["limits_reached"]
+    assert summary["tracer_version"] == "php-call-reachability-3"
+    assert evidence and evidence[0]["trace"]["edges"][0]["origin"] == "php-parser"
+
+
+def test_graph_edge_found_by_lsp_traces_a_call_the_parser_left_dynamic():
+    # The parser saw `$this->repo->save()` as `__unknown::save`; the language server resolved it.
+    chunks = _two_chunks(["__unknown::save"])
+    edges = [{"caller": "App\\Controller::create", "callee": "App\\Service::save", "origin": "lsp"}]
+    summary, evidence = build_call_traces(PROJECT, REVISION, _snapshot(), chunks, BUSINESS_FILES, graph_edges=edges)
+    assert summary["trace_count"] == 1
+    # The chunk's dynamic call still counts as unresolved: completeness is never overstated.
+    assert summary["status"] == "partial"
+    assert any(e["reason"] == "dynamic_call_unresolved" for e in summary["unresolved_edges"])
+
+
+def test_most_precise_origin_wins_per_call():
+    edges = [{"caller": "App\\Controller::create", "callee": "App\\Service::save", "origin": "php-parser"},
+             {"caller": "App\\Controller::create", "callee": "App\\Service::save", "origin": "lsp"},
+             {"caller": "App\\Controller::create", "callee": "App\\Service::save", "origin": "tree-sitter"}]
+    summary, evidence = build_call_traces(PROJECT, REVISION, _snapshot(), _two_chunks(), BUSINESS_FILES,
+                                          graph_edges=edges)
+    assert summary["edge_count"] == 1 and summary["edge_origins"] == ["lsp"]
+    assert evidence[0]["trace"]["edges"][0]["origin"] == "lsp"
+
+
+def test_graph_edges_to_symbols_outside_the_index_are_unresolved():
+    edges = [{"caller": "App\\Controller::create", "callee": "App\\Missing::run", "origin": "lsp"},
+             {"caller": "Vendor\\Lib::x", "callee": "App\\Service::save", "origin": "lsp"}]
+    summary, _ = build_call_traces(PROJECT, REVISION, _snapshot(), _two_chunks(), BUSINESS_FILES, graph_edges=edges)
+    assert summary["edge_count"] == 0
+    assert [(e["target_symbol"], e["reason"]) for e in summary["unresolved_edges"]] == [
+        ("App\\Missing::run", "target_not_indexed")]

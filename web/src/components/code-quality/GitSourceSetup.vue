@@ -1,7 +1,8 @@
 <script setup lang="ts">
 import { ref, watch } from 'vue';
-import { GitBranch, LoaderCircle, RefreshCw, Save, ShieldCheck, Unplug, KeyRound, Download, Cpu, CircleCheck, CircleAlert } from 'lucide-vue-next';
+import { GitBranch, LoaderCircle, RefreshCw, Save, ShieldCheck, Unplug, KeyRound, Download, Cpu, CircleAlert } from 'lucide-vue-next';
 import { makeRequest } from '../../ui/makeRequest';
+import { toastMessage } from '../../composables/useToasts';
 
 type Source = { project_id: string; repository: string; branch: string; status: string; last_commit_sha?: string | null; last_revision_id?: string | null; error_code?: string | null; credential_id: string };
 const props = defineProps<{ defaultProjectId?: string }>();
@@ -12,8 +13,8 @@ const token = ref('');
 const source = ref<Source | null>(null);
 const credentialSaved = ref(false);
 const busy = ref(false);
-const message = ref('');
-const error = ref('');
+const message = toastMessage('success');
+const error = toastMessage('error');
 const emit = defineEmits<{ revisionReady: [projectId: string, revisionId: string] }>();
 
 const request = async (path: string, init?: RequestInit) => {
@@ -108,8 +109,6 @@ const synchronize = async () => {
         <button type="button" :disabled="busy || !projectId.trim()" class="kb-btn" @click="saveSource"><LoaderCircle v-if="busy" class="kb-spin" aria-hidden="true" /><Save v-else aria-hidden="true" />Save repository</button>
         <button type="button" :disabled="busy || !projectId.trim()" class="kb-btn" @click="loadSource"><RefreshCw aria-hidden="true" />Load settings</button>
       </div>
-      <p v-if="message" role="status" class="kb-rev-note" data-tone="ok"><CircleCheck aria-hidden="true" />{{ message }}</p>
-      <p v-if="error" role="alert" class="kb-rev-note" data-tone="bad"><CircleAlert aria-hidden="true" />{{ error }}</p>
     </div>
 
     <div class="kb-panel">

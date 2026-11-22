@@ -132,3 +132,70 @@ rules:
     pattern-regex: '(?m)^\s*while\s*\(?\s*true\s*\)?\s*:\s*$|^\s*while\s*\(\s*true\s*\)\s*\{'
     metadata:
       category: reliability
+  # In-house rules for weakness classes the bundled taint analysis does not cover (plan task 9f;
+  # decision: bundled-security-rules-are-redistributable). Written from the CWE, not from a project.
+  - id: builtin-php-shell-command-from-variable
+    message: "Shell command built from a non-constant value without escapeshellarg (CWE-78); a stored or configured value can still inject commands. Escape each argument or pass an argument array to a process API."
+    severity: WARNING
+    languages: [php]
+    patterns:
+      - pattern-either:
+          - pattern: exec($COMMAND, ...)
+          - pattern: shell_exec($COMMAND)
+          - pattern: system($COMMAND, ...)
+          - pattern: passthru($COMMAND, ...)
+          - pattern: popen($COMMAND, ...)
+          - pattern: proc_open($COMMAND, ...)
+      - metavariable-regex:
+          metavariable: $COMMAND
+          regex: '(?s).*\$'
+      - pattern-not-regex: 'escapeshell(?:arg|cmd)\s*\('
+      - pattern-not-inside: |
+          $COMMAND = <... escapeshellarg(...) ...>;
+          ...
+      - pattern-not-inside: |
+          $COMMAND = <... escapeshellcmd(...) ...>;
+          ...
+    metadata:
+      category: security
+      cwe: CWE-78
+  - id: builtin-jwt-payload-decoded-without-verification
+    message: "JWT payload decoded without verifying its signature (CWE-347); decode tokens only through a library call that checks the signature, expiry and expected claims."
+    severity: WARNING
+    languages: [php]
+    pattern-either:
+      - pattern: base64_decode(explode('.', $TOKEN)[1], ...)
+      - pattern: base64_decode(explode(".", $TOKEN)[1], ...)
+      - pattern: |
+          $PARTS = explode('.', $TOKEN);
+          ...
+          base64_decode($PARTS[1], ...);
+      - pattern: |
+          [$H, $P, $S] = explode('.', $TOKEN);
+          ...
+          base64_decode($P, ...);
+    metadata:
+      category: security
+      cwe: CWE-347
+  - id: builtin-jwt-verification-disabled
+    message: "JWT signature verification is turned off (CWE-347); verify the signature, expiry and expected claims before trusting a token."
+    severity: ERROR
+    languages: [python]
+    pattern-either:
+      - pattern: 'jwt.decode(..., options={..., "verify_signature": False, ...}, ...)'
+      - pattern: jwt.decode(..., verify=False, ...)
+    metadata:
+      category: security
+      cwe: CWE-347
+  - id: builtin-jwt-decode-without-verify
+    message: "jsonwebtoken decode() does not verify the signature (CWE-347); use verify() before trusting a token's claims."
+    severity: WARNING
+    languages: [javascript, typescript]
+    patterns:
+      - pattern-inside: |
+          $JWT = require('jsonwebtoken');
+          ...
+      - pattern: $JWT.decode(...)
+    metadata:
+      category: security
+      cwe: CWE-347

@@ -1,12 +1,13 @@
 <script setup lang="ts">
 import { ref, watch } from 'vue';
+import { toastMessage } from '../../../composables/useToasts';
 import { ms, pct, perfRequest, projectPath, shortRevision, type Comparison, type Run } from './performance';
 
 const props = defineProps<{ projectId: string; history: Run[]; baselineId: string }>();
 const left = ref('');
 const right = ref('');
 const comparison = ref<Comparison | null>(null);
-const error = ref('');
+const error = toastMessage('error');
 const label = (run: Run) => `${new Date(run.created_at).toLocaleString()} · ${run.target_name} · rev ${shortRevision(run)}${run.run_id === props.baselineId ? ' · baseline' : ''}`;
 const change = (value?: number | null, lowerIsBetter = true) => {
   if (value == null) return { text: '—', cls: 'text-slate-500' };
@@ -39,7 +40,6 @@ watch([left, right], () => void compare());
       <label class="text-xs text-slate-400">Before<select v-model="left" class="mt-1.5 min-h-10 w-full rounded-lg border border-slate-700 bg-slate-950 px-3 text-sm"><option value="">Select a run</option><option v-for="run in history" :key="run.run_id" :value="run.run_id">{{ label(run) }}</option></select></label>
       <label class="text-xs text-slate-400">After<select v-model="right" class="mt-1.5 min-h-10 w-full rounded-lg border border-slate-700 bg-slate-950 px-3 text-sm"><option value="">Select a run</option><option v-for="run in history" :key="run.run_id" :value="run.run_id">{{ label(run) }}</option></select></label>
     </div>
-    <p v-if="error" role="alert" class="mt-3 text-sm text-rose-200">{{ error }}</p>
     <template v-if="comparison">
       <p class="mt-3 text-sm" :class="comparison.equivalent ? 'text-emerald-200' : 'text-amber-200'">
         {{ comparison.equivalent ? 'Same target, routes, authentication, workload and runner.' : `Different ${comparison.differences.join(', ').replace(/_/g, ' ')}: compare with care.` }}

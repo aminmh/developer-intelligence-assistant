@@ -1,0 +1,15 @@
+{
+    "name": "developer-assistant/psalm-tool",
+    "description": "Pinned Psalm for taint analysis on the analyzer worker (decision: bundled-security-rules-are-redistributable).",
+    "type": "project",
+    "license": "proprietary",
+    "require": {
+        "php": "^8.4",
+        "vimeo/psalm": "6.20.5"
+    },
+    "config": {
+        "platform": {"php": "8.4.27"},
+        "allow-plugins": false,
+        "sort-packages": true
+    }
+}

@@ -13,6 +13,8 @@ from __future__ import annotations
 
 import importlib.metadata as metadata
 import logging
+from dataclasses import dataclass, field
+from typing import TYPE_CHECKING
 
 from agent.core.profile import (
     FrameworkProfile,
@@ -23,6 +25,10 @@ from agent.core.profile import (
 from agent.core.types import Project
 from agent.interfaces.framework import FrameworkPlugin
 from agent.interfaces.language import LanguagePlugin
+
+if TYPE_CHECKING:
+    from agent.core.capability import Capability
+    from agent.core.revision import RevisionContext
 
 logger = logging.getLogger(__name__)
 
@@ -157,3 +163,82 @@ class PluginRegistry:
             )
 
         return profile
+
+    # -- capability providers ----------------------------------------------------
+
+    def collect(self, capability: "Capability", context: "RevisionContext",
+                min_confidence: float = 0.5) -> "CapabilityCollection":
+        """Records of one capability from every framework plugin detected in the revision.
+
+        Checks call this instead of naming frameworks (decision:
+        framework-knowledge-lives-in-plugins-over-language-facts). A detected framework
+        that does not provide the capability, or fails to, is reported as a gap.
+        """
+        from agent.interfaces.capabilities import RECORD_TYPES, CapabilityProvider, CapabilityUnavailable
+
+        project = context.project
+        result = CapabilityCollection(capability=capability)
+        allowed = RECORD_TYPES.get(capability, ())
+        # Language plugins join only when they advertise the capability (a language's own tooling,
+        # such as its test runner's configuration); one that does not is not a gap.
+        languages = [plugin for plugin in self._languages.values()
+                     if capability in tuple(getattr(plugin, "capabilities", ()) or ())]
+        for plugin in [*self._frameworks.values(), *languages]:
+            try:
+                detection = plugin.detect(project)
+            except Exception:  # noqa: BLE001 — a broken detector must not stop collection
+                continue
+            if detection.confidence < min_confidence:
+                continue
+            result.detected.append(plugin.name)
+            advertised = capability in tuple(getattr(plugin, "capabilities", ()))
+            if not advertised or not isinstance(plugin, CapabilityProvider):
+                result.gaps.append({"framework": plugin.name, "capability": capability.value,
+                                    "reason": f"The {plugin.name} plugin does not provide {capability.value}."})
+                continue
+            try:
+                records = list(plugin.provide(capability, context) or [])
+            except CapabilityUnavailable as exc:
+                result.gaps.append({"framework": plugin.name, "capability": capability.value,
+                                    "reason": str(exc)[:300] or f"{plugin.name} could not provide {capability.value}."})
+                continue
+            except Exception as exc:  # noqa: BLE001 — a failing provider is a gap, never fatal
+                logger.warning("capability provider %s failed for %s: %s", plugin.name, capability.value, exc)
+                result.gaps.append({"framework": plugin.name, "capability": capability.value,
+                                    "reason": f"The {plugin.name} plugin failed while providing {capability.value}."})
+                continue
+            bad = [r for r in records if allowed and not isinstance(r, allowed)]
+            if bad:
+                result.gaps.append({"framework": plugin.name, "capability": capability.value,
+                                    "reason": f"The {plugin.name} plugin returned records of the wrong type."})
+                continue
+            result.providers.append(plugin.name)
+            result.records.extend(records)
+        # A framework that does not provide a capability its language plugin provided is not a gap.
+        covered = {plugin.name for plugin in languages if plugin.name in result.providers}
+        result.gaps = [gap for gap in result.gaps
+                       if not (getattr(self._frameworks.get(gap["framework"]), "language", None) in covered
+                               and gap["reason"].endswith(f"does not provide {capability.value}."))]
+        return result
+
+
+@dataclass
+class CapabilityCollection:
+    """What ``PluginRegistry.collect`` found for one capability."""
+
+    capability: "Capability"
+    records: list = field(default_factory=list)
+    providers: list[str] = field(default_factory=list)   # detected plugins that provided records
+    detected: list[str] = field(default_factory=list)    # all detected framework plugins
+    gaps: list[dict] = field(default_factory=list)       # detected plugins that could not provide
+
+    @property
+    def status(self) -> str:
+        """complete when every detected framework provided; partial with gaps; unavailable when none did."""
+        if not self.detected or not self.providers:
+            return "unavailable"
+        return "partial" if self.gaps else "complete"
+
+    def coverage(self) -> dict:
+        return {"capability": self.capability.value, "status": self.status, "providers": self.providers,
+                "detected_frameworks": self.detected, "gaps": self.gaps, "records": len(self.records)}

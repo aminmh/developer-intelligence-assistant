@@ -4,8 +4,9 @@ from __future__ import annotations
 from collections import defaultdict
 from typing import Any, Iterable
 
-CATEGORIES = ("security", "clean_code", "maintainability", "reliability", "performance")
-SCORING_VERSION = "deterministic-category-score-1"
+from code_quality.categories import CATEGORIES
+
+SCORING_VERSION = "deterministic-category-score-2"  # ten categories
 
 # Penalties are deliberately small and versioned. The score is a stable baseline;
 # rule authors can refine a rule's severity without making the model choose the

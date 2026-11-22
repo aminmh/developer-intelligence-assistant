@@ -14,6 +14,23 @@ agent_tools:
   # limit. Groq's free tier allows 8,000 tokens per minute (use about 6500 there).
   max_request_tokens: 0
 
+# Budgeted model review per assessment category (code_quality/category_review.py). Off by
+# default: each review sends tool results to the remote model and adds cost. Needs a remote
+# model that passed the tool-calling check and the project's consent to send source.
+# CODE_QUALITY_REVIEW_ENABLED=true overrides `enabled`.
+code_quality_review:
+  enabled: false
+  max_tool_calls: 20        # per category (12 stopped 5 of 9 reviews on skiplanner)
+  max_tokens: 60000         # per category, prompt + completion
+  max_seconds: 180          # per category
+  global_max_tokens: 1200000 # all loops of one assessment
+  parallel: 5
+  # One loop per checklist question (32 for ten categories), each with its own budget.
+  per_question: true
+  question_tool_calls: 10
+  question_tokens: 30000
+  question_seconds: 150
+
 tools:
   chunk_code:
     args:

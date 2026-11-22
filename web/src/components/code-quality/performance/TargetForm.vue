@@ -83,11 +83,11 @@ const setBudget = (key: 'p95_ms' | 'error_rate', value: string) => {
       <div class="grid gap-2 sm:grid-cols-3">
         <label v-for="mode in ([['constant_vus', 'Constant users'], ['ramping_vus', 'Ramp users'], ['constant_arrival_rate', 'Requests per second']] as const)" :key="mode[0]" class="flex min-h-9 items-center gap-2 rounded-lg border border-slate-800 bg-slate-950/60 px-3 text-sm text-slate-300"><input v-model="target.executor" type="radio" :value="mode[0]" />{{ mode[1] }}</label>
       </div>
-      <div v-if="target.executor === 'constant_vus'" class="grid gap-3 sm:grid-cols-2">
+      <div v-if="target.executor === 'constant_vus'" class="grid items-end gap-3 sm:grid-cols-2">
         <label class="text-xs text-slate-400">Virtual users per route<input v-model.number="target.virtual_users" type="number" min="1" max="50" :class="field" /></label>
         <label class="text-xs text-slate-400">Duration (seconds)<input v-model.number="target.duration_seconds" type="number" min="5" max="300" :class="field" /></label>
       </div>
-      <div v-else-if="target.executor === 'constant_arrival_rate'" class="grid gap-3 sm:grid-cols-3">
+      <div v-else-if="target.executor === 'constant_arrival_rate'" class="grid items-end gap-3 sm:grid-cols-3">
         <label class="text-xs text-slate-400">Requests per second per route<input v-model.number="target.rate_per_second" type="number" min="1" max="500" :class="field" /></label>
         <label class="text-xs text-slate-400">Max virtual users per route<input v-model.number="target.max_virtual_users" type="number" min="1" max="50" :class="field" /></label>
         <label class="text-xs text-slate-400">Duration (seconds)<input v-model.number="target.duration_seconds" type="number" min="5" max="300" :class="field" /></label>
@@ -100,7 +100,7 @@ const setBudget = (key: 'p95_ms' | 'error_rate', value: string) => {
         </div>
         <button type="button" class="inline-flex min-h-8 items-center gap-1 rounded-lg border border-slate-700 px-2.5 text-xs text-slate-300 disabled:opacity-40" :disabled="(target.stages || []).length >= 10" @click="addStage"><Plus :size="12" />Add stage</button>
       </div>
-      <div class="grid gap-3 sm:grid-cols-4">
+      <div class="grid items-end gap-3 sm:grid-cols-4">
         <label class="text-xs text-slate-400">Think time (ms)<input v-model.number="target.think_time_ms" type="number" min="0" max="2000" :class="field" /></label>
         <label class="text-xs text-slate-400">Warm-up (s, not measured)<input v-model.number="target.warmup_seconds" type="number" min="0" max="60" :class="field" /></label>
         <label class="text-xs text-slate-400">p95 budget (ms)<input :value="target.thresholds.p95_ms ?? ''" type="number" min="1" :class="field" placeholder="none" @input="setBudget('p95_ms', ($event.target as HTMLInputElement).value)" /></label>

@@ -175,7 +175,7 @@ def _symfony_routes(root: Path) -> tuple[list[dict[str, Any]], bool]:
 # ── entry points ─────────────────────────────────────────────────────────────
 
 def backend_routes(root: str | Path) -> dict[str, Any]:
-    """``{"framework", "routes", "notes"}`` for the back-end application under ``root``."""
+    """``{"framework", "routes", "notes", "root"}`` for the back-end application under ``root``."""
     found = find_backend(Path(root))
     if found is None:
         return {"framework": None, "routes": [],
@@ -194,7 +194,8 @@ def backend_routes(root: str | Path) -> dict[str, Any]:
     routes = sorted(unique.values(), key=lambda route: (route["path"], route["method"]))[:MAX_ROUTES]
     if not routes:
         notes.append("No routes were found in the project's route files.")
-    return {"framework": framework, "routes": routes, "notes": notes}
+    # ``root`` is the application folder the route files are relative to; code drift reads handlers from it.
+    return {"framework": framework, "routes": routes, "notes": notes, "root": str(base)}
 
 
 class RoutesUnavailable(LookupError):

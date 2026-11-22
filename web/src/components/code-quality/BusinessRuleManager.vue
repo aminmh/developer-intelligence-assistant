@@ -1,7 +1,8 @@
 <script setup lang="ts">
 import { computed, ref, watch } from 'vue';
-import { AlertCircle, CheckCircle2, Download, ExternalLink, LoaderCircle, RefreshCw, Unplug, Scale, KeyRound, PlugZap, Link2, FileText } from 'lucide-vue-next';
+import { AlertCircle, Download, ExternalLink, LoaderCircle, RefreshCw, Unplug, Scale, KeyRound, PlugZap, Link2, FileText } from 'lucide-vue-next';
 import { makeRequest } from '../../ui/makeRequest';
+import { toastMessage } from '../../composables/useToasts';
 import RuleKnowledgePanel from './RuleKnowledgePanel.vue';
 
 type Collection = { id: string; name: string };
@@ -24,8 +25,8 @@ const loading = ref(false);
 const saving = ref(false);
 const testing = ref(false);
 const exporting = ref(false);
-const error = ref('');
-const notice = ref('');
+const error = toastMessage('error');
+const notice = toastMessage('success');
 const latestSync = ref<SyncSummary | null>(null);
 let loadSequence = 0;
 let documentsRequest = 0;
@@ -245,8 +246,6 @@ watch(() => props.projectId, () => { documentsRequest += 1; documentsLoading.val
           <button v-if="connected" type="button" :disabled="saving" class="kb-btn" data-variant="danger" @click="disconnect"><Unplug aria-hidden="true" />Disconnect</button>
         </div>
 
-        <div v-if="error" role="alert" class="kb-rev-note" data-tone="bad"><AlertCircle aria-hidden="true" />{{ error }}</div>
-        <div v-if="notice" role="status" class="kb-rev-note" data-tone="ok"><CheckCircle2 aria-hidden="true" />{{ notice }}</div>
       </div>
 
       <div class="kb-panel">

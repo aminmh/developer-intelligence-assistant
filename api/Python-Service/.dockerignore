@@ -4,6 +4,8 @@
 php/vendor/
 # Phpactor/PHPStan toolchain vendor is installed inside the image at /opt/php-lsp.
 php/lsp/vendor/
+# Psalm (taint analysis) vendor is installed inside the image at /opt/psalm.
+php/psalm/vendor/
 
 app/__pycache__/
 *.pyc

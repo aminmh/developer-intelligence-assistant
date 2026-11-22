@@ -4,14 +4,16 @@ import {
   AlertCircle, ArrowDownRight, ArrowRight, ArrowUpRight, Boxes, Bug, Calendar, ChevronDown, ChevronsUpDown, CircleCheck, Code, Cpu,
   Eye, Files, FileSearch, FlaskConical, Gauge, GitBranch, GitCommitHorizontal, GitCompareArrows, Library, LifeBuoy, ListChecks,
   LoaderCircle, Play, Plug, Radar, RefreshCw, Save, SearchCode, ShieldAlert, SlidersHorizontal, Sparkles, Trash2, TriangleAlert,
-  Waypoints, Wrench, X, Zap,
+  Waypoints, Wrench, X, Zap, Workflow, BookOpen, Languages, Accessibility,
 } from 'lucide-vue-next';
 import ConfirmModal from './ConfirmModal.vue';
+import { toastMessage } from '../composables/useToasts';
 import { makeRequest } from '../ui/makeRequest';
 import PerformanceSetup from './code-quality/PerformanceSetup.vue';
 import RuleManager from './code-quality/RuleManager.vue';
 import SourcePreview from './code-quality/SourcePreview.vue';
 import DirectoryExclusionTree from './code-quality/DirectoryExclusionTree.vue';
+import PublicRouteSettings from './code-quality/PublicRouteSettings.vue';
 import BusinessRuleReviews from './code-quality/BusinessRuleReviews.vue';
 import ExternalAnalyzerSetup from './code-quality/ExternalAnalyzerSetup.vue';
 import { useUrlTab } from '../composables/useUrlTab';
@@ -24,10 +26,16 @@ const emit = defineEmits<{ openKnowledgeBase: []; revisionRemoved: [] }>();
 
 const categories = [
   { id: 'security', label: 'Security' },
-  { id: 'clean_code', label: 'Clean code' },
+  { id: 'clean_code', label: 'Architecture and design' },
   { id: 'maintainability', label: 'Maintainability' },
   { id: 'reliability', label: 'Reliability' },
   { id: 'performance', label: 'Performance' },
+  // Scored only from their own non-source evidence; unassessed with a reason when there is none.
+  { id: 'process', label: 'Process' },
+  { id: 'testing', label: 'Testing' },
+  { id: 'documentation', label: 'Documentation' },
+  { id: 'localization', label: 'Localization' },
+  { id: 'accessibility', label: 'Accessibility' },
 ] as const;
 type CategoryId = typeof categories[number]['id'];
 type AiOpinion = { assessed: boolean; score: number | null; reason: string; evidence_ids: string[] };
@@ -35,6 +43,15 @@ type CategoryScore = { assessed: boolean; score: number | null; reason: string; 
 type FlowTrace = { nodes: Array<{ symbol: string; file: string; start_line: number; end_line: number }>; edges: Array<{ type: string; from: string; to: string; file: string; line: number }> };
 type PhpDesignSignals = { status: 'complete' | 'partial' | 'unavailable'; revision_id: string; analyzer_version: string; languages: string[]; principles_with_static_signals: string[]; principles_requiring_semantic_evidence: string[]; chunk_count: number; class_count: number; method_count: number; signal_count: number; signals_truncated: boolean; limits?: Record<string, number>; reason: string };
 type AssessmentEvidence = { evidence_id: string; kind?: 'finding' | 'coverage' | 'semantic_trace' | 'semantic_context' | 'architectural_signal' | 'runtime_measurement'; category: CategoryId | 'business_rule'; rule: string; file: string | null; line: number | null; message: string; trace?: FlowTrace };
+// Budgeted per-category model reviews (assessment plan Phase 4): findings are kept only with verified citations.
+type ReviewTraceRow = { tool: string; arguments: Record<string, unknown>; ok: boolean; error?: string | null; result_bytes: number; truncated: boolean; ranges_returned: number };
+type CategoryReview = { category: string; status: 'complete' | 'partial' | 'unavailable'; reason: string | null; summary: string | null;
+  budget: { max_tool_calls: number; max_tokens: number; max_seconds: number };
+  usage: { tool_calls: number; total_tokens: number; estimated: boolean; seconds: number };
+  trace: ReviewTraceRow[]; accepted_findings: number; rejected_citations: number };
+type CategoryReviews = { status: 'complete' | 'partial' | 'disabled' | 'unavailable'; version: string; reason?: string; model?: string;
+  config: { max_tool_calls: number; max_tokens: number; max_seconds: number; global_max_tokens: number; parallel: number; tools: string[] };
+  categories: Record<string, CategoryReview>; total_tokens?: number; seconds?: number };
 type BusinessRuleSnapshot = { rule_id: string; version: number; title: string; statement: string; category: string; source?: 'outline'; collection_id?: string; updated_at?: string; content_hash?: string };
 type BusinessRuleReview = { rule_id: string; version: number; status: 'supported' | 'concern' | 'unknown'; reason: string; evidence_ids: string[] };
 type TokenUsage = { prompt_tokens: number | null; completion_tokens: number | null; total_tokens: number; estimated: boolean; source: 'provider' | 'estimate'; batch_count?: number; summarized_evidence_count?: number };
@@ -43,6 +60,7 @@ type Report = {
   overall_score: number | null; categories: Record<CategoryId, CategoryScore>; weights: Record<CategoryId, number>; shadow_scoring?: { version: string; status: string; categories: Record<CategoryId, CategoryScore> };
   coverage: { files: number; scanned_files: number; skipped_files: number; excluded_files?: number; user_excluded_files?: number; user_exclusion_patterns?: string[]; scanned_bytes: number; languages: Record<string, number>; unsupported_extensions: Record<string, number>; analyzer_failures: Array<{ name: string; reason: string }>; categories: Record<CategoryId, { supported: boolean; status?: 'covered' | 'partial' | 'unavailable'; evidence_count: number; reason?: string | null }>; analyzers: Array<{ name: string; version: string; rules_version?: string; languages: string[]; categories: string[]; status?: string; server_version?: string; server_edition?: string; scanned_files?: number; skipped_files?: number; finding_count?: number; reason?: string | null; unresolved?: string[] }>; external_analyzers?: { sonarqube?: { status: string; version?: string; server_version?: string; server_edition?: string; scanned_files?: number; skipped_files?: number; finding_count?: number; reason?: string | null }; joern?: { status: string; version?: string; languages?: string[]; scanned_files?: number; skipped_files?: number; finding_count?: number; reason?: string | null; unresolved?: string[] } }; business_rule_review?: { status: string; reason?: string | null; collection_id?: string | null; document_count?: number; imported_count?: number; omitted_count?: number; oversized_count?: number; limit_exceeded?: boolean; synchronized_at?: string | null }; semantic_context?: { status: 'available' | 'available_no_matches' | 'unavailable'; revision_id: string; retriever_version: string; query_count: number; business_rule_query_count?: number; omitted_business_rule_ids?: string[]; evidence_count: number; failure_code?: string | null; diagnostic_detail?: string | null; searched_collection_count?: number; candidate_count?: number; rejected_revision_count?: number; rejected_source_count?: number; category_search?: Partial<Record<CategoryId, { attempted_queries: number; candidate_count: number; accepted_count: number; rejected_revision_count: number; rejected_source_count: number }>>; reason?: string | null }; category_review_context?: { status: 'available' | 'partial' | 'unavailable' | 'not_needed'; source: string | null; excerpt_count: number; categories: Record<CategoryId, number>; scanned_files: number; scanned_bytes: number; reason: string }; semantic_flow_tracing?: { status: 'complete' | 'partial' | 'unavailable'; revision_id: string; tracer_version: string; languages?: string[]; flow_types: string[]; node_count: number; edge_count: number; trace_count: number; unresolved_edge_count: number; unresolved_edges?: Array<{ source_symbol: string; file: string; line: number; target_symbol: string | null; reason: string; count: number }>; limits_reached?: string[]; reason: string }; php_design_signals?: PhpDesignSignals };
   token_usage?: TokenUsage | null;
+  category_reviews?: CategoryReviews;
   custom_rules?: Array<{ rule_id: string; title: string; content_hash: string; yaml: string }>;
   findings: Array<{ evidence_id: string; category: CategoryId; rule: string; file: string; line: number; message: string; severity?: string; tool?: string; tool_version?: string }>;
   evidence: AssessmentEvidence[];
@@ -103,8 +121,9 @@ watch(selectedRevision, (key) => {
   if (picked.project_id !== scope.projectId.value || nextRevision !== scope.revision.value) keepLocalPick = true;
   scope.select(picked.project_id, nextRevision);
 });
-const weights = ref<Record<CategoryId, number>>({ security: 20, clean_code: 20, maintainability: 20, reliability: 20, performance: 20 });
-const savedWeights = ref<Record<CategoryId, number>>({ security: 20, clean_code: 20, maintainability: 20, reliability: 20, performance: 20 });
+const equalWeights = () => Object.fromEntries(categories.map((item) => [item.id, 100 / categories.length])) as Record<CategoryId, number>;
+const weights = ref<Record<CategoryId, number>>(equalWeights());
+const savedWeights = ref<Record<CategoryId, number>>(equalWeights());
 const history = ref<HistoryRow[]>([]);
 const selectedReportId = ref('');
 const leftCompareId = ref('');
@@ -121,7 +140,7 @@ const exclusionSettingsUnavailable = ref(false);
 const savingExclusions = ref(false);
 const exclusionPatterns = ref<string[]>([]);
 const savedExclusionPatterns = ref<string[]>([]);
-const exclusionMessage = ref('');
+const exclusionMessage = toastMessage('success');
 const sourceDirectories = ref<string[]>([]);
 const loadingSourceDirectories = ref(false);
 const sourceDirectoryError = ref('');
@@ -138,13 +157,15 @@ const revisionDeleteTarget = ref<ProjectRevision | null>(null);
 const deletingRevision = ref(false);
 const revisionDeleteError = ref('');
 const error = ref('');
-const preferenceMessage = ref('');
+const preferenceMessage = toastMessage('success');
 const recoveryAction = ref<'projects' | 'history' | 'report' | 'comparison' | 'weights' | 'exclusions' | 'saveExclusions' | 'assessment'>('projects');
 let historyRequest = 0;
 let reportRequest = 0;
 let exclusionsRequest = 0;
 
 const selectedProject = computed(() => projects.value.find((item) => revisionKey(item) === selectedRevision.value) || null);
+// Reports saved before the ten-category rubric hold only the five source categories.
+const reportCategories = computed(() => categories.filter((item) => currentReport.value?.categories?.[item.id]));
 const totalWeight = computed(() => categories.reduce((total, item) => total + Number(weights.value[item.id] || 0), 0));
 const weightsChanged = computed(() => categories.some((item) => Number(weights.value[item.id]) !== savedWeights.value[item.id]));
 const parsedExclusionPatterns = computed(() => [...new Set(exclusionPatterns.value.map((item) => item.trim()).filter(Boolean))].sort());
@@ -156,7 +177,13 @@ const compareIsEquivalent = computed(() => {
   const [left, right] = compareReports.value;
   if (!left || !right) return true;
   const analyzer = (report: Report) => report.coverage.analyzers.map((item) => `${item.name}:${item.version}:${item.rules_version || ''}`).sort();
+  // Different review models, budgets or tool sets make scores non-equivalent (review spec clause 12).
+  const review = (report: Report) => {
+    const reviews = report.category_reviews;
+    return reviews && reviews.status !== 'disabled' ? { model: reviews.model, config: reviews.config } : null;
+  };
   return left.rubric_version === right.rubric_version
+    && JSON.stringify(review(left)) === JSON.stringify(review(right))
     && left.categories.clean_code?.score_method === right.categories.clean_code?.score_method
     && left.categories.clean_code?.metric_schema === right.categories.clean_code?.metric_schema
     && left.categories.clean_code?.rubric_version === right.categories.clean_code?.rubric_version
@@ -635,6 +662,11 @@ const categoryMeta: Record<CategoryId, { color: string; icon: unknown }> = {
   maintainability: { color: '#22d3ee', icon: Wrench },
   reliability: { color: '#34d399', icon: LifeBuoy },
   performance: { color: '#fbbf24', icon: Zap },
+  process: { color: '#a78bfa', icon: Workflow },
+  testing: { color: '#2dd4bf', icon: FlaskConical },
+  documentation: { color: '#60a5fa', icon: BookOpen },
+  localization: { color: '#f472b6', icon: Languages },
+  accessibility: { color: '#a3e635', icon: Accessibility },
 };
 const qualityTabs = [
   { id: 'assessment' as const, label: 'Assessment', icon: Gauge, domId: 'quality-assessment-tab', panel: 'quality-assessment-panel' },
@@ -794,7 +826,7 @@ const statusTone = (status?: string) => (status === 'complete' || status === 'av
             <div class="cq-setup-body">
               <div>
                 <h3 class="cq-h4">Category weights</h3>
-                <p class="cq-hint">The weighted total appears only when all five categories are assessed. Scoring uses a fixed rubric, temperature 0 and top_p 1. Providers can still change behaviour; comparisons flag known differences in model, rubric, analyzers, coverage, weights and scoring settings.</p>
+                <p class="cq-hint">The weighted total appears only when all ten categories are assessed. Scoring uses a fixed rubric, temperature 0 and top_p 1. Providers can still change behaviour; comparisons flag known differences in model, rubric, analyzers, coverage, weights and scoring settings.</p>
                 <div class="cq-weights">
                   <label v-for="category in categories" :key="category.id" class="cq-weight" :style="{ '--c': categoryMeta[category.id].color }">
                     <span>{{ category.label }}</span>
@@ -809,7 +841,6 @@ const statusTone = (status?: string) => (status === 'complete' || status === 'av
                   <button type="button" class="cq-btn cq-btn-sm" :disabled="totalWeight !== 100 || savingWeights" @click="saveWeights"><Save aria-hidden="true" />{{ savingWeights ? 'Saving…' : 'Save weights' }}</button>
                 </div>
                 <p v-if="weightsChanged && totalWeight === 100" class="cq-hint">Changes apply when you save or start an assessment.</p>
-                <p v-if="preferenceMessage" class="cq-hint" data-tone="ok">{{ preferenceMessage }}</p>
               </div>
 
               <div>
@@ -837,9 +868,9 @@ const statusTone = (status?: string) => (status === 'complete' || status === 'av
                   <button type="button" class="cq-btn cq-btn-sm" :disabled="!selectedProject || loadingExclusions || exclusionSettingsUnavailable || savingExclusions || !exclusionsChanged" @click="saveProjectExclusions">
                     <LoaderCircle v-if="savingExclusions" class="cq-spin" aria-hidden="true" /><Save v-else aria-hidden="true" />{{ savingExclusions ? 'Saving…' : 'Save exclusions' }}
                   </button>
-                  <span v-if="exclusionMessage" class="cq-hint" data-tone="ok" role="status">{{ exclusionMessage }}</span>
                 </div>
               </div>
+              <PublicRouteSettings :project-id="selectedProject?.project_id" :disabled="assessing" />
             </div>
           </details>
 
@@ -886,7 +917,7 @@ const statusTone = (status?: string) => (status === 'complete' || status === 'av
             </section>
 
             <div class="cq-cats">
-              <article v-for="category in categories" :key="category.id" class="cq-cat" :style="{ '--c': categoryMeta[category.id].color }" :data-assessed="currentReport.categories[category.id].assessed">
+              <article v-for="category in reportCategories" :key="category.id" class="cq-cat" :style="{ '--c': categoryMeta[category.id].color }" :data-assessed="currentReport.categories[category.id].assessed">
                 <div class="cq-cat-top"><component :is="categoryMeta[category.id].icon" aria-hidden="true" />{{ category.label }}</div>
                 <div class="cq-cat-score">{{ formatScore(currentReport.categories[category.id].score) }}<small v-if="currentReport.categories[category.id].assessed"> /100</small></div>
                 <div class="cq-cat-bar" aria-hidden="true"><i :style="{ transform: `scaleX(${(currentReport.categories[category.id].score ?? 0) / 100})` }"></i></div>
@@ -937,6 +968,27 @@ const statusTone = (status?: string) => (status === 'complete' || status === 'av
                   <div class="cq-mini-grid">
                     <div v-for="category in categories" :key="category.id" class="cq-mini"><b>{{ category.label }}</b><span>{{ currentReport.coverage.category_review_context.categories[category.id] || 0 }} excerpts</span></div>
                   </div>
+                </div>
+              </details>
+
+              <details v-if="currentReport.category_reviews" class="cq-diag">
+                <summary><Radar aria-hidden="true" />Category reviews<span class="cq-tag" :data-tone="statusTone(currentReport.category_reviews.status)">{{ currentReport.category_reviews.status === 'disabled' ? 'Off' : currentReport.category_reviews.status }}</span><ChevronDown class="cq-chev" aria-hidden="true" /></summary>
+                <div class="cq-diag-body" aria-live="polite">
+                  <p v-if="currentReport.category_reviews.status === 'disabled' || !Object.keys(currentReport.category_reviews.categories).length">{{ currentReport.category_reviews.reason }}</p>
+                  <template v-else>
+                    <p>{{ currentReport.category_reviews.model }} explored this revision with read-only tools, one budgeted review per category ({{ currentReport.category_reviews.config.max_tool_calls }} tool calls, {{ currentReport.category_reviews.config.max_tokens.toLocaleString() }} tokens and {{ currentReport.category_reviews.config.max_seconds }} s each; {{ (currentReport.category_reviews.total_tokens || 0).toLocaleString() }} of {{ currentReport.category_reviews.config.global_max_tokens.toLocaleString() }} tokens used in {{ currentReport.category_reviews.seconds }} s). Findings are kept only when a tool showed the cited lines.</p>
+                    <div v-for="(review, key) in currentReport.category_reviews.categories" :key="key" class="cq-review">
+                      <p class="cq-review-head"><b>{{ categoryLabel(key as CategoryId) }}</b>
+                        <span class="cq-tag" :data-tone="statusTone(review.status)">{{ review.status }}</span>
+                        <span>{{ review.usage.tool_calls }}/{{ review.budget.max_tool_calls }} tool calls · {{ review.usage.total_tokens.toLocaleString() }}{{ review.usage.estimated ? ' (estimated)' : '' }} tokens · {{ review.usage.seconds }} s · {{ review.accepted_findings }} kept</span>
+                        <span v-if="review.rejected_citations" data-tone="warn">· {{ review.rejected_citations }} rejected citations</span></p>
+                      <p v-if="review.reason" class="cq-hint" data-tone="warn">{{ review.reason }}</p>
+                      <p v-if="review.summary" class="cq-hint">{{ review.summary }}</p>
+                      <ul v-if="review.trace.length" class="cq-mono">
+                        <li v-for="(step, index) in review.trace" :key="index">{{ step.ok ? '✓' : '✗' }} {{ step.tool }} {{ Object.values(step.arguments).map((value) => String(value)).join(' ').slice(0, 120) }} · {{ step.result_bytes.toLocaleString() }} bytes<span v-if="step.ranges_returned"> · {{ step.ranges_returned }} citable ranges</span><span v-if="step.error"> · {{ step.error }}</span></li>
+                      </ul>
+                    </div>
+                  </template>
                 </div>
               </details>
 

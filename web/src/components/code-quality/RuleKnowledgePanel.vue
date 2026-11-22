@@ -3,6 +3,7 @@ import { computed, ref, watch } from 'vue';
 import { AlertTriangle, Check, ChevronDown, ChevronRight, ClipboardCopy, Download, ExternalLink, FlaskConical,
   GitCompare, LoaderCircle, Link2, RefreshCw, ShieldCheck, Sparkles, X } from 'lucide-vue-next';
 import { makeRequest } from '../../ui/makeRequest';
+import { toastMessage } from '../../composables/useToasts';
 import ImpactResults from './RuleImpactResults.vue';
 import ToggleCard from '../ToggleCard.vue';
 import { outlineHref, ruleKnowledgePath, ruleRequest, symbolLabel, syncedAgo, type ImpactResult, type RuleDocument,
@@ -24,8 +25,8 @@ const runtimeNote = ref('');
 const tested = ref<Record<string, boolean>>({});
 const expanded = ref<string | null>(null);
 const busy = ref('');
-const error = ref('');
-const notice = ref('');
+const error = toastMessage('error');
+const notice = toastMessage('success');
 const filter = ref<'all' | 'needs_review' | 'unlinked'>('all');
 const diff = ref('');
 const impact = ref<ImpactResult | null>(null);
@@ -290,7 +291,5 @@ watch(revisionId, (value, previous) => { if (previous && value !== previous) voi
       </section>
     </template>
 
-    <p v-if="error" role="alert" class="rounded-lg border border-rose-500/30 bg-rose-500/10 p-3 text-sm text-rose-200">{{ error }}</p>
-    <p v-if="notice" role="status" class="rounded-lg border border-emerald-500/20 bg-emerald-500/5 p-3 text-sm text-emerald-200">{{ notice }}</p>
   </section>
 </template>

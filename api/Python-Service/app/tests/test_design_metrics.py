@@ -159,8 +159,14 @@ def test_assessment_uses_metric_score_and_persists_no_card_source(monkeypatch, t
     monkeypatch.setattr(semantic, "retrieve_revision_context", lambda *_, **__: (semantic_summary, []))
     flow_summary = {"status": "complete", "tracer_version": "test", "flow_types": [], "limits": {}}
     monkeypatch.setattr(flow, "retrieve_revision_call_traces", lambda *_, **__: (flow_summary, []))
-    monkeypatch.setattr(service, "_score", lambda *_, **__: ({category: {"assessed": True, "score": 60, "reason": "Fixture", "evidence_ids": []}
-        for category in service.CATEGORIES if category != "clean_code"}, "model", "local", {"total_tokens": 1}, [], []))
+    scored_evidence = []
+
+    def score(evidence, *_args, **_kwargs):  # the model now scores Architecture too, from the design evidence
+        scored_evidence.append(list(evidence))
+        return ({category: {"assessed": True, "score": 60, "reason": "Fixture", "evidence_ids": []}
+                 for category in service.SOURCE_CATEGORIES}, "model", "local", {"total_tokens": 1}, [], [])
+
+    monkeypatch.setattr(service, "_score", score)
     monkeypatch.setattr(llm, "remote_configured", lambda: False)
     judge_calls = []
     def complete(prompt, **_):
@@ -170,14 +176,17 @@ def test_assessment_uses_metric_score_and_persists_no_card_source(monkeypatch, t
                                        "verdict": "violation", "reason": "Disconnected responsibilities."} for entry in entries]}), "model", "local"
     monkeypatch.setattr(llm, "complete_with_model", complete)
     # Existing evidence prevents archive fallback in this isolated orchestration test.
-    monkeypatch.setattr(service, "_category_coverage", lambda *_: {c: {"supported": True, "reason": None} for c in service.CATEGORIES})
+    monkeypatch.setattr(service, "_category_coverage", lambda *_: {c: {"supported": True, "reason": None} for c in service.SOURCE_CATEGORIES})
     import code_quality.category_context as context
     monkeypatch.setattr(context, "build_category_context", lambda *_args, **_kwargs: ({"status": "available", "source": None, "excerpt_count": 0, "categories": {}, "scanned_files": 0, "scanned_bytes": 0, "reason": "fixture"}, []))
     store = ReportStore(tmp_path / "reports.sqlite")
     report = service.assess_revision("pizza", revision, snapshot, b"archive", "alice", store)
-    assert report["categories"]["clean_code"]["score"] == 85
-    assert report["categories"]["clean_code"]["score_method"] == "design-metrics-1"
-    assert report["overall_score"] == 65
+    assert report["categories"]["clean_code"]["score"] == 60  # the model's score is official
+    assert report["categories"]["clean_code"]["score_method"] == "model-evaluator-with-design-metrics"
+    assert report["categories"]["clean_code"]["design_metric_score"] == 85  # the metric result is kept as evidence
+    summary = [row for row in scored_evidence[0] if row.get("rule") == "design-metrics-summary"]
+    assert len(summary) == 1 and summary[0]["category"] == "clean_code" and "score 85" in summary[0]["message"]
+    assert report["overall_score"] is None  # the evidence categories have no evidence in this fixture
     assert report["clean_code_design"]["unit_count"] == 1
     assert "card" not in report["clean_code_design"]["candidates"][0]
     assert store.get_report("pizza", report["report_id"])["clean_code_design"]["clean_code_hash"] == report["clean_code_design"]["clean_code_hash"]
@@ -301,3 +310,83 @@ def test_two_class_revision_delta_only_judges_changed_class(tmp_path):
     assert len(calls) == 2 and len(calls[1]) == 1
     assert calls[1][0]["card"]["symbol"] == "App\\Other"
     assert {c["symbol"]: verdicts[c["evidence_id"]]["cache_hit"] for c in second} == {"App\\Example": True, "App\\Other": False}
+
+
+# ── rubric 2: ranked, budgeted judging and estimated penalties (plan Phase 5) ──
+
+def _unit(name, loc=100, **metrics):
+    base = {"method_count": 20, "loc": loc, "lcom4": 1, "type_switch": 0, "concrete_dependencies": 0,
+            "unsupported_overrides": 0, "infrastructure_instantiations": 0, "max_cyclomatic": 1, "max_nesting": 1,
+            "max_params": 1, "max_method_loc": 10, "fan_out": 0, "public_interface_size": 1}
+    return {"declaration": {"node_type": "class", "fq_symbol_name": f"App\\{name}", "file_path": f"src/{name}.php",
+                            "start_line": 1, "code": f"class {name}", "content_hash": name},
+            "metrics": {**base, **metrics}, "flagged": {}, "methods": [], "properties": [], "related": []}
+
+
+def _limits(rubric, **limits):
+    return {**rubric, "limits": {**rubric["limits"], **limits}}
+
+
+def test_candidates_are_ranked_by_severity_with_a_minimum_per_principle():
+    rubric, _ = load_rubric()
+    units = [_unit(f"Big{n}", method_count=16 + n, lcom4=1) for n in range(10)] + [_unit("Switchy", method_count=5, type_switch=3)]
+    candidates, counts = select_candidates("p", "r", units, _limits(rubric, min_candidates_per_principle=1, max_candidates=3))
+    # Each principle's most severe unit, then the next most severe overall, in severity order
+    # (type switch 3/2 x 15 = 22.5 outranks method count 25/15 x 10 = 16.7).
+    assert [(c["rule_id"], c["symbol"]) for c in candidates] == [
+        ("ocp-type-switch", "App\\Switchy"), ("srp-method-count", "App\\Big9"), ("srp-method-count", "App\\Big8")]
+    assert counts["SRP"]["exceeding"] == 10 and counts["SRP"]["unjudged"] == 8 and counts["OCP"]["unjudged"] == 0
+    assert candidates[0]["severity"] > candidates[1]["severity"]
+
+
+def test_the_judge_token_budget_bounds_how_many_are_judged():
+    rubric, _ = load_rubric()
+    units = [_unit(f"Big{n}", method_count=16 + n) for n in range(30)]
+    small, _ = select_candidates("p", "r", units, _limits(rubric, judge_input_tokens=400))
+    large, _ = select_candidates("p", "r", units, _limits(rubric, judge_input_tokens=100_000))
+    assert 0 < len(small) < len(large) == 30
+
+
+def test_unjudged_units_carry_the_judged_violation_rate_as_an_estimated_penalty():
+    rubric, rubric_hash = load_rubric()
+    units = [_unit(f"Big{n}", method_count=20) for n in range(4)]
+    rubric = _limits(rubric, min_candidates_per_principle=1, max_candidates=2)
+    candidates, counts = select_candidates("p", "r", units, rubric)
+    verdicts = {candidates[0]["evidence_id"]: {"verdict": "violation", "reason": "Mixed responsibilities."},
+                candidates[1]["evidence_id"]: {"verdict": "acceptable", "reason": "Cohesive."}}
+    category, provenance, findings = score_design(units, candidates, verdicts, counts, rubric, rubric_hash, False)
+    scores = {u["symbol"]: u for u in provenance["unit_scores"]}
+    judged_bad, judged_ok = candidates[0]["symbol"], candidates[1]["symbol"]
+    assert scores[judged_bad]["score"] == 90 and scores[judged_ok]["score"] == 100
+    unjudged = [u for symbol, u in scores.items() if symbol not in (judged_bad, judged_ok)]
+    assert all(u["score"] == 95 and u["estimated_rules"] == ["srp-method-count"] for u in unjudged)  # 10 × 0.5
+    assert provenance["unjudged_estimate"]["rates"]["srp-method-count"] == 0.5 and provenance["unjudged_estimate"]["units"] == 2
+    assert counts["SRP"]["estimated"] == 2 and category["assessment_status"] == "provisional"
+    assert category["score"] == 95 and "estimated penalty" in category["reason"] and len(findings) == 1
+
+
+def test_without_decisive_verdicts_the_default_rate_applies():
+    rubric, rubric_hash = load_rubric()
+    units = [_unit("Big1", method_count=20), _unit("Big2", method_count=20)]
+    rubric = _limits(rubric, min_candidates_per_principle=1, max_candidates=1)
+    candidates, counts = select_candidates("p", "r", units, rubric)
+    verdicts = {candidates[0]["evidence_id"]: {"verdict": "uncertain", "reason": "Unclear."}}
+    _, provenance, _ = score_design(units, candidates, verdicts, counts, rubric, rubric_hash, False)
+    assert provenance["unjudged_estimate"]["rates"]["srp-method-count"] == rubric["unjudged_default_rate"]
+
+
+def test_srp_cards_show_the_disconnected_method_groups_with_code():
+    from code_quality.design_metrics import _component_groups, _method_groups
+
+    def method(name, props, loc, code):
+        return {"method_name": name, "signature": f"public function {name}()", "reads_properties": props,
+                "loc": loc, "code": code, "start_line": loc}
+    methods = [method("price", ["amount"], 5, "return $this->amount;"), method("tax", ["amount"], 9, "x" * 5000),
+               method("notify", ["mailer"], 7, "$this->mailer->send();")]
+    groups = _component_groups(methods, "App\\Invoice")
+    assert [[m["method_name"] for m in g] for g in groups] == [["price", "tax"], ["notify"]]
+    rubric, _ = load_rubric()
+    cards = _method_groups({"groups": groups}, rubric)
+    assert cards[0]["properties"] == ["amount"] and cards[0]["excerpt_of"] == "public function tax()"
+    assert cards[0]["excerpt_truncated"] and len(cards[0]["excerpt"]) == rubric["limits"]["body_chars"]
+    assert cards[1]["excerpt"] == "$this->mailer->send();"

@@ -96,6 +96,15 @@ def remove_revision(project_id: str, revision_id: str) -> bool:
                     archive_key = registry.archive_key(project_id, reference)
                     if archive_key:
                         storage.delete_snapshot_archive(archive_key)
+                        if snapshot.commit_sha and not snapshot.dirty:
+                            from code_quality.history_secrets import history_key
+                            # Git-synchronized revisions keep their history next to the archive.
+                            try:
+                                history = history_key(archive_key, snapshot.commit_sha)
+                            except ValueError:
+                                history = None  # an archive key of another layout has no history beside it
+                            if history:
+                                storage.delete_snapshot_archive(history)
                     report_store = ReportStore()
                     with report_store._connect() as db:
                         db.execute("DELETE FROM assessment_reports WHERE project_id=? AND revision_id=?", (project_id, revision_id))

@@ -194,6 +194,13 @@ class Storage:
             raise ValueError("Invalid source archive identity")
         return self._put_archive(f"telemetry-sources/{snapshot_key}/{checksum}.zip", data, "application/zip")
 
+    def put_snapshot_history(self, key: str, data: bytes) -> str:
+        """A Git revision's history artifact, next to its archive (code_quality.history_secrets)."""
+        from code_quality.history_secrets import is_history_key
+        if not is_history_key(key):
+            raise ValueError("Invalid history artifact key")
+        return self._put_archive(key, data, "application/zip")
+
     def get_snapshot_archive(self, key: str) -> bytes:
         """Read a previously staged immutable snapshot archive."""
         response = self._get_client().get_object(self.tus_bucket, key)
