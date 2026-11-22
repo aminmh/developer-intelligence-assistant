@@ -61,11 +61,13 @@ def _source_root(project_id: str, revision_id: str) -> Any:
 
 
 def _static_routes(project_id: str, revision_id: str) -> list[dict[str, Any]]:
-    from projects.backend_routes import routes_for_revision
-
+    # Routes enrich the report; impact stands without them, including where the route
+    # reader itself is not installed.
     try:
+        from projects.backend_routes import routes_for_revision
+
         return list(routes_for_revision(project_id, revision_id).get("routes") or [])
-    except Exception:  # noqa: BLE001 — routes enrich the report; impact stands without them
+    except Exception:  # noqa: BLE001
         return []
 
 

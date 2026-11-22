@@ -159,3 +159,13 @@ def test_service_input_errors_are_request_errors(deps):
         run_impact("pizza", "rev_1", {})
     with pytest.raises(ImpactRequestError, match="list"):
         run_impact("pizza", "rev_1", {"symbols": "App\\Repo::find"})
+
+
+def test_service_resolves_without_static_route_support(monkeypatch):
+    """Static routes are optional: a missing route reader must not fail the request."""
+    import sys
+
+    from inspection import impact_service
+
+    monkeypatch.setitem(sys.modules, "projects.backend_routes", None)   # import raises ImportError
+    assert impact_service._static_routes("pizza", "rev_1") == []
