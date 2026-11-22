@@ -65,10 +65,27 @@ def test_scoping_and_ambiguous_closures():
             prepared = prepare_chunks([chunk], snapshot)[0]
             assert prepared["symbol_id"] == "closure@routes/web.php:42"
             ids.add(prepared["storage_id"])
+            method = {"type": "method", "class_fqn": "App\\Foo", "method_name": "bar", "file": "src/Foo.php"}
             with pytest.raises(ValueError, match="Ambiguous"):
-                prepare_chunks([chunk, chunk], snapshot)
+                prepare_chunks([method, method], snapshot)
     assert len(ids) == 4
     assert storage_id("ab", "a" * 40, "c") != storage_id("a", "a" * 40, "bc")
+
+
+def test_closures_nested_on_one_line_keep_one_runtime_id():
+    # `static fn ($j) => array_map(static fn ($x) => $x->get(), $j)` exports two
+    # closures with the same file, start line and source text.
+    path = "tests/Unit/ClientIndexSearchTest.php"
+    outer = {"type": "arrow_function", "file": path, "start_line": 177, "end_line": 177, "name": "{closure}"}
+    snapshot = Snapshot("one", "a" * 40, "c" * 64)
+    prepared = prepare_chunks([outer, dict(outer)], snapshot)
+    assert [c["symbol_id"] for c in prepared] == [f"closure@{path}:177"]
+
+    # A multi-line closure that opens on the same line as an inner one.
+    wide = {**outer, "end_line": 181}
+    prepared = prepare_chunks([wide, outer], snapshot)
+    assert [c["symbol_id"] for c in prepared] == [f"closure@{path}:177", None]
+    assert len({c["storage_id"] for c in prepared}) == 2
 
 
 def test_anonymous_class_methods_are_indexed_without_runtime_identity():
@@ -87,6 +104,11 @@ def test_anonymous_class_methods_are_indexed_without_runtime_identity():
     prepared = prepare_chunks([chunk], Snapshot("pizza", "a" * 40, "c" * 64))[0]
     assert prepared["symbol_id"] is None
     assert prepared["storage_id"]
+    # In a namespace (test doubles such as `new class extends Repository {}`) the class is Ns\(anonymous).
+    namespaced = {**chunk, "class_fqn": "App\\Tests\\Functional\\(anonymous)", "fq_symbol_name": "App\\Tests\\Functional\\(anonymous)::flush",
+                  "file_path": "tests/Functional/WebhookTest.php"}
+    assert from_chunk(namespaced) is None
+    assert prepare_chunks([namespaced], Snapshot("pizza", "a" * 40, "c" * 64))[0]["symbol_id"] is None
 
 
 def test_indexed_chunks_carry_registered_immutable_revision_id(tmp_path, monkeypatch):

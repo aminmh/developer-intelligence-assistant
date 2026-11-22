@@ -11,6 +11,29 @@ from typing import Any
 from infra.php_tools import extract_zip_safely, run_code_parse
 from infra.settings import settings
 
+_libc: Any = None
+
+
+def release_memory() -> None:
+    """Collect garbage and hand freed heap pages back to the OS (glibc only; best-effort).
+
+    An index job allocates hundreds of MiB of chunks in a worker thread; without a trim the
+    API keeps that memory resident after the job ends.
+    """
+    import ctypes
+    import gc
+
+    global _libc
+    gc.collect()
+    if _libc is False:
+        return
+    try:
+        if _libc is None:
+            _libc = ctypes.CDLL("libc.so.6")
+        _libc.malloc_trim(0)
+    except (OSError, AttributeError):
+        _libc = False
+
 logger = logging.getLogger("download_jobs")
 
 
@@ -225,6 +248,8 @@ class IndexingService:
             chunks, index, parse_error = self._parse_source(str(workdir), filename)
             if chunks and identity:
                 index = self._with_scip(index, zip_data, identity)
+            if chunks:
+                index = self._with_lsp(index, zip_data, str(workdir), identity)
             snapshot = None
             if identity:
                 from telemetry.snapshot import Snapshot
@@ -239,6 +264,7 @@ class IndexingService:
                     chunk["symbol_id"] = from_chunk(chunk)
             if chunks and identity:
                 self._store_repo_map(identity.get("source_archive_sha256"), chunks)
+                self._store_language_facts(identity.get("source_archive_sha256"), str(workdir))
             if not chunks:
                 logger.warning("No chunks produced: %s (%s)", collection_name, parse_error)
                 self.write_status(
@@ -281,6 +307,9 @@ class IndexingService:
             self.write_status(download_id, "error", 0, 0, collection_name, error=error)
         finally:
             shutil.rmtree(workdir, ignore_errors=True)
+            # Drop this job's chunks and symbol export before returning freed memory to the OS.
+            chunks = index = definitions = references = zip_data = None  # noqa: F841
+            release_memory()
 
     @staticmethod
     def _with_scip(index: dict[str, Any], zip_data: bytes, identity: dict[str, Any]) -> dict[str, Any]:
@@ -313,6 +342,24 @@ class IndexingService:
         definitions += [d for d in export["definitions"] if (d.get("kind"), d.get("fqn")) not in known]
         return {"definitions": definitions,
                 "references": [*(index.get("references") or []), *export["references"]]}
+
+    @staticmethod
+    def _with_lsp(index: dict[str, Any], zip_data: bytes, workdir: str,
+                  identity: dict[str, Any] | None) -> dict[str, Any]:
+        """Add language-server definitions and references (origin `lsp`); see ``lsp.jobs.enrich_export``."""
+        from lsp.jobs import enrich_export
+
+        return enrich_export(index, workdir, zip_data=zip_data, identity=identity)
+
+    @staticmethod
+    def _store_language_facts(archive_sha256: str | None, workdir: str) -> None:
+        """Export and store the revision's language facts for framework plugins. Best-effort."""
+        try:
+            from agent.core.facts import facts_for_workspace
+
+            facts_for_workspace(workdir, archive_sha256)
+        except Exception as exc:  # noqa: BLE001 — providers export on first use when this fails
+            logger.warning("Language facts not stored: %s", exc)
 
     @staticmethod
     def _store_repo_map(archive_sha256: str | None, chunks: list[dict[str, Any]]) -> None:

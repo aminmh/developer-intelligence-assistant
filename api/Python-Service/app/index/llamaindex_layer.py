@@ -99,6 +99,31 @@ _MAX_TEXT_CHARS = 4000
 _QDRANT_UPSERT_MAX_POINTS = 64
 _QDRANT_UPSERT_MAX_BYTES = 8 * 1024 * 1024
 _QDRANT_READBACK_BATCH_SIZE = 512
+# Rows per Neo4j UNWIND write. One transaction per batch keeps a large project's graph under the
+# server's per-transaction memory cap (70% of the heap by default; the 384 MB heap allows ~268 MiB).
+_GRAPH_WRITE_BATCH_SIZE = 1_000
+
+
+# Every graph write and neighbour lookup finds nodes by id; without this index each
+# lookup scans every CodeSymbol node.
+_GRAPH_INDEX_CYPHER = "CREATE RANGE INDEX code_symbol_id IF NOT EXISTS FOR (n:CodeSymbol) ON (n.id)"
+
+
+def _ensure_graph_indexes(store: Any) -> None:
+    """Create the CodeSymbol id index once per store. Best-effort: writes still work without it."""
+    try:
+        store.structured_query(_GRAPH_INDEX_CYPHER)
+    except Exception as exc:  # noqa: BLE001 — a missing index only slows lookups
+        get_exception_logger().warning("Neo4j CodeSymbol id index could not be created: %s", exc)
+
+
+def _batched_write(store: Any, cypher: str, rows: List[dict]) -> int:
+    """Run an ``UNWIND $data`` upsert in bounded batches; returns the summed ``count``."""
+    total = 0
+    for offset in range(0, len(rows), _GRAPH_WRITE_BATCH_SIZE):
+        result = store.structured_query(cypher, param_map={"data": rows[offset:offset + _GRAPH_WRITE_BATCH_SIZE]})
+        total += int((result or [{}])[0].get("count") or 0)
+    return total
 _TRACE_LOCK = threading.Lock()
 _TRACE_CACHE: Dict[str, Dict[str, Any]] = {}
 _TRACE_CACHE_LIMIT = 200
@@ -201,16 +226,16 @@ RETURN n.id AS src, m.id AS tgt, type(r) AS rel,
        m.type AS type, m.collection AS collection
 """
 
-# Tier-4 sym leg: resolve vector-hit symbols to PhpSymbol nodes inside
+# Tier-4 sym leg: resolve vector-hit symbols to Symbol nodes inside
 # sym_<stem>, then return one-hop DECLARES/REFERENCES evidence rows. Every row
 # is a real graph fact (node props + edge props) — never fabricated source.
 _SYM_EVIDENCE_CYPHER = """
 UNWIND $candidates AS candidate
-MATCH (anchor:PhpSymbol {collection: $collection})
+MATCH (anchor:Symbol {collection: $collection})
 WHERE anchor.fqn = candidate OR anchor.name = candidate
 WITH COLLECT(DISTINCT anchor.id) AS anchor_ids
 UNWIND anchor_ids AS anchor_id
-MATCH (a:PhpSymbol {collection: $collection})-[r:DECLARES|REFERENCES]-(e:PhpSymbol {collection: $collection})
+MATCH (a:Symbol {collection: $collection})-[r:DECLARES|REFERENCES]-(e:Symbol {collection: $collection})
 WHERE a.id = anchor_id
 RETURN a.id AS src, a.fqn AS src_fqn, a.kind AS src_kind,
        type(r) AS rel, r.kind AS rel_kind,
@@ -243,7 +268,7 @@ def _point_id_for(node_id: str) -> str:
 # chunk_code_* wholesale, knowledge must survive).
 _KNOWLEDGE_PREFIX = "proj_knowledge_"
 _CODE_PREFIX = "chunk_code_"
-# Tier-4 inspection symbol graph (PhpSymbol nodes) — separate from the chunk
+# Tier-4 inspection symbol graph (Symbol nodes) — separate from the chunk
 # graph; scoped by collection sym_<stem>.
 _SYM_PREFIX = "sym_"
 
@@ -407,7 +432,7 @@ def qdrant_collection_has_points(collection_name: str) -> bool:
 
 
 def sym_collection_exists(stem: str) -> bool:
-    """True when the graph holds a PhpSymbol for ``sym_<stem>``.
+    """True when the graph holds a Symbol for ``sym_<stem>``.
 
     Mirrors ``analysis_service.link_knowledge_to_graph``: the driver session is
     taken from a fresh ``CodePropertyGraph`` store handle. Guarded — any
@@ -425,7 +450,7 @@ def sym_collection_exists(stem: str) -> bool:
         collection = f"sym_{stem or 'unnamed'}"
         with driver.session() as session:
             result = session.run(
-                "MATCH (s:PhpSymbol) WHERE s.collection = $collection "
+                "MATCH (s:Symbol) WHERE s.collection = $collection "
                 "RETURN count(s) AS n",
                 collection=collection,
             )
@@ -635,12 +660,19 @@ def build_embeddable_text(chunk: Dict[str, Any]) -> str:
     return text
 
 
-_ORIGIN_BY_LANGUAGE = {"javascript": "tree-sitter", "typescript": "tree-sitter", "python": "python-ast"}
+_ORIGIN_BY_LANGUAGE = {"php": "php-parser", "javascript": "tree-sitter", "typescript": "tree-sitter",
+                       "python": "python-ast"}
 
 
 def _edge_origin(chunk: Dict[str, Any]) -> str:
-    """Which extractor found a call edge: the chunk's own origin, else by language (PHP parser by default)."""
-    return str(chunk.get("origin") or _ORIGIN_BY_LANGUAGE.get(str(chunk.get("language") or ""), "php-parser"))
+    """Which extractor found a call edge: the chunk's own origin, else the language's default producer.
+
+    Chunks without a language predate multi-language indexing and came from the PHP parser.
+    """
+    language = str(chunk.get("language") or "")
+    if not language:
+        return str(chunk.get("origin") or "php-parser")
+    return str(chunk.get("origin") or _ORIGIN_BY_LANGUAGE.get(language, "unknown"))
 
 
 def _strip_none(mapping: Dict[str, Any]) -> Dict[str, Any]:
@@ -796,6 +828,8 @@ class CodePropertyGraph:
                 )
                 self._graph_store_failed = True
                 self._graph_store = None
+            else:
+                _ensure_graph_indexes(self._graph_store)
         return self._graph_store
 
     def _get_qdrant(self) -> QdrantClient:
@@ -1053,8 +1087,8 @@ class CodePropertyGraph:
                         structure_rows.append({"source_id": src, "target_id": target_id, "kind": kind, "collection": collection_name})
 
         try:
-            result = store.structured_query(_NODE_UPSERT_CYPHER, param_map={"data": node_rows})
-            if strict and (not result or result[0].get("count") != len(node_rows)):
+            written = _batched_write(store, _NODE_UPSERT_CYPHER, node_rows)
+            if strict and written != len(node_rows):
                 raise RuntimeError("Snapshot graph node count mismatch")
         except Exception as exc:
             if strict:
@@ -1068,10 +1102,8 @@ class CodePropertyGraph:
 
         if rel_rows:
             try:
-                result = store.structured_query(
-                    _REL_UPSERT_CYPHER, param_map={"data": rel_rows}
-                )
-                if strict and (not result or result[0].get("count") != len(rel_rows)):
+                written = _batched_write(store, _REL_UPSERT_CYPHER, rel_rows)
+                if strict and written != len(rel_rows):
                     raise RuntimeError("Snapshot graph call count mismatch")
             except Exception as exc:
                 if strict:
@@ -1085,11 +1117,8 @@ class CodePropertyGraph:
 
         if structure_rows:
             try:
-                result = store.structured_query(
-                    _STRUCTURE_REL_UPSERT_CYPHER,
-                    param_map={"data": structure_rows},
-                )
-                if strict and (not result or result[0].get("count") != len(structure_rows)):
+                written = _batched_write(store, _STRUCTURE_REL_UPSERT_CYPHER, structure_rows)
+                if strict and written != len(structure_rows):
                     raise RuntimeError("Snapshot graph structure count mismatch")
             except Exception as exc:
                 if strict:
@@ -1181,9 +1210,32 @@ class CodePropertyGraph:
             except Exception:
                 pass
 
-        points: List[PointStruct] = []
+        # Points are upserted as soon as a size-capped batch fills, so memory stays flat
+        # however many chunks a revision has.
+        batch: List[PointStruct] = []
+        batch_bytes = 0
+        ingested = 0
         embed_fails = 0
         vector_size: Optional[int] = None
+
+        def flush_batch() -> bool:
+            nonlocal ingested, batch, batch_bytes
+            if not batch:
+                return True
+            try:
+                qdrant.upsert(collection_name=collection_name, wait=True, points=batch)
+            except Exception as exc:
+                get_exception_logger().error(
+                    "Qdrant upsert failed for collection %s (batch_size=%s): %s",
+                    collection_name,
+                    len(batch),
+                    exc,
+                )
+                return False
+            ingested += len(batch)
+            batch = []
+            batch_bytes = 0
+            return True
 
         embeddable = [(chunk, build_embeddable_text(chunk)) for chunk in chunks]
         embeddable = [(chunk, text) for chunk, text in embeddable if text.strip()]
@@ -1191,8 +1243,9 @@ class CodePropertyGraph:
         hashes = {id(chunk): embed_hash(text) for chunk, text in embeddable}
         reused = self._reusable_vectors(qdrant, reuse_from or [], profile, set(hashes.values()), collection_name)
 
-        def add_point(chunk: Dict[str, Any], embedding: List[float]) -> None:
-            nonlocal vector_size
+        def add_point(chunk: Dict[str, Any], embedding: List[float]) -> bool:
+            """Queue one point, flushing first when the batch is full; False once an upsert fails."""
+            nonlocal vector_size, batch_bytes
             if vector_size is None:
                 vector_size = len(embedding)
                 try:
@@ -1203,20 +1256,35 @@ class CodePropertyGraph:
                 except Exception:
                     pass
                 ensure_payload_indexes(qdrant, collection_name)
-            points.append(PointStruct(
+            point = PointStruct(
                 id=_point_id_for(_chunk_node_id(chunk)),
                 vector=embedding,
                 payload={**_payload(chunk, collection_name), "embed_hash": hashes[id(chunk)],
                          "embed_profile": profile},
-            ))
+            )
+            # Payload size dominates these requests; the vector estimate
+            # keeps the cap safe without depending on pydantic internals.
+            point_bytes = len(json.dumps(point.payload or {}, ensure_ascii=False, default=str).encode("utf-8"))
+            point_bytes += len(point.vector) * 8 + 512
+            if batch and (
+                len(batch) >= _QDRANT_UPSERT_MAX_POINTS
+                or batch_bytes + point_bytes > _QDRANT_UPSERT_MAX_BYTES
+            ):
+                if not flush_batch():
+                    return False
+            batch.append(point)
+            batch_bytes += point_bytes
+            return True
 
         missing = []
         for chunk, text in embeddable:
             vector = reused.get(hashes[id(chunk)])
             if vector is not None:
-                add_point(chunk, vector)
+                if not add_point(chunk, vector):
+                    return ingested, embed_fails
             else:
                 missing.append((chunk, text))
+        reused.clear()
         self._last_vector_stats["reused"] = len(embeddable) - len(missing)
         if progress_callback and len(missing) < len(embeddable):
             progress_callback("embedding", len(embeddable) - len(missing), len(embeddable))
@@ -1225,7 +1293,7 @@ class CodePropertyGraph:
         embeddable = missing
         batch_size = 96
         for offset in range(0, len(embeddable), batch_size):
-            batch = embeddable[offset:offset + batch_size]
+            chunk_batch = embeddable[offset:offset + batch_size]
 
             def report_embedding_progress(amount: int) -> None:
                 nonlocal completed
@@ -1238,16 +1306,16 @@ class CodePropertyGraph:
                 progress_callback("embedding", completed, embeddable_total)
             try:
                 vectors = embed_texts(
-                    [text for _, text in batch],
+                    [text for _, text in chunk_batch],
                     input_type="search_document",
                     progress=report_embedding_progress,
                 )
-                if len(vectors) != len(batch):
+                if len(vectors) != len(chunk_batch):
                     raise RuntimeError("Embedding provider returned an incomplete batch")
             except EmbeddingProviderError:
                 raise
             except Exception as exc:
-                embed_fails += len(batch)
+                embed_fails += len(chunk_batch)
                 if self._last_embedding_error is None:
                     status = getattr(exc, "code", None)
                     self._last_embedding_error = (
@@ -1257,56 +1325,15 @@ class CodePropertyGraph:
                     )
                 continue
 
-            for (chunk, _), embedding in zip(batch, vectors):
-                add_point(chunk, embedding)
+            for (chunk, _), embedding in zip(chunk_batch, vectors):
+                if not add_point(chunk, embedding):
+                    return ingested, embed_fails
                 self._last_vector_stats["embedded"] += 1
 
         if progress_callback:
             progress_callback("upserting", completed, embeddable_total)
-
-        if points:
-            ingested = 0
-            batch: List[PointStruct] = []
-            batch_bytes = 0
-
-            def flush_batch() -> bool:
-                nonlocal ingested, batch, batch_bytes
-                if not batch:
-                    return True
-                try:
-                    qdrant.upsert(collection_name=collection_name, wait=True, points=batch)
-                except Exception as exc:
-                    get_exception_logger().error(
-                        "Qdrant upsert failed for collection %s (batch_size=%s): %s",
-                        collection_name,
-                        len(batch),
-                        exc,
-                    )
-                    return False
-                ingested += len(batch)
-                batch = []
-                batch_bytes = 0
-                return True
-
-            for point in points:
-                # Payload size dominates these requests; the vector estimate
-                # keeps the cap safe without depending on pydantic internals.
-                point_bytes = len(json.dumps(point.payload or {}, ensure_ascii=False, default=str).encode("utf-8"))
-                point_bytes += len(point.vector) * 8 + 512
-                if batch and (
-                    len(batch) >= _QDRANT_UPSERT_MAX_POINTS
-                    or batch_bytes + point_bytes > _QDRANT_UPSERT_MAX_BYTES
-                ):
-                    if not flush_batch():
-                        return ingested, embed_fails
-                batch.append(point)
-                batch_bytes += point_bytes
-
-            if not flush_batch():
-                return ingested, embed_fails
-            return ingested, embed_fails
-
-        return len(points), embed_fails
+        flush_batch()
+        return ingested, embed_fails
 
     # --- retrieval ----------------------------------------------------------
 
