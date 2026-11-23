@@ -118,49 +118,76 @@ class VendorDocs:
         return any(name.startswith(marker) or f"/{marker}" in name for name in self.names)
 
 
-def _excerpt(record: Any, section: Section, limit: int = MAX_EXCERPT_CHARS) -> Excerpt:
+@dataclass
+class Citation:
+    """How a provider names where an excerpt came from."""
+
+    provider: str
+    version_or_ref: str
+    prefix: str                        # path or URL the document path is appended to
+    versioned: bool = True
+
+    def path(self, document: str) -> str:
+        return f"{self.prefix.rstrip('/')}/{document}"
+
+
+def _excerpt(record: Any, section: Section, citation: Citation, limit: int = MAX_EXCERPT_CHARS) -> Excerpt:
     heading = f"{section.heading}\n\n" if section.heading else ""
     text, truncated = cap(heading + section.text, limit)
-    return Excerpt(provider=PROVIDER, library=record.name, version_or_ref=record.version,
-                   path_or_url=f"{record.path}/{section.path}", line=section.line, text=text, truncated=truncated,
-                   section=section.heading)
+    return Excerpt(provider=citation.provider, library=record.name, version_or_ref=citation.version_or_ref,
+                   path_or_url=citation.path(section.path), line=section.line, text=text, truncated=truncated,
+                   section=section.heading, versioned=citation.versioned)
 
 
-def topic_excerpts(docs: VendorDocs, record: Any, topic: str, limit: int = 5) -> list[Excerpt]:
-    """Clause 3: the sections of the installed package's documents that best match ``topic``."""
-    all_sections = [s for path, text in docs.documents(record.path).items() for s in sections(path, text)]
+def topic_from_documents(documents: dict[str, str], record: Any, topic: str, citation: Citation,
+                         limit: int = 5) -> list[Excerpt]:
+    """Clause 3: the sections that best match ``topic``; with no topic, the start of the README."""
+    all_sections = [s for path, text in documents.items() for s in sections(path, text)]
     words = _words(topic)
-    if not words:  # no topic: the start of the README, else of the first document
+    if not words:
         readme = [s for s in all_sections if s.path.lower().startswith("readme")]
-        return [_excerpt(record, s) for s in (readme or all_sections)[:1]]
+        return [_excerpt(record, s, citation) for s in (readme or all_sections)[:1]]
     scored = [(s, _score(s, words)) for s in all_sections]
     matching = [(s, score) for s, score in scored if score[0] > 0]
     ranked = [s for s, _ in sorted(matching, key=lambda item: (-item[1][0], tuple(-n for n in item[1][1]), -item[1][2],
                                                                     item[0].path, item[0].line))]
-    return [_excerpt(record, s) for s in ranked[:limit]]
+    return [_excerpt(record, s, citation) for s in ranked[:limit]]
 
 
-def upgrade_excerpts(docs: VendorDocs, record: Any, target: str) -> tuple[list[Excerpt], list[str]]:
-    """Clause 8: version sections after the installed version, up to ``target``; returns (excerpts, versions found)."""
+def upgrade_from_documents(documents: dict[str, str], record: Any, target: str,
+                           citation: Citation) -> tuple[list[Excerpt], list[str]]:
+    """Clause 8: version sections after the installed version, up to ``target``; returns (excerpts, versions)."""
     installed, wanted = parse_version(record.version), parse_version(target)
     if installed is None or wanted is None:
         return [], []
     found: list[tuple[tuple[int, int, int], Excerpt]] = []
-    for path, text in docs.documents(record.path).items():
+    for path, text in documents.items():
         base = path.rsplit("/", 1)[-1]
         upgrade_file = _UPGRADE_FILE.match(base)
         if upgrade_file:  # UPGRADE-8.0.md covers the 8.0 line as a whole
             version = parse_version(upgrade_file.group(1))
             if version and in_range(version, installed, wanted, precision=2):
                 for section in sections(path, text):
-                    found.append((version, _excerpt(record, section)))
+                    found.append((version, _excerpt(record, section, citation)))
             continue
         for section in sections(path, text):
             heading = _VERSION_HEADING.match(section.heading)
             version = parse_version(heading.group(1)) if heading else None
             precision = heading.group(1).count(".") + 1 if heading else 3
             if version and in_range(version, installed, wanted, precision=min(precision, 3)):
-                found.append((version, _excerpt(record, section)))
+                found.append((version, _excerpt(record, section, citation)))
     found.sort(key=lambda item: (item[0], item[1].path_or_url, item[1].line or 0))
     versions = sorted({".".join(map(str, v)) for v, _ in found}, key=lambda s: tuple(map(int, s.split("."))))
     return [excerpt for _, excerpt in found], versions
+
+
+def _citation(record: Any) -> Citation:
+    return Citation(provider=PROVIDER, version_or_ref=record.version, prefix=record.path)
+
+
+def topic_excerpts(docs: VendorDocs, record: Any, topic: str, limit: int = 5) -> list[Excerpt]:
+    return topic_from_documents(docs.documents(record.path), record, topic, _citation(record), limit)
+
+
+def upgrade_excerpts(docs: VendorDocs, record: Any, target: str) -> tuple[list[Excerpt], list[str]]:
+    return upgrade_from_documents(docs.documents(record.path), record, target, _citation(record))

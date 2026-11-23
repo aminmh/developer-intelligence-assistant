@@ -126,7 +126,7 @@ def test_excerpts_are_cited_from_the_installed_copy():
 def test_vendor_reports_missing_copies_and_missing_docs():
     absent = lookup(_archive(_project()), "absent/pkg", "anything")
     assert absent["coverage"] == "unavailable" and "does not include the installed copy" in absent["reasons"][0]
-    assert "files at 1.2.3" in absent["reasons"][0]  # the tag as the lockfile writes it
+    assert "turned off" in absent["reasons"][1]  # a bare lookup makes no remote calls
     undocumented = lookup(_archive(_project()), "laravel/framework", "routing")
     assert undocumented["coverage"] == "unavailable" and "no documentation matching" in undocumented["reasons"][0]
     readme = lookup(_archive(_project()), "symfony/http-foundation")
@@ -227,3 +227,215 @@ def test_excerpts_are_cited_ranked_by_topic_coverage_then_recency():
     result = lookup(_archive(_project(**{"vendor/symfony/http-foundation/CHANGELOG.md": changelog})),
                     "symfony/http-foundation", "cookie partitioned")
     assert [e["section"] for e in result["excerpts"]] == ["7.4", "7.3", "5.1.0"]
+
+
+# --- Phase 2: T7-T10, clauses 3-4, 8-10, failure clauses 1-3 ---------------------------------------------
+
+import urllib.error  # noqa: E402
+
+from knowledge.http import Fetcher, RateLimited, RemoteUnavailable  # noqa: E402
+from knowledge.providers.github_ref import installed_refs, target_refs  # noqa: E402
+from knowledge.settings import OFF_REASON, get_remote_docs, remote_docs_allowed, set_remote_docs  # noqa: E402
+
+GITHUB_CHANGELOG_74 = "CHANGELOG\n=========\n\n7.4\n---\n\n * Add partitioned cookies\n"
+GITHUB_CHANGELOG_80 = ("CHANGELOG\n=========\n\n8.0\n---\n\n * Remove `Request::get()`\n\n"
+                       "7.4\n---\n\n * Add partitioned cookies\n")
+
+
+def _listing(*names):
+    return json.dumps([{"type": "file", "name": n, "size": 100} for n in names] + [{"type": "dir", "name": "src"}]).encode()
+
+
+class FakeGitHub:
+    """Answers GitHub URLs from a table; records every request like the real fetcher."""
+
+    def __init__(self, routes=None, fail=None):
+        self.routes = routes or {}
+        self.fail = fail
+        self.requests = []
+
+    def __call__(self, request, hosts):
+        self.requests.append((request.full_url, dict(request.header_items())))
+        if self.fail:
+            raise self.fail
+        body = self.routes.get(request.full_url)
+        if body is None:
+            raise urllib.error.HTTPError(request.full_url, 404, "Not Found", {}, None)
+        return io.BytesIO(body)
+
+
+REPO = "https://api.github.com/repos"
+RAW = "https://raw.githubusercontent.com"
+ROUTES = {
+    f"{REPO}/symfony/http-foundation/contents?ref=d070b716": _listing("CHANGELOG.md", "README.md", "Cookie.php"),
+    f"{RAW}/symfony/http-foundation/d070b716/CHANGELOG.md": GITHUB_CHANGELOG_74.encode(),
+    f"{RAW}/symfony/http-foundation/d070b716/README.md": b"HttpFoundation\n==============\n\nRequests and responses.\n",
+    f"{REPO}/symfony/http-foundation/contents?ref=v8.0.0": _listing("CHANGELOG.md"),
+    f"{RAW}/symfony/http-foundation/v8.0.0/CHANGELOG.md": GITHUB_CHANGELOG_80.encode(),
+    f"{REPO}/absent/pkg/contents?ref=v1.2.3": _listing("CHANGELOG.md"),
+    f"{RAW}/absent/pkg/v1.2.3/CHANGELOG.md": b"# Changelog\n\n## 1.2.3\n\n- Retry middleware added.\n",
+}
+
+
+def _fetcher(github, **kwargs):
+    return Fetcher(opener=github, public=lambda host: True, token=kwargs.pop("token", ""), **kwargs)
+
+
+def test_remote_docs_switch(tmp_path, monkeypatch):
+    class Store(dict):
+        def set(self, key, value):
+            self[key] = value
+
+    store = Store()
+    assert get_remote_docs("pizza", store=store) == {"project_id": "pizza", "allowed": True, "updated_at": None,
+                                                     "source": "default"}  # on by default (user, 2026-11-23)
+    assert set_remote_docs("pizza", False, store=store)["allowed"] is False
+    assert remote_docs_allowed("pizza", store=store) is False and remote_docs_allowed("other", store=store) is True
+    from infra.remote_consent import InvalidProject
+
+    with pytest.raises(InvalidProject):
+        set_remote_docs("pizza", "yes", store=store)
+
+    class Broken:
+        def get(self, key):
+            raise OSError("locked")
+
+    assert remote_docs_allowed("pizza", store=Broken()) is False  # fails closed
+    assert remote_docs_allowed(None, store=store) is False
+
+    from fastapi import FastAPI
+    from fastapi.testclient import TestClient
+
+    from infra.settings import settings
+    from routers import remote_consent
+
+    monkeypatch.setattr(settings, "internal_secret", "s" * 40, raising=False)
+    monkeypatch.setattr("knowledge.settings._store", lambda store=None: store if store is not None else Store_shared)
+    Store_shared = Store()
+    app = FastAPI()
+    app.include_router(remote_consent.router)
+    client = TestClient(app)
+    headers = {"X-Internal-Secret": "s" * 40}
+    assert client.get("/projects/pizza/remote-docs", headers=headers).json()["allowed"] is True
+    assert client.put("/projects/pizza/remote-docs", headers=headers, json={"allowed": False}).json()["allowed"] is False
+    assert client.get("/projects/pizza/remote-docs", headers=headers).json()["allowed"] is False
+    assert client.put("/projects/pizza/remote-docs", headers=headers, json={"allowed": "no"}).status_code == 400
+    assert client.get("/projects/pizza/remote-docs").status_code == 401
+
+
+def test_provider_order_and_consent():
+    github = FakeGitHub(ROUTES)
+    # The installed copy answers: no remote call at all.
+    local = lookup(_archive(_project()), "symfony/http-foundation", "partitioned", remote_allowed=True,
+                   fetcher=_fetcher(github))
+    assert local["providers"] == ["vendor"] and github.requests == []
+    # Missing copy, remote off: no call, and the reason says why.
+    off = lookup(_archive(_project()), "absent/pkg", "retry", fetcher=_fetcher(github))
+    assert off["coverage"] == "unavailable" and OFF_REASON in off["reasons"] and github.requests == []
+    # Missing copy, remote on: the tag-pinned files answer and the vendor gap is resolved.
+    remote = lookup(_archive(_project()), "absent/pkg", "retry", remote_allowed=True, fetcher=_fetcher(github))
+    assert remote["coverage"] == "complete" and remote["reasons"] == [] and remote["providers"] == ["vendor", "github_ref"]
+    assert remote["excerpts"][0]["provider"] == "github_ref"
+
+
+def test_github_ref_reads_at_tag():
+    github = FakeGitHub(ROUTES)
+    remote = lookup(_archive(_project()), "absent/pkg", "retry", remote_allowed=True, fetcher=_fetcher(github))
+    excerpt = remote["excerpts"][0]
+    assert excerpt["path_or_url"] == "https://github.com/absent/pkg/blob/v1.2.3/CHANGELOG.md"
+    assert excerpt["version_or_ref"] == "1.2.3 (v1.2.3)" and excerpt["versioned"] is True and excerpt["line"] == 3
+    # The tag as written (1.2.3) did not exist, so the other spelling was tried next.
+    assert [url for url, _ in github.requests][:2] == [f"{REPO}/absent/pkg/contents?ref=1.2.3",
+                                                         f"{REPO}/absent/pkg/contents?ref=v1.2.3"]
+    # With the installed copy silent on the topic, the files at the lockfile's exact commit are read first.
+    commit = lookup(_archive(_project(**{"vendor/symfony/http-foundation/CHANGELOG.md": "nothing"})),
+                    "symfony/http-foundation", "partitioned", remote_allowed=True, fetcher=_fetcher(FakeGitHub(ROUTES)))
+    assert commit["excerpts"][0]["path_or_url"] == "https://github.com/symfony/http-foundation/blob/d070b716/CHANGELOG.md"
+    # Failure clause 2: no ref exists.
+    missing = lookup(_archive(_project()), "absent/pkg", "retry", remote_allowed=True, fetcher=_fetcher(FakeGitHub({})))
+    assert missing["coverage"] == "unavailable"
+    assert "No ref of absent/pkg matches 1.2.3 (tried 1.2.3, v1.2.3)." in missing["reasons"]
+    no_repo = lookup(_archive(_project()), "acme/util", "x", remote_allowed=True, fetcher=_fetcher(FakeGitHub(ROUTES)))
+    assert any("names no GitHub repository" in r for r in no_repo["reasons"])
+
+
+def test_github_ref_reads_at_tag_ref_forms():
+    class Rec:
+        reference, tag, version = "abc123", "v7.4.18", "7.4.18"
+
+    assert installed_refs(Rec()) == ["abc123", "v7.4.18", "7.4.18"]
+    assert target_refs("8.0") == ["v8.0.0", "8.0.0", "v8.0", "8.0"]
+    assert target_refs("v8.1.2") == ["v8.1.2", "8.1.2"] and target_refs("next") == []
+
+
+def test_upgrade_notes_at_target_tag():
+    """The installed copy stops at 7.4; the 8.0 notes come from the target tag's own CHANGELOG."""
+    github = FakeGitHub(ROUTES)
+    result = lookup(_archive(_project()), "http-foundation", target_version="8.0", remote_allowed=True,
+                    fetcher=_fetcher(github))
+    assert result["coverage"] == "complete" and result["versions_found"] == ["8.0.0"]
+    (excerpt,) = result["excerpts"]
+    assert excerpt["section"] == "8.0" and "Remove `Request::get()`" in excerpt["text"]
+    assert excerpt["path_or_url"] == "https://github.com/symfony/http-foundation/blob/v8.0.0/CHANGELOG.md"
+    assert excerpt["version_or_ref"] == "8.0 (v8.0.0)"
+
+
+def test_only_identifiers_leave_the_machine():
+    github = FakeGitHub(ROUTES)
+    lookup(_archive(_project()), "absent/pkg", "retry middleware secretword", remote_allowed=True,
+           fetcher=_fetcher(github, token="tok"))
+    for url, headers in github.requests:
+        assert "secretword" not in url and "retry" not in url  # topics are matched locally
+        assert url.startswith(("https://api.github.com/repos/absent/pkg/", "https://raw.githubusercontent.com/absent/pkg/"))
+        assert headers.get("Authorization") == "Bearer tok"
+    fetcher = _fetcher(FakeGitHub(ROUTES), hosts=frozenset({"api.github.com"}))
+    for url in ("https://evil.example.com/x", "http://api.github.com/repos/a/b", "ftp://api.github.com/x"):
+        with pytest.raises(RemoteUnavailable):
+            fetcher.get(url)
+    private = Fetcher(opener=FakeGitHub(ROUTES), public=lambda host: False, token="")
+    with pytest.raises(RemoteUnavailable, match="public address"):
+        private.get(f"{REPO}/absent/pkg/contents?ref=v1.2.3")
+    gitmcp = FakeGitHub({"https://gitmcp.io/docs": b"{}"})
+    _fetcher(gitmcp, token="tok").get("https://gitmcp.io/docs")
+    assert "Authorization" not in gitmcp.requests[0][1]  # the GitHub token goes to GitHub only
+    from knowledge.http import _NoForeignRedirects
+
+    handler = _NoForeignRedirects(frozenset({"api.github.com"}))
+    with pytest.raises(RemoteUnavailable, match="redirect"):
+        handler.redirect_request(None, None, 302, "Found", {}, "https://evil.example.com/")
+
+
+def test_remote_failures_are_partial():
+    down = lookup(_archive(_project()), "absent/pkg", "retry", remote_allowed=True,
+                  fetcher=_fetcher(FakeGitHub(fail=urllib.error.URLError("dns"))))
+    assert down["coverage"] == "unavailable" and any("could not be reached" in r for r in down["reasons"])
+    # With an installed answer and a failed remote call for the target, the result is partial, not an error.
+    ahead = "CHANGELOG\n=========\n\n8.0\n---\n\n * Shipped early\n\n7.4\n---\n\n * Now\n"
+    partial = lookup(_archive(_project(**{"vendor/symfony/http-foundation/CHANGELOG.md": ahead})), "http-foundation",
+                     target_version="8.0", remote_allowed=True,
+                     fetcher=_fetcher(FakeGitHub(fail=urllib.error.URLError("dns"))))
+    assert partial["coverage"] == "partial" and partial["excerpts"][0]["provider"] == "vendor"
+    assert any("could not be reached" in r for r in partial["reasons"])
+
+    class Limited:
+        calls = 0
+
+        def __call__(self, request, hosts):
+            Limited.calls += 1
+            raise urllib.error.HTTPError(request.full_url, 403, "Forbidden", {"X-RateLimit-Remaining": "0"}, None)
+
+    limited = _fetcher(Limited())
+    with pytest.raises(RateLimited):
+        limited.get(f"{REPO}/absent/pkg/contents?ref=1.2.3")
+    with pytest.raises(RateLimited):
+        limited.get(f"{REPO}/absent/pkg/contents?ref=v1.2.3")
+    assert Limited.calls == 1  # failure clause 3: no further calls once limited
+    result = lookup(_archive(_project()), "absent/pkg", "retry", remote_allowed=True, fetcher=_fetcher(Limited()))
+    assert any("rate-limited" in r for r in result["reasons"])
+
+    class ServerError:
+        def __call__(self, request, hosts):
+            raise urllib.error.HTTPError(request.full_url, 500, "Oops", {}, None)
+
+    with pytest.raises(RemoteUnavailable, match="HTTP 500"):
+        _fetcher(ServerError()).get(f"{REPO}/a/b/contents?ref=x")

@@ -1,8 +1,8 @@
 """Knowledge service: resolve the installed version, ask providers in order, return cited excerpts.
 
-Spec clauses 1-3, 7-8, 11 and failure clauses 4-5. Phase 1 has only the ``vendor`` provider, so a
-library the upload does not contain reads ``partial``/``unavailable`` with a reason; later phases add
-tag-pinned repository files and GitMCP behind the project switch (clauses 4-6, 9-10).
+Spec clauses 1-4, 7-9, 11 and failure clauses 1-5. Providers run in order: the installed copy in the
+revision, then (when the project allows remote documentation) the library's files at the installed
+commit or tag, or at the target version's tag for upgrade notes. GitMCP follows in a later phase.
 """
 
 from __future__ import annotations
@@ -79,52 +79,108 @@ def _limit_total(excerpts: list[Excerpt]) -> list[Excerpt]:
     return out
 
 
+def _vendor(archive: bytes, record: Any, topic: str, target: str | None, cache: KnowledgeCache | None) -> dict[str, Any]:
+    from knowledge.providers.vendor import PROVIDER, VendorDocs, topic_excerpts, upgrade_excerpts
+
+    key = cache_key(PROVIDER, record.name, record.version, topic, target)
+    cached = cache.get(key) if cache else None
+    if cached is not None:
+        return cached
+    docs = VendorDocs(archive)
+    if not docs.present(record.path):
+        found = {"excerpts": [], "versions_found": [], "missing_copy": True, "reasons": [
+            f"The upload does not include the installed copy ({record.path})."]}
+    elif target:
+        excerpts, versions = upgrade_excerpts(docs, record, target)
+        found = {"excerpts": [e.to_dict() for e in excerpts], "versions_found": versions, "reasons": [] if excerpts else [
+            f"The installed copy ({record.version}) has no upgrade notes after it up to {target}."]}
+    else:
+        excerpts = topic_excerpts(docs, record, topic)
+        found = {"excerpts": [e.to_dict() for e in excerpts], "versions_found": [], "reasons": [] if excerpts else [
+            f"The installed copy of {record.name} has no documentation matching \"{topic}\"."]}
+    if cache:
+        cache.put(key, PROVIDER, record.name, record.version, found)
+    return found
+
+
+def _github(record: Any, topic: str, target: str | None, cache: KnowledgeCache | None, github: Any) -> dict[str, Any]:
+    """Clause 4: the installed version at its commit or tag, or, with a target, the target's own files."""
+    from knowledge.providers import github_ref
+    from knowledge.providers.vendor import topic_from_documents, upgrade_from_documents
+
+    if not record.repository:
+        return {"excerpts": [], "versions_found": [], "reasons": [
+            f"The lockfile names no GitHub repository for {record.name}, so its files cannot be read at a tag."]}
+    refs = github_ref.target_refs(target) if target else github_ref.installed_refs(record)
+    key = cache_key(github_ref.PROVIDER, record.name, "|".join(refs), topic, target)
+    cached = cache.get(key) if cache else None
+    if cached is not None:
+        return cached
+    ref, documents = github.first(record.repository, refs)
+    if ref is None:  # failure clause 2
+        return {"excerpts": [], "versions_found": [], "reasons": [
+            f"No ref of {record.repository} matches {target or record.version} (tried {', '.join(refs)})."]}
+    citation = github_ref.citation(record, ref, target or record.version)
+    if target:
+        excerpts, versions = upgrade_from_documents(documents, record, target, citation)
+        missing = f"{record.repository} at {github_ref.display_ref(ref)} has no upgrade notes after {record.version}."
+    else:
+        excerpts, versions = topic_from_documents(documents, record, topic, citation), []
+        missing = f"{record.repository} at {github_ref.display_ref(ref)} has no documentation matching \"{topic}\"."
+    found = {"excerpts": [e.to_dict() for e in excerpts], "versions_found": versions,
+             "reasons": [] if excerpts else [missing]}
+    if cache:
+        cache.put(key, github_ref.PROVIDER, record.name, ref, found)
+    return found
+
+
 def lookup(archive: bytes, library: Any, topic: Any = None, target_version: Any = None, *,
            cache: KnowledgeCache | None = None, registry: Any = None,
-           packages: Callable[[bytes], tuple[list[Any], list[str]]] | None = None) -> dict[str, Any]:
-    """Cited excerpts for ``library`` at the version the revision installs."""
+           packages: Callable[[bytes], tuple[list[Any], list[str]]] | None = None,
+           remote_allowed: bool = False, fetcher: Any = None) -> dict[str, Any]:
+    """Cited excerpts for ``library`` at the version the revision installs, from providers in order.
+
+    Clauses 3-4, 8-9 and failure clauses 1-3: the installed copy first; with remote documentation
+    allowed, the library's files at the installed commit or tag when the copy is missing or silent, and
+    the target version's files for upgrade notes, since an installed copy cannot describe newer versions.
+    """
+    from knowledge.http import Fetcher, RemoteUnavailable
     from knowledge.model import parse_version
-    from knowledge.providers.vendor import PROVIDER as VENDOR
-    from knowledge.providers.vendor import VendorDocs, topic_excerpts, upgrade_excerpts
+    from knowledge.providers.github_ref import GitHubRef
+    from knowledge.settings import OFF_REASON
 
     library, topic, target = _validate(library, topic, target_version)
     records, reasons = (packages or (lambda a: installed_packages(a, registry)))(archive)
     record, missing = find_package(records, library)
     if record is None:
         return {"library": library, "installed_version": None, "excerpts": [], "coverage": UNAVAILABLE,
-                "reasons": [missing, *reasons], "versions_found": []}
+                "reasons": [missing, *reasons], "versions_found": [], "providers": []}
     if target and (parse_version(target) is None or parse_version(record.version) is None):
         raise KnowledgeRequestError(f"Cannot compare {record.version} with target {target}.")
-    result: dict[str, Any] = {"library": record.name, "installed_version": record.version, "lockfile": record.lockfile,
-                              "excerpts": [], "coverage": COMPLETE, "reasons": [], "versions_found": []}
-    key = cache_key(VENDOR, record.name, record.version, topic, target)
-    cached = cache.get(key) if cache else None
-    if cached is None:
-        docs = VendorDocs(archive)
-        if not docs.present(record.path):
-            cached = {"excerpts": [], "versions_found": [], "reasons": [
-                f"The upload does not include the installed copy ({record.path}); later providers read the "
-                f"library's files at {record.tag}."]}
-        elif target:
-            excerpts, versions = upgrade_excerpts(docs, record, target)
-            cached = {"excerpts": [e.to_dict() for e in excerpts], "versions_found": versions, "reasons": [] if excerpts else [
-                f"The installed copy ({record.version}) has no upgrade notes after it up to {target}; notes for newer "
-                "versions are in the target version's own files."]}
-        else:
-            excerpts = topic_excerpts(docs, record, topic)
-            cached = {"excerpts": [e.to_dict() for e in excerpts], "versions_found": [], "reasons": [] if excerpts else [
-                f"The installed copy of {record.name} has no documentation matching \"{topic}\"."]}
-        if cache:
-            cache.put(key, VENDOR, record.name, record.version, cached)
-    excerpts = _limit_total([Excerpt(**row) for row in cached["excerpts"]])
-    result["excerpts"] = [e.to_dict() for e in excerpts]
-    result["versions_found"] = cached["versions_found"]
-    result["reasons"] = list(cached["reasons"])
-    if not excerpts:
-        result["coverage"] = UNAVAILABLE
-    elif result["reasons"]:
-        result["coverage"] = PARTIAL
-    return result
+    vendor = _vendor(archive, record, topic, target, cache)
+    excerpts = [Excerpt(**row) for row in vendor["excerpts"]]
+    versions = set(vendor["versions_found"])
+    gaps: list[str] = list(vendor["reasons"])
+    providers = ["vendor"]
+    needs_remote = bool(target) or not excerpts
+    if needs_remote and not remote_allowed:
+        gaps.append(OFF_REASON)
+    elif needs_remote:
+        providers.append("github_ref")
+        try:
+            remote = _github(record, topic, target, cache, GitHubRef(fetcher or Fetcher()))
+        except RemoteUnavailable as exc:  # failure clauses 1 and 3
+            remote = {"excerpts": [], "versions_found": [], "reasons": [str(exc)]}
+        if remote["excerpts"]:
+            gaps = []  # the later provider covered what the installed copy could not
+        excerpts += [Excerpt(**row) for row in remote["excerpts"]]
+        versions |= set(remote["versions_found"])
+        gaps += remote["reasons"]
+    excerpts = _limit_total(excerpts)
+    coverage = UNAVAILABLE if not excerpts else (PARTIAL if gaps else COMPLETE)
+    return {"library": record.name, "installed_version": record.version, "lockfile": record.lockfile,
+            "excerpts": [e.to_dict() for e in excerpts], "coverage": coverage, "reasons": gaps,
+            "versions_found": sorted(versions, key=lambda v: parse_version(v) or (0, 0, 0)), "providers": providers}
 
 
 def lookup_revision(project_id: str, revision_id: str, library: Any, topic: Any = None,
@@ -132,9 +188,12 @@ def lookup_revision(project_id: str, revision_id: str, library: Any, topic: Any 
     """``lookup`` on an indexed revision's archive."""
     from code_quality.rule_code import load_revision
 
+    from knowledge.settings import remote_docs_allowed
+
     revision = load_revision(project_id, revision_id)
     return {"project_id": project_id, "revision_id": revision_id,
-            **lookup(revision.archive_loader(), library, topic, target_version, cache=cache or KnowledgeCache())}
+            **lookup(revision.archive_loader(), library, topic, target_version, cache=cache or KnowledgeCache(),
+                     remote_allowed=remote_docs_allowed(project_id))}
 
 
 def archive_names(archive: bytes) -> list[str]:
