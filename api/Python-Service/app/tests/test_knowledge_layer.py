@@ -309,7 +309,7 @@ def test_remote_docs_switch(tmp_path, monkeypatch):
     from infra.settings import settings
     from routers import remote_consent
 
-    monkeypatch.setattr(settings, "internal_secret", "s" * 40, raising=False)
+    monkeypatch.setattr(settings._env, "internal_secret", "s" * 40)  # as test_remote_consent does; restorable
     monkeypatch.setattr("knowledge.settings._store", lambda store=None: store if store is not None else Store_shared)
     Store_shared = Store()
     app = FastAPI()
@@ -439,3 +439,184 @@ def test_remote_failures_are_partial():
 
     with pytest.raises(RemoteUnavailable, match="HTTP 500"):
         _fetcher(ServerError()).get(f"{REPO}/a/b/contents?ref=x")
+
+
+# --- Phase 3: T11-T13, clauses 5-7, 10-11 -----------------------------------------------------------------
+
+from knowledge.mcp_client import ALLOWED_TOOLS, McpClient  # noqa: E402
+from knowledge.providers.gitmcp import parse_results  # noqa: E402
+
+GITMCP_MATCH = """## Query
+retry middleware.
+## Response
+### Sources:
+Important: you can fetch the full content of any source using the fetch_url_content tool
+#### (absent/pkg/docs/retry.md)[https://raw.githubusercontent.com/absent/pkg/main/docs/retry.md] (Score: 0.81)
+- # Retries
+Use `RetryMiddleware::create()` with a decider.
+#### (absent/pkg/README.md)[https://raw.githubusercontent.com/absent/pkg/main/README.md] (Score: 0.12)
+- # Pkg
+Unrelated.
+"""
+GITMCP_FALLBACK = ('### Search Results for: "retry"\n\nNo relevant documentation found for your query. It\'s either '
+                   'being indexed or the search query did not match any documentation.\n\nAs a fallback, this is the '
+                   'documentation for absent/pkg:\n\n# Pkg\n')
+
+
+class _Response(io.BytesIO):
+    def __init__(self, body: bytes, status: int = 200, headers: dict | None = None):
+        super().__init__(body)
+        self.status, self.headers = status, headers or {}
+
+
+class FakeMcp:
+    """Speaks GitMCP's streamable HTTP: SSE replies, a session header, 202 for notifications."""
+
+    def __init__(self, answer: str = GITMCP_MATCH, tools=("search_generic_documentation", "fetch_generic_documentation",
+                                                          "fetch_generic_url_content")):
+        self.answer, self.tool_names, self.messages, self.headers = answer, tools, [], []
+
+    def __call__(self, request, hosts):
+        message = json.loads(request.data)
+        self.messages.append(message)
+        self.headers.append(dict(request.header_items()))
+        if "id" not in message:
+            return _Response(b"", 202)
+        if message["method"] == "initialize":
+            result = {"protocolVersion": "2025-03-26", "serverInfo": {"name": "GitMCP", "version": "1.1.0"}}
+        elif message["method"] == "tools/list":
+            result = {"tools": [{"name": n, "inputSchema": {}} for n in self.tool_names]}
+        else:
+            result = {"content": [{"type": "text", "text": self.answer}]}
+        body = f"event: message\ndata: {json.dumps({'jsonrpc': '2.0', 'id': message['id'], 'result': result})}\n\n"
+        return _Response(body.encode(), 200, {"Content-Type": "text/event-stream", "mcp-session-id": "sess-1"})
+
+
+def test_mcp_client_session_tools_and_allowlist():
+    server = FakeMcp()
+    client = McpClient(_fetcher(server), "https://gitmcp.io/docs")
+    text = client.call("search_generic_documentation", {"owner": "absent", "repo": "pkg", "query": "retry"})
+    assert "RetryMiddleware" in text
+    methods = [m.get("method") for m in server.messages]
+    assert methods == ["initialize", "notifications/initialized", "tools/list", "tools/call"]
+    assert "Mcp-session-id" not in server.headers[0] and server.headers[1]["Mcp-session-id"] == "sess-1"
+    assert server.headers[0]["User-agent"] == "DevAssistant-Knowledge/1"  # GitMCP's Cloudflare refuses urllib's default
+    # The generic URL fetcher is offered by the server and suggested by its results, but never callable.
+    assert "fetch_generic_url_content" not in ALLOWED_TOOLS
+    with pytest.raises(RemoteUnavailable, match="not allowed"):
+        client.call("fetch_generic_url_content", {"url": "http://169.254.169.254/"})
+    assert len(server.messages) == 4  # refused before any request
+    missing = McpClient(_fetcher(FakeMcp(tools=("search_generic_documentation",))), "https://gitmcp.io/docs")
+    with pytest.raises(RemoteUnavailable, match="does not offer"):
+        missing.call("fetch_generic_documentation", {"owner": "a", "repo": "b"})
+    outside = McpClient(_fetcher(FakeMcp(), hosts=frozenset({"api.github.com"})), "https://gitmcp.io/docs")
+    with pytest.raises(RemoteUnavailable, match="not an allowed"):
+        outside.initialize()
+
+
+def test_mcp_client_errors_become_remote_unavailable():
+    class ErrorServer(FakeMcp):
+        def __call__(self, request, hosts):
+            message = json.loads(request.data)
+            if message.get("method") == "tools/call":
+                body = json.dumps({"jsonrpc": "2.0", "id": message["id"], "error": {"code": -32602, "message": "bad args"}})
+                return _Response(body.encode(), 200, {"Content-Type": "application/json"})
+            return super().__call__(request, hosts)
+
+    client = McpClient(_fetcher(ErrorServer()), "https://gitmcp.io/docs")
+    with pytest.raises(RemoteUnavailable, match="bad args"):
+        client.call("search_generic_documentation", {"owner": "a", "repo": "b", "query": "q"})
+
+
+def test_gitmcp_excerpts_unversioned():
+    blocks = parse_results(GITMCP_MATCH)
+    assert [(b["path"], b["score"], b["branch"]) for b in blocks] == [("absent/pkg/docs/retry.md", 0.81, "main"),
+                                                                      ("absent/pkg/README.md", 0.12, "main")]
+    assert parse_results(GITMCP_FALLBACK) == []  # GitMCP's no-match answer is not evidence
+    from knowledge.providers.gitmcp import search
+
+    class Rec:
+        name, repository, version = "absent/pkg", "absent/pkg", "1.2.3"
+
+    client = McpClient(_fetcher(FakeMcp()), "https://gitmcp.io/docs")
+    excerpts, reason = search(client, Rec(), "retry middleware")
+    assert reason is None and len(excerpts) == 1  # below the score floor is dropped
+    (excerpt,) = excerpts
+    assert excerpt.versioned is False and excerpt.version_or_ref == "main (unversioned)"
+    assert excerpt.path_or_url == "https://raw.githubusercontent.com/absent/pkg/main/docs/retry.md"
+    assert excerpt.provider == "gitmcp" and "RetryMiddleware" in excerpt.text
+    _, reason = search(McpClient(_fetcher(FakeMcp(GITMCP_FALLBACK)), "https://gitmcp.io/docs"), Rec(), "retry")
+    assert "no indexed documentation" in reason
+
+
+def test_gitmcp_called_last(tmp_path):
+    server = FakeMcp()
+    # The version-exact sources have nothing (no copy, no refs): GitMCP answers, marked as unversioned.
+    result = lookup(_archive(_project()), "absent/pkg", "retry middleware", remote_allowed=True,
+                    fetcher=_fetcher(FakeGitHub({})), mcp=McpClient(_fetcher(server), "https://gitmcp.io/docs"))
+    assert result["providers"] == ["vendor", "github_ref", "gitmcp"]
+    assert result["excerpts"][0]["provider"] == "gitmcp" and result["excerpts"][0]["versioned"] is False
+    assert result["coverage"] == "partial" and any("default branch" in r for r in result["reasons"])
+    # Topic words go to GitMCP (clause 10 allows them); nothing else from the project does.
+    call = next(m for m in server.messages if m.get("method") == "tools/call")
+    assert call["params"]["arguments"] == {"owner": "absent", "repo": "pkg", "query": "retry middleware"}
+    # Not called when an exact source answers, for upgrade notes, without a topic, or with remote docs off.
+    quiet = FakeMcp()
+    client = McpClient(_fetcher(quiet), "https://gitmcp.io/docs")
+    lookup(_archive(_project()), "absent/pkg", "retry", remote_allowed=True, fetcher=_fetcher(FakeGitHub(ROUTES)), mcp=client)
+    lookup(_archive(_project()), "absent/pkg", target_version="2.0", remote_allowed=True,
+           fetcher=_fetcher(FakeGitHub({})), mcp=client)
+    lookup(_archive(_project()), "absent/pkg", remote_allowed=True, fetcher=_fetcher(FakeGitHub({})), mcp=client)
+    lookup(_archive(_project()), "absent/pkg", "retry", fetcher=_fetcher(FakeGitHub({})), mcp=client)
+    assert quiet.messages == []
+    # One-day cache: a repeat within the day does not call GitMCP again.
+    cache = KnowledgeCache(tmp_path / "k.sqlite")
+    counted = FakeMcp()
+    for _ in range(2):
+        lookup(_archive(_project()), "absent/pkg", "retry middleware", remote_allowed=True, cache=cache,
+               fetcher=_fetcher(FakeGitHub({})), mcp=McpClient(_fetcher(counted), "https://gitmcp.io/docs"))
+    assert sum(1 for m in counted.messages if m.get("method") == "tools/call") == 1
+    # A GitMCP failure is a reason, never an error.
+    down = lookup(_archive(_project()), "absent/pkg", "retry", remote_allowed=True, fetcher=_fetcher(FakeGitHub({})),
+                  mcp=McpClient(_fetcher(FakeGitHub(fail=urllib.error.URLError("dns"))), "https://gitmcp.io/docs"))
+    assert down["coverage"] == "unavailable" and any("could not be reached" in r for r in down["reasons"])
+
+
+def test_mcp_client_reads_only_the_first_event_of_an_open_stream():
+    """Found live: GitMCP keeps the event stream open after its reply; reading on would hit the timeout."""
+    class OpenStream(io.BytesIO):
+        status, headers = 200, {"Content-Type": "text/event-stream", "mcp-session-id": "s"}
+
+        def read1(self, size=-1):
+            chunk = super().read1(size)
+            if not chunk:
+                raise TimeoutError("read past the first event")
+            return chunk
+
+    def opener(request, hosts):
+        message = json.loads(request.data)
+        if "id" not in message:
+            return _Response(b"", 202)
+        result = {"tools": [{"name": "search_generic_documentation"}]} if message["method"] == "tools/list" else {}
+        event = f"event: message\r\ndata: {json.dumps({'jsonrpc': '2.0', 'id': message['id'], 'result': result})}\r\n\r\n"
+        return OpenStream(event.encode())
+
+    client = McpClient(_fetcher(opener), "https://gitmcp.io/docs")
+    assert list(client.tools()) == ["search_generic_documentation"]
+
+
+def test_gitmcp_excerpts_unversioned_drop_translations_of_the_same_page():
+    """Found live: GitMCP returned FastAPI's dependencies page in English, Ukrainian and Chinese."""
+    from knowledge.providers.gitmcp import search
+
+    def block(path, score):
+        return f"#### (fastapi/fastapi/{path})[https://raw.githubusercontent.com/fastapi/fastapi/master/{path}] (Score: {score})\n- text {path}\n"
+
+    answer = "## Response\n" + block("docs/en/docs/deps.md", 0.74) + block("docs/uk/docs/deps.md", 0.67) + \
+        block("docs/zh-hant/docs/deps.md", 0.66) + block("docs/en/docs/other.md", 0.5)
+
+    class Rec:
+        name, repository, version = "fastapi/fastapi", "fastapi/fastapi", "0.120.0"
+
+    excerpts, _ = search(McpClient(_fetcher(FakeMcp(answer)), "https://gitmcp.io/docs"), Rec(), "deps")
+    assert [e.path_or_url.rsplit("master/", 1)[1] for e in excerpts] == ["docs/en/docs/deps.md", "docs/en/docs/other.md"]
