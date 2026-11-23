@@ -29,6 +29,7 @@ const error = ref('');
 const notice = ref('');
 const dirty = ref(false);
 let timer: ReturnType<typeof setTimeout> | null = null;
+let lastCompleted: string | null | undefined;  // undefined until the first load of this check
 
 const METHODS = ['GET', 'HEAD', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'];
 const base = () => `/api/regression/projects/${encodeURIComponent(props.projectId)}/checks/${encodeURIComponent(props.checkId)}`;
@@ -56,10 +57,12 @@ async function load() {
     if (!dirty.value) probes.value = state.probes;
     settings.value = { disposable: false, reset_path: '', ignore: [], ...state.settings };
     ignoreText.value = (state.settings.ignore || []).join('\n');
-    const wasRunning = Boolean(running.value);
     runs.value = state.runs;
+    // A run can finish before the first poll, so compare the newest completed run, not the running state.
+    const newest = state.runs.find((run) => run.state === 'completed')?.run_id ?? null;
+    if (lastCompleted !== undefined && newest !== lastCompleted) emit('reportChanged');
+    lastCompleted = newest;
     if (running.value) timer = setTimeout(() => void load(), 2000);
-    else if (wasRunning) emit('reportChanged');
   } catch (cause: any) { error.value = cause.message; }
 }
 
@@ -106,7 +109,9 @@ const startRun = (kind: 'baseline' | 'candidate') => act(kind, async () => {
 const addProbe = () => { probes.value.push({ method: 'GET', path: '/' }); dirty.value = true; };
 const removeProbe = (index: number) => { probes.value.splice(index, 1); dirty.value = true; };
 
-watch(() => [props.projectId, props.checkId], () => { dirty.value = false; unfilled.value = []; void load(); }, { immediate: true });
+watch(() => [props.projectId, props.checkId], () => {
+  dirty.value = false; unfilled.value = []; lastCompleted = undefined; void load();
+}, { immediate: true });
 onBeforeUnmount(() => { if (timer) clearTimeout(timer); });
 </script>
 
