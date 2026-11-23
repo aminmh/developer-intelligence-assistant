@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import http.client
 import logging
+import re
 import socket
 import ssl
 import threading
@@ -285,6 +286,27 @@ def _span_delta(deltas: dict[str, dict[str, Any]] | None, template: str) -> dict
     return next((delta for route, delta in (deltas or {}).items() if route.strip("/") == wanted), None)
 
 
+def _template_pattern(template: str) -> re.Pattern:
+    """A route template as a regex over concrete paths: each {param} matches one segment."""
+    parts = re.split(r"(\{[A-Za-z_][A-Za-z0-9_]*\??\})", template)
+    return re.compile("^" + "".join("[^/]+" if part.startswith("{") else re.escape(part) for part in parts) + "$")
+
+
+def _result_key(row: dict[str, Any], templates: list[tuple[str, str]]) -> str:
+    """The report route a replayed request exercises: its own template, else the route whose template matches its path.
+
+    Hand-typed or imported probes carry only a concrete path, such as /api/orders/1 for /api/orders/{id}.
+    """
+    key = _route_key(row["method"], row["template"])
+    if "{" in row["template"]:
+        return key
+    path = row["path"].split("?", 1)[0]
+    for method, template in templates:
+        if _route_key(method, "") == _route_key(row["method"], "") and _template_pattern(template).match(path):
+            return _route_key(method, template)
+    return key
+
+
 def _route_key(method: str, template: str) -> str:
     from regression.probes import _method
 
@@ -297,9 +319,10 @@ def merge(report: dict[str, Any], candidate: dict[str, Any] | None, deltas: dict
     from regression.coverage import apply_coverage
 
     results = ((candidate or {}).get("summary") or {}).get("results") or []
+    templates = [(route.get("method", ""), route.get("path", "")) for route in report.get("routes", [])]
     by_route: dict[str, list[dict[str, Any]]] = {}
     for row in results:
-        by_route.setdefault(_route_key(row["method"], row["template"]), []).append(row)
+        by_route.setdefault(_result_key(row, templates), []).append(row)
     known = set()
     for route in report.get("routes", []):
         key = _route_key(route.get("method", ""), route.get("path", ""))

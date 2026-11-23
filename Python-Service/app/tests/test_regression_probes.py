@@ -85,6 +85,7 @@ def test_probes_from_capabilities_model_failure_leaves_routes_unfilled():
 
     built = build_from_routes([{"method": "GET", "path": "/a/{id}"}], [], model_call=broken)
     assert built["probes"] == [] and built["unfilled"][0]["params"] == ["id"]
+    assert built["unfilled"][0]["reason"] == "the model could not be reached"  # found live: say why
 
 
 def test_probes_from_capabilities_edited_set_is_stored_in_order(tmp_path):

@@ -145,6 +145,7 @@ def build_from_routes(routes: list[dict[str, Any]], excerpts: list[dict[str, Any
     for start in range(0, len(needs_model), MAX_ROUTES_PER_PROMPT):
         batch = needs_model[start:start + MAX_ROUTES_PER_PROMPT]
         answered: dict[str, dict[str, Any]] = {}
+        missing = "no value proposed"
         try:
             content, _model, _used = model_call(json.dumps({"routes": batch, "files": excerpts}, ensure_ascii=False),
                                                 system=TASK, temperature=0.0, max_tokens=3000, provider=provider,
@@ -154,11 +155,12 @@ def build_from_routes(routes: list[dict[str, Any]], excerpts: list[dict[str, Any
                     answered.setdefault(item["route"], item)
         except Exception as exc:  # noqa: BLE001 — unanswered routes stay for the developer to fill
             logger.warning("regression_probe_model_failed error_type=%s", type(exc).__name__)
+            missing = "the model could not be reached"
         for key in batch:
             method, template = key.split(" ", 1)
             item = answered.get(key)
             if item is None:
-                unfilled.append({"route": key, "params": route_parameters(template), "reason": "no value proposed"})
+                unfilled.append({"route": key, "params": route_parameters(template), "reason": missing})
                 continue
             params = item.get("params") if isinstance(item.get("params"), dict) else {}
             try:

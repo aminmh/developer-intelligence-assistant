@@ -332,3 +332,24 @@ def test_routes_agent_tool_lists_replay_differences(tmp_path):
     route, other = _items(report)
     assert route["replay_differences"][0]["path"] == "/o/7" and route["span_flags"] == ["query_count"]
     assert other["kind"] == "request" and other["route"] == "GET /h"
+
+
+def test_verdicts_match_hand_typed_paths_to_route_templates():
+    """Found live: a probe typed as /api/orders/1 belongs to GET /api/orders/{id}, not to "other requests"."""
+    report = {"routes": [{"method": "GET", "path": "/api/orders/{id}", "verdict": "unchanged"},
+                         {"method": "GET", "path": "/api/orders", "verdict": "unchanged"},
+                         {"method": "GET", "path": "/api/items/{item?}", "verdict": "unchanged"}],
+              "symbols": [], "impacted": [], "uncovered": []}
+    row = lambda path, equal, method="GET": {"probe_id": path, "method": method, "path": path, "template": path,
+                                             "equal": equal, "differences": [] if equal else [{"where": "status"}]}
+    candidate = {"run_id": "c", "summary": {"baseline_run_id": "b", "results": [
+        row("/api/orders/1", False), row("/api/orders?page=2", True), row("/api/orders/1/items", False),
+        row("/api/orders/1", False, method="DELETE"), row("/api/items/9", True)]}}
+    merged = merge(report, candidate)
+    by_path = {r["path"]: r for r in merged["routes"]}
+    assert by_path["/api/orders/{id}"]["verdict"] == "suspected_regression"
+    assert by_path["/api/orders/{id}"]["replay"]["probes"] == 1
+    assert by_path["/api/orders"]["replay"] == {"probes": 1, "differing": 0, "differences": []}
+    assert by_path["/api/items/{item?}"]["coverage"] == ["replay"]
+    assert sorted((o["method"], o["path"]) for o in merged["replay_other"]) == [("DELETE", "/api/orders/1"),
+                                                                              ("GET", "/api/orders/1/items")]
