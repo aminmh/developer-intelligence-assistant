@@ -104,6 +104,34 @@ def body_view(response: dict[str, Any]) -> tuple[str, Any]:
     return "text", re.sub(r"\s+", " ", text).strip()
 
 
+LOCAL_ALIASES = ("localhost", "127.0.0.1", "host.docker.internal", "0.0.0.0")
+
+
+def origin_aliases(origin: str) -> list[str]:
+    """Prefixes under which an app may print its own absolute URLs.
+
+    A local target is reached as host.docker.internal but usually prints APP_URL (localhost); both
+    mean "this app". Found live: Laravel pagination links differed only by the two targets' ports.
+    """
+    from urllib.parse import urlsplit
+
+    parts = urlsplit(origin)
+    if not parts.hostname:
+        return []
+    port = f":{parts.port}" if parts.port else ""
+    hosts = LOCAL_ALIASES if parts.hostname in LOCAL_ALIASES else (parts.hostname,)
+    return sorted({f"{scheme}://{host}{port}" for scheme in ("http", "https") for host in hosts}, key=len, reverse=True)
+
+
+def relative(value: Any, prefixes: list[str]) -> Any:
+    """A string URL on one of ``prefixes`` with the origin replaced by ``<origin>``."""
+    if isinstance(value, str):
+        for prefix in prefixes:
+            if value == prefix or value.startswith((prefix + "/", prefix + "?")):
+                return "<origin>" + value[len(prefix):]
+    return value
+
+
 def _headers(response: dict[str, Any]) -> dict[str, str]:
     headers = response.get("headers") or {}
     out = {name: str(headers.get(name, "")) for name in COMPARED_HEADERS}
@@ -111,8 +139,13 @@ def _headers(response: dict[str, Any]) -> dict[str, str]:
     return out
 
 
-def _differences(base: dict[str, Any], candidate: dict[str, Any]) -> list[dict[str, Any]]:
-    """Every difference between two responses, before noise and rules."""
+def _differences(base: dict[str, Any], candidate: dict[str, Any],
+                 origins: tuple[list[str], list[str]] | None = None) -> list[dict[str, Any]]:
+    """Every difference between two responses, before noise and rules.
+
+    ``origins`` holds the URL prefixes of each side's own app; such URLs compare by path.
+    """
+    mine, theirs = origins or ([], [])
     diffs: list[dict[str, Any]] = []
     if base.get("error") or candidate.get("error"):
         if base.get("error") != candidate.get("error"):
@@ -121,12 +154,15 @@ def _differences(base: dict[str, Any], candidate: dict[str, Any]) -> list[dict[s
     if base.get("status") != candidate.get("status"):
         diffs.append({"where": "status", "path": "", "base": base.get("status"), "candidate": candidate.get("status")})
     left, right = _headers(base), _headers(candidate)
+    left["location"], right["location"] = relative(left["location"], mine), relative(right["location"], theirs)
     for name in COMPARED_HEADERS:
         if left[name] != right[name]:
             diffs.append({"where": "header", "path": name, "base": left[name], "candidate": right[name]})
     kind_a, view_a = body_view(base)
     kind_b, view_b = body_view(candidate)
     if kind_a == "json" and kind_b == "json":
+        view_a = {path: relative(value, mine) for path, value in view_a.items()}
+        view_b = {path: relative(value, theirs) for path, value in view_b.items()}
         for path in sorted(set(view_a) | set(view_b)):
             if view_a.get(path, "<missing>") != view_b.get(path, "<missing>"):
                 diffs.append({"where": "body", "path": path, "base": view_a.get(path, "<missing>"),
@@ -155,12 +191,13 @@ def noise_between(first: dict[str, Any], second: dict[str, Any]) -> list[str]:
 
 
 def compare(base: dict[str, Any], candidate: dict[str, Any], *, noise: list[str] | None = None,
-            ignore: list[str] | None = None) -> dict[str, Any]:
+            ignore: list[str] | None = None, origins: tuple[str, str] | None = None) -> dict[str, Any]:
     """Clauses 15-16: differences beyond noise and ignore rules, capped, with what was dropped."""
     noisy = set(noise or [])
     rules = compile_rules(ignore)
     kept, dropped = [], {"noise": 0, "ignored": 0}
-    for diff in _differences(base, candidate):
+    prefixes = (origin_aliases(origins[0]), origin_aliases(origins[1])) if origins else None
+    for diff in _differences(base, candidate, prefixes):
         if _key(diff) in noisy:
             dropped["noise"] += 1
         elif diff["where"] == "body" and any(rule.match(diff["path"]) for rule in rules):

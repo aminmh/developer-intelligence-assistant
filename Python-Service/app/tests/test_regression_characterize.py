@@ -135,7 +135,7 @@ def test_symbol_tests_are_model_written_review_only_and_budgeted():
     bodies = {"s2": {"path": "app/Shop.php", "line": 3, "body": "function fee() { return 2; }"},
               "s3": {"path": "app/Shop.php", "line": 9, "body": "function round() {}"}}
     files, skipped = symbol_tests(rows, bodies, PHPUNIT, model_call=model, limit=1)
-    assert [f["path"] for f in files] == ["tests/Feature/Characterization/ShopFeeCharacterizationTest.php"]
+    assert [f["path"] for f in files] == ["tests/Characterization/ShopFeeCharacterizationTest.php"]
     assert files[0]["review_only"] is True and files[0]["content"].startswith("<?php")
     assert prompts[0]["base_source"]["body"].startswith("function fee") and prompts[0]["test_runner"] == "phpunit"
     assert skipped == [{"symbol": "App\\Shop::tax", "reason": "base source unavailable"},
@@ -216,7 +216,29 @@ def test_bundle_zip_and_route(tmp_path, monkeypatch):
     assert zipped.headers["content-type"] == "application/zip"
     with zipfile.ZipFile(io.BytesIO(zipped.content)) as archive:
         names = archive.namelist()
-    assert names[0] == "README-regression-tests.md" and any(n.startswith("tests/Feature/Characterization/") for n in names)
+    assert names[0] == "README-regression-tests.md" and any(n.startswith("tests/Characterization/") for n in names)
     pending = store.create("pizza", "rev_a", "rev_c")
     assert client.post(f"/projects/pizza/regression-checks/{pending['check_id']}/tests", headers=headers).status_code == 422
     assert bundle_zip({"files": []})  # an empty bundle is still a valid archive
+
+
+def test_route_tests_run_on_the_recorded_database_without_reset_and_skip_own_urls():
+    """Found live on pizza-builder: Pest.php applies RefreshDatabase to tests/Feature, seeders mint new ULIDs,
+    and pagination links carry the host the request used."""
+    paged = _json({"data": [{"id": "01M83PAZN1MT9DZ8CKBFQ1DAB1"}],
+                   "links": {"first": "http://host.docker.internal:8201/api/v1/sizes?page=1", "next": None,
+                             "docs": "https://example.com/docs"},
+                   "meta": {"path": "http://localhost:8201/api/v1/sizes"}})
+    baseline = {"run_id": "run-b", "summary": {"noise": {}, "target_origin": "http://host.docker.internal:8201"}}
+    probes = [{"probe_id": "p1", "order": 0, "method": "GET", "path": "/api/v1/sizes", "template": "/api/v1/sizes",
+               "headers": {}, "body": None}]
+    bundle = build_bundle(_check(), probes, baseline, lambda _r, _p: paged, {}, [PEST], symbol_bodies={},
+                          model_call=lambda *a, **k: ("{}", "m", "local"), notes=["Source was partial."])
+    readme, tests = bundle["files"][0], bundle["files"][1]
+    assert tests["path"].startswith("tests/Characterization/")  # outside ->in('Feature') and its RefreshDatabase
+    assert "uses(Tests\\TestCase::class);" in tests["content"] and "RefreshDatabase" not in tests["content"]
+    assert "assertJsonPath('data.0.id', '01M83PAZN1MT9DZ8CKBFQ1DAB1')" in tests["content"]  # same database: ids hold
+    assert "8201" not in tests["content"] and "2 own-origin URL" in tests["content"]
+    assert "assertJsonPath('links.docs', 'https://example.com/docs')" in tests["content"]  # other hosts still pinned
+    assert "> Source was partial." in readme["content"] and "DB_DATABASE=" in readme["content"]
+    assert "No test template is available" not in readme["content"]

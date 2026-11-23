@@ -1,7 +1,7 @@
 """Symfony ``characterization_tests``: WebTestCase tests that pin recorded HTTP responses.
 
-Files go under ``tests/`` (the default ``phpunit.xml.dist`` suite). The tests start from the same
-data the baseline was recorded with and do not reset the database.
+Files go under ``tests/`` (the default ``phpunit.xml.dist`` suite). The tests read the database the
+baseline was recorded on and never reset it (see the Laravel templates for why a fresh load is not enough).
 """
 
 from __future__ import annotations
@@ -20,9 +20,9 @@ use Symfony\\Bundle\\FrameworkBundle\\Test\\WebTestCase;
 
 /**
  * Characterization tests from a Developer Assistant regression check.
- * They pin the responses recorded from the base version: run them against the base version
- * first (they must pass), then against the changed version. They start from the same data
- * the recording used and do not reset the database.
+ * They pin the responses the base version gave on the database the baseline was recorded on.
+ * Run them against a copy of that database: first on the base version (they must pass), then on
+ * the changed version. They do not reset or load fixtures.
  */
 class {name}Test extends WebTestCase
 {
@@ -46,7 +46,10 @@ class {name}Test extends WebTestCase
     json_assertion="        self::assertSame({value}, $data{bracket_path});",
     text_assertion="        self::assertStringContainsString({text}, (string) $response->getContent());",
     json_value="json_decode({json}, true)", no_body="null", uses_dot_path=False,
-    run_command="php bin/phpunit tests/Characterization",
+    run_command="DATABASE_URL=<recorded database> php bin/phpunit tests/Characterization",
+    setup_note=("These tests read the database the baseline was recorded on and never reset it. Point the test "
+                "environment's DATABASE_URL at a copy of it (.env.test.local or the command line). Write probes change "
+                "that copy, so restore it before each run."),
 )
 
 

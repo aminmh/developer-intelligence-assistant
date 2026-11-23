@@ -183,6 +183,7 @@ class TestTemplateRecord:
     null_literal: str = "null"
     uses_dot_path: bool = True         # dot paths cannot address keys that contain dots
     run_command: str = ""
+    setup_note: str = ""               # how to point the tests at the data the baseline was recorded on
 
 
 def record_dict(record: Any) -> dict[str, Any]:

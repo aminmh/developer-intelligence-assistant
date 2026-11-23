@@ -61,3 +61,21 @@ def test_noise_structural_diff_keys_with_dots_stay_unambiguous():
     """Found writing characterization tests: {"a.b": 1} and {"a": {"b": 1}} must not share a path."""
     assert flatten({"a.b": 1, "a": {"b": 2}, "has space": 3}) == {'$["a.b"]': 1, "$.a.b": 2, '$["has space"]': 3}
     assert not compare(_json({"a.b": 1}), _json({"a": {"b": 1}}))["equal"]
+
+
+def test_noise_structural_diff_compares_own_urls_by_path():
+    """Found live on pizza-builder: pagination links differed only by each target's own port."""
+    from regression.diff import origin_aliases
+
+    base = _json({"links": {"first": "http://host.docker.internal:8201/api/x?page=1", "cdn": "https://cdn.example.com/a.js"},
+                  "meta": {"path": "http://localhost:8201/api/x"}})
+    cand = _json({"links": {"first": "http://host.docker.internal:8202/api/x?page=1", "cdn": "https://cdn.example.com/a.js"},
+                  "meta": {"path": "http://localhost:8202/api/x"}})
+    origins = ("http://host.docker.internal:8201", "http://host.docker.internal:8202")
+    assert compare(base, cand, origins=origins)["equal"] is True
+    assert not compare(base, cand)["equal"]  # without the origins the ports differ
+    moved = _json({"links": {"first": "http://host.docker.internal:8202/api/y?page=1", "cdn": "https://cdn.example.com/a.js"},
+                   "meta": {"path": "http://localhost:8202/api/x"}})
+    assert [d["path"] for d in compare(base, moved, origins=origins)["differences"]] == ["$.links.first"]
+    assert "http://localhost:8201" in origin_aliases("http://host.docker.internal:8201")
+    assert origin_aliases("https://shop.example.com") == ["https://shop.example.com", "http://shop.example.com"]

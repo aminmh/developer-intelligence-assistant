@@ -16,7 +16,7 @@ import logging
 import re
 from typing import Any, Callable
 
-from regression.diff import body_view, compile_rules, general
+from regression.diff import body_view, compile_rules, general, origin_aliases, relative
 
 MAX_ASSERTIONS = 40
 MAX_TEXT_ASSERTIONS = 3
@@ -97,14 +97,16 @@ def _text_fragments(raw: Any) -> list[str]:
     return fragments[:MAX_TEXT_ASSERTIONS]
 
 
-def assertions_for(response: dict[str, Any], template: Any, *, noise: list[str], ignore: list[str]) -> tuple[list[str], list[str]]:
+def assertions_for(response: dict[str, Any], template: Any, *, noise: list[str], ignore: list[str],
+                   origin: str = "") -> tuple[list[str], list[str]]:
     """Assertion lines for a recorded response, and notes on what was left out."""
     kind, view = body_view(response)
     notes: list[str] = []
     noisy = {key.split(":", 1)[1] for key in noise if key.startswith("body:")}
     if kind == "json":
         rules = compile_rules(ignore)
-        lines, skipped = [], {"noise": 0, "ignored": 0, "shape": 0, "path": 0}
+        lines, skipped = [], {"noise": 0, "ignored": 0, "shape": 0, "path": 0, "own-origin URL": 0}
+        prefixes = origin_aliases(origin) if origin else []
         for path, value in view.items():
             if general(path) in noisy:
                 skipped["noise"] += 1
@@ -112,6 +114,8 @@ def assertions_for(response: dict[str, Any], template: Any, *, noise: list[str],
                 skipped["ignored"] += 1
             elif value in ("<timestamp>", "<uuid>"):
                 skipped["shape"] += 1
+            elif relative(value, prefixes) is not value:
+                skipped["own-origin URL"] += 1  # the test client runs under another host than the recording
             elif path == "$" or (template.uses_dot_path and dot_path(path) is None):
                 skipped["path"] += 1
             else:
@@ -135,7 +139,7 @@ def assertions_for(response: dict[str, Any], template: Any, *, noise: list[str],
 
 
 def route_tests(probes: list[dict[str, Any]], load: Callable[[str], dict[str, Any] | None], template: Any, *,
-                noise: dict[str, list[str]], ignore: list[str], skip_routes: set[str] | None = None,
+                noise: dict[str, list[str]], ignore: list[str], skip_routes: set[str] | None = None, origin: str = "",
                 route_of: Callable[[dict[str, Any]], str] | None = None) -> tuple[list[str], list[dict[str, Any]]]:
     """One test per recorded probe, in probe order; probes of routes tests already cover are skipped."""
     tests, skipped, names = [], [], set()
@@ -148,7 +152,8 @@ def route_tests(probes: list[dict[str, Any]], load: Callable[[str], dict[str, An
         if response is None or response.get("error") or response.get("status") is None:
             skipped.append({"probe": f"{probe['method']} {probe['path']}", "reason": "no baseline recording"})
             continue
-        lines, notes = assertions_for(response, template, noise=noise.get(probe["probe_id"], []), ignore=ignore)
+        lines, notes = assertions_for(response, template, noise=noise.get(probe["probe_id"], []), ignore=ignore,
+                                      origin=origin)
         name = _name(f"{probe['method']} {probe['path']}")
         while name in names:
             name += "_2"
@@ -228,17 +233,22 @@ def symbol_tests(symbols: list[dict[str, Any]], bodies: dict[str, dict[str, Any]
 
 # --- the bundle -----------------------------------------------------------------------------------------
 
-def _readme(check: dict[str, Any], template: Any | None, files: list[dict[str, Any]], skipped: list[dict[str, Any]]) -> str:
+def _readme(check: dict[str, Any], template: Any | None, files: list[dict[str, Any]], skipped: list[dict[str, Any]],
+            notes: list[str] | None = None) -> str:
     lines = [f"# Characterization tests for regression check {check['check_id']}", "",
              f"Base revision: `{check['base_revision_id']}`. Candidate revision: `{check['candidate_revision_id']}`.", "",
              "1. Copy the files into the project at the paths shown.",
-             "2. Check out the base version, start from the same seeded data used for the baseline recording, and run "
-             "the tests. They must pass: they describe the base version.",
-             "3. Check out the changed version with the same data and run them again. A failure is a behavior change "
-             "to review.", ""]
+             "2. Check out the base version and run the tests against a copy of the database the baseline was recorded "
+             "on. They must pass: they describe the base version.",
+             "3. Check out the changed version, restore the same copy, and run them again. A failure is a behavior "
+             "change to review.", ""]
+    for note in notes or []:
+        lines += [f"> {note}", ""]
+    if template and template.setup_note:
+        lines += [template.setup_note, ""]
     if template and template.run_command:
         lines += [f"Run with: `{template.run_command}`", ""]
-    if not template:
+    if not template and not notes:
         lines += ["No test template is available for this project's framework, so only the request file is included. "
                   f"Import `{REQUEST_FILE}` into a regression check's probes to replay it against both versions.", ""]
     lines += ["## Files", ""] + [f"- `{f['path']}` ({f['kind'].replace('_', ' ')}"
@@ -253,7 +263,7 @@ def build_bundle(check: dict[str, Any], probes: list[dict[str, Any]], baseline: 
                  load: Callable[[str, int], dict[str, Any] | None] | None, settings: dict[str, Any],
                  templates: list[Any], *, symbol_bodies: dict[str, dict[str, Any]] | None = None,
                  model_call: Callable[..., Any] | None = None, provider: str = "local",
-                 route_of: Callable[[dict[str, Any]], str] | None = None) -> dict[str, Any]:
+                 route_of: Callable[[dict[str, Any]], str] | None = None, notes: list[str] | None = None) -> dict[str, Any]:
     """Every file of the test bundle with what was left out and why."""
     report = check["report"]
     template = templates[0] if templates else None
@@ -273,7 +283,8 @@ def build_bundle(check: dict[str, Any], probes: list[dict[str, Any]], baseline: 
     if template and recorded:
         noise = (baseline.get("summary") or {}).get("noise") or {}
         tests, skipped_routes = route_tests(probes, load_first, template, noise=noise, ignore=settings.get("ignore") or [],
-                                            skip_routes=tested_routes, route_of=route_of)
+                                            skip_routes=tested_routes, route_of=route_of,
+                                            origin=(baseline.get("summary") or {}).get("target_origin") or "")
         skipped += skipped_routes
         if tests:
             files.append({"path": template.file.replace("{name}", name),
@@ -290,7 +301,7 @@ def build_bundle(check: dict[str, Any], probes: list[dict[str, Any]], baseline: 
         skipped += skipped_symbols
     if probes:
         files.append({"path": REQUEST_FILE, "content": request_file(probes, load_first), "kind": "request_file"})
-    readme = {"path": "README-regression-tests.md", "content": _readme(check, template, files, skipped), "kind": "readme"}
+    readme = {"path": "README-regression-tests.md", "content": _readme(check, template, files, skipped, notes), "kind": "readme"}
     return {"files": [readme, *files], "skipped": skipped, "template": template.runner if template else None,
             "framework": template.framework if template else None}
 

@@ -154,6 +154,7 @@ def execute(run: dict[str, Any], target: dict[str, Any], probes: list[dict[str, 
             recordings.load(project_id, check_id, run_id, probe["probe_id"], 2) or {}) for probe in sent}
         return summary
     summary["baseline_run_id"] = baseline["run_id"] if baseline else None
+    run = {**run, "target_origin": origin}
     summary["results"] = compare_with_baseline(project_id, run, sent, baseline, settings, recordings)
     return summary
 
@@ -172,7 +173,8 @@ def compare_with_baseline(project_id: str, run: dict[str, Any], probes: list[dic
         if before is None or after is None:
             results.append({**row, "equal": None, "reason": "no baseline recording for this probe"})
             continue
-        outcome = compare(before, after, noise=noise.get(probe["probe_id"]), ignore=settings.get("ignore"))
+        origins = (((baseline or {}).get("summary") or {}).get("target_origin") or "", run.get("target_origin") or "")
+        outcome = compare(before, after, noise=noise.get(probe["probe_id"]), ignore=settings.get("ignore"), origins=origins)
         results.append({**row, **outcome, "base_status": before.get("status"), "candidate_status": after.get("status")})
     return results
 

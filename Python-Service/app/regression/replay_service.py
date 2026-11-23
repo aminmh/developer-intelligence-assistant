@@ -186,7 +186,7 @@ def test_bundle(store: RegressionStore, project_id: str, check_id: str, *,
     bundle = build_bundle(check, store.get_probes(project_id, check_id), store.latest_run(project_id, check_id, "baseline"),
                           lambda run_id, probe_id: recordings.load(project_id, check_id, run_id, probe_id, 1),
                           store.get_settings(project_id, check_id), templates, symbol_bodies=bodies,
-                          model_call=model_call, provider=_provider(project_id))
+                          model_call=model_call, provider=_provider(project_id), notes=notes)
     return {**bundle, "notes": notes, "check_id": check_id}
 
 
