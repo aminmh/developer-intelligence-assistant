@@ -10,7 +10,7 @@ import { openDocument, complete as completeDockerfile, format as formatDockerfil
 import { installOidcAuth, authRoleFor, authIsGlobalAdmin, authCanRunRuntimeSetup, authProjectsFor, authRemoveProjectMemberships,
   authCreateIdeToken, authListIdeTokens, authRevokeIdeToken, authUserForIdeToken } from './src/server/oidcAuth';
 import { registerDataAdminRoutes } from './src/server/dataAdminRoutes';
-import { registerCodeQualityRoutes } from './src/server/codeQualityRoutes';
+import { createCredentialHelper, registerCodeQualityRoutes } from './src/server/codeQualityRoutes';
 import { registerWorkingTreeGrants, registerWorkingTreeUpload, type WorkingTreeDependencies } from './src/server/workingTreeRoutes';
 import { registerSchemaDraftRoutes } from './src/server/schemaDraftRoutes';
 import { registerRuntimeSchemaRoutes } from './src/server/runtimeSchemaRoutes';
@@ -18,6 +18,7 @@ import { registerContractRoutes } from './src/server/contractRoutes';
 import { registerIdeApi, registerIdeTokenRoutes, type IdeDependencies } from './src/server/ideRoutes';
 import { registerFrontendRoutes } from './src/server/frontendRoutes';
 import { codeImpactBodyParser, registerCodeImpactRoutes } from './src/server/codeImpactRoutes';
+import { registerRegressionRoutes } from './src/server/regressionRoutes';
 
 dotenv.config();
 
@@ -301,6 +302,23 @@ async function startServer() {
     apiUrl: PYTHON_API_URL,
     getUser: (res) => (res.locals as any).authUser,
     canReadProject: (user, projectId) => Boolean(user && (authIsGlobalAdmin(user) || authRoleFor(user, projectId))),
+  });
+  registerRegressionRoutes(app, {
+    apiUrl: PYTHON_API_URL,
+    internalSecret: INTERNAL_SECRET,
+    getUser: (res) => (res.locals as any).authUser,
+    canReadProject: (user, projectId) => Boolean(user && (authIsGlobalAdmin(user) || authRoleFor(user, projectId))),
+    canOperateProject: (user, projectId) => Boolean(user && (authIsGlobalAdmin(user) || ['operator', 'admin'].includes(authRoleFor(user, projectId) || ''))),
+    bearerToken: async (targetId) => {
+      const helper = createCredentialHelper({ helperUrl: process.env.RUNTIME_HELPER_URL || 'http://127.0.0.1:47831',
+        webOrigin: process.env.WEB_ORIGIN || 'http://localhost:3000', internalSecret: INTERNAL_SECRET });
+      try {
+        const { response, data } = await helper.callCredentialHelper(targetId, 'code-quality-benchmark-use', 'POST', {});
+        return { status: response.status, token: typeof data.token === 'string' ? data.token : undefined, detail: data.detail };
+      } catch {
+        return { status: 503, detail: 'The desktop OS credential helper is unavailable. Start or restart Developer Assistant and retry.' };
+      }
+    },
   });
   registerSchemaDraftRoutes(app, {
     apiUrl: PYTHON_API_URL,

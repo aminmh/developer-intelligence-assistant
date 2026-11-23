@@ -30,3 +30,7 @@ class Capability(str, Enum):
     TEST_CONVENTIONS = "test_conventions"
     CONFIG_RISKS = "config_risks"
     TAINT_MODEL = "taint_model"
+    # Regression check (@.archcore/regression/regression-evidence-comes-from-framework-capabilities.adr.md).
+    RUN_HINTS = "run_hints"
+    PROBE_HINTS = "probe_hints"
+    CHARACTERIZATION_TESTS = "characterization_tests"

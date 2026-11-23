@@ -126,5 +126,65 @@ class TaintStubRecord:
     content: str
 
 
+@dataclass(frozen=True)
+class RunHintRecord:
+    """Capability ``run_hints``: one thing a developer needs to start the application.
+
+    Hints are shown to the developer as a checklist; the app never runs a ``command``.
+    """
+
+    framework: str
+    kind: str                          # "env" | "service" | "command" | "port" | "note"
+    name: str                          # variable, service or step name
+    detail: str                        # what to do or why it is needed
+    file: str = ""                     # where the hint comes from, relative to the revision root
+    line: int | None = None
+
+
+@dataclass(frozen=True)
+class ParamHintRecord:
+    """Capability ``probe_hints``: a file that tells where request parameter values come from.
+
+    The regression check reads a bounded excerpt of ``file`` and lets the model propose route
+    parameters, query strings and bodies from it; the record itself carries no values.
+    """
+
+    framework: str
+    kind: str                          # "seeder" | "factory" | "fixture" | "validation" | "binding"
+    name: str                          # class or fixture name
+    file: str                          # relative to the revision root
+    line: int | None = None
+    handler: str | None = None         # handler symbol the hint applies to, when known
+
+
+@dataclass(frozen=True)
+class TestTemplateRecord:
+    """Capability ``characterization_tests``: how this project's test runner expresses a recorded HTTP exchange.
+
+    Templates are plain text with placeholders the regression check fills; nothing here is executed.
+    ``file`` and ``file_template`` take ``{name}`` and ``{tests}``; ``route_test`` takes ``{test_name}``,
+    ``{title}``, ``{note}``, ``{method}``, ``{path}``, ``{body}``, ``{status}`` and ``{assertions}``;
+    ``json_assertion`` takes ``{dot_path}``, ``{bracket_path}`` and ``{value}``; ``text_assertion`` takes
+    ``{text}``. String placeholders arrive as single-quoted literals with backslash escapes.
+    """
+
+    framework: str
+    runner: str                        # "phpunit" | "pest" | "pytest" | ...
+    language: str                      # language of the generated file, for prompts and display
+    file: str                          # path of the generated file, with {name}
+    file_template: str
+    route_test: str
+    json_assertion: str
+    text_assertion: str
+    json_value: str                    # wraps a JSON literal into a value, with {json}
+    no_body: str                       # value for a request without a body
+    true_literal: str = "true"
+    false_literal: str = "false"
+    null_literal: str = "null"
+    uses_dot_path: bool = True         # dot paths cannot address keys that contain dots
+    run_command: str = ""
+    setup_note: str = ""               # how to point the tests at the data the baseline was recorded on
+
+
 def record_dict(record: Any) -> dict[str, Any]:
     return asdict(record)

@@ -391,3 +391,57 @@ def test_code_impact_items_cite_path_and_line(monkeypatch, project):
 def test_code_impact_needs_an_indexed_revision(project):
     out = _output(_run("code_impact", {"symbols": ["X"]}, project, filename="armaiti-api-develop.zip"))
     assert out["coverage"] == "unavailable" and out["items"] == []
+
+
+# --- regression_check (regression-check spec clause 22) --------------------------------------------
+
+def test_regression_check_cites(tmp_path):
+    from agent_tools.regression import REGRESSION_TOOLS, regression_check
+    from agent_tools.types import ToolContext
+    from regression.store import RegressionStore
+
+    store = RegressionStore(tmp_path / "r.sqlite")
+    context = ToolContext(workflow="code_refactor", project_id="pizza", revision_id="rev_b")
+    started = []
+
+    def start(project_id, base, candidate, store_):
+        started.append((project_id, base, candidate))
+        return store_.create(project_id, base, candidate)
+
+    first = regression_check({"base_revision_id": "rev_a"}, context, store=store, start=start)
+    assert first["state"] == "pending" and started == [("pizza", "rev_a", "rev_b")]
+    check_id = first["check_id"]
+    report = store.get("pizza", check_id)["report"]
+    report["symbols"] = [{"fqn": "App\\Repo::find", "path": "app/Repo.php", "line": 10, "change": "modified",
+                          "verdict": "suspected_regression", "coverage": [],
+                          "evidence": [{"reasons": [{"text": "returns null now", "path": "app/Repo.php", "line": 12}]}]}]
+    report["routes"] = [{"method": "GET", "path": "/orders/{id}", "handler_path": "app/OrderController.php",
+                         "handler_line": 20, "verdict": "suspected_regression", "depends_on": ["App\\Repo::find"]}]
+    store.save("pizza", check_id, state="done", report=report)
+    out = regression_check({"base_revision_id": "rev_a"}, context, store=store, start=start)
+    assert out["state"] == "done" and len(started) == 1
+    symbol, route = out["items"]
+    assert (symbol["path"], symbol["line"], symbol["verdict"]) == ("app/Repo.php", 10, "suspected_regression")
+    assert symbol["reasons"][0]["line"] == 12
+    assert (route["route"], route["path"], route["line"]) == ("GET /orders/{id}", "app/OrderController.php", 20)
+    assert out["counts"]["suspected_regression"] == 2 and "not proof" in out["judgment_label"]
+    assert out["characterization_tests"].startswith("Record a baseline")
+    definition = REGRESSION_TOOLS[0]
+    assert definition.effect == "read_only" and "code_refactor" in definition.workflows
+
+
+def test_regression_check_needs_a_revision_and_base(tmp_path):
+    import pytest as _pytest
+
+    from agent_tools.regression import regression_check
+    from agent_tools.types import ToolCallRejected, ToolContext
+    from regression.store import RegressionStore
+
+    store = RegressionStore(tmp_path / "r.sqlite")
+    assert regression_check({"base_revision_id": "rev_a"}, ToolContext(workflow="chat"), store=store)["state"] \
+        == "unavailable"
+    with _pytest.raises(ToolCallRejected):
+        regression_check({}, ToolContext(workflow="chat", project_id="p", revision_id="r"), store=store)
+    none = regression_check({"base_revision_id": "rev_a", "start": False},
+                            ToolContext(workflow="chat", project_id="p", revision_id="r"), store=store)
+    assert none["state"] == "none"
