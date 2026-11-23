@@ -184,6 +184,8 @@ class TestTemplateRecord:
     uses_dot_path: bool = True         # dot paths cannot address keys that contain dots
     run_command: str = ""
     setup_note: str = ""               # how to point the tests at the data the baseline was recorded on
+    package: str = ""                  # the framework package the template is written against
+    verified_range: tuple[str, str] = ()  # (lowest, below) versions of ``package`` a real run passed on; () when never run
 
 
 @dataclass(frozen=True)
@@ -204,6 +206,23 @@ class PackageRecord:
     repository: str | None = None      # "owner/repo" on GitHub when known
     reference: str | None = None       # source commit
     dev: bool = False
+
+
+@dataclass(frozen=True)
+class DocSourceRecord:
+    """Capability ``doc_sources``: where a framework keeps documentation outside its package.
+
+    ``package`` is the framework's own package as lockfiles name it. ``repository`` holds the guides, read
+    at ``ref`` filled with the version line (``{major}.x`` gives ``13.x``). ``topics`` maps a topic word
+    prefix to a file (``("test", "http-tests.md")``); ``upgrade_path`` is the guide for upgrading to a major line.
+    """
+
+    framework: str
+    package: str
+    repository: str                    # "owner/repo" on GitHub
+    ref: str                           # branch or tag with {major} and {minor}
+    upgrade_path: str = ""             # one guide per major line; empty when there is none
+    topics: tuple[tuple[str, str], ...] = ()
 
 
 def record_dict(record: Any) -> dict[str, Any]:

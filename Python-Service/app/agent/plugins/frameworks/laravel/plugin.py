@@ -120,6 +120,7 @@ class LaravelFrameworkPlugin(FrameworkPlugin):
         Capability.RUN_HINTS,
         Capability.PROBE_HINTS,
         Capability.CHARACTERIZATION_TESTS,
+        Capability.DOC_SOURCES,
         Capability.RUNTIME_INSPECTION,
         Capability.TEST_EXECUTION,
     )
@@ -853,6 +854,10 @@ class LaravelFrameworkPlugin(FrameworkPlugin):
             stub = _Path(__file__).with_name("psalm") / "taint.phpstub"
             return [TaintStubRecord(framework="laravel", analyzer="psalm", name="laravel.phpstub",
                                     content=stub.read_text(encoding="utf-8"))]
+        if capability == Capability.DOC_SOURCES:  # a fixed documentation repository, no PHP facts
+            from agent.plugins.frameworks.laravel.doc_sources import provide_doc_sources
+
+            return provide_doc_sources(context)
         if capability == Capability.CHARACTERIZATION_TESTS:  # composer.json, no PHP facts
             from agent.plugins.frameworks.laravel.test_templates import provide_test_templates
 

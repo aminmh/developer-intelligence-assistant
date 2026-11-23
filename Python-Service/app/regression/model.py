@@ -35,6 +35,7 @@ def new_report(check_id: str, project_id: str, base_revision_id: str, candidate_
         "uncovered": [],
         "partial": [],
         "contract_changes": [],
+        "package_changes": [],
         "baseline_checklist": [],
         "notes": [],
     }

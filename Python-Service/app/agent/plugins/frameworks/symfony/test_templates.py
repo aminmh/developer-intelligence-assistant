@@ -2,6 +2,7 @@
 
 Files go under ``tests/`` (the default ``phpunit.xml.dist`` suite). The tests read the database the
 baseline was recorded on and never reset it (see the Laravel templates for why a fresh load is not enough).
+Not yet run against a real Symfony project, so it has no verified range.
 """
 
 from __future__ import annotations
@@ -10,7 +11,7 @@ from agent.core.records import TestTemplateRecord
 from agent.core.revision import RevisionContext
 
 WEB_TEST_CASE = TestTemplateRecord(
-    framework="symfony", runner="phpunit", language="php",
+    framework="symfony", runner="phpunit", language="php", package="symfony/framework-bundle",
     file="tests/Characterization/{name}Test.php",
     file_template="""<?php
 

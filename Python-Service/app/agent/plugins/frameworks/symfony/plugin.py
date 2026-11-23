@@ -19,7 +19,7 @@ class SymfonyFrameworkPlugin(FrameworkPlugin):
     capabilities = (Capability.AST_ANALYSIS, Capability.DEPENDENCY_ANALYSIS,
                     Capability.ROUTE_ANALYSIS, Capability.ROUTE_AUTHORIZATION, Capability.TAINT_MODEL,
                     Capability.CONFIG_RISKS, Capability.TRANSLATIONS, Capability.TEMPLATES,
-                    Capability.CHARACTERIZATION_TESTS)
+                    Capability.CHARACTERIZATION_TESTS, Capability.DOC_SOURCES)
 
     def provide(self, capability: Capability, context: "RevisionContext") -> list:
         """Routes, guards and access rules from PHP facts and Symfony configuration; the Psalm taint model.
@@ -38,6 +38,10 @@ class SymfonyFrameworkPlugin(FrameworkPlugin):
             stub = _Path(__file__).with_name("psalm") / "taint.phpstub"
             return [TaintStubRecord(framework="symfony", analyzer="psalm", name="symfony.phpstub",
                                     content=stub.read_text(encoding="utf-8"))]
+        if capability == Capability.DOC_SOURCES:  # a fixed documentation repository, no PHP facts
+            from agent.plugins.frameworks.symfony.doc_sources import provide_doc_sources
+
+            return provide_doc_sources(context)
         if capability == Capability.CHARACTERIZATION_TESTS:  # a fixed WebTestCase layout, no PHP facts
             from agent.plugins.frameworks.symfony.test_templates import provide_test_templates
 

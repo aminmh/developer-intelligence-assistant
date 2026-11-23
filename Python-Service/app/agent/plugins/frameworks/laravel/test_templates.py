@@ -6,6 +6,9 @@ was recorded on, so they must not reset it: files go under ``tests/Characterizat
 ``tests/Pest.php``, and use the project's plain ``Tests\\TestCase``. Seeders that generate ULIDs,
 UUIDs or timestamps produce different data on every run, which is why a fresh seed is not enough.
 Found in a live run on pizza-builder (2026-11-23).
+
+Verified ranges: the Pest template passed on pizza-builder with ``laravel/framework`` 12.69.1 (Pest 3.8);
+the PHPUnit template has not been run against a real project yet. Widen a range only after a run.
 """
 
 from __future__ import annotations
@@ -55,7 +58,7 @@ class {{name}}Test extends TestCase
     text_assertion="        $response->assertSee({text}, false);",
     json_value="json_decode({json}, true)", no_body="[]",
     run_command="DB_DATABASE=<recorded database> php artisan test tests/Characterization",
-    setup_note=_SETUP,
+    setup_note=_SETUP, package="laravel/framework",
 )
 
 PEST = TestTemplateRecord(
@@ -83,7 +86,7 @@ test({title}, function () {
     text_assertion="    $response->assertSee({text}, false);",
     json_value="json_decode({json}, true)", no_body="[]",
     run_command="DB_DATABASE=<recorded database> ./vendor/bin/pest tests/Characterization",
-    setup_note=_SETUP,
+    setup_note=_SETUP, package="laravel/framework", verified_range=("12.0", "13.0"),
 )
 
 

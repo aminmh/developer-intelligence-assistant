@@ -2,7 +2,9 @@
 
 Spec clauses 1-4, 7-9, 11 and failure clauses 1-5. Providers run in order: the installed copy in the
 revision, then (when the project allows remote documentation) the library's files at the installed
-commit or tag, or at the target version's tag for upgrade notes. GitMCP follows in a later phase.
+commit or tag, or at the target version's tag for upgrade notes, then GitMCP. A framework plugin may name
+a separate documentation repository (``DOC_SOURCES``); its guides are read at the matching version line
+before the library's own files.
 """
 
 from __future__ import annotations
@@ -36,6 +38,15 @@ def installed_packages(archive: bytes, registry: Any = None) -> tuple[list[Any],
     if not collection.detected:
         reasons.append("No language plugin was detected for this revision, so installed versions are unknown.")
     return list(collection.records), reasons
+
+
+def doc_sources(archive: bytes, registry: Any = None) -> list[Any]:
+    """``DOC_SOURCES`` records of the frameworks detected in a revision."""
+    from agent.core.capability import Capability
+    from code_quality.framework_evidence import archive_context, collect_capabilities
+
+    with archive_context(archive, []) as context:
+        return list(collect_capabilities(context, {Capability.DOC_SOURCES}, registry)[Capability.DOC_SOURCES].records)
 
 
 def find_package(records: list[Any], library: str) -> tuple[Any | None, str | None]:
@@ -134,6 +145,21 @@ def _github(record: Any, topic: str, target: str | None, cache: KnowledgeCache |
     return found
 
 
+def _doc_source(source: Any, record: Any, topic: str, target: str | None, cache: KnowledgeCache | None,
+                fetcher: Any) -> dict[str, Any]:
+    from knowledge.providers import doc_source
+
+    key = cache_key(doc_source.PROVIDER, record.name, f"{source.repository}|{source.ref}|{record.version}", topic, target)
+    cached = cache.get(key) if cache else None
+    if cached is not None:
+        return cached
+    found = doc_source.upgrade(fetcher, source, record, target) if target else doc_source.topic(fetcher, source, record, topic)
+    found = {**found, "excerpts": [e.to_dict() for e in found["excerpts"]]}
+    if cache and (found["excerpts"] or found["reasons"]):  # one week: a version line's branch still moves
+        cache.put(key, doc_source.PROVIDER, record.name, source.ref, found)
+    return found
+
+
 def _gitmcp(record: Any, topic: str, cache: KnowledgeCache | None, mcp: Any, fetcher: Any) -> dict[str, Any]:
     from knowledge.http import Fetcher
     from knowledge.mcp_client import McpClient
@@ -154,12 +180,15 @@ def _gitmcp(record: Any, topic: str, cache: KnowledgeCache | None, mcp: Any, fet
 def lookup(archive: bytes, library: Any, topic: Any = None, target_version: Any = None, *,
            cache: KnowledgeCache | None = None, registry: Any = None,
            packages: Callable[[bytes], tuple[list[Any], list[str]]] | None = None,
-           remote_allowed: bool = False, fetcher: Any = None, mcp: Any = None) -> dict[str, Any]:
+           remote_allowed: bool = False, fetcher: Any = None, mcp: Any = None,
+           sources: Callable[[bytes], list[Any]] | None = None) -> dict[str, Any]:
     """Cited excerpts for ``library`` at the version the revision installs, from providers in order.
 
     Clauses 3-4, 8-9 and failure clauses 1-3: the installed copy first; with remote documentation
     allowed, the library's files at the installed commit or tag when the copy is missing or silent, and
     the target version's files for upgrade notes, since an installed copy cannot describe newer versions.
+    A plugin's documentation repository is read first among remote sources, and also when the installed
+    copy answered a topic one of its guides covers, since a package README rarely explains the framework.
     """
     from knowledge.http import Fetcher, RemoteUnavailable
     from knowledge.model import parse_version
@@ -179,13 +208,38 @@ def lookup(archive: bytes, library: Any, topic: Any = None, target_version: Any 
     versions = set(vendor["versions_found"])
     gaps: list[str] = list(vendor["reasons"])
     providers = ["vendor"]
-    needs_remote = bool(target) or not excerpts
+    # With a target, remote sources are needed unless the installed copy's notes reach the target's line,
+    # as a newer revision's copy does when the regression check compares two lockfiles.
+    reached = bool(target) and any((parse_version(v) or (0, 0, 0))[:2] >= (parse_version(target) or (0, 0, 0))[:2]
+                                   for v in versions)
+    needs_remote = (bool(target) and not reached) or not excerpts
+    github_fetcher = fetcher or (Fetcher() if remote_allowed else None)  # GitHub hosts share one rate limit
+    asked_remote = needs_remote
+    guides = []
+    if remote_allowed and ((target and needs_remote) or (topic and not target)):
+        from knowledge.providers.doc_source import topic_files
+
+        guides = [s for s in (sources or (lambda a: doc_sources(a, registry)))(archive)
+                  if s.package == record.name and (s.upgrade_path if target else topic_files(s, topic))]
+    for source in guides:
+        if "doc_source" not in providers:
+            providers.append("doc_source")
+        try:
+            found = _doc_source(source, record, topic, target, cache, github_fetcher)
+        except RemoteUnavailable as exc:
+            found = {"excerpts": [], "versions_found": [], "reasons": [str(exc)]}
+        if found["excerpts"] and needs_remote:
+            gaps, needs_remote = [], False  # the guide covered what the installed copy could not
+        excerpts += [Excerpt(**row) for row in found["excerpts"]]
+        versions |= set(found["versions_found"])
+        if found["excerpts"] or asked_remote:  # a guide read on top of an answer is no gap when it is silent
+            gaps += found["reasons"]
     if needs_remote and not remote_allowed:
         gaps.append(OFF_REASON)
     elif needs_remote:
         providers.append("github_ref")
         try:
-            remote = _github(record, topic, target, cache, GitHubRef(fetcher or Fetcher()))
+            remote = _github(record, topic, target, cache, GitHubRef(github_fetcher))
         except RemoteUnavailable as exc:  # failure clauses 1 and 3
             remote = {"excerpts": [], "versions_found": [], "reasons": [str(exc)]}
         if remote["excerpts"]:

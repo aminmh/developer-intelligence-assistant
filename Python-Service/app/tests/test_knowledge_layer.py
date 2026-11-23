@@ -147,6 +147,7 @@ def test_vendor_excerpts_are_capped():
 
 def test_upgrade_notes_between_versions():
     result = lookup(_archive(_project()), "acme/kit", target_version="3.0")
+    assert result["coverage"] == "complete"  # the installed notes reach 3.0, so remote documentation is not needed
     assert result["installed_version"] == "2.1.0" and result["versions_found"] == ["2.2.0", "3.0.0"]
     sections = [(e["path_or_url"].rsplit("/", 1)[-1], e["section"]) for e in result["excerpts"]]
     assert ("CHANGELOG.md", "[2.2.0]") in sections and ("CHANGELOG.md", "[3.0.0] - 2026-10-01") in sections
@@ -409,10 +410,11 @@ def test_remote_failures_are_partial():
     down = lookup(_archive(_project()), "absent/pkg", "retry", remote_allowed=True,
                   fetcher=_fetcher(FakeGitHub(fail=urllib.error.URLError("dns"))))
     assert down["coverage"] == "unavailable" and any("could not be reached" in r for r in down["reasons"])
-    # With an installed answer and a failed remote call for the target, the result is partial, not an error.
+    # With an installed answer short of the target and a failed remote call, the result is partial, not an error.
+    # (An installed copy whose notes reach the target's line needs no remote call: Phase 4, T15.)
     ahead = "CHANGELOG\n=========\n\n8.0\n---\n\n * Shipped early\n\n7.4\n---\n\n * Now\n"
     partial = lookup(_archive(_project(**{"vendor/symfony/http-foundation/CHANGELOG.md": ahead})), "http-foundation",
-                     target_version="8.0", remote_allowed=True,
+                     target_version="8.1", remote_allowed=True,
                      fetcher=_fetcher(FakeGitHub(fail=urllib.error.URLError("dns"))))
     assert partial["coverage"] == "partial" and partial["excerpts"][0]["provider"] == "vendor"
     assert any("could not be reached" in r for r in partial["reasons"])
@@ -620,3 +622,101 @@ def test_gitmcp_excerpts_unversioned_drop_translations_of_the_same_page():
 
     excerpts, _ = search(McpClient(_fetcher(FakeMcp(answer)), "https://gitmcp.io/docs"), Rec(), "deps")
     assert [e.path_or_url.rsplit("master/", 1)[1] for e in excerpts] == ["docs/en/docs/deps.md", "docs/en/docs/other.md"]
+
+
+# --- Phase 4, T14: framework documentation repositories ------------------------------------------------
+
+LARAVEL_13_GUIDE = """# Upgrade Guide
+
+- [Upgrading To 13.0 From 12.x](#upgrade-13.0)
+
+<a name="high-impact-changes"></a>
+## High Impact Changes
+
+<div class="content-list" markdown="1">
+
+- [Request Forgery Protection](#request-forgery-protection)
+
+</div>
+
+<a name="upgrade-13.0"></a>
+## Upgrading To 13.0 From 12.x
+
+### Cache
+
+<a name="cache-prefixes"></a>
+#### Cache Prefixes and Session Cookie Names
+
+**Likelihood Of Impact: Low**
+
+Default cache prefixes now use hyphens.
+
+<a name="request-forgery-protection"></a>
+### Request Forgery Protection
+
+**Likelihood Of Impact: High**
+
+`VerifyCsrfToken` is now `PreventRequestForgery`.
+"""
+HTTP_TESTS = "# HTTP Tests\n\n## Making Requests\n\nUse `$this->get()`.\n\n## Testing JSON APIs\n\nUse `assertJsonPath` on JSON responses.\n"
+DOCS = f"{RAW}/laravel/docs"
+
+
+def test_doc_sources_come_from_the_detected_framework_plugin():
+    from agent.plugins.frameworks.laravel.doc_sources import LARAVEL_DOCS
+    from knowledge.providers.doc_source import ref_for, topic_files
+    from knowledge.service import doc_sources
+
+    assert doc_sources(_archive(_project())) == [LARAVEL_DOCS]
+    assert doc_sources(_archive({"README.md": "plain"})) == []
+    assert ref_for(LARAVEL_DOCS, (13, 2, 0)) == "13.x"
+    assert topic_files(LARAVEL_DOCS, "testing JSON responses with route binding") == [
+        "http-tests.md", "routing.md", "responses.md"]
+    assert topic_files(LARAVEL_DOCS, "queues") == []
+
+
+def test_doc_sources_upgrade_guide_for_each_major_line():
+    """Found live: laravel/framework's CHANGELOG at v13.0.0 holds 12.x notes; the guide is in laravel/docs."""
+    github = FakeGitHub({f"{DOCS}/13.x/upgrade.md": LARAVEL_13_GUIDE.encode()})
+    result = lookup(_archive(_project()), "laravel/framework", target_version="13.0", remote_allowed=True,
+                    fetcher=_fetcher(github))
+    assert result["providers"] == ["vendor", "doc_source"] and result["coverage"] == "complete"
+    assert result["versions_found"] == ["13.0.0"] and result["reasons"] == []
+    assert [url for url, _ in github.requests] == [f"{DOCS}/13.x/upgrade.md"]  # the framework's CHANGELOG is not read
+    sections = [e["section"] for e in result["excerpts"]]
+    # Found live: index sections that only link within the page are dropped, and changes are ranked by the
+    # guide's own likelihood of impact, so a short budget reaches the high-impact ones.
+    assert sections == ["Request Forgery Protection", "Cache Prefixes and Session Cookie Names"]
+    last = result["excerpts"][-1]
+    assert last["version_or_ref"] == "13.0 (laravel/docs@13.x)" and last["versioned"] is True
+    assert last["path_or_url"] == "https://github.com/laravel/docs/blob/13.x/upgrade.md" and last["provider"] == "doc_source"
+    # Two lines ahead with one guide missing: what was found, and the missing line named.
+    two = lookup(_archive(_project()), "laravel/framework", target_version="14.0", remote_allowed=True,
+                 fetcher=_fetcher(FakeGitHub({f"{DOCS}/13.x/upgrade.md": LARAVEL_13_GUIDE.encode()})))
+    assert two["coverage"] == "partial" and two["reasons"] == ["laravel/docs has no upgrade.md on 14.x."]
+    # A minor upgrade within the line has no guide; the library's own files at the target tag are read.
+    minor = FakeGitHub({})
+    lookup(_archive(_project()), "laravel/framework", target_version="12.70", remote_allowed=True, fetcher=_fetcher(minor))
+    assert all("laravel/docs" not in url for url, _ in minor.requests) and minor.requests
+
+
+def test_doc_sources_topic_guides_at_the_installed_line(tmp_path):
+    github = FakeGitHub({f"{DOCS}/12.x/http-tests.md": HTTP_TESTS.encode()})
+    cache = KnowledgeCache(tmp_path / "k.sqlite")
+    result = lookup(_archive(_project()), "laravel/framework", "testing JSON", remote_allowed=True,
+                    fetcher=_fetcher(github), cache=cache)
+    assert result["providers"] == ["vendor", "doc_source"] and result["coverage"] == "complete"
+    first = result["excerpts"][0]
+    assert first["section"] == "Testing JSON APIs" and first["version_or_ref"] == "12.x (laravel/docs@12.x)"
+    assert [url for url, _ in github.requests] == [f"{DOCS}/12.x/http-tests.md"]
+    again = FakeGitHub({})
+    assert lookup(_archive(_project()), "laravel/framework", "testing JSON", remote_allowed=True,
+                  fetcher=_fetcher(again), cache=cache)["excerpts"] == result["excerpts"] and again.requests == []
+    # Remote documentation off: no guide is read.
+    off = FakeGitHub({f"{DOCS}/12.x/http-tests.md": HTTP_TESTS.encode()})
+    assert "doc_source" not in lookup(_archive(_project()), "laravel/framework", "testing", fetcher=_fetcher(off))["providers"]
+    assert off.requests == []
+    # Other packages never use Laravel's guides.
+    other = FakeGitHub(ROUTES)
+    lookup(_archive(_project()), "symfony/http-foundation", "testing", remote_allowed=True, fetcher=_fetcher(other))
+    assert all("laravel/docs" not in url for url, _ in other.requests)

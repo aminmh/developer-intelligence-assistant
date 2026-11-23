@@ -9,7 +9,8 @@ from __future__ import annotations
 
 from typing import Any, Callable
 
-from regression.probes import ProbeError, build_from_routes, hint_excerpts, import_requests, validate_probes
+from regression.probes import (PROBE_DOCS_TOPIC, TEST_DOCS_TOPIC, ProbeError, build_from_routes, hint_excerpts,
+                               import_requests, validate_probes)
 from regression.recordings import Recordings
 from regression.replay import ReplayError, merge, span_deltas, span_summary
 from regression.store import RegressionStore
@@ -80,9 +81,21 @@ def _candidate_hints(project_id: str, revision_id: str) -> list[dict[str, Any]]:
         return hint_excerpts(hints, context.read_text)
 
 
+def _framework_docs(project_id: str, revision_id: str, topic: str) -> dict[str, Any] | None:
+    """Guides of the revision's installed framework version for ``topic``, as untrusted prompt context."""
+    from knowledge.cache import KnowledgeCache
+    from knowledge.settings import remote_docs_allowed
+    from regression.probes import framework_context
+    from regression.service import _load_revision
+
+    archive = _load_revision(project_id, revision_id).archive_loader()
+    return framework_context(archive, topic, remote_allowed=remote_docs_allowed(project_id), cache=KnowledgeCache())
+
+
 def generate(store: RegressionStore, project_id: str, check_id: str, *,
              hints: Callable[[str, str], list[dict[str, Any]]] = _candidate_hints,
-             model_call: Callable[..., Any] | None = None) -> dict[str, Any]:
+             model_call: Callable[..., Any] | None = None,
+             docs: Callable[[str, str, str], dict[str, Any] | None] = _framework_docs) -> dict[str, Any]:
     """Clause 10: probes for the routes of a finished static report; the developer reviews before saving."""
     from regression.equivalence import _provider
 
@@ -93,8 +106,17 @@ def generate(store: RegressionStore, project_id: str, check_id: str, *,
         excerpts = hints(project_id, check["candidate_revision_id"])
     except Exception:  # noqa: BLE001 — probes can still be built from route templates
         excerpts = []
-    return build_from_routes(check["report"].get("routes", []), excerpts, model_call=model_call,
-                             provider=_provider(project_id)) | {"hint_files": [e["file"] for e in excerpts]}
+    routes = check["report"].get("routes", [])
+    documentation = None
+    if routes:
+        try:
+            documentation = docs(project_id, check["candidate_revision_id"], PROBE_DOCS_TOPIC)
+        except Exception:  # noqa: BLE001 — probes are still built without the guides
+            documentation = None
+    cites = [item["cite"] for item in (documentation or {}).get("untrusted_documentation", [])]
+    return build_from_routes(routes, excerpts, model_call=model_call, provider=_provider(project_id),
+                             documentation=documentation) | {"hint_files": [e["file"] for e in excerpts],
+                                                             "documentation": cites}
 
 
 def import_into(store: RegressionStore, project_id: str, check_id: str, text: Any, target: dict[str, Any],
@@ -146,8 +168,11 @@ def run(store: RegressionStore, user_id: str, project_id: str, check_id: str, bo
     return replay.start(store, project_id, check_id, kind, target, **options)
 
 
-def _base_material(project_id: str, revision_id: str, symbol_ids: list[str]) -> tuple[list[Any], dict[str, Any]]:
-    """Test templates and changed-symbol source of the base revision: the tests describe the base version."""
+def _base_material(project_id: str, revision_id: str, symbol_ids: list[str]) -> tuple[Any, ...]:
+    """Test templates, changed-symbol source and locked package versions of the base revision.
+
+    The tests describe the base version, so its versions decide whether a template is in its verified range.
+    """
     import io
     import zipfile
 
@@ -161,13 +186,16 @@ def _base_material(project_id: str, revision_id: str, symbol_ids: list[str]) -> 
     with zipfile.ZipFile(io.BytesIO(archive)) as bundle:
         names = [info.filename for info in bundle.infolist() if not info.is_dir()]
     with archive_context(archive, names) as context:
-        templates = collect_capabilities(context, {Capability.CHARACTERIZATION_TESTS})[Capability.CHARACTERIZATION_TESTS].records
-    return list(templates), symbol_bodies(archive, revision.definitions, symbol_ids)
+        collected = collect_capabilities(context, {Capability.CHARACTERIZATION_TESTS, Capability.INSTALLED_PACKAGES})
+    templates = collected[Capability.CHARACTERIZATION_TESTS].records
+    installed = {record.name: record.version for record in collected[Capability.INSTALLED_PACKAGES].records}
+    return list(templates), symbol_bodies(archive, revision.definitions, symbol_ids), installed
 
 
 def test_bundle(store: RegressionStore, project_id: str, check_id: str, *,
-                material: Callable[[str, str, list[str]], tuple[list[Any], dict[str, Any]]] = _base_material,
-                recordings: Recordings | None = None, model_call: Callable[..., Any] | None = None) -> dict[str, Any]:
+                material: Callable[[str, str, list[str]], tuple[Any, ...]] = _base_material,
+                recordings: Recordings | None = None, model_call: Callable[..., Any] | None = None,
+                docs: Callable[[str, str, str], dict[str, Any] | None] = _framework_docs) -> dict[str, Any]:
     """Clauses 19-21: characterization tests and the request file for a finished check."""
     from regression.characterize import build_bundle
     from regression.equivalence import _provider
@@ -178,16 +206,19 @@ def test_bundle(store: RegressionStore, project_id: str, check_id: str, *,
     recordings = recordings or Recordings()
     ids = [s["canonical_symbol_id"] for s in check["report"].get("symbols", []) if s.get("canonical_symbol_id")]
     notes = []
+    installed: dict[str, str] = {}
     try:
-        templates, bodies = material(project_id, check["base_revision_id"], ids)
+        templates, bodies, *rest = material(project_id, check["base_revision_id"], ids)
+        installed = rest[0] if rest else {}
     except Exception:  # noqa: BLE001 — the request file still works without templates
         templates, bodies = [], {}
         notes.append("The base revision's source could not be read, so only the request file is included.")
     bundle = build_bundle(check, store.get_probes(project_id, check_id), store.latest_run(project_id, check_id, "baseline"),
                           lambda run_id, probe_id: recordings.load(project_id, check_id, run_id, probe_id, 1),
                           store.get_settings(project_id, check_id), templates, symbol_bodies=bodies,
-                          model_call=model_call, provider=_provider(project_id), notes=notes)
-    return {**bundle, "notes": notes, "check_id": check_id}
+                          model_call=model_call, provider=_provider(project_id), notes=notes, installed=installed,
+                          documentation=lambda: docs(project_id, check["base_revision_id"], TEST_DOCS_TOPIC))
+    return {**bundle, "notes": [*notes, *(row["reason"] for row in bundle["partial"])], "check_id": check_id}
 
 
 __all__ = ["ProbeError", "ReplayError", "generate", "test_bundle", "import_into", "refresh_report", "run", "save_settings", "state",
