@@ -70,3 +70,33 @@ def update_retention(
         return set_policy(project_id, body)
     except (InvalidRetention, ValueError) as exc:
         raise HTTPException(400, str(exc)) from exc
+
+
+@router.get("/{project_id}/remote-docs", summary="Read whether framework docs may come from public hosts")
+def read_remote_docs(
+    project_id: str,
+    x_internal_secret: Annotated[str | None, Header(alias="X-Internal-Secret")] = None,
+) -> dict[str, Any]:
+    """@.archcore/knowledge-layer/framework-knowledge-layer.spec.md: on by default."""
+    from knowledge.settings import get_remote_docs
+
+    _authorize(x_internal_secret)
+    try:
+        return get_remote_docs(project_id)
+    except InvalidProject as exc:
+        raise HTTPException(400, str(exc)) from exc
+
+
+@router.put("/{project_id}/remote-docs", summary="Turn remote framework documentation on or off")
+def update_remote_docs(
+    project_id: str,
+    body: dict,
+    x_internal_secret: Annotated[str | None, Header(alias="X-Internal-Secret")] = None,
+) -> dict[str, Any]:
+    from knowledge.settings import set_remote_docs
+
+    _authorize(x_internal_secret)
+    try:
+        return set_remote_docs(project_id, body.get("allowed"))
+    except InvalidProject as exc:
+        raise HTTPException(400, str(exc)) from exc

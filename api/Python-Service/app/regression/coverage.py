@@ -127,6 +127,32 @@ def partial_from(collections: dict[Any, Any]) -> list[dict[str, Any]]:
     return rows
 
 
+def _change_kind(old: str, new: str) -> str:
+    from knowledge.model import parse_version
+
+    before, after = parse_version(old), parse_version(new)
+    if before is None or after is None:
+        return "changed"
+    if after < before:
+        return "downgrade"
+    return "major" if after[0] != before[0] else "minor" if after[1] != before[1] else "patch"
+
+
+def package_changes(base: list[Any], candidate: list[Any]) -> list[dict[str, Any]]:
+    """Packages whose locked version differs between the revisions, from ``INSTALLED_PACKAGES`` records."""
+    before = {(r.ecosystem, r.name): r for r in base}
+    after = {(r.ecosystem, r.name): r for r in candidate}
+    rows = []
+    for key in sorted(before.keys() | after.keys()):
+        old, new = before.get(key), after.get(key)
+        if old is not None and new is not None and old.version == new.version:
+            continue
+        change = "added" if old is None else "removed" if new is None else _change_kind(old.version, new.version)
+        rows.append({"ecosystem": key[0], "name": key[1], "from": old.version if old else None,
+                     "to": new.version if new else None, "change": change, "dev": (new or old).dev, "notes": None})
+    return rows
+
+
 def tier_for(report: dict[str, Any], *, replay_results: bool = False) -> str:
     """Clause 8: the evidence tier the check reached."""
     if replay_results and report.get("runtime_observed"):

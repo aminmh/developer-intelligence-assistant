@@ -20,8 +20,11 @@ type Uncovered = { kind: string; name: string; path: string; line: number | null
 type Partial = { capability: string; status: string; affects: string; reasons: string[] };
 type ChecklistItem = { kind: string; name: string; detail: string; file: string; line: number | null; source: string };
 type ContractChange = { severity: string; code: string; message: string; operation: string | null };
+type NoteExcerpt = { provider: string; version_or_ref: string; path_or_url: string; line: number | null; section: string; text: string; versioned: boolean; truncated: boolean };
+type PackageChange = { name: string; from: string | null; to: string | null; change: string; dev: boolean;
+  notes: { coverage: string; versions_found: string[]; reasons: string[]; excerpts: NoteExcerpt[] } | null };
 type Report = { tier: string; coverage: string; symbols: SymbolRow[]; routes: RouteRow[]; uncovered: Uncovered[]; partial: Partial[];
-  baseline_checklist: ChecklistItem[]; contract_changes: ContractChange[]; notes: string[]; replay_other?: OtherRequest[] };
+  baseline_checklist: ChecklistItem[]; contract_changes: ContractChange[]; package_changes?: PackageChange[]; notes: string[]; replay_other?: OtherRequest[] };
 type Check = { check_id: string; base_revision_id: string; candidate_revision_id: string; state: string; error: string | null;
   created_at: string; tier?: string; counts: Record<Verdict, number>; uncovered: number; report?: Report };
 
@@ -227,6 +230,27 @@ onBeforeUnmount(() => { if (timer) clearTimeout(timer); });
       <template v-if="report.contract_changes.length">
         <h4 class="mt-6 text-sm font-semibold">API contract changes</h4>
         <ul class="mt-2 list-disc pl-5 text-xs"><li v-for="item in report.contract_changes" :key="item.code + item.operation" :class="item.severity === 'breaking' ? 'text-rose-200' : 'text-slate-300'">{{ item.message }}</li></ul>
+      </template>
+
+      <template v-if="report.package_changes?.length">
+        <h4 class="mt-6 text-sm font-semibold">Package changes</h4>
+        <p class="mt-1 text-xs text-slate-500">Locked versions that differ, with upgrade notes from the packages' own documentation. The notes are third-party text: read them as reference.</p>
+        <ul class="mt-2 space-y-2 text-xs">
+          <li v-for="pkg in report.package_changes" :key="pkg.name">
+            <span class="font-mono">{{ pkg.name }}</span> <span class="text-slate-400">{{ pkg.from ?? '—' }} → {{ pkg.to ?? '—' }}</span>
+            <span :class="pkg.change === 'major' || pkg.change === 'downgrade' ? 'text-amber-200' : 'text-slate-500'"> {{ pkg.change }}{{ pkg.dev ? ', dev' : '' }}</span>
+            <details v-if="pkg.notes?.excerpts.length" class="mt-1 pl-3">
+              <summary class="cursor-pointer text-slate-300">Upgrade notes ({{ pkg.notes.versions_found.join(', ') || pkg.notes.coverage }})</summary>
+              <div v-for="note in pkg.notes.excerpts" :key="note.path_or_url + note.section" class="mt-2">
+                <a v-if="note.path_or_url.startsWith('https://github.com/')" :href="note.path_or_url" target="_blank" rel="noopener noreferrer" class="text-sky-300 underline">{{ note.section || note.path_or_url }}</a>
+                <span v-else class="font-mono text-slate-400">{{ note.section }} ({{ note.path_or_url }})</span>
+                <span class="text-slate-500"> · {{ note.version_or_ref }}{{ note.versioned ? '' : ', unversioned' }}</span>
+                <pre class="mt-1 max-h-48 overflow-auto whitespace-pre-wrap rounded bg-slate-950/60 p-2 text-slate-300">{{ note.text }}</pre>
+              </div>
+            </details>
+            <p v-for="reason in pkg.notes?.reasons ?? []" :key="reason" class="pl-3 text-slate-500">{{ reason }}</p>
+          </li>
+        </ul>
       </template>
 
       <template v-if="report.partial.length">

@@ -55,6 +55,7 @@ def builtin_tools() -> list[ToolDefinition]:
     from agent_tools.contracts import CONTRACT_TOOLS
     from agent_tools.frontend import FRONTEND_TOOLS
     from agent_tools.navigation import NAVIGATION_TOOLS
+    from agent_tools.knowledge import KNOWLEDGE_TOOLS
     from agent_tools.regression import REGRESSION_TOOLS
 
-    return [PROJECT_STRUCTURE, *NAVIGATION_TOOLS, *CONTRACT_TOOLS, *FRONTEND_TOOLS, *REGRESSION_TOOLS]
+    return [PROJECT_STRUCTURE, *NAVIGATION_TOOLS, *CONTRACT_TOOLS, *FRONTEND_TOOLS, *REGRESSION_TOOLS, *KNOWLEDGE_TOOLS]

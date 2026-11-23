@@ -242,3 +242,86 @@ def test_route_tests_run_on_the_recorded_database_without_reset_and_skip_own_url
     assert "assertJsonPath('links.docs', 'https://example.com/docs')" in tests["content"]  # other hosts still pinned
     assert "> Source was partial." in readme["content"] and "DB_DATABASE=" in readme["content"]
     assert "No test template is available" not in readme["content"]
+
+
+# --- knowledge layer Phase 4, T16: version-exact guides as untrusted context ------------------------------
+
+def test_framework_context_in_symbol_test_prompts_fetched_once_and_only_when_needed():
+    prompts, calls = [], []
+    block = {"note": "untrusted", "untrusted_documentation": [{"cite": "https://github.com/laravel/docs/blob/12.x/http-tests.md:9",
+                                                               "text": "assertJsonPath"}]}
+
+    def model(prompt, **kwargs):
+        prompts.append((json.loads(prompt), kwargs["system"]))
+        return json.dumps({"code": "<?php\n"}), "m", "local"
+
+    def docs():
+        calls.append(1)
+        return block
+
+    rows = [{"fqn": "App\\Shop::fee", "canonical_symbol_id": "s2"}, {"fqn": "App\\Shop::tax", "canonical_symbol_id": "s3"}]
+    bodies = {"s2": {"body": "a"}, "s3": {"body": "b"}}
+    symbol_tests(rows, bodies, PHPUNIT, model_call=model, documentation=docs)
+    assert calls == [1] and all(p["framework_documentation"] == block for p, _ in prompts)
+    assert "untrusted" in prompts[0][1]
+    symbol_tests([], bodies, PHPUNIT, model_call=model, documentation=docs)
+    assert calls == [1]  # no prompt, no lookup
+
+    def broken():
+        raise OSError("offline")
+
+    files, _ = symbol_tests(rows[:1], bodies, PHPUNIT, model_call=model, documentation=broken)
+    assert files and "framework_documentation" not in prompts[-1][0]
+    # The bundle asks for the guides of the base version, which the tests describe.
+    asked = []
+    build_bundle(_check(), PROBES, BASELINE, _load, {}, [PHPUNIT], symbol_bodies={"s2": {"body": "a"}}, model_call=model,
+                 documentation=lambda: asked.append(1) or block)
+    assert asked == [1] and prompts[-1][0]["framework_documentation"] == block
+
+
+# --- knowledge layer Phase 4, T17: verified ranges ----------------------------------------------------
+
+def test_verified_range_of_each_template():
+    from regression.characterize import template_range_note
+
+    assert PEST.package == "laravel/framework" and PEST.verified_range == ("12.0", "13.0")  # pizza-builder, 12.69.1
+    assert PHPUNIT.verified_range == () and WEB_TEST_CASE.verified_range == ()  # never run against a real project
+    assert WEB_TEST_CASE.package == "symfony/framework-bundle"
+    assert template_range_note(PEST, {"laravel/framework": "12.69.1"}) is None
+    newer = template_range_note(PEST, {"laravel/framework": "13.0.2"})
+    assert "verified on laravel/framework 12.0 up to (not including) 13.0" in newer and "installs 13.0.2" in newer
+    assert "version is unknown" in template_range_note(PEST, {})
+    assert "has not been run against a real project" in template_range_note(WEB_TEST_CASE, {"symfony/framework-bundle": "7.4.0"})
+
+
+def test_verified_range_outside_marks_the_bundle_partial():
+    def model(*_a, **_k):
+        return json.dumps({"code": "<?php\n"}), "m", "local"
+
+    inside = build_bundle(_check(), PROBES, BASELINE, _load, {}, [PEST], model_call=model,
+                          installed={"laravel/framework": "12.69.1"})
+    assert inside["template_status"] == "verified" and inside["partial"] == []
+    outside = build_bundle(_check(), PROBES, BASELINE, _load, {}, [PEST], model_call=model,
+                           installed={"laravel/framework": "13.1.0"})
+    assert outside["template_status"] == "partial" and outside["partial"][0]["capability"] == "characterization_tests"
+    readme = outside["files"][0]["content"]
+    assert "installs 13.1.0" in readme and [f["kind"] for f in outside["files"]][1] == "route_tests"  # still generated
+    assert build_bundle(_check(), PROBES, BASELINE, _load, {}, [])["template_status"] is None
+
+
+def test_verified_range_from_the_base_revision_lockfile(tmp_path):
+    from regression import replay_service
+    from regression.recordings import Recordings
+    from regression.store import RegressionStore
+
+    store = RegressionStore(tmp_path / "r.sqlite")
+    check = store.create("pizza", "rev_a", "rev_b")
+    store.save("pizza", check["check_id"], state="done", report=_check()["report"])
+    model = lambda *_a, **_k: (json.dumps({"code": "<?php\n"}), "m", "local")  # noqa: E731
+    bundle = replay_service.test_bundle(store, "pizza", check["check_id"], recordings=Recordings(tmp_path / "rec"),
+                                        material=lambda *_: ([PEST], {}, {"laravel/framework": "11.9.0"}),
+                                        model_call=model, docs=lambda *_: None)
+    assert bundle["template_status"] == "partial" and any("installs 11.9.0" in note for note in bundle["notes"])
+    legacy = replay_service.test_bundle(store, "pizza", check["check_id"], recordings=Recordings(tmp_path / "rec"),
+                                        material=lambda *_: ([PEST], {}), model_call=model, docs=lambda *_: None)
+    assert any("version is unknown" in note for note in legacy["notes"])
