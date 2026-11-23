@@ -1,12 +1,13 @@
 <script setup lang="ts">
 import { computed, onUnmounted, ref, watch } from 'vue';
-import { Files, GitBranch, Scale, UploadCloud, FileArchive, CircleCheck, CircleAlert, Filter, GitCommitHorizontal, TriangleAlert, Check } from 'lucide-vue-next';
+import { Files, FileJson, GitBranch, Scale, UploadCloud, FileArchive, CircleCheck, CircleAlert, Filter, GitCommitHorizontal, TriangleAlert, Check } from 'lucide-vue-next';
 import type { UploadedFile, RAGConfig } from '../types';
 import { useUrlTab } from '../composables/useUrlTab';
 import { makeRequest } from '../ui/makeRequest';
 import RAGFiles from './RAGFiles.vue';
 import GitSourceSetup from './code-quality/GitSourceSetup.vue';
 import BusinessRuleManager from './code-quality/BusinessRuleManager.vue';
+import ApiContractManager from './contracts/ApiContractManager.vue';
 import { validateUploadIdentity } from '../services/uploadIdentity';
 import { useProjectScope, type ScopeRevision } from '../composables/useProjectScope';
 import { describeRevision, relativeAge } from '../utils/chatRevisions';
@@ -31,8 +32,8 @@ const emit = defineEmits<{
   'update:commitSha': [value: string];
 }>();
 
-type KnowledgeTab = 'files' | 'git-source' | 'business-rules';
-const activeTab = useUrlTab<KnowledgeTab>({ values: ['files', 'git-source', 'business-rules'], fallback: 'files' });
+type KnowledgeTab = 'files' | 'git-source' | 'business-rules' | 'api-contracts';
+const activeTab = useUrlTab<KnowledgeTab>({ values: ['files', 'git-source', 'business-rules', 'api-contracts'], fallback: 'files' });
 
 // ---- Upload identity (owned by App; this card edits it) --------------------
 const projectInput = ref<HTMLInputElement | null>(null);
@@ -92,12 +93,14 @@ const stats = computed(() => {
 // ---- Tab status dots: is a Git source synced / an Outline collection connected? ----
 const gitReady = ref(false);
 const rulesConnected = ref(false);
+const hasContracts = ref(false);
 let statusTimer: ReturnType<typeof setTimeout> | null = null;
 let statusSequence = 0;
 const loadStatus = async (projectId: string) => {
   const sequence = ++statusSequence;
   gitReady.value = false;
   rulesConnected.value = false;
+  hasContracts.value = false;
   if (!projectId) return;
   const base = `/api/code-quality/projects/${encodeURIComponent(projectId)}`;
   const read = async (path: string) => {
@@ -106,10 +109,12 @@ const loadStatus = async (projectId: string) => {
       return response.ok ? await response.json() : null;
     } catch { return null; }
   };
-  const [git, outline] = await Promise.all([read(`${base}/git-source`), read(`${base}/outline`)]);
+  const [git, outline, contracts] = await Promise.all([read(`${base}/git-source`), read(`${base}/outline`),
+    read(`/api/projects/${encodeURIComponent(projectId)}/contracts`)]);
   if (sequence !== statusSequence) return;
   gitReady.value = git?.source?.status === 'ready';
   rulesConnected.value = !!outline?.connection;
+  hasContracts.value = (contracts?.sources?.length || 0) + (contracts?.attachments?.length || 0) > 0;
 };
 watch(() => [props.projectId.trim(), activeTab.value] as const, ([projectId]) => {
   if (statusTimer) clearTimeout(statusTimer);
@@ -121,6 +126,7 @@ const tabs = computed(() => [
   { id: 'files' as const, label: 'Files and indexing', icon: Files, ready: false, readyLabel: '' },
   { id: 'git-source' as const, label: 'Git source', icon: GitBranch, ready: gitReady.value, readyLabel: 'Synced' },
   { id: 'business-rules' as const, label: 'Business rules', icon: Scale, ready: rulesConnected.value, readyLabel: 'Connected' },
+  { id: 'api-contracts' as const, label: 'API contracts', icon: FileJson, ready: hasContracts.value, readyLabel: 'Has contracts' },
 ]);
 </script>
 
@@ -269,8 +275,11 @@ const tabs = computed(() => [
       <div v-else-if="activeTab === 'git-source'" role="tabpanel" aria-label="Git source">
         <GitSourceSetup :default-project-id="props.projectId" />
       </div>
-      <div v-else role="tabpanel" aria-label="Business rules">
+      <div v-else-if="activeTab === 'business-rules'" role="tabpanel" aria-label="Business rules">
         <BusinessRuleManager :project-id="props.projectId" />
+      </div>
+      <div v-else role="tabpanel" aria-label="API contracts">
+        <ApiContractManager :project-id="props.projectId" @changed="hasContracts = $event" />
       </div>
     </div>
   </section>

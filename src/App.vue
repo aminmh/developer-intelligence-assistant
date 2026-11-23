@@ -3,11 +3,9 @@ import { computed, defineAsyncComponent, ref, watch, onMounted, onUnmounted } fr
 import {
   Settings,
   X,
-  CheckCircle,
-  AlertTriangle,
   ScrollText,
   Database,
-  Network,
+  Network, LayoutPanelLeft,
   Activity,
   PanelLeftClose,
   PanelLeftOpen,
@@ -22,6 +20,8 @@ import {
 } from 'lucide-vue-next';
 import BrandLogo from './components/BrandLogo.vue';
 import ProjectSwitcher from './components/ProjectSwitcher.vue';
+import ToastStack from './components/ToastStack.vue';
+import { toast } from './composables/useToasts';
 import { useProjectScope } from './composables/useProjectScope';
 import ToggleCard from './components/ToggleCard.vue';
 import type { RAGConfig, SearchMatch, LLMUsage, ContextUsage, ChatBusinessRuleSource, ToolCallView, ToolAvailability, CitationPreview, ApprovalView } from './types';
@@ -44,9 +44,10 @@ const DatabaseSchemaView = defineAsyncComponent(() => import('./components/Datab
 const DomainKnowledgeView = defineAsyncComponent(() => import('./components/DomainKnowledgeView.vue'));
 const RuntimeView = defineAsyncComponent(() => import('./components/RuntimeView.vue'));
 const CodeQualityView = defineAsyncComponent(() => import('./components/CodeQualityView.vue'));
+const UiMapView = defineAsyncComponent(() => import('./components/UiMapView.vue'));
 
-type AppTab = 'chat' | 'files' | 'config' | 'logs' | 'schema' | 'domain' | 'runtime' | 'code-quality';
-const VALID_TABS: AppTab[] = ['chat', 'files', 'config', 'logs', 'schema', 'domain', 'runtime', 'code-quality'];
+type AppTab = 'chat' | 'files' | 'config' | 'logs' | 'schema' | 'domain' | 'runtime' | 'code-quality' | 'ui-map';
+const VALID_TABS: AppTab[] = ['chat', 'files', 'config', 'logs', 'schema', 'domain', 'runtime', 'code-quality', 'ui-map'];
 const tabFromUrl = (): AppTab => {
   const value = new URLSearchParams(window.location.search).get('tab');
   return VALID_TABS.includes(value as AppTab) ? value as AppTab : 'chat';
@@ -298,10 +299,6 @@ watch(
 );
 
 const loading = ref(false);
-const showSuccessToast = ref(false);
-const successMessage = ref('');
-const showErrorToast = ref(false);
-const errorMessage = ref('');
 const orchestrationSteps = ref<PipelineStep[]>([]);
 const generatingAnswer = ref(false);
 let pollTimerId: ReturnType<typeof setTimeout> | null = null;
@@ -339,16 +336,9 @@ const ROUTES = ['code_explain', 'code_refactor', 'debug', 'search', 'knowledge',
 
 const messages = ref<Message[]>([]);
 
+// Every success and error message in the app goes to the shared toast stack.
 const triggerToast = (msg: string, isSuccess = true) => {
-  if (isSuccess) {
-    successMessage.value = msg;
-    showSuccessToast.value = true;
-    setTimeout(() => { showSuccessToast.value = false; }, 3000);
-  } else {
-    errorMessage.value = msg;
-    showErrorToast.value = true;
-    setTimeout(() => { showErrorToast.value = false; }, 4000);
-  }
+  if (isSuccess) toast.success(msg); else toast.error(msg);
 };
 
 const {
@@ -1189,6 +1179,7 @@ const navGroups: Array<{ label: string; items: Array<{ id: AppTab; label: string
     { id: 'runtime', label: 'Runtime', icon: Activity },
     { id: 'schema', label: 'Database schema', icon: Database },
     { id: 'domain', label: 'Domain knowledge', icon: Network },
+    { id: 'ui-map', label: 'UI map', icon: LayoutPanelLeft },
   ] },
   { label: 'system', items: [
     { id: 'logs', label: 'Developer logs', icon: ScrollText },
@@ -1199,6 +1190,7 @@ const pageMeta: Record<AppTab, { title: string; description: string }> = {
   chat: { title: 'Codebase chat', description: 'Ask questions about the indexed code' },
   files: { title: 'Knowledge base', description: 'Upload, version and index projects' },
   'code-quality': { title: 'Code quality', description: 'Scores, analyzers and rule reviews' },
+  'ui-map': { title: 'UI map', description: 'Routes, components and requests of a front end' },
   runtime: { title: 'Runtime', description: 'Traces and host telemetry' },
   schema: { title: 'Database schema', description: 'Explore and edit the data model' },
   domain: { title: 'Domain knowledge', description: 'Business entities and rules' },
@@ -1543,6 +1535,8 @@ onUnmounted(() => narrowQuery?.removeEventListener('change', syncNarrow));
 
       <DomainKnowledgeView v-else-if="activeTab === 'domain'" @ask-about-concept="askAboutDomainConcept" />
 
+      <UiMapView v-else-if="activeTab === 'ui-map'" />
+
       <RuntimeView v-else-if="activeTab === 'runtime'" :use-remote="useRemote" />
       <CodeQualityView v-else-if="activeTab === 'code-quality'" :files="files" @open-knowledge-base="activeTab = 'files'" @revision-removed="fetchFiles" />
       </div>
@@ -1550,33 +1544,7 @@ onUnmounted(() => narrowQuery?.removeEventListener('change', syncNarrow));
       </div>
     </main>
 
-    <!-- Success toast -->
-    <Transition name="app-toast">
-      <div v-if="showSuccessToast" role="status" aria-live="polite" class="app-toast app-glass pointer-events-auto fixed bottom-6 right-6 z-50 flex w-full max-w-sm items-start gap-3 p-4">
-        <CheckCircle class="h-5 w-5 shrink-0 text-emerald-400" aria-hidden="true" />
-        <div class="flex-1 text-left">
-          <p class="app-toast-title">Done</p>
-          <p class="app-toast-body mt-1">{{ successMessage }}</p>
-        </div>
-        <button type="button" class="app-icon-btn -m-1.5" aria-label="Dismiss" @click="showSuccessToast = false">
-          <X aria-hidden="true" />
-        </button>
-      </div>
-    </Transition>
-
-    <!-- Error toast -->
-    <Transition name="app-toast">
-      <div v-if="showErrorToast" role="alert" class="app-toast app-glass pointer-events-auto fixed bottom-6 right-6 z-50 flex w-full max-w-sm items-start gap-3 p-4" style="border-color: rgb(251 113 133 / 0.35)">
-        <AlertTriangle class="h-5 w-5 shrink-0 text-rose-400" aria-hidden="true" />
-        <div class="flex-1 text-left">
-          <p class="app-toast-title">Something went wrong</p>
-          <p class="app-toast-body mt-1">{{ errorMessage }}</p>
-        </div>
-        <button type="button" class="app-icon-btn -m-1.5" aria-label="Dismiss" @click="showErrorToast = false">
-          <X aria-hidden="true" />
-        </button>
-      </div>
-    </Transition>
+    <ToastStack />
 
   </div>
 </template>

@@ -7,10 +7,14 @@ import dotenv from 'dotenv';
 import { RAGService } from './src/server/rag';
 import { UploadedFile } from './src/types';
 import { openDocument, complete as completeDockerfile, format as formatDockerfile, closeSession as closeDockerfileSession, closeAllSessions, bridgeStatus } from './src/server/dockerfileLanguageBridge';
-import { installOidcAuth, authRoleFor, authIsBootstrapAdmin, authCanRunRuntimeSetup } from './src/server/oidcAuth';
+import { installOidcAuth, authRoleFor, authIsGlobalAdmin, authCanRunRuntimeSetup,
+  authCreateIdeToken, authListIdeTokens, authRevokeIdeToken, authUserForIdeToken } from './src/server/oidcAuth';
 import { registerCodeQualityRoutes } from './src/server/codeQualityRoutes';
 import { registerWorkingTreeGrants, registerWorkingTreeUpload, type WorkingTreeDependencies } from './src/server/workingTreeRoutes';
 import { registerSchemaDraftRoutes } from './src/server/schemaDraftRoutes';
+import { registerContractRoutes } from './src/server/contractRoutes';
+import { registerIdeApi, registerIdeTokenRoutes, type IdeDependencies } from './src/server/ideRoutes';
+import { registerFrontendRoutes } from './src/server/frontendRoutes';
 import { codeImpactBodyParser, registerCodeImpactRoutes } from './src/server/codeImpactRoutes';
 
 dotenv.config();
@@ -111,7 +115,7 @@ async function findStoredUpload(filename: string, uploadSessionId: string): Prom
 // Business rules ride along with chat only for a project the signed-in user can access.
 function businessRulesAllowed(res: express.Response, projectId: unknown): boolean {
   const user = (res.locals as any).authUser;
-  return typeof projectId === 'string' && !!projectId && Boolean(user && (authIsBootstrapAdmin(user) || authRoleFor(user, projectId)));
+  return typeof projectId === 'string' && !!projectId && Boolean(user && (authIsGlobalAdmin(user) || authRoleFor(user, projectId)));
 }
 
 // Python trusts X-User-Id only with the internal secret; it makes the signed-in
@@ -134,8 +138,8 @@ async function authorizeAttachedUpload(
   // Filename-only requests are the retained legacy and saved-analysis paths.
   // New project-scoped uploads always carry their authoritative upload session.
   if (!uploadSessionId && !projectId && !commitSha) {
-    if (allowNonUploadContext || authIsBootstrapAdmin(user)) return true;
-    res.status(403).json({ success: false, error: 'Unattributed legacy uploads are restricted to the bootstrap administrator.' });
+    if (allowNonUploadContext || authIsGlobalAdmin(user)) return true;
+    res.status(403).json({ success: false, error: 'Unattributed legacy uploads are restricted to global administrators.' });
     return false;
   }
   if (typeof uploadSessionId !== 'string' || !uploadSessionId) {
@@ -162,8 +166,8 @@ async function authorizeAttachedUpload(
   } else if (projectId || commitSha) {
     res.status(409).json({ success: false, error: 'Legacy uploads cannot be assigned an inferred project identity.' });
     return false;
-  } else if (!authIsBootstrapAdmin(user)) {
-    res.status(403).json({ success: false, error: 'Unattributed legacy uploads are restricted to the bootstrap administrator.' });
+  } else if (!authIsGlobalAdmin(user)) {
+    res.status(403).json({ success: false, error: 'Unattributed legacy uploads are restricted to global administrators.' });
     return false;
   }
   return true;
@@ -263,24 +267,38 @@ async function startServer() {
     internalSecret: INTERNAL_SECRET,
     webOrigin: process.env.WEB_ORIGIN || 'http://localhost:3000',
     roleFor: (user, projectId) => authRoleFor(user, projectId),
-    isGlobalAdmin: (user) => authIsBootstrapAdmin(user),
+    isGlobalAdmin: (user) => authIsGlobalAdmin(user),
     getUser: (res) => (res.locals as any).authUser,
   };
   // The desktop helper's upload authenticates with its grant, so it is registered before sessions.
   registerWorkingTreeUpload(app, workingTree);
+  // IDE extensions authenticate with a personal IDE token, not a session, so they are registered before sessions too.
+  const ide: IdeDependencies = {
+    apiUrl: PYTHON_API_URL,
+    internalSecret: INTERNAL_SECRET,
+    webOrigin: process.env.WEB_ORIGIN || 'http://localhost:3000',
+    userForToken: (authorization) => authUserForIdeToken(authorization),
+    canAccessProject: (user, projectId) => Boolean(authIsGlobalAdmin(user) || authRoleFor(user, projectId)),
+    getUser: (res) => (res.locals as any).authUser,
+    createToken: (user, name) => authCreateIdeToken(user, name),
+    listTokens: (user) => authListIdeTokens(user),
+    revokeToken: (user, tokenId) => authRevokeIdeToken(user, tokenId),
+  };
+  registerIdeApi(app, ide);
   installOidcAuth(app);
+  registerIdeTokenRoutes(app, ide);
   registerWorkingTreeGrants(app, workingTree);
   registerCodeImpactRoutes(app, {
     apiUrl: PYTHON_API_URL,
     getUser: (res) => (res.locals as any).authUser,
-    canReadProject: (user, projectId) => Boolean(user && (authIsBootstrapAdmin(user) || authRoleFor(user, projectId))),
+    canReadProject: (user, projectId) => Boolean(user && (authIsGlobalAdmin(user) || authRoleFor(user, projectId))),
   });
   registerSchemaDraftRoutes(app, {
     apiUrl: PYTHON_API_URL,
     internalSecret: INTERNAL_SECRET,
     webOrigin: process.env.WEB_ORIGIN || 'http://localhost:3000',
     getUser: (res) => (res.locals as any).authUser,
-    isGlobalAdmin: (user) => Boolean(user && authIsBootstrapAdmin(user)),
+    isGlobalAdmin: (user) => Boolean(user && authIsGlobalAdmin(user)),
   });
 
   app.post('/api/runtime/setup-authorization', (req, res) => {
@@ -309,7 +327,7 @@ async function startServer() {
     if (typeof projectId !== 'string' || !/^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$/.test(projectId)) {
       return res.status(400).json({ detail: 'A valid Runtime project ID is required.' });
     }
-    if (!user || (!authIsBootstrapAdmin(user) && authRoleFor(user, projectId) !== 'admin')) {
+    if (!user || (!authIsGlobalAdmin(user) && authRoleFor(user, projectId) !== 'admin')) {
       return res.status(403).json({ detail: 'Project administrator access is required to remove local Runtime containers.' });
     }
     if (sharedSecret.length < 32) return res.status(503).json({ detail: 'Runtime removal authorization is not configured.' });
@@ -466,16 +484,32 @@ async function startServer() {
     }
   });
 
+
+  registerFrontendRoutes(app, {
+    apiUrl: PYTHON_API_URL,
+    internalSecret: INTERNAL_SECRET,
+    getUser: (res) => (res.locals as any).authUser,
+    canAccessProject: (user, projectId) => Boolean(user && (authIsGlobalAdmin(user as any) || authRoleFor(user as any, projectId))),
+  });
+  registerContractRoutes(app, {
+    apiUrl: PYTHON_API_URL,
+    internalSecret: INTERNAL_SECRET,
+    webOrigin: process.env.WEB_ORIGIN || 'http://localhost:3000',
+    getUser: (res) => (res.locals as any).authUser,
+    canAccessProject: (user, projectId) => Boolean(user && (authIsGlobalAdmin(user as any) || authRoleFor(user as any, projectId))),
+    canOperateProject: (user, projectId) => Boolean(user && (authIsGlobalAdmin(user as any) || ['operator', 'admin'].includes(authRoleFor(user as any, projectId) || ''))),
+  });
+
   registerCodeQualityRoutes(app, {
     apiUrl: PYTHON_API_URL,
     internalSecret: INTERNAL_SECRET,
     helperUrl: process.env.RUNTIME_HELPER_URL || 'http://127.0.0.1:47831',
     webOrigin: process.env.WEB_ORIGIN || 'http://localhost:3000',
     getUser: (res) => (res.locals as any).authUser,
-    canAccessProject: (user, projectId) => Boolean(user && (authIsBootstrapAdmin(user) || authRoleFor(user, projectId))),
-    canManageProject: (user, projectId) => Boolean(user && (authIsBootstrapAdmin(user) || authRoleFor(user, projectId) === 'admin')),
-    canOperateProject: (user, projectId) => Boolean(user && (authIsBootstrapAdmin(user) || ['operator', 'admin'].includes(authRoleFor(user, projectId) || ''))),
-    isGlobalAdmin: (user) => Boolean(user && authIsBootstrapAdmin(user)),
+    canAccessProject: (user, projectId) => Boolean(user && (authIsGlobalAdmin(user) || authRoleFor(user, projectId))),
+    canManageProject: (user, projectId) => Boolean(user && (authIsGlobalAdmin(user) || authRoleFor(user, projectId) === 'admin')),
+    canOperateProject: (user, projectId) => Boolean(user && (authIsGlobalAdmin(user) || ['operator', 'admin'].includes(authRoleFor(user, projectId) || ''))),
+    isGlobalAdmin: (user) => Boolean(user && authIsGlobalAdmin(user)),
   });
 
   app.get('/api/runtime/projects', async (_req, res) => {
@@ -489,11 +523,11 @@ async function startServer() {
       }
       const user = (res.locals as any).authUser;
       const projects = data.filter((project: any) => typeof project.project_id === 'string'
-        && (authIsBootstrapAdmin(user) || Boolean(authRoleFor(user, project.project_id))))
+        && (authIsGlobalAdmin(user) || Boolean(authRoleFor(user, project.project_id))))
         .map((project: any) => ({
           ...project,
-          can_remove: authIsBootstrapAdmin(user) || authRoleFor(user, project.project_id) === 'admin',
-          can_delete_telemetry: authIsBootstrapAdmin(user) || authRoleFor(user, project.project_id) === 'admin',
+          can_remove: authIsGlobalAdmin(user) || authRoleFor(user, project.project_id) === 'admin',
+          can_delete_telemetry: authIsGlobalAdmin(user) || authRoleFor(user, project.project_id) === 'admin',
         }));
       return res.json({ projects });
     } catch {
@@ -504,7 +538,7 @@ async function startServer() {
   app.get('/api/runtime/projects/:projectId/snapshots/:commitSha', async (req, res) => {
     try {
       const user = (res.locals as any).authUser;
-      if (!authIsBootstrapAdmin(user) && !authRoleFor(user, req.params.projectId)) {
+      if (!authIsGlobalAdmin(user) && !authRoleFor(user, req.params.projectId)) {
         return res.status(403).json({ detail: 'Project access denied.' });
       }
       const url = new URL(`${PYTHON_API_URL}/telemetry/runtime/projects/${encodeURIComponent(req.params.projectId)}/snapshots/${encodeURIComponent(req.params.commitSha)}`);
@@ -519,7 +553,7 @@ async function startServer() {
   app.get('/api/runtime/projects/:projectId/revisions/:revisionId', async (req, res) => {
     try {
       const user = (res.locals as any).authUser;
-      if (!authIsBootstrapAdmin(user) && !authRoleFor(user, req.params.projectId)) {
+      if (!authIsGlobalAdmin(user) && !authRoleFor(user, req.params.projectId)) {
         return res.status(403).json({ detail: 'Project access denied.' });
       }
       const url = new URL(`${PYTHON_API_URL}/telemetry/runtime/projects/${encodeURIComponent(req.params.projectId)}/revisions/${encodeURIComponent(req.params.revisionId)}`);
@@ -534,7 +568,7 @@ async function startServer() {
   app.get('/api/runtime/projects/:projectId/revisions/:revisionId/requests', async (req, res) => {
     try {
       const user = (res.locals as any).authUser;
-      if (!authIsBootstrapAdmin(user) && !authRoleFor(user, req.params.projectId)) {
+      if (!authIsGlobalAdmin(user) && !authRoleFor(user, req.params.projectId)) {
         return res.status(403).json({ detail: 'Project access denied.' });
       }
       const outcome = typeof req.query.outcome === 'string' ? req.query.outcome : 'all';
@@ -553,7 +587,7 @@ async function startServer() {
   app.delete('/api/runtime/projects/:projectId/revisions/:revisionId/requests', async (req, res) => {
     try {
       const user = (res.locals as any).authUser;
-      if (!authIsBootstrapAdmin(user) && authRoleFor(user, req.params.projectId) !== 'admin') {
+      if (!authIsGlobalAdmin(user) && authRoleFor(user, req.params.projectId) !== 'admin') {
         return res.status(403).json({ detail: 'Project administrator access is required to delete Runtime telemetry.' });
       }
       const traceIds = req.body?.trace_ids;
@@ -578,7 +612,7 @@ async function startServer() {
   app.get('/api/runtime/projects/:projectId/revisions/:revisionId/requests/:traceId', async (req, res) => {
     try {
       const user = (res.locals as any).authUser;
-      if (!authIsBootstrapAdmin(user) && !authRoleFor(user, req.params.projectId)) {
+      if (!authIsGlobalAdmin(user) && !authRoleFor(user, req.params.projectId)) {
         return res.status(403).json({ detail: 'Project access denied.' });
       }
       const path = `/telemetry/runtime/projects/${encodeURIComponent(req.params.projectId)}/revisions/${encodeURIComponent(req.params.revisionId)}/requests/${encodeURIComponent(req.params.traceId)}`;
@@ -593,7 +627,7 @@ async function startServer() {
   app.post('/api/runtime/projects/:projectId/revisions/:revisionId/requests/:traceId/analysis', async (req, res) => {
     try {
       const user = (res.locals as any).authUser;
-      if (!authIsBootstrapAdmin(user) && !authRoleFor(user, req.params.projectId)) {
+      if (!authIsGlobalAdmin(user) && !authRoleFor(user, req.params.projectId)) {
         return res.status(403).json({ detail: 'Project access denied.' });
       }
       const path = `/telemetry/runtime/projects/${encodeURIComponent(req.params.projectId)}/revisions/${encodeURIComponent(req.params.revisionId)}/requests/${encodeURIComponent(req.params.traceId)}/analysis`;
@@ -612,7 +646,7 @@ async function startServer() {
   app.post('/api/runtime/projects/:projectId/revisions/:revisionId/requests/:traceId/analysis/diff', async (req, res) => {
     try {
       const user = (res.locals as any).authUser;
-      if (!authIsBootstrapAdmin(user) && !authRoleFor(user, req.params.projectId)) {
+      if (!authIsGlobalAdmin(user) && !authRoleFor(user, req.params.projectId)) {
         return res.status(403).json({ detail: 'Project access denied.' });
       }
       const path = `/telemetry/runtime/projects/${encodeURIComponent(req.params.projectId)}/revisions/${encodeURIComponent(req.params.revisionId)}/requests/${encodeURIComponent(req.params.traceId)}/analysis/diff`;
@@ -1205,7 +1239,7 @@ async function startServer() {
       if (!pyRes.ok) return res.status(pyRes.status).json({ success: false, error: 'Projects are unavailable.' });
       const user = (res.locals as any).authUser;
       const projects = (data.projects || []).filter((project) =>
-        Boolean(user && (authIsBootstrapAdmin(user) || authRoleFor(user, project.project_id))));
+        Boolean(user && (authIsGlobalAdmin(user) || authRoleFor(user, project.project_id))));
       return res.json({ success: true, projects, vectors_checked: Boolean(data.vectors_checked) });
     } catch {
       return res.status(502).json({ success: false, error: 'Projects are unavailable.' });
@@ -1221,7 +1255,7 @@ async function startServer() {
       if (!pyRes.ok) return res.status(pyRes.status).json({ success: false, error: 'Revisions are unavailable.' });
       const user = (res.locals as any).authUser;
       const projects = (data.projects || []).filter((project) =>
-        Boolean(user && (authIsBootstrapAdmin(user) || authRoleFor(user, project.project_id))));
+        Boolean(user && (authIsGlobalAdmin(user) || authRoleFor(user, project.project_id))));
       return res.json({ success: true, projects });
     } catch {
       return res.status(502).json({ success: false, error: 'Revisions are unavailable.' });
@@ -1265,7 +1299,7 @@ async function startServer() {
       const user = (res.locals as any).authUser;
       const visibleFiles = files.filter((file) => file.projectId
         ? Boolean(authRoleFor(user, file.projectId))
-        : authIsBootstrapAdmin(user));
+        : authIsGlobalAdmin(user));
       res.json({ success: true, files: visibleFiles });
     } catch (error: any) {
       res.status(500).json({ success: false, error: error.message });
@@ -1321,7 +1355,7 @@ async function startServer() {
 
   app.post('/api/embeddings/rebuild-route-feedback', async (req, res) => {
     const user = (res.locals as any).authUser;
-    if (!authIsBootstrapAdmin(user)) {
+    if (!authIsGlobalAdmin(user)) {
       return res.status(403).json({ detail: 'Administrator access is required.' });
     }
     try {
@@ -1436,7 +1470,7 @@ async function startServer() {
         if (req.body?.project_id !== storedFile.project_id || !authRoleFor(user, storedFile.project_id)) {
           return res.status(403).json({ success: false, error: 'Project access denied.' });
         }
-      } else if (!authIsBootstrapAdmin(user)) {
+      } else if (!authIsGlobalAdmin(user)) {
         return res.status(403).json({ success: false, error: 'Administrator access is required to delete an unattributed legacy upload.' });
       }
 
@@ -1591,7 +1625,7 @@ async function startServer() {
   app.get('/api/auth/projects/:projectId/remote-source', async (req, res) => {
     try {
       const user = (res.locals as any).authUser;
-      if (!authIsBootstrapAdmin(user) && !authRoleFor(user, req.params.projectId)) {
+      if (!authIsGlobalAdmin(user) && !authRoleFor(user, req.params.projectId)) {
         return res.status(403).json({ detail: 'Project access denied.' });
       }
       const pyRes = await fetch(remoteSourcePath(req.params.projectId), { headers: { 'X-Internal-Secret': INTERNAL_SECRET } });
@@ -1605,7 +1639,7 @@ async function startServer() {
   app.put('/api/auth/projects/:projectId/remote-source', async (req, res) => {
     try {
       const user = (res.locals as any).authUser;
-      if (!authIsBootstrapAdmin(user) && authRoleFor(user, req.params.projectId) !== 'admin') {
+      if (!authIsGlobalAdmin(user) && authRoleFor(user, req.params.projectId) !== 'admin') {
         return res.status(403).json({ detail: 'Project administrator access is required to change this setting.' });
       }
       if (typeof req.body?.allowed !== 'boolean') {
@@ -1631,7 +1665,7 @@ async function startServer() {
   app.get('/api/auth/projects/:projectId/retention', async (req, res) => {
     try {
       const user = (res.locals as any).authUser;
-      if (!authIsBootstrapAdmin(user) && !authRoleFor(user, req.params.projectId)) {
+      if (!authIsGlobalAdmin(user) && !authRoleFor(user, req.params.projectId)) {
         return res.status(403).json({ detail: 'Project access denied.' });
       }
       const pyRes = await fetch(retentionPath(req.params.projectId), { headers: { 'X-Internal-Secret': INTERNAL_SECRET } });
@@ -1645,7 +1679,7 @@ async function startServer() {
   app.put('/api/auth/projects/:projectId/retention', async (req, res) => {
     try {
       const user = (res.locals as any).authUser;
-      if (!authIsBootstrapAdmin(user) && authRoleFor(user, req.params.projectId) !== 'admin') {
+      if (!authIsGlobalAdmin(user) && authRoleFor(user, req.params.projectId) !== 'admin') {
         return res.status(403).json({ detail: 'Project administrator access is required to change this setting.' });
       }
       const change: Record<string, unknown> = {};
@@ -1679,7 +1713,7 @@ async function startServer() {
       const infoRes = await fetch(`${PYTHON_API_URL}/tool-approvals/${approvalId}`, { headers: { 'X-Internal-Secret': INTERNAL_SECRET } });
       const info = await infoRes.json().catch(() => ({}));
       if (!infoRes.ok) return res.status(infoRes.status).json({ success: false, error: info.detail || 'Approval unavailable.' });
-      if (decision === 'approve' && info.project_id && !authIsBootstrapAdmin(user)
+      if (decision === 'approve' && info.project_id && !authIsGlobalAdmin(user)
         && !['operator', 'admin'].includes(authRoleFor(user, info.project_id) || '')) {
         return res.status(403).json({ success: false, error: 'Operator or administrator access is required to approve tool calls.' });
       }
