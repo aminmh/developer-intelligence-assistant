@@ -31,6 +31,11 @@ def _shape(value: Any) -> Any:
     return value
 
 
+def key_part(key: str) -> str:
+    """``.name``, or ``["a.b"]`` for a key a dotted path cannot address unambiguously."""
+    return f".{key}" if key and re.fullmatch(r'[^.\[\]"\s]+', key) else f"[{json.dumps(key, ensure_ascii=False)}]"
+
+
 def flatten(value: Any, path: str = "$") -> dict[str, Any]:
     """Leaf values by JSON path; empty containers are leaves so additions and removals show."""
     if isinstance(value, dict) and value:
@@ -38,7 +43,7 @@ def flatten(value: Any, path: str = "$") -> dict[str, Any]:
         for key, item in value.items():
             if _TOKEN_KEYS.search(str(key)):
                 continue
-            out.update(flatten(item, f"{path}.{key}"))
+            out.update(flatten(item, f"{path}{key_part(str(key))}"))
         return out
     if isinstance(value, list) and value:
         out = {}

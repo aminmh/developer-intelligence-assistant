@@ -33,3 +33,4 @@ class Capability(str, Enum):
     # Regression check (@.archcore/regression/regression-evidence-comes-from-framework-capabilities.adr.md).
     RUN_HINTS = "run_hints"
     PROBE_HINTS = "probe_hints"
+    CHARACTERIZATION_TESTS = "characterization_tests"

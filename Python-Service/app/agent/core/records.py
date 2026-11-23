@@ -157,5 +157,33 @@ class ParamHintRecord:
     handler: str | None = None         # handler symbol the hint applies to, when known
 
 
+@dataclass(frozen=True)
+class TestTemplateRecord:
+    """Capability ``characterization_tests``: how this project's test runner expresses a recorded HTTP exchange.
+
+    Templates are plain text with placeholders the regression check fills; nothing here is executed.
+    ``file`` and ``file_template`` take ``{name}`` and ``{tests}``; ``route_test`` takes ``{test_name}``,
+    ``{title}``, ``{note}``, ``{method}``, ``{path}``, ``{body}``, ``{status}`` and ``{assertions}``;
+    ``json_assertion`` takes ``{dot_path}``, ``{bracket_path}`` and ``{value}``; ``text_assertion`` takes
+    ``{text}``. String placeholders arrive as single-quoted literals with backslash escapes.
+    """
+
+    framework: str
+    runner: str                        # "phpunit" | "pest" | "pytest" | ...
+    language: str                      # language of the generated file, for prompts and display
+    file: str                          # path of the generated file, with {name}
+    file_template: str
+    route_test: str
+    json_assertion: str
+    text_assertion: str
+    json_value: str                    # wraps a JSON literal into a value, with {json}
+    no_body: str                       # value for a request without a body
+    true_literal: str = "true"
+    false_literal: str = "false"
+    null_literal: str = "null"
+    uses_dot_path: bool = True         # dot paths cannot address keys that contain dots
+    run_command: str = ""
+
+
 def record_dict(record: Any) -> dict[str, Any]:
     return asdict(record)

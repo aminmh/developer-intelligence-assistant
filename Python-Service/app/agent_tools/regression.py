@@ -83,7 +83,11 @@ def regression_check(args: dict[str, Any], context: ToolContext, *, store: Any =
             "coverage": report.get("coverage"), "counts": verdict_counts(report),
             "uncovered": report.get("uncovered", [])[:MAX_ITEMS], "partial": report.get("partial", []),
             "contract_changes": report.get("contract_changes", [])[:20], "notes": report.get("notes", []),
-            "judgment_label": JUDGMENT_LABEL, "items": _items(report)}
+            "judgment_label": JUDGMENT_LABEL, "items": _items(report),
+            "characterization_tests": (
+                "Route tests from the recorded baseline and a replayable request file can be downloaded in Code Quality "
+                "> Regression > Characterization tests." if store.latest_run(context.project_id, done["check_id"], "baseline")
+                else "Record a baseline in Code Quality > Regression to get route tests that pin the base version's responses.")}
 
 
 REGRESSION_TOOLS = [

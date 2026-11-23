@@ -21,6 +21,7 @@ from agent.core.records import (
     RunHintRecord,
     TaintStubRecord,
     TemplateRecord,
+    TestTemplateRecord,
     TestRecord,
     TranslationRecord,
 )
@@ -37,6 +38,7 @@ RECORD_TYPES: dict[Capability, tuple[type, ...]] = {
     Capability.TAINT_MODEL: (TaintStubRecord,),
     Capability.RUN_HINTS: (RunHintRecord,),
     Capability.PROBE_HINTS: (ParamHintRecord,),
+    Capability.CHARACTERIZATION_TESTS: (TestTemplateRecord,),
 }
 
 

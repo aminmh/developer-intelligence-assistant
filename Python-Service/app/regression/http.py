@@ -210,3 +210,20 @@ def get_replay_run(project_id: str, check_id: str, run_id: str, request: Request
     if run["check_id"] != check_id:
         raise HTTPException(404, "Replay run was not found for this check.")
     return run
+
+
+# --- characterization tests (spec clauses 19-21) -------------------------------------------------------
+
+@router.post("/projects/{project_id}/regression-checks/{check_id}/tests",
+             summary="Characterization tests and a replayable request file for the check")
+async def build_tests(project_id: str, check_id: str, request: Request) -> Any:
+    from regression import replay_service
+    from regression.characterize import bundle_zip
+
+    _authorize(request, project_id)
+    store = _store()
+    bundle = await run_in_threadpool(_replay_call, lambda: replay_service.test_bundle(store, project_id, check_id))
+    if request.query_params.get("format") == "zip":
+        return Response(bundle_zip(bundle), media_type="application/zip", headers={
+            "Content-Disposition": f'attachment; filename="regression-tests-{check_id}.zip"'})
+    return bundle

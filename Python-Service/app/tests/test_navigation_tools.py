@@ -425,6 +425,7 @@ def test_regression_check_cites(tmp_path):
     assert symbol["reasons"][0]["line"] == 12
     assert (route["route"], route["path"], route["line"]) == ("GET /orders/{id}", "app/OrderController.php", 20)
     assert out["counts"]["suspected_regression"] == 2 and "not proof" in out["judgment_label"]
+    assert out["characterization_tests"].startswith("Record a baseline")
     definition = REGRESSION_TOOLS[0]
     assert definition.effect == "read_only" and "code_refactor" in definition.workflows
 

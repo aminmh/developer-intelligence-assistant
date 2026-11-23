@@ -55,3 +55,9 @@ def test_noise_structural_diff_status_headers_html_and_hash():
 
 def test_noise_structural_diff_flatten_keeps_empty_containers():
     assert flatten({"a": [], "b": {}, "c": [1]}) == {"$.a": [], "$.b": {}, "$.c[0]": 1}
+
+
+def test_noise_structural_diff_keys_with_dots_stay_unambiguous():
+    """Found writing characterization tests: {"a.b": 1} and {"a": {"b": 1}} must not share a path."""
+    assert flatten({"a.b": 1, "a": {"b": 2}, "has space": 3}) == {'$["a.b"]': 1, "$.a.b": 2, '$["has space"]': 3}
+    assert not compare(_json({"a.b": 1}), _json({"a": {"b": 1}}))["equal"]
