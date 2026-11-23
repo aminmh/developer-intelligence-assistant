@@ -1131,6 +1131,22 @@ def assess_revision(project_id: str, revision_id: str, snapshot: dict, archive_d
     semgrep_findings, semgrep_failures, semgrep_result = _run_static_rules(archive_data, files, custom_rule_sets)
     findings = (findings + semgrep_findings)[:MAX_FINDINGS]
     analyzer_failures.extend(semgrep_failures)
+    # Angular, React, and Vue source: in-process checks, no Node toolchain. Accessibility findings are
+    # not one of the five scored categories, so only the security, reliability, performance, and
+    # maintainability findings join the assessment.
+    frontend_result = None
+    try:
+        from code_quality.frontend_checks import run_on_archive as run_frontend_checks
+        frontend_result = run_frontend_checks(archive_data, files)
+    except Exception as exc:  # noqa: BLE001 — a failing analyzer is reported, never fatal
+        analyzer_failures.append({"name": "frontend-checks", "reason": f"Front-end checks failed ({type(exc).__name__})."})
+    if frontend_result:
+        findings = (findings + [
+            _finding(row["file"], row["line"], row["rule"], row["area"], row["message"])
+            | {"severity": row["severity"], "kind": "finding", "tool": "frontend-checks",
+               "tool_version": frontend_result["version"]}
+            for row in frontend_result["findings"] if row["area"] in CATEGORIES
+        ])[:MAX_FINDINGS]
     # Framework-neutral checks over records that framework plugins provide
     # (decision: framework-knowledge-lives-in-plugins-over-language-facts).
     framework_coverage: dict[str, Any] = {"checks": [], "capabilities": []}
@@ -1409,6 +1425,14 @@ def assess_revision(project_id: str, revision_id: str, snapshot: dict, archive_d
                           "categories": semgrep_result["categories"],
                           "limits": {"timeout_seconds": 90, "output_bytes": 8 * 1024 * 1024,
                                      "findings": MAX_FINDINGS}})
+    if frontend_result:
+        analyzers.append({"name": "frontend-checks", "version": frontend_result["version"],
+                          "languages": ["javascript", "typescript", "vue"],
+                          "selected_languages": sorted(set(languages) & {"javascript", "typescript", "vue"}),
+                          "categories": ["security", "reliability", "performance", "maintainability"],
+                          "limits": {"files": 4000, "file_bytes": 1_000_000, "findings_per_rule": 150},
+                          "files_checked": frontend_result["files_checked"],
+                          "accessibility_findings": frontend_result["by_area"]["accessibility"]})
     if framework_coverage.get("checks"):
         analyzers.append({"name": "framework-checks", "version": "framework-checks-1",
                           "checks": framework_coverage["checks"],

@@ -164,6 +164,15 @@ class SourceService:
                  indexer: Callable[[str, Snapshot], dict] = index_source):
         self.registry, self.storage, self.indexer = registry, storage, indexer
 
+    @staticmethod
+    def _contracts_ready(project_id: str, source_ref: str) -> None:
+        """Let repository-path API contracts read their file from the revision that just became ready."""
+        try:
+            from api_contracts.service import contract_service
+            contract_service.on_revision_ready(project_id, source_ref)
+        except Exception:  # noqa: BLE001 — a contract problem never fails indexing
+            logging.getLogger(__name__).warning("contract_revision_hook_unavailable project=%s", project_id)
+
     def upload(self, project_id: str, commit_sha: str | None, data: bytes) -> dict:
         snapshot = Snapshot(project_id, commit_sha, hashlib.sha256(data).hexdigest())
         validate_archive(data)
@@ -246,6 +255,7 @@ class SourceService:
                         or result.get("graph_nodes") != count or result.get("embed_fails", 0))):
                     raise RuntimeError("Incomplete snapshot indexing")
                 self.registry.finish_job(project_id, commit_sha, success=True)
+                self._contracts_ready(project_id, commit_sha)
             except Superseded:
                 self.registry.finish_job(project_id, commit_sha, success=False)  # recorded as superseded
             except Exception as exc:
@@ -305,6 +315,7 @@ def index_uploaded_snapshot(
                     or int(result.get("embed_fails", 0) or 0)):
                 raise RuntimeError("Incomplete snapshot indexing")
             registry.finish_job(snapshot.project_id, snapshot.reference, success=True)
+            SourceService._contracts_ready(snapshot.project_id, snapshot.reference)
             return result
         except Exception:
             registry.finish_job(snapshot.project_id, snapshot.reference, success=False)

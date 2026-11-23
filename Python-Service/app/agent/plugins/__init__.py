@@ -9,6 +9,7 @@ from __future__ import annotations
 
 from agent.core.di import Container
 from agent.core.registry import PluginRegistry
+from agent.plugins.frameworks.frontend import AngularFrameworkPlugin, ReactFrameworkPlugin, VueFrameworkPlugin
 from agent.plugins.frameworks.laravel import LaravelFrameworkPlugin
 from agent.plugins.frameworks.symfony import SymfonyFrameworkPlugin
 from agent.plugins.languages.php import PhpLanguagePlugin
@@ -24,6 +25,8 @@ def register_builtins(registry: PluginRegistry, container: Container | None = No
     registry.register_framework(LaravelFrameworkPlugin())
     registry.register_framework(SymfonyFrameworkPlugin())
     registry.register_framework(TestFrameworkPlugin())
+    for frontend_plugin in (AngularFrameworkPlugin(), ReactFrameworkPlugin(), VueFrameworkPlugin()):
+        registry.register_framework(frontend_plugin)
     registry.register_migration_adapter("laravel", LaravelMigrationAdapter())
     registry.register_migration_adapter("symfony", DoctrineMigrationAdapter())
     registry.register_migration_adapter("doctrine", DoctrineMigrationAdapter())

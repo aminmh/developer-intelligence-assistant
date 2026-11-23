@@ -34,14 +34,23 @@ processors:
           - 'set(version, "1")'
       - context: span
         statements:
-          - 'keep_keys(attributes, ["indexer.symbol_id", "indexer.caller.symbol_id", "indexer.route_id", "indexer.table_ids", "indexer.db.table", "indexer.command.name", "indexer.exception.type", "indexer.exception.normalized_message", "indexer.exception.top_frames", "indexer.php.cpu_time_us", "indexer.php.peak_memory_bytes", "indexer.method_hook_counts", "indexer.dropped.hook_calls", "indexer.benchmark_run_id", "profiler.profile_id", "profiler.top_frames", "profiler.sample_period_ms", "http.route", "http.request.method", "http.response.status_code", "db.system.name", "db.namespace", "db.operation.name", "db.collection.name", "server.address", "url.scheme", "rpc.system", "messaging.system", "error.type"])'
+          - 'keep_keys(attributes, ["indexer.symbol_id", "indexer.caller.symbol_id", "indexer.route_id", "indexer.table_ids", "indexer.db.table", "indexer.command.name", "indexer.exception.type", "indexer.exception.normalized_message", "indexer.exception.top_frames", "indexer.php.cpu_time_us", "indexer.php.peak_memory_bytes", "indexer.method_hook_counts", "indexer.dropped.hook_calls", "indexer.benchmark_run_id", "profiler.profile_id", "profiler.top_frames", "profiler.sample_period_ms", "http.route", "http.request.method", "http.response.status_code", "db.system.name", "db.namespace", "db.operation.name", "db.collection.name", "server.address", "url.scheme", "rpc.system", "messaging.system", "error.type", "browser.route", "browser.vital.lcp_ms", "browser.vital.inp_ms", "browser.vital.cls", "browser.frontend.project_id", "browser.frontend.revision_id", "indexer.browser.trace_id", "indexer.browser.span_id"])'
           # Benchmark tags come from a request header: keep only well-formed run ids.
           - 'delete_key(attributes, "indexer.benchmark_run_id") where attributes["indexer.benchmark_run_id"] != nil and not IsMatch(attributes["indexer.benchmark_run_id"], "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$")'
           # error.type carries an exception class or status code; drop anything else (free text could hold data).
           - 'delete_key(attributes, "error.type") where attributes["error.type"] != nil and not IsMatch(attributes["error.type"], "^[A-Za-z0-9_\\\\]{1,255}$")'
+          # Browser spans arrive through the application's relay, which already validates them. Check the
+          # text attributes again here: a route must look like a route template, never free text or a URL
+          # with a query string, and the front-end identity must have the registry's shape.
+          - 'delete_key(attributes, "browser.route") where attributes["browser.route"] != nil and not IsMatch(attributes["browser.route"], "^[A-Za-z0-9_./:{}*@ ()\\[\\]-]{1,200}$")'
+          - 'delete_key(attributes, "browser.frontend.project_id") where attributes["browser.frontend.project_id"] != nil and not IsMatch(attributes["browser.frontend.project_id"], "^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$")'
+          - 'delete_key(attributes, "browser.frontend.revision_id") where attributes["browser.frontend.revision_id"] != nil and not IsMatch(attributes["browser.frontend.revision_id"], "^rev_[0-9a-f]{32}$")'
+          # A request span may name the browser screen view that sent it: two hex IDs, nothing else.
+          - 'delete_key(attributes, "indexer.browser.trace_id") where attributes["indexer.browser.trace_id"] != nil and not IsMatch(attributes["indexer.browser.trace_id"], "^[0-9a-f]{32}$")'
+          - 'delete_key(attributes, "indexer.browser.span_id") where attributes["indexer.browser.span_id"] != nil and not IsMatch(attributes["indexer.browser.span_id"], "^[0-9a-f]{16}$")'
           # Keep the bounded set of span names the indexr library creates; rewrite anything else,
           # since auto-instrumentation names can contain URLs or SQL.
-          - 'set(name, "runtime.span") where not IsMatch(name, "^(http\\.server|db\\.query|messaging\\.process|cli\\.command)$")'
+          - 'set(name, "runtime.span") where not IsMatch(name, "^(http\\.server|db\\.query|messaging\\.process|cli\\.command|browser\\.page|browser\\.interaction|browser\\.error)$")'
           - 'set(status.message, "")'
           - 'set(trace_state, "")'
   p95policy/runtime:

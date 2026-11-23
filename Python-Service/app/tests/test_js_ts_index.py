@@ -34,3 +34,29 @@ def test_adapter_reports_unsupported_and_malformed_coverage(tmp_path):
     assert result["coverage"] == "partial"
     assert result["malformed_files"] == ["types.ts"]
     assert any(item["construct"] == "interface_declaration" for item in result["unsupported_constructs"])
+
+
+def test_vue_components_tsx_and_angular_templates_are_indexed(tmp_path):
+    (tmp_path / "OrderCard.vue").write_text(
+        "<template>\n  <article>{{ total() }}</article>\n</template>\n\n"
+        "<script setup lang=\"ts\">\nfunction total(): number {\n  return 1;\n}\n</script>\n")
+    (tmp_path / "Page.tsx").write_text("export function Page() {\n  return <main><p>hi</p></main>;\n}\n")
+    (tmp_path / "home.component.html").write_text("<main><app-list></app-list></main>\n")
+    (tmp_path / "index.html").write_text("<html></html>\n")
+
+    result = produce_chunks(tmp_path, "typescript")
+    chunks = {chunk["name"]: chunk for chunk in result["chunks"]}
+
+    assert result["malformed_files"] == []  # .tsx parses with the TSX grammar
+    assert chunks["total"]["file"] == "OrderCard.vue" and chunks["total"]["start_line"] == 6  # line in the .vue file
+    assert chunks["OrderCard"]["origin"] == "markup" and "<article>" in chunks["OrderCard"]["code"]
+    assert chunks["Page"]["type"] == "function"
+    assert "<app-list>" in chunks["HomeComponentTemplate"]["code"]
+    assert not any(chunk["file"] == "index.html" for chunk in result["chunks"])
+    assert all(from_chunk(chunk) for chunk in result["chunks"] if chunk["type"] == "function")
+
+
+def test_file_limit_allows_real_front_end_projects():
+    from projects import js_ts_index
+
+    assert js_ts_index._MAX_FILES >= 4000

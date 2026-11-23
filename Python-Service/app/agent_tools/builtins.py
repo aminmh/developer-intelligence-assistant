@@ -52,6 +52,8 @@ PROJECT_STRUCTURE = ToolDefinition(
 
 
 def builtin_tools() -> list[ToolDefinition]:
+    from agent_tools.contracts import CONTRACT_TOOLS
+    from agent_tools.frontend import FRONTEND_TOOLS
     from agent_tools.navigation import NAVIGATION_TOOLS
 
-    return [PROJECT_STRUCTURE, *NAVIGATION_TOOLS]
+    return [PROJECT_STRUCTURE, *NAVIGATION_TOOLS, *CONTRACT_TOOLS, *FRONTEND_TOOLS]

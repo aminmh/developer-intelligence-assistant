@@ -141,6 +141,7 @@ async def lifespan(app: FastAPI):
         next_aggregation = 0.0
         next_policy_refresh = 0.0
         next_schema_check = 0.0
+        next_contract_refresh = 0.0
         schema_ready = False
         while True:
             try:
@@ -171,6 +172,14 @@ async def lifespan(app: FastAPI):
                     except Exception as exc:
                         logging.getLogger(__name__).warning("Revision retention failed: %s", exc)
                     next_retention = now + 600
+                if now >= next_contract_refresh:
+                    # URL contract sources with a refresh interval; each source decides whether it is due.
+                    try:
+                        from api_contracts.service import contract_service
+                        await asyncio.to_thread(contract_service.refresh_due_urls)
+                    except Exception as exc:
+                        logging.getLogger(__name__).warning("Contract URL refresh failed: %s", type(exc).__name__)
+                    next_contract_refresh = now + 300
                 if schema_ready and now >= next_policy_refresh:
                     try:
                         from telemetry.policy import refresh_sampling_policy
@@ -312,6 +321,10 @@ from routers.tool_approvals import router as tool_approvals_router  # noqa: E402
 app.include_router(code_tools_router)
 app.include_router(remote_consent_router)
 app.include_router(tool_approvals_router)
+from routers.api_contracts import router as api_contracts_router  # noqa: E402 — after app exists
+app.include_router(api_contracts_router)
+from routers.frontend import router as frontend_router  # noqa: E402 — after app exists
+app.include_router(frontend_router)
 
 app.add_middleware(
     CORSMiddleware,

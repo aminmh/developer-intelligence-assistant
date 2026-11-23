@@ -10,12 +10,16 @@ from typing import Any
 
 from tree_sitter_language_pack import get_parser
 
-_MAX_FILES = 400
+# Front-end projects are large: a mid-size Angular or Vue application has well over 400 source files.
+_MAX_FILES = int(os.getenv("JS_TS_MAX_FILES", "4000"))
+_MAX_TEMPLATE_CHARS = 3_000
 _MAX_FILE_BYTES = 1_000_000
 _MAX_CODE_CHARS = 3_000
 _EXTENSIONS = {
     ".js": "javascript", ".mjs": "javascript", ".cjs": "javascript",
-    ".jsx": "javascript", ".ts": "typescript", ".tsx": "typescript",
+    ".jsx": "javascript", ".ts": "typescript", ".tsx": "tsx",
+    # Markup that belongs to a component: Vue single-file components and Angular templates.
+    ".vue": "vue", ".html": "angular-template",
 }
 _SKIP_DIRS = {
     ".git", "node_modules", "vendor", "dist", "build", "coverage",
@@ -197,6 +201,44 @@ def _declarations(root: Any, source: bytes, relative: str) -> tuple[list[dict[st
     return definitions, unsupported
 
 
+def _markup_chunk(relative: str, name: str, kind: str, markup: str, lines: int) -> dict[str, Any]:
+    """One searchable chunk for a component's template, so questions about a screen find its markup."""
+    module = _module_name(relative)
+    return {
+        "type": kind, "origin": "markup", "name": name[:120], "class": None, "class_fqn": f"{module}\\{name}",
+        "namespace": module, "file": relative, "start_line": 1, "end_line": max(1, lines), "modifiers": [],
+        "parameters": [], "return_type": None, "calls": [], "callers": [], "has_docblock": False, "docblock": "",
+        "code": markup.strip()[:_MAX_TEMPLATE_CHARS],
+    }
+
+
+def _pascal(stem: str) -> str:
+    return "".join(part[:1].upper() + part[1:] for part in re.split(r"[^A-Za-z0-9]+", stem) if part) or "Component"
+
+
+def _vue_chunks(source: bytes, relative: str) -> tuple[list[dict[str, Any]], list[dict[str, Any]], bool]:
+    """Declarations of a Vue component's script blocks (with file line numbers) plus its template."""
+    from projects.frontend.parsing import split_vue
+
+    scripts, template = split_vue(source)
+    definitions: list[dict[str, Any]] = []
+    unsupported: list[dict[str, Any]] = []
+    malformed = False
+    for script, grammar, offset in scripts:
+        padded = b"\n" * offset + script  # keep the file's line numbers
+        tree = get_parser(grammar).parse(padded)
+        found, unhandled = _declarations(tree.root_node, padded, relative)
+        definitions.extend(found)
+        # A component script is mostly top-level statements; only real gaps are worth reporting.
+        unsupported.extend(item for item in unhandled if item.get("construct") != "non_function_variable")
+        malformed = malformed or tree.root_node.has_error
+    stem = Path(relative).stem
+    name = _pascal(Path(relative).parent.name if stem.lower() == "index" else stem)
+    text = template.decode("utf-8", errors="replace") if template else source.decode("utf-8", errors="replace")
+    definitions.append(_markup_chunk(relative, name, "class", text, source.count(b"\n") + 1))
+    return definitions, unsupported, malformed
+
+
 def produce_chunks(workspace_path: str | Path, language: str) -> dict[str, Any]:
     """Parse bounded project sources and report partial syntax coverage honestly."""
     root = Path(workspace_path)
@@ -213,6 +255,8 @@ def produce_chunks(workspace_path: str | Path, language: str) -> dict[str, Any]:
         for filename in sorted(names):
             path = Path(directory) / filename
             grammar = _EXTENSIONS.get(path.suffix.lower())
+            if grammar == "angular-template" and not filename.lower().endswith(".component.html"):
+                grammar = None  # only Angular component templates; other HTML is not source code
             if grammar is None:
                 continue
             if files_seen >= _MAX_FILES:
@@ -224,8 +268,20 @@ def produce_chunks(workspace_path: str | Path, language: str) -> dict[str, Any]:
                     unsupported.append({"file": path.relative_to(root).as_posix(), "construct": "file_size_limit"})
                     continue
                 source = path.read_bytes()
-                tree = get_parser(grammar).parse(source)
                 relative = path.relative_to(root).as_posix()
+                if grammar == "vue":
+                    found, unhandled, broken = _vue_chunks(source, relative)
+                    chunks.extend(found)
+                    unsupported.extend(unhandled)
+                    if broken:
+                        malformed.append(relative)
+                    continue
+                if grammar == "angular-template":
+                    name = _pascal(path.name[: -len(".html")]) + "Template"
+                    chunks.append(_markup_chunk(relative, name, "function",
+                                                source.decode("utf-8", errors="replace"), source.count(b"\n") + 1))
+                    continue
+                tree = get_parser(grammar).parse(source)
                 found, unhandled = _declarations(tree.root_node, source, relative)
                 chunks.extend(found)
                 unsupported.extend(unhandled)

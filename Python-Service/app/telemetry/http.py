@@ -214,6 +214,29 @@ def runtime_revision(project_id: str, revision_id: str, request: Request) -> dic
         raise HTTPException(404, "Indexed revision was not found") from exc
 
 
+@runtime_router.get("/projects/{project_id}/screens")
+def runtime_screen_views(project_id: str, request: Request) -> dict:
+    """Browser screen views of a project, with Web Vitals and the requests each one sent."""
+    authorize_internal(request)
+    from telemetry.browser import screen_views
+    try:
+        validate_project_id(project_id)
+    except ValueError as exc:
+        raise HTTPException(422, "Invalid project identity") from exc
+    return screen_views(project_id)
+
+
+@runtime_router.get("/projects/{project_id}/screens/{trace_id}")
+def runtime_screen_view(project_id: str, trace_id: str, request: Request) -> dict:
+    authorize_internal(request)
+    from telemetry.browser import screen_view
+    try:
+        validate_project_id(project_id)
+        return screen_view(project_id, trace_id)
+    except ValueError as exc:
+        raise HTTPException(422, "Invalid project or trace identity") from exc
+
+
 @runtime_router.get("/projects/{project_id}/revisions/{revision_id}/requests")
 def runtime_requests(project_id: str, revision_id: str, request: Request, outcome: str = "all") -> dict:
     authorize_internal(request)
