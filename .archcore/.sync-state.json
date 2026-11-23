@@ -1,0 +1,461 @@
+{
+  "version": 1,
+  "files": {},
+  "relations": [
+    {
+      "source": "runtime-telemetry/runtime-clickhouse-remote-provisioning.plan.md",
+      "target": "runtime-telemetry/runtime-clickhouse-remote-provisioning.spec.md",
+      "type": "implements"
+    },
+    {
+      "source": "agent-tools/langchain-tool-orchestration.plan.md",
+      "target": "agent-tools/langchain-tool-orchestration.spec.md",
+      "type": "implements"
+    },
+    {
+      "source": "code-quality/implement-codebase-quality-assessment.plan.md",
+      "target": "code-quality/codebase-quality-assessment.spec.md",
+      "type": "implements"
+    },
+    {
+      "source": "code-quality/implement-codebase-quality-assessment.plan.md",
+      "target": "runtime-telemetry/runtime-trace-summary.spec.md",
+      "type": "depends_on"
+    },
+    {
+      "source": "code-quality/implement-codebase-quality-assessment.plan.md",
+      "target": "runtime-telemetry/runtime-clickhouse-remote-provisioning.spec.md",
+      "type": "depends_on"
+    },
+    {
+      "source": "code-quality/expand-static-analyzer-coverage.plan.md",
+      "target": "code-quality/codebase-quality-assessment.spec.md",
+      "type": "implements"
+    },
+    {
+      "source": "code-quality/expand-static-analyzer-coverage.plan.md",
+      "target": "code-quality/implement-codebase-quality-assessment.plan.md",
+      "type": "extends"
+    },
+    {
+      "source": "code-quality/semantic-flow-tracing.spec.md",
+      "target": "code-quality/codebase-quality-assessment.spec.md",
+      "type": "extends"
+    },
+    {
+      "source": "code-quality/git-source-synchronization.plan.md",
+      "target": "code-quality/codebase-quality-assessment.spec.md",
+      "type": "implements"
+    },
+    {
+      "source": "code-quality/semantic-flow-tracing.plan.md",
+      "target": "code-quality/semantic-flow-tracing.spec.md",
+      "type": "implements"
+    },
+    {
+      "source": "code-quality/implement-codebase-quality-assessment.plan.md",
+      "target": "code-quality/git-source-synchronization.plan.md",
+      "type": "depends_on"
+    },
+    {
+      "source": "code-quality/implement-codebase-quality-assessment.plan.md",
+      "target": "code-quality/semantic-flow-tracing.plan.md",
+      "type": "depends_on"
+    },
+    {
+      "source": "diagram-editor/implement-drawio-database-schema-editing.plan.md",
+      "target": "diagram-editor/drawio-database-schema-editing.spec.md",
+      "type": "implements"
+    },
+    {
+      "source": "code-quality/implement-business-rule-semantic-review.plan.md",
+      "target": "code-quality/business-rule-semantic-review.spec.md",
+      "type": "implements"
+    },
+    {
+      "source": "code-quality/business-rule-semantic-review.spec.md",
+      "target": "code-quality/codebase-quality-assessment.spec.md",
+      "type": "extends"
+    },
+    {
+      "source": "code-quality/business-rule-semantic-review.spec.md",
+      "target": "code-quality/semantic-flow-tracing.spec.md",
+      "type": "related"
+    },
+    {
+      "source": "code-quality/external-static-analyzer-integrations.spec.md",
+      "target": "code-quality/codebase-quality-assessment.spec.md",
+      "type": "extends"
+    },
+    {
+      "source": "code-quality/remote-analyzer-worker.spec.md",
+      "target": "code-quality/external-static-analyzer-integrations.spec.md",
+      "type": "extends"
+    },
+    {
+      "source": "code-quality/remote-analyzer-worker.plan.md",
+      "target": "code-quality/remote-analyzer-worker.spec.md",
+      "type": "implements"
+    },
+    {
+      "source": "code-quality/five-category-assessment-scoring.scenario.md",
+      "target": "code-quality/codebase-quality-assessment.spec.md",
+      "type": "depends_on"
+    },
+    {
+      "source": "code-quality/deterministic-clean-code-assessment.spec.md",
+      "target": "code-quality/codebase-quality-assessment.spec.md",
+      "type": "extends"
+    },
+    {
+      "source": "code-quality/deterministic-clean-code-assessment.spec.md",
+      "target": "code-quality/compute-clean-code-score-from-versioned-metrics.adr.md",
+      "type": "implements"
+    },
+    {
+      "source": "code-quality/compute-clean-code-score-from-versioned-metrics.adr.md",
+      "target": "code-quality/codebase-quality-assessment.spec.md",
+      "type": "extends"
+    },
+    {
+      "source": "code-quality/deterministic-clean-code-assessment.plan.md",
+      "target": "code-quality/deterministic-clean-code-assessment.spec.md",
+      "type": "implements"
+    },
+    {
+      "source": "code-quality/assessment-index-precheck.spec.md",
+      "target": "code-quality/codebase-quality-assessment.spec.md",
+      "type": "extends"
+    },
+    {
+      "source": "diagram-editor/drawio-implementation-preflight.doc.md",
+      "target": "diagram-editor/implement-drawio-database-schema-editing.plan.md",
+      "type": "related"
+    },
+    {
+      "source": "runtime-telemetry/local-clickhouse-performance-and-span-accuracy.plan.md",
+      "target": "runtime-telemetry/clickhouse-background-and-retention.plan.md",
+      "type": "depends_on"
+    },
+    {
+      "source": "runtime-telemetry/local-clickhouse-performance-and-span-accuracy.plan.md",
+      "target": "runtime-telemetry/local-runtime-reads-full-spans-without-tail-sampling.adr.md",
+      "type": "depends_on"
+    },
+    {
+      "source": "runtime-telemetry/local-clickhouse-performance-and-span-accuracy.plan.md",
+      "target": "runtime-telemetry/python-service-owns-runtime-span-table-schema.adr.md",
+      "type": "depends_on"
+    },
+    {
+      "source": "runtime-telemetry/runtime-summary-reads-hourly-rollups.adr.md",
+      "target": "runtime-telemetry/python-service-owns-runtime-span-table-schema.adr.md",
+      "type": "depends_on"
+    },
+    {
+      "source": "code-quality/business-rule-knowledge.spec.md",
+      "target": "code-quality/business-rule-index-is-a-synced-read-only-copy.adr.md",
+      "type": "depends_on"
+    },
+    {
+      "source": "code-quality/business-rule-knowledge.spec.md",
+      "target": "code-quality/business-rule-semantic-review.spec.md",
+      "type": "extends"
+    },
+    {
+      "source": "code-quality/benchmarks-run-in-background-one-at-a-time.adr.md",
+      "target": "code-quality/codebase-quality-assessment.spec.md",
+      "type": "extends"
+    },
+    {
+      "source": "agent-tools/implement-source-code-navigation-tools.plan.md",
+      "target": "agent-tools/source-code-navigation-tools.spec.md",
+      "type": "implements"
+    },
+    {
+      "source": "agent-tools/source-code-navigation-tools.spec.md",
+      "target": "agent-tools/langchain-tool-orchestration.spec.md",
+      "type": "depends_on"
+    },
+    {
+      "source": "agent-tools/implement-source-code-navigation-tools.plan.md",
+      "target": "agent-tools/langchain-tool-orchestration.plan.md",
+      "type": "depends_on"
+    },
+    {
+      "source": "agent-tools/implement-source-code-navigation-tools.plan.md",
+      "target": "code-quality/external-static-analyzer-integrations.spec.md",
+      "type": "depends_on"
+    },
+    {
+      "source": "agent-tools/langchain-tool-orchestration.plan.md",
+      "target": "agent-tools/paused-agent-runs-resume-from-checkpoint-on-new-stream.adr.md",
+      "type": "depends_on"
+    },
+    {
+      "source": "agent-tools/langchain-tool-orchestration.plan.md",
+      "target": "agent-tools/remote-model-source-access-requires-project-consent.adr.md",
+      "type": "depends_on"
+    },
+    {
+      "source": "agent-tools/langchain-tool-orchestration.plan.md",
+      "target": "agent-tools/mcp-servers-reach-only-allowlisted-hosts-through-egress-proxy.adr.md",
+      "type": "depends_on"
+    },
+    {
+      "source": "agent-tools/source-code-navigation-tools.spec.md",
+      "target": "agent-tools/remote-model-source-access-requires-project-consent.adr.md",
+      "type": "depends_on"
+    },
+    {
+      "source": "data-management/data-management.spec.md",
+      "target": "code-quality/revision-removal.spec.md",
+      "type": "depends_on"
+    },
+    {
+      "source": "data-management/data-management.spec.md",
+      "target": "data-management/global-admins-are-a-list-in-the-auth-store.adr.md",
+      "type": "depends_on"
+    },
+    {
+      "source": "data-management/data-management.spec.md",
+      "target": "data-management/deletes-are-dry-run-planned-and-audited.adr.md",
+      "type": "depends_on"
+    },
+    {
+      "source": "frontend-assist/frontend-developer-assistance.plan.md",
+      "target": "frontend-assist/api-contract-sources-and-versions.spec.md",
+      "type": "implements"
+    },
+    {
+      "source": "frontend-assist/api-contract-sources-and-versions.spec.md",
+      "target": "knowledge-base/sync-creates-new-revisions-and-reuses-unchanged-vectors.adr.md",
+      "type": "depends_on"
+    },
+    {
+      "source": "frontend-assist/api-contract-sources-and-versions.spec.md",
+      "target": "agent-tools/remote-model-source-access-requires-project-consent.adr.md",
+      "type": "depends_on"
+    },
+    {
+      "source": "frontend-assist/frontend-developer-assistance.plan.md",
+      "target": "frontend-assist/contract-conformance-findings.spec.md",
+      "type": "implements"
+    },
+    {
+      "source": "frontend-assist/contract-conformance-findings.spec.md",
+      "target": "frontend-assist/api-contract-sources-and-versions.spec.md",
+      "type": "depends_on"
+    },
+    {
+      "source": "frontend-assist/response-shapes-from-runtime-telemetry.rnd.md",
+      "target": "frontend-assist/contract-conformance-findings.spec.md",
+      "type": "related"
+    },
+    {
+      "source": "frontend-assist/frontend-developer-assistance.plan.md",
+      "target": "frontend-assist/browser-telemetry-through-a-same-origin-relay.rfc.md",
+      "type": "depends_on"
+    },
+    {
+      "source": "runtime-telemetry/requests-record-their-browser-screen-view-instead-of-joining-its-trace.adr.md",
+      "target": "frontend-assist/browser-telemetry-through-a-same-origin-relay.rfc.md",
+      "type": "extends"
+    },
+    {
+      "source": "agent-tools/lsp-first-symbol-navigation.plan.md",
+      "target": "agent-tools/language-servers-feed-the-symbol-graph-at-index-time.adr.md",
+      "type": "implements"
+    },
+    {
+      "source": "agent-tools/lsp-first-symbol-navigation.plan.md",
+      "target": "code-quality/external-static-analyzer-integrations.spec.md",
+      "type": "implements"
+    },
+    {
+      "source": "agent-tools/lsp-first-symbol-navigation.plan.md",
+      "target": "agent-tools/source-code-navigation-tools.spec.md",
+      "type": "implements"
+    },
+    {
+      "source": "agent-tools/language-servers-feed-the-symbol-graph-at-index-time.adr.md",
+      "target": "code-quality/external-static-analyzer-integrations.spec.md",
+      "type": "depends_on"
+    },
+    {
+      "source": "code-quality/close-assessment-gaps-with-panel-review.plan.md",
+      "target": "code-quality/assessment-scores-ten-categories.adr.md",
+      "type": "implements"
+    },
+    {
+      "source": "code-quality/close-assessment-gaps-with-panel-review.plan.md",
+      "target": "code-quality/assessment-review-explores-code-with-budgeted-tools.adr.md",
+      "type": "implements"
+    },
+    {
+      "source": "code-quality/close-assessment-gaps-with-panel-review.plan.md",
+      "target": "code-quality/budgeted-exploratory-review.spec.md",
+      "type": "implements"
+    },
+    {
+      "source": "code-quality/close-assessment-gaps-with-panel-review.plan.md",
+      "target": "code-quality/category-evidence-for-process-testing-docs-l10n-a11y.spec.md",
+      "type": "implements"
+    },
+    {
+      "source": "code-quality/close-assessment-gaps-with-panel-review.plan.md",
+      "target": "code-quality/codebase-quality-assessment.spec.md",
+      "type": "implements"
+    },
+    {
+      "source": "code-quality/budgeted-exploratory-review.spec.md",
+      "target": "code-quality/codebase-quality-assessment.spec.md",
+      "type": "extends"
+    },
+    {
+      "source": "code-quality/category-evidence-for-process-testing-docs-l10n-a11y.spec.md",
+      "target": "code-quality/codebase-quality-assessment.spec.md",
+      "type": "extends"
+    },
+    {
+      "source": "code-quality/budgeted-exploratory-review.spec.md",
+      "target": "agent-tools/source-code-navigation-tools.spec.md",
+      "type": "depends_on"
+    },
+    {
+      "source": "code-quality/budgeted-exploratory-review.spec.md",
+      "target": "code-quality/assessment-review-explores-code-with-budgeted-tools.adr.md",
+      "type": "implements"
+    },
+    {
+      "source": "code-quality/category-evidence-for-process-testing-docs-l10n-a11y.spec.md",
+      "target": "code-quality/assessment-scores-ten-categories.adr.md",
+      "type": "implements"
+    },
+    {
+      "source": "code-quality/close-assessment-gaps-with-panel-review.plan.md",
+      "target": "code-quality/framework-knowledge-lives-in-plugins-over-language-facts.adr.md",
+      "type": "implements"
+    },
+    {
+      "source": "code-quality/close-assessment-gaps-with-panel-review.plan.md",
+      "target": "code-quality/bundled-security-rules-are-redistributable.adr.md",
+      "type": "depends_on"
+    },
+    {
+      "source": "frontend-assist/contract-change-notifications.spec.md",
+      "target": "frontend-assist/contract-conformance-findings.spec.md",
+      "type": "depends_on"
+    },
+    {
+      "source": "frontend-assist/contract-change-notifications.spec.md",
+      "target": "frontend-assist/ide-tokens-are-personal-read-only-bearer-tokens.adr.md",
+      "type": "depends_on"
+    },
+    {
+      "source": "frontend-assist/frontend-developer-assistance.plan.md",
+      "target": "frontend-assist/contract-change-notifications.spec.md",
+      "type": "implements"
+    },
+    {
+      "source": "installation/local-mode-fits-an-8-gb-machine-with-hosted-models.adr.md",
+      "target": "agent-tools/language-servers-feed-the-symbol-graph-at-index-time.adr.md",
+      "type": "depends_on"
+    },
+    {
+      "source": "installation/local-mode-fits-an-8-gb-machine-with-hosted-models.adr.md",
+      "target": "installation/resumable-local-installer.spec.md",
+      "type": "related"
+    },
+    {
+      "source": "agent-tools/change-impact-analysis.spec.md",
+      "target": "agent-tools/source-code-navigation-tools.spec.md",
+      "type": "depends_on"
+    },
+    {
+      "source": "code-quality/business-rule-knowledge.spec.md",
+      "target": "agent-tools/change-impact-analysis.spec.md",
+      "type": "depends_on"
+    },
+    {
+      "source": "agent-tools/implement-change-impact-analysis.plan.md",
+      "target": "agent-tools/change-impact-analysis.spec.md",
+      "type": "implements"
+    },
+    {
+      "source": "agent-tools/implement-change-impact-analysis.plan.md",
+      "target": "agent-tools/lsp-first-symbol-navigation.plan.md",
+      "type": "depends_on"
+    },
+    {
+      "source": "regression/implement-regression-check.plan.md",
+      "target": "regression/regression-check.spec.md",
+      "type": "implements"
+    },
+    {
+      "source": "regression/regression-check.spec.md",
+      "target": "agent-tools/change-impact-analysis.spec.md",
+      "type": "depends_on"
+    },
+    {
+      "source": "regression/regression-check.spec.md",
+      "target": "regression/developer-runs-targets-app-only-sends-http.adr.md",
+      "type": "depends_on"
+    },
+    {
+      "source": "regression/regression-check.spec.md",
+      "target": "regression/replay-writes-only-on-disposable-targets.adr.md",
+      "type": "depends_on"
+    },
+    {
+      "source": "regression/regression-check.spec.md",
+      "target": "regression/replay-recordings-stay-out-of-telemetry.adr.md",
+      "type": "depends_on"
+    },
+    {
+      "source": "regression/regression-check.spec.md",
+      "target": "regression/regression-evidence-comes-from-framework-capabilities.adr.md",
+      "type": "depends_on"
+    },
+    {
+      "source": "regression/regression-evidence-comes-from-framework-capabilities.adr.md",
+      "target": "code-quality/framework-knowledge-lives-in-plugins-over-language-facts.adr.md",
+      "type": "extends"
+    },
+    {
+      "source": "regression/replay-writes-only-on-disposable-targets.adr.md",
+      "target": "regression/developer-runs-targets-app-only-sends-http.adr.md",
+      "type": "extends"
+    },
+    {
+      "source": "knowledge-layer/framework-knowledge-layer.spec.md",
+      "target": "knowledge-layer/remote-documentation-provider.rnd.md",
+      "type": "depends_on"
+    },
+    {
+      "source": "knowledge-layer/framework-knowledge-layer.spec.md",
+      "target": "agent-tools/mcp-servers-reach-only-allowlisted-hosts-through-egress-proxy.adr.md",
+      "type": "depends_on"
+    },
+    {
+      "source": "knowledge-layer/framework-knowledge-layer.spec.md",
+      "target": "code-quality/framework-knowledge-lives-in-plugins-over-language-facts.adr.md",
+      "type": "depends_on"
+    },
+    {
+      "source": "knowledge-layer/remote-documentation-provider.rnd.md",
+      "target": "knowledge-layer/gitmcp-is-the-remote-documentation-provider.adr.md",
+      "type": "supports"
+    },
+    {
+      "source": "knowledge-layer/framework-knowledge-layer.spec.md",
+      "target": "knowledge-layer/gitmcp-is-the-remote-documentation-provider.adr.md",
+      "type": "depends_on"
+    },
+    {
+      "source": "regression/regression-check.spec.md",
+      "target": "knowledge-layer/framework-knowledge-layer.spec.md",
+      "type": "depends_on"
+    }
+  ]
+}
