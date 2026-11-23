@@ -126,5 +126,20 @@ class TaintStubRecord:
     content: str
 
 
+@dataclass(frozen=True)
+class RunHintRecord:
+    """Capability ``run_hints``: one thing a developer needs to start the application.
+
+    Hints are shown to the developer as a checklist; the app never runs a ``command``.
+    """
+
+    framework: str
+    kind: str                          # "env" | "service" | "command" | "port" | "note"
+    name: str                          # variable, service or step name
+    detail: str                        # what to do or why it is needed
+    file: str = ""                     # where the hint comes from, relative to the revision root
+    line: int | None = None
+
+
 def record_dict(record: Any) -> dict[str, Any]:
     return asdict(record)

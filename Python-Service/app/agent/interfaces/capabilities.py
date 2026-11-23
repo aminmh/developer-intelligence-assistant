@@ -17,6 +17,7 @@ from agent.core.records import (
     ConfigRiskRecord,
     GuardRecord,
     RouteRecord,
+    RunHintRecord,
     TaintStubRecord,
     TemplateRecord,
     TestRecord,
@@ -33,6 +34,7 @@ RECORD_TYPES: dict[Capability, tuple[type, ...]] = {
     Capability.TEST_CONVENTIONS: (TestRecord,),
     Capability.CONFIG_RISKS: (ConfigRiskRecord,),
     Capability.TAINT_MODEL: (TaintStubRecord,),
+    Capability.RUN_HINTS: (RunHintRecord,),
 }
 
 
