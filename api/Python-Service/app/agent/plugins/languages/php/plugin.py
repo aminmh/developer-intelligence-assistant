@@ -35,12 +35,16 @@ class PhpLanguagePlugin(LanguagePlugin):
     name = "php"
     # Language tooling the framework-neutral Code Quality checks read (PHPUnit is PHP's test runner,
     # whatever the framework): test classes, and test configuration against the installed PHPUnit.
-    capabilities = (Capability.TEST_CONVENTIONS, Capability.CONFIG_RISKS)
+    capabilities = (Capability.TEST_CONVENTIONS, Capability.CONFIG_RISKS, Capability.INSTALLED_PACKAGES)
 
     def provide(self, capability: Capability, context: "RevisionContext") -> list:
         from agent.interfaces.capabilities import CapabilityUnavailable
         from agent.plugins.languages.php.testing import provide_test_config_risks, provide_tests
 
+        if capability == Capability.INSTALLED_PACKAGES:  # composer.lock, read as data
+            from agent.plugins.languages.php.packages import provide_installed_packages
+
+            return provide_installed_packages(context)
         if capability == Capability.CONFIG_RISKS:
             return provide_test_config_risks(context)
         if capability == Capability.TEST_CONVENTIONS:

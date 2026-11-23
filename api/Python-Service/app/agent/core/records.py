@@ -186,5 +186,25 @@ class TestTemplateRecord:
     setup_note: str = ""               # how to point the tests at the data the baseline was recorded on
 
 
+@dataclass(frozen=True)
+class PackageRecord:
+    """Capability ``installed_packages``: one package a lockfile pins, as the project runs it.
+
+    ``version`` is normalized (``7.4.18``); ``tag`` is the version as the lockfile writes it (``v7.4.18``);
+    ``reference`` is the source commit when the lockfile records one. ``path`` is where the installed copy
+    lives inside the revision (``vendor/symfony/http-foundation``), whether or not the upload contains it.
+    """
+
+    ecosystem: str                     # "composer" | "npm" | "pypi" | ...
+    name: str
+    version: str
+    tag: str
+    lockfile: str
+    path: str
+    repository: str | None = None      # "owner/repo" on GitHub when known
+    reference: str | None = None       # source commit
+    dev: bool = False
+
+
 def record_dict(record: Any) -> dict[str, Any]:
     return asdict(record)
