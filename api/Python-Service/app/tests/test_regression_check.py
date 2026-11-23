@@ -61,6 +61,7 @@ def _run_static(project_id, check_id, **kwargs):
     kwargs.setdefault("revisions", lambda *_: _Revision())
     kwargs.setdefault("reviewer", lambda *_: {"reviewed": 0})
     kwargs.setdefault("evidence", lambda *_: ({}, {}))
+    kwargs.setdefault("upgrades", lambda *_: [])
     return run_static(project_id, check_id, **kwargs)
 
 
@@ -380,3 +381,108 @@ def test_interrupted_checks_are_failed_on_first_use(tmp_path):
     check = store.create("pizza", "rev_a", "rev_b")
     assert store.fail_interrupted() == 1
     assert store.get("pizza", check["check_id"])["state"] == "failed"
+
+
+# --- knowledge layer Phase 4, T15: upgrade notes for changed packages ----------------------------------
+
+def _zip(files):
+    import io
+    import zipfile
+
+    buffer = io.BytesIO()
+    with zipfile.ZipFile(buffer, "w") as bundle:
+        for path, text in files.items():
+            bundle.writestr("shop/" + path, text)
+    return buffer.getvalue()
+
+
+def _lock(*packages, dev=()):
+    import json
+
+    def row(name, version):
+        return {"name": name, "version": version,
+                "source": {"type": "git", "url": f"https://github.com/{name}.git", "reference": "abc123"}}
+
+    return json.dumps({"packages": [row(*p) for p in packages], "packages-dev": [row(*p) for p in dev]})
+
+
+class _Archive:
+    definitions: dict = {}
+
+    def __init__(self, files):
+        self.files = files
+
+    def archive_loader(self):
+        return _zip(self.files)
+
+
+FOUNDATION_80 = "CHANGELOG\n=========\n\n8.0\n---\n\n * Remove `Request::get()`\n\n7.4\n---\n\n * Add partitioned cookies\n"
+APP = {"composer.json": '{"require": {"laravel/framework": "^12.0"}}', "artisan": "#!/usr/bin/env php"}
+
+
+def test_package_upgrades_listed_with_notes_from_the_candidate_copy():
+    base = _Archive({**APP, "composer.lock": _lock(("symfony/http-foundation", "v7.4.18"), ("acme/kit", "2.1.0"),
+                                                   ("guzzlehttp/guzzle", "7.9.2"), ("same/pkg", "1.0.0"),
+                                                   dev=[("pestphp/pest", "v3.8.2")])})
+    candidate = _Archive({**APP, "composer.lock": _lock(("symfony/http-foundation", "v8.0.1"), ("guzzlehttp/guzzle", "7.9.3"),
+                                                        ("same/pkg", "1.0.0"), ("new/pkg", "1.0.0"),
+                                                        dev=[("pestphp/pest", "v3.7.0")]),
+                          "vendor/symfony/http-foundation/CHANGELOG.md": FOUNDATION_80})
+    rows = {row["name"]: row for row in service._package_upgrades("pizza", base, candidate, remote_allowed=False)}
+    assert {name: (row["from"], row["to"], row["change"]) for name, row in rows.items()} == {
+        "symfony/http-foundation": ("7.4.18", "8.0.1", "major"), "guzzlehttp/guzzle": ("7.9.2", "7.9.3", "patch"),
+        "acme/kit": ("2.1.0", None, "removed"), "new/pkg": (None, "1.0.0", "added"),
+        "pestphp/pest": ("3.8.2", "3.7.0", "downgrade")}
+    notes = rows["symfony/http-foundation"]["notes"]
+    assert notes["coverage"] == "complete" and notes["versions_found"] == ["8.0.0"]
+    (excerpt,) = notes["excerpts"]  # the 7.4 notes the base already had are not repeated
+    assert excerpt["section"] == "8.0" and "Request::get()" in excerpt["text"] and excerpt["provider"] == "vendor"
+    assert excerpt["path_or_url"] == "vendor/symfony/http-foundation/CHANGELOG.md"
+    guzzle = rows["guzzlehttp/guzzle"]["notes"]  # no copy in the upload and remote documentation off: said so
+    assert guzzle["coverage"] == "unavailable" and any("remote documentation" in r.lower() for r in guzzle["reasons"])
+    assert rows["acme/kit"]["notes"] is None and rows["pestphp/pest"]["notes"] is None
+
+
+def test_package_upgrades_budget_and_guides(monkeypatch):
+    import io
+    import urllib.error
+
+    from knowledge.http import Fetcher
+
+    requests = []
+
+    def opener(request, hosts):
+        requests.append(request.full_url)
+        if request.full_url == "https://raw.githubusercontent.com/laravel/docs/13.x/upgrade.md":
+            return io.BytesIO(b"# Upgrade Guide\n\n## Upgrading To 13.0 From 12.x\n\nUpdate `laravel/framework` to `^13.0`.\n")
+        raise urllib.error.HTTPError(request.full_url, 404, "Not Found", {}, None)
+
+    monkeypatch.setattr(service, "MAX_UPGRADE_LOOKUPS", 1)
+    base = _Archive({**APP, "composer.lock": _lock(("laravel/framework", "v12.69.1"), ("zeta/lib", "1.0.0"))})
+    candidate = _Archive({**APP, "composer.lock": _lock(("laravel/framework", "v13.0.2"), ("zeta/lib", "2.0.0"))})
+    rows = {row["name"]: row for row in service._package_upgrades(
+        "pizza", base, candidate, remote_allowed=True, fetcher=Fetcher(opener=opener, public=lambda h: True, token=""))}
+    laravel = rows["laravel/framework"]["notes"]
+    assert laravel["providers"] == ["vendor", "doc_source"] and laravel["versions_found"] == ["13.0.0"]
+    assert laravel["excerpts"][-1]["path_or_url"] == "https://github.com/laravel/docs/blob/13.x/upgrade.md"
+    assert rows["zeta/lib"]["notes"]["reasons"] == ["Not looked up: notes are read for the first 1 upgrades only."]
+    assert all("zeta" not in url for url in requests)
+
+
+def test_package_upgrades_in_the_saved_report(tmp_path):
+    store = RegressionStore(tmp_path / "r.sqlite")
+    registry = Registry()
+    check = create_check("pizza", "rev_a", "rev_b", store=store, registry=registry)
+    row = {"name": "a/b", "from": "1.0.0", "to": "2.0.0", "change": "major", "dev": False, "notes": None}
+    saved = _run_static("pizza", check["check_id"], store=store, registry=registry, impact=lambda *a: _impact_report(),
+                        contracts=Contracts(), upgrades=lambda *_: [row])
+    assert saved["report"]["package_changes"] == [row]
+
+    def broken(*_):
+        raise OSError("no archive")
+
+    again = create_check("pizza", "rev_a", "rev_b", store=store, registry=registry)
+    failed = _run_static("pizza", again["check_id"], store=store, registry=registry, impact=lambda *a: _impact_report(),
+                         contracts=Contracts(), upgrades=broken)
+    assert failed["state"] == "done" and failed["report"]["package_changes"] == []
+    assert "Locked package versions could not be compared between the two revisions." in failed["report"]["notes"]

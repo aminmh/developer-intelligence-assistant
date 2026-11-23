@@ -36,3 +36,4 @@ class Capability(str, Enum):
     CHARACTERIZATION_TESTS = "characterization_tests"
     # Knowledge layer (@.archcore/knowledge-layer/framework-knowledge-layer.spec.md).
     INSTALLED_PACKAGES = "installed_packages"
+    DOC_SOURCES = "doc_sources"

@@ -83,6 +83,12 @@ def regression_check(args: dict[str, Any], context: ToolContext, *, store: Any =
             "coverage": report.get("coverage"), "counts": verdict_counts(report),
             "uncovered": report.get("uncovered", [])[:MAX_ITEMS], "partial": report.get("partial", []),
             "contract_changes": report.get("contract_changes", [])[:20], "notes": report.get("notes", []),
+            "package_changes": [{**{k: row.get(k) for k in ("name", "from", "to", "change", "dev")},
+                                 "notes": {"coverage": (row.get("notes") or {}).get("coverage"),
+                                           "versions_found": (row.get("notes") or {}).get("versions_found", []),
+                                           "cites": [f"{e.get('section')}: {e.get('path_or_url')}"
+                                                     for e in (row.get("notes") or {}).get("excerpts", [])[:5]]}}
+                                for row in report.get("package_changes", [])[:20]],
             "judgment_label": JUDGMENT_LABEL, "items": _items(report),
             "characterization_tests": (
                 "Route tests from the recorded baseline and a replayable request file can be downloaded in Code Quality "

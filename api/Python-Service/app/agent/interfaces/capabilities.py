@@ -15,6 +15,7 @@ from agent.core.capability import Capability
 from agent.core.records import (
     AccessRuleRecord,
     ConfigRiskRecord,
+    DocSourceRecord,
     GuardRecord,
     PackageRecord,
     ParamHintRecord,
@@ -41,6 +42,7 @@ RECORD_TYPES: dict[Capability, tuple[type, ...]] = {
     Capability.PROBE_HINTS: (ParamHintRecord,),
     Capability.CHARACTERIZATION_TESTS: (TestTemplateRecord,),
     Capability.INSTALLED_PACKAGES: (PackageRecord,),
+    Capability.DOC_SOURCES: (DocSourceRecord,),
 }
 
 

@@ -137,3 +137,83 @@ def test_har_import_accepts_a_plain_request_list_and_rejects_other_json():
         import_requests("{\"not\": \"har\"}", "https://shop.example.com")
     with pytest.raises(ProbeError):
         import_requests("not json", "https://shop.example.com")
+
+
+# --- knowledge layer Phase 4, T16: version-exact guides as untrusted context ------------------------------
+
+def _laravel_archive():
+    import io
+    import zipfile
+
+    lock = {"packages": [{"name": "laravel/framework", "version": "v12.69.1",
+                          "source": {"type": "git", "url": "https://github.com/laravel/framework.git", "reference": "0c07"}}]}
+    buffer = io.BytesIO()
+    with zipfile.ZipFile(buffer, "w") as bundle:
+        for path, text in {"composer.json": '{"require": {"laravel/framework": "^12.0"}}', "artisan": "#!/usr/bin/env php",
+                           "composer.lock": json.dumps(lock)}.items():
+            bundle.writestr("shop/" + path, text)
+    return buffer.getvalue()
+
+
+def test_framework_context_reads_the_installed_line_guides_as_untrusted_data():
+    import io
+    import urllib.error
+
+    from knowledge.http import Fetcher
+    from knowledge.prompt import UNTRUSTED_NOTE
+    from regression.probes import PROBE_DOCS_TOPIC, framework_context
+
+    asked = []
+
+    def opener(request, hosts):
+        asked.append(request.full_url)
+        if request.full_url == "https://raw.githubusercontent.com/laravel/docs/12.x/routing.md":
+            return io.BytesIO(b"# Routing\n\n## Route Model Binding\n\nRoute parameters bind to models by id.\n")
+        raise urllib.error.HTTPError(request.full_url, 404, "Not Found", {}, None)
+
+    fetcher = Fetcher(opener=opener, public=lambda h: True, token="")
+    block = framework_context(_laravel_archive(), PROBE_DOCS_TOPIC, remote_allowed=True, fetcher=fetcher)
+    assert block["note"] == UNTRUSTED_NOTE
+    (item,) = block["untrusted_documentation"]
+    assert item["cite"] == "https://github.com/laravel/docs/blob/12.x/routing.md:3" and item["version"] == "12.x (laravel/docs@12.x)"
+    assert asked == ["https://raw.githubusercontent.com/laravel/docs/12.x/routing.md",
+                     "https://raw.githubusercontent.com/laravel/docs/12.x/validation.md",
+                     "https://raw.githubusercontent.com/laravel/docs/12.x/requests.md"]
+    # Remote documentation off and no installed copy: no context, no request.
+    asked.clear()
+    assert framework_context(_laravel_archive(), PROBE_DOCS_TOPIC, remote_allowed=False, fetcher=fetcher) is None
+    assert asked == []
+
+
+def test_framework_context_goes_into_probe_prompts(tmp_path):
+    from regression import replay_service
+    from regression.probes import PROBE_DOCS_TOPIC
+
+    prompts = []
+
+    def model(prompt, **kwargs):
+        prompts.append((json.loads(prompt), kwargs["system"]))
+        return json.dumps({"probes": [{"route": "GET /a/{id}", "params": {"id": 1}}]}), "m", "local"
+
+    block = {"note": "untrusted", "untrusted_documentation": [{"cite": "https://github.com/laravel/docs/blob/12.x/routing.md:3",
+                                                               "text": "bind"}]}
+    built = build_from_routes([{"method": "GET", "path": "/a/{id}"}], [], model_call=model, documentation=block)
+    assert built["probes"][0]["path"] == "/a/1"
+    assert prompts[0][0]["framework_documentation"] == block and "untrusted" in prompts[0][1]
+    build_from_routes([{"method": "GET", "path": "/b/{id}"}], [], model_call=model)
+    assert "framework_documentation" not in prompts[1][0]
+
+    store = RegressionStore(tmp_path / "r.sqlite")
+    check = store.create("pizza", "rev_a", "rev_b")
+    store.save("pizza", check["check_id"], state="done", report={"routes": [{"method": "GET", "path": "/c/{id}"}]})
+    seen = []
+    result = replay_service.generate(store, "pizza", check["check_id"], hints=lambda *_: [], model_call=model,
+                                     docs=lambda *args: seen.append(args) or block)
+    assert seen == [("pizza", "rev_b", PROBE_DOCS_TOPIC)]  # the candidate's version: probes run against both
+    assert result["documentation"] == ["https://github.com/laravel/docs/blob/12.x/routing.md:3"]
+
+    def broken(*_):
+        raise OSError("gone")
+
+    assert replay_service.generate(store, "pizza", check["check_id"], hints=lambda *_: [], model_call=model,
+                                   docs=broken)["documentation"] == []

@@ -182,6 +182,69 @@ def _revision_evidence(project_id: str, revision: Any) -> tuple[dict[Any, Any], 
     return collections, files
 
 
+MAX_UPGRADE_LOOKUPS = 6
+MAX_NOTES_CHARS = 6000
+_UPGRADE_ORDER = {"major": 0, "minor": 1, "patch": 2}
+
+
+def _trim_notes(found: dict[str, Any]) -> dict[str, Any]:
+    """Cited excerpts within ``MAX_NOTES_CHARS`` per package, so a report stays readable."""
+    from knowledge.model import cap
+
+    excerpts, used = [], 0
+    for excerpt in found.get("excerpts") or []:
+        room = MAX_NOTES_CHARS - used
+        if room <= 200:
+            break
+        text, truncated = cap(excerpt.get("text") or "", min(room, 2000))
+        used += len(text)
+        excerpts.append({key: excerpt.get(key) for key in ("provider", "version_or_ref", "path_or_url", "line", "section",
+                                                            "versioned")} | {"text": text,
+                                                                             "truncated": truncated or excerpt.get("truncated")})
+    return {"coverage": found.get("coverage"), "versions_found": found.get("versions_found") or [],
+            "reasons": found.get("reasons") or [], "providers": found.get("providers") or [], "excerpts": excerpts}
+
+
+def _package_upgrades(project_id: str, base: Any, candidate: Any, *, remote_allowed: bool | None = None,
+                      fetcher: Any = None, registry: Any = None) -> list[dict[str, Any]]:
+    """Packages the candidate's lockfile changes, with upgrade notes for the most significant upgrades.
+
+    Notes come from the knowledge layer with the base version as installed and the candidate version as
+    target, read first from the candidate's own installed copy, whose changelog already covers the new
+    versions. No cache: a vendor entry is keyed by installed version and target, and the base revision's
+    copy, which cannot hold these notes, would share the key.
+    """
+    from knowledge.service import KnowledgeRequestError, doc_sources, installed_packages, lookup
+    from knowledge.settings import remote_docs_allowed
+    from regression.coverage import package_changes
+
+    base_archive, candidate_archive = base.archive_loader(), candidate.archive_loader()
+    before, _ = installed_packages(base_archive, registry)
+    after, _ = installed_packages(candidate_archive, registry)
+    rows = package_changes(before, after)
+    remote = remote_docs_allowed(project_id) if remote_allowed is None else remote_allowed
+    installed = {(r.ecosystem, r.name): r for r in before}
+    upgrades = sorted((row for row in rows if row["change"] in _UPGRADE_ORDER),
+                      key=lambda row: (row["dev"], _UPGRADE_ORDER[row["change"]], row["name"]))
+    guides: list[Any] | None = None
+    for index, row in enumerate(upgrades):
+        if index >= MAX_UPGRADE_LOOKUPS:
+            row["notes"] = {"coverage": "unavailable", "versions_found": [], "providers": [], "excerpts": [],
+                            "reasons": [f"Not looked up: notes are read for the first {MAX_UPGRADE_LOOKUPS} upgrades only."]}
+            continue
+        if remote and guides is None:
+            guides = doc_sources(candidate_archive, registry)
+        record = installed[(row["ecosystem"], row["name"])]
+        try:
+            found = lookup(candidate_archive, row["name"], target_version=row["to"], registry=registry,
+                           packages=lambda _archive, record=record: ([record], []), remote_allowed=remote,
+                           fetcher=fetcher, sources=lambda _archive: guides or [])
+        except KnowledgeRequestError as exc:
+            found = {"coverage": "unavailable", "reasons": [str(exc)]}
+        row["notes"] = _trim_notes(found)
+    return rows
+
+
 def _review(project_id: str, report: dict[str, Any], base: Any, candidate: Any) -> dict[str, Any]:
     from regression.equivalence import review
 
@@ -207,6 +270,7 @@ def run_static(project_id: str, check_id: str, *, store: RegressionStore | None 
                contracts: Any = None, revisions: Callable[[str, str], Any] = _load_revision,
                reviewer: Callable[..., dict[str, Any]] = _review,
                evidence: Callable[[str, Any], tuple[dict[Any, Any], dict[str, str]]] = _revision_evidence,
+               upgrades: Callable[[str, Any, Any], list[dict[str, Any]]] = _package_upgrades,
                ) -> dict[str, Any]:
     """Run the static part of a check and save the report."""
     store = store or RegressionStore()
@@ -221,6 +285,11 @@ def run_static(project_id: str, check_id: str, *, store: RegressionStore | None 
         base, candidate = revisions(project_id, base_id), revisions(project_id, candidate_id)
         if report["coverage"] != "unavailable":
             report["review"] = reviewer(project_id, report, base, candidate)
+        try:
+            report["package_changes"] = upgrades(project_id, base, candidate)
+        except Exception as exc:  # noqa: BLE001 — the rest of the report stands; the gap is stated
+            logger.warning("regression_package_changes_failed error_type=%s", type(exc).__name__)
+            report["notes"].append("Locked package versions could not be compared between the two revisions.")
         try:
             collections, files = evidence(project_id, candidate)
         except Exception as exc:  # noqa: BLE001 — coverage still runs; the gap is stated

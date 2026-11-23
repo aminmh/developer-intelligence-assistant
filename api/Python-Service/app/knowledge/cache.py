@@ -1,7 +1,8 @@
 """Excerpt cache (spec clause 11): keyed by provider, library, version or ref, topic and target.
 
 Excerpts from a fixed version (the installed copy, files at a tag or commit) never change, so they are
-kept without expiry. GitMCP excerpts follow a moving default branch and expire after a day.
+kept without expiry. GitMCP excerpts follow a moving default branch and expire after a day; a framework
+guide follows its version line's branch, which changes slowly, and expires after a week.
 """
 
 from __future__ import annotations
@@ -14,7 +15,8 @@ from hashlib import sha256
 from pathlib import Path
 from typing import Any
 
-LIFETIMES_S: dict[str, float | None] = {"vendor": None, "github_ref": None, "gitmcp": 24 * 3600}
+LIFETIMES_S: dict[str, float | None] = {"vendor": None, "github_ref": None, "gitmcp": 24 * 3600,
+                                        "doc_source": 7 * 24 * 3600}
 
 
 def _default_path() -> Path:
