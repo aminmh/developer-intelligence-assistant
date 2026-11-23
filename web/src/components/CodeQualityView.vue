@@ -4,12 +4,13 @@ import {
   AlertCircle, ArrowDownRight, ArrowRight, ArrowUpRight, Boxes, Bug, Calendar, ChevronDown, ChevronsUpDown, CircleCheck, Code, Cpu,
   Eye, Files, FileSearch, FlaskConical, Gauge, GitBranch, GitCommitHorizontal, GitCompareArrows, Library, LifeBuoy, ListChecks,
   LoaderCircle, Play, Plug, Radar, RefreshCw, Save, SearchCode, ShieldAlert, SlidersHorizontal, Sparkles, Trash2, TriangleAlert,
-  Waypoints, Wrench, X, Zap, Workflow, BookOpen, Languages, Accessibility,
+  Waypoints, Wrench, X, Zap, Workflow, BookOpen, Languages, Accessibility, ShieldCheck,
 } from 'lucide-vue-next';
 import ConfirmModal from './ConfirmModal.vue';
 import { toastMessage } from '../composables/useToasts';
 import { makeRequest } from '../ui/makeRequest';
 import PerformanceSetup from './code-quality/PerformanceSetup.vue';
+import RegressionCheck from './regression/RegressionCheck.vue';
 import RuleManager from './code-quality/RuleManager.vue';
 import SourcePreview from './code-quality/SourcePreview.vue';
 import DirectoryExclusionTree from './code-quality/DirectoryExclusionTree.vue';
@@ -74,8 +75,8 @@ type HistoryRow = Pick<Report, 'report_id' | 'project_id' | 'revision_id' | 'com
 
 const registeredRevisions = ref<ProjectRevision[]>([]);
 const projects = computed(() => assessmentRevisions(props.files, registeredRevisions.value));
-type QualityTab = 'assessment' | 'compare' | 'performance' | 'rules' | 'external';
-const activeTab = useUrlTab<QualityTab>({ values: ['assessment', 'compare', 'performance', 'rules', 'external'], fallback: 'assessment' });
+type QualityTab = 'assessment' | 'compare' | 'regression' | 'performance' | 'rules' | 'external';
+const activeTab = useUrlTab<QualityTab>({ values: ['assessment', 'compare', 'regression', 'performance', 'rules', 'external'], fallback: 'assessment' });
 const selectedRevision = ref('');
 // The header switcher picks the project; this page lists that project's revisions.
 const scope = useProjectScope();
@@ -671,6 +672,7 @@ const categoryMeta: Record<CategoryId, { color: string; icon: unknown }> = {
 const qualityTabs = [
   { id: 'assessment' as const, label: 'Assessment', icon: Gauge, domId: 'quality-assessment-tab', panel: 'quality-assessment-panel' },
   { id: 'compare' as const, label: 'Compare', icon: GitCompareArrows, domId: 'quality-compare-tab', panel: 'quality-compare-panel' },
+  { id: 'regression' as const, label: 'Regression', icon: ShieldCheck, domId: 'quality-regression-tab', panel: 'quality-regression-panel' },
   { id: 'performance' as const, label: 'Performance', icon: Zap, domId: 'quality-performance-tab', panel: 'quality-performance-panel' },
   { id: 'rules' as const, label: 'Custom rules', icon: ListChecks, domId: 'quality-rules-tab', panel: 'quality-rules-panel' },
   { id: 'external' as const, label: 'External analyzers', icon: Plug, domId: 'quality-external-analyzers-tab', panel: 'quality-external-analyzers-panel' },
@@ -1166,6 +1168,10 @@ const statusTone = (status?: string) => (status === 'complete' || status === 'av
         </section>
       </div>
 
+      <div v-else-if="activeTab === 'regression'" id="quality-regression-panel" role="tabpanel" aria-labelledby="quality-regression-tab" class="cq-legacy">
+        <RegressionCheck :project-id="selectedProject?.project_id || ''" :candidate-revision-id="selectedProject?.revision_id || ''"
+                         :revisions="projects.filter((item) => item.project_id === selectedProject?.project_id)" />
+      </div>
       <div v-else-if="activeTab === 'performance'" id="quality-performance-panel" role="tabpanel" aria-labelledby="quality-performance-tab" class="cq-legacy">
         <PerformanceSetup :project-id="selectedProject?.project_id || ''" :revision-id="selectedProject?.revision_id || ''" />
       </div>

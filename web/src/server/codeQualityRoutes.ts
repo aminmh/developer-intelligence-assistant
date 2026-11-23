@@ -21,6 +21,32 @@ type RouteDependencies = {
   gitReconcileIntervalMs?: number;
 };
 
+/** Signed requests to the desktop OS credential helper (Bearer tokens of saved benchmark targets). */
+export function createCredentialHelper(dependencies: { helperUrl: string; webOrigin: string; internalSecret: string }) {
+  const helperAuthorization = (operation: string, targetId: string, projectId?: string) => {
+    const now = Math.floor(Date.now() / 1000);
+    const encode = (value: unknown) => Buffer.from(JSON.stringify(value)).toString('base64url');
+    const header = encode({ alg: 'HS256', typ: 'JWT' });
+    const claims = encode({ aud: 'runtime-helper', origin: dependencies.webOrigin, operation,
+      target_id: targetId, ...(projectId ? { project_id: projectId } : {}), exp: now + 120, jti: randomUUID() });
+    const key = createHmac('sha256', dependencies.internalSecret).update('devassistant-runtime-helper-v1').digest();
+    const signature = createHmac('sha256', key).update(`${header}.${claims}`).digest('base64url');
+    return `${header}.${claims}.${signature}`;
+  };
+  const callCredentialHelper = async (targetId: string, operation: string, method: 'POST' | 'DELETE', body: Record<string, unknown>) => {
+    const token = helperAuthorization(operation, targetId);
+    const response = await fetch(`${dependencies.helperUrl}/code-quality-bearer${operation === 'code-quality-benchmark-use' ? '-use' : ''}`, {
+      method,
+      headers: { Origin: dependencies.webOrigin, Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ ...body, target_id: targetId }),
+      signal: AbortSignal.timeout(10_000),
+    });
+    const data = await response.json().catch(() => ({ detail: 'The desktop OS credential helper returned an invalid response.' }));
+    return { response, data };
+  };
+  return { helperAuthorization, callCredentialHelper };
+}
+
 export function registerCodeQualityRoutes(app: Express, dependencies: RouteDependencies) {
   const userFor = (res: Response) => dependencies.getUser(res);
   const authenticated = (res: Response) => {
@@ -76,27 +102,7 @@ export function registerCodeQualityRoutes(app: Express, dependencies: RouteDepen
     } catch { return res.status(502).json({ detail: 'Developer Mode could not be updated.' }); }
   });
 
-  const helperAuthorization = (operation: string, targetId: string, projectId?: string) => {
-    const now = Math.floor(Date.now() / 1000);
-    const encode = (value: unknown) => Buffer.from(JSON.stringify(value)).toString('base64url');
-    const header = encode({ alg: 'HS256', typ: 'JWT' });
-    const claims = encode({ aud: 'runtime-helper', origin: dependencies.webOrigin, operation,
-      target_id: targetId, ...(projectId ? { project_id: projectId } : {}), exp: now + 120, jti: randomUUID() });
-    const key = createHmac('sha256', dependencies.internalSecret).update('devassistant-runtime-helper-v1').digest();
-    const signature = createHmac('sha256', key).update(`${header}.${claims}`).digest('base64url');
-    return `${header}.${claims}.${signature}`;
-  };
-  const callCredentialHelper = async (targetId: string, operation: string, method: 'POST' | 'DELETE', body: Record<string, unknown>) => {
-    const token = helperAuthorization(operation, targetId);
-    const response = await fetch(`${dependencies.helperUrl}/code-quality-bearer${operation === 'code-quality-benchmark-use' ? '-use' : ''}`, {
-      method,
-      headers: { Origin: dependencies.webOrigin, Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
-      body: JSON.stringify({ ...body, target_id: targetId }),
-      signal: AbortSignal.timeout(10_000),
-    });
-    const data = await response.json().catch(() => ({ detail: 'The desktop OS credential helper returned an invalid response.' }));
-    return { response, data };
-  };
+  const { helperAuthorization, callCredentialHelper } = createCredentialHelper(dependencies);
   const callGitCredentialHelper = async (projectId: string, targetId: string,
     operation: 'code-quality-github-manage' | 'code-quality-github-fetch',
     method: 'POST' | 'DELETE', body: Record<string, unknown>) => {

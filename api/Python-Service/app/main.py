@@ -319,6 +319,8 @@ from routers.code_tools import router as code_tools_router  # noqa: E402 — aft
 from routers.remote_consent import router as remote_consent_router  # noqa: E402 — after app exists
 from routers.tool_approvals import router as tool_approvals_router  # noqa: E402 — after app exists
 app.include_router(code_tools_router)
+from regression.http import router as regression_router  # noqa: E402 — after app exists
+app.include_router(regression_router)
 app.include_router(remote_consent_router)
 app.include_router(tool_approvals_router)
 from routers.api_contracts import router as api_contracts_router  # noqa: E402 — after app exists
