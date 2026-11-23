@@ -16,6 +16,7 @@ from agent.core.records import (
     AccessRuleRecord,
     ConfigRiskRecord,
     GuardRecord,
+    PackageRecord,
     ParamHintRecord,
     RouteRecord,
     RunHintRecord,
@@ -39,6 +40,7 @@ RECORD_TYPES: dict[Capability, tuple[type, ...]] = {
     Capability.RUN_HINTS: (RunHintRecord,),
     Capability.PROBE_HINTS: (ParamHintRecord,),
     Capability.CHARACTERIZATION_TESTS: (TestTemplateRecord,),
+    Capability.INSTALLED_PACKAGES: (PackageRecord,),
 }
 
 
