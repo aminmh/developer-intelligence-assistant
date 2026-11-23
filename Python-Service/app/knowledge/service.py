@@ -134,10 +134,27 @@ def _github(record: Any, topic: str, target: str | None, cache: KnowledgeCache |
     return found
 
 
+def _gitmcp(record: Any, topic: str, cache: KnowledgeCache | None, mcp: Any, fetcher: Any) -> dict[str, Any]:
+    from knowledge.http import Fetcher
+    from knowledge.mcp_client import McpClient
+    from knowledge.providers import gitmcp
+
+    key = cache_key(gitmcp.PROVIDER, record.name, "default", topic)
+    cached = cache.get(key) if cache else None
+    if cached is not None:
+        return cached
+    client = mcp or McpClient(fetcher or Fetcher(), gitmcp.server_url())
+    excerpts, reason = gitmcp.search(client, record, topic)
+    found = {"excerpts": [e.to_dict() for e in excerpts], "reasons": [reason] if reason else []}
+    if cache:  # one day: GitMCP follows the default branch, which moves
+        cache.put(key, gitmcp.PROVIDER, record.name, "default", found)
+    return found
+
+
 def lookup(archive: bytes, library: Any, topic: Any = None, target_version: Any = None, *,
            cache: KnowledgeCache | None = None, registry: Any = None,
            packages: Callable[[bytes], tuple[list[Any], list[str]]] | None = None,
-           remote_allowed: bool = False, fetcher: Any = None) -> dict[str, Any]:
+           remote_allowed: bool = False, fetcher: Any = None, mcp: Any = None) -> dict[str, Any]:
     """Cited excerpts for ``library`` at the version the revision installs, from providers in order.
 
     Clauses 3-4, 8-9 and failure clauses 1-3: the installed copy first; with remote documentation
@@ -176,6 +193,17 @@ def lookup(archive: bytes, library: Any, topic: Any = None, target_version: Any 
         excerpts += [Excerpt(**row) for row in remote["excerpts"]]
         versions |= set(remote["versions_found"])
         gaps += remote["reasons"]
+    if remote_allowed and not excerpts and not target and topic and record.repository:
+        providers.append("gitmcp")  # clause 5: last, unversioned, only when the exact sources had nothing
+        try:
+            found = _gitmcp(record, topic, cache, mcp, fetcher)
+        except RemoteUnavailable as exc:
+            found = {"excerpts": [], "reasons": [str(exc)]}
+        if found["excerpts"]:
+            gaps.append(f"Only GitMCP had documentation on this topic; it reads {record.repository}'s default branch, "
+                        f"which may differ from the installed {record.version}.")
+        excerpts += [Excerpt(**row) for row in found["excerpts"]]
+        gaps += found["reasons"]
     excerpts = _limit_total(excerpts)
     coverage = UNAVAILABLE if not excerpts else (PARTIAL if gaps else COMPLETE)
     return {"library": record.name, "installed_version": record.version, "lockfile": record.lockfile,

@@ -56,6 +56,25 @@ def _urlopen(request: urllib.request.Request, hosts: frozenset[str]):
     return urllib.request.build_opener(_NoForeignRedirects(hosts)).open(request, timeout=TIMEOUT_S)
 
 
+def _first_event(response) -> bytes:
+    """Read a server-sent-events reply up to the end of its first ``data:`` event.
+
+    Found live: GitMCP keeps the stream open after answering, so reading to the end of the response
+    waits until the timeout. The size cap still applies.
+    """
+    body = bytearray()
+    while len(body) <= MAX_RESPONSE_BYTES:
+        chunk = response.read1(65536)
+        if not chunk:
+            break
+        body += chunk
+        text = bytes(body).replace(b"\r\n", b"\n")
+        start = text.find(b"data:")
+        if start >= 0 and b"\n\n" in text[start:]:
+            break
+    return bytes(body)
+
+
 class Fetcher:
     """One request's outbound calls; ``sent`` records every URL for audit and tests."""
 
@@ -70,6 +89,12 @@ class Fetcher:
 
     def get(self, url: str, *, accept: str = "application/vnd.github+json") -> bytes | None:
         """Body of a 200 response, None for 404; raises RemoteUnavailable or RateLimited otherwise."""
+        response = self.send("GET", url, headers={"Accept": accept})
+        return None if response is None else response[2]
+
+    def send(self, method: str, url: str, *, data: bytes | None = None,
+             headers: dict[str, str] | None = None) -> tuple[int, dict[str, str], bytes] | None:
+        """``(status, lower-cased headers, body)``, or None for 404; every check applies to every method."""
         if self.limited:
             raise RateLimited(self.limited)
         parts = urlsplit(url)
@@ -78,17 +103,24 @@ class Fetcher:
             raise RemoteUnavailable(f"{host or url} is not an allowed documentation host.")
         if not self.public(host):
             raise RemoteUnavailable(f"{host} does not resolve to a public address.")
-        headers = {"User-Agent": USER_AGENT, "Accept": accept}
+        # A User-Agent is always set: GitMCP's Cloudflare front answers urllib's default one with 403 (found live).
+        sent_headers = {"User-Agent": USER_AGENT, **(headers or {})}
         if self.token and host in _TOKEN_HOSTS:
-            headers["Authorization"] = f"Bearer {self.token}"
+            sent_headers["Authorization"] = f"Bearer {self.token}"
         self.sent.append(url)
+        request = urllib.request.Request(url, data=data, headers=sent_headers, method=method)
         try:
-            with self.opener(urllib.request.Request(url, headers=headers), self.hosts) as response:
-                body = response.read(MAX_RESPONSE_BYTES + 1)
+            with self.opener(request, self.hosts) as response:
+                status = getattr(response, "status", 200) or 200
+                received = {k.lower(): v for k, v in (getattr(response, "headers", None) or {}).items()}
+                if "text/event-stream" in received.get("content-type", "") and hasattr(response, "read1"):
+                    body = _first_event(response)
+                else:
+                    body = response.read(MAX_RESPONSE_BYTES + 1)
         except urllib.error.HTTPError as exc:
             if exc.code == 404:
                 return None
-            if exc.code == 429 or (exc.code == 403 and exc.headers.get("X-RateLimit-Remaining") == "0"):
+            if exc.code == 429 or (exc.code == 403 and (exc.headers or {}).get("X-RateLimit-Remaining") == "0"):
                 self.limited = f"{host} rate-limited the request; set KNOWLEDGE_GITHUB_TOKEN or retry later."
                 raise RateLimited(self.limited) from exc
             raise RemoteUnavailable(f"{host} answered HTTP {exc.code}.") from exc
@@ -97,5 +129,5 @@ class Fetcher:
         except (urllib.error.URLError, TimeoutError, OSError) as exc:
             raise RemoteUnavailable(f"{host} could not be reached: {type(exc).__name__}.") from exc
         if len(body) > MAX_RESPONSE_BYTES:
-            raise RemoteUnavailable(f"{host} returned more than {MAX_RESPONSE_BYTES // 1024} KB for one file.")
-        return body
+            raise RemoteUnavailable(f"{host} returned more than {MAX_RESPONSE_BYTES // 1024} KB for one response.")
+        return status, received, body
