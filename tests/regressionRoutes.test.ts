@@ -8,15 +8,17 @@ import { registerRegressionRoutes } from '../src/server/regressionRoutes';
 type Reply = { status: number; body?: unknown };
 
 /** A stub Python API recording what reached it, and a web app with a fixed signed-in user. */
-async function withServers(user: string, reply: Reply, run: (webUrl: string, received: any[]) => Promise<void>) {
+async function withServers(user: string, reply: Reply | ((url: string) => Reply), run: (webUrl: string, received: any[]) => Promise<void>,
+  bearerToken?: (targetId: string) => Promise<{ status: number; token?: string; detail?: string }>) {
   const received: any[] = [];
   const python = http.createServer((req, res) => {
     let raw = '';
     req.on('data', (chunk) => { raw += chunk; });
     req.on('end', () => {
       received.push({ method: req.method, url: req.url, headers: req.headers, body: raw ? JSON.parse(raw) : null });
-      if (reply.body === undefined) return res.writeHead(reply.status).end();
-      res.writeHead(reply.status, { 'Content-Type': 'application/json' }).end(JSON.stringify(reply.body));
+      const answer = typeof reply === 'function' ? reply(req.url || '') : reply;
+      if (answer.body === undefined) return res.writeHead(answer.status).end();
+      res.writeHead(answer.status, { 'Content-Type': 'application/json' }).end(JSON.stringify(answer.body));
     });
   });
   await new Promise<void>((resolve) => python.listen(0, '127.0.0.1', resolve));
@@ -29,6 +31,7 @@ async function withServers(user: string, reply: Reply, run: (webUrl: string, rec
     getUser: (res) => res.locals.authUser,
     canReadProject: (u, projectId) => ['alice', 'viewer'].includes(u?.sub || '') && projectId === 'shop',
     canOperateProject: (u) => u?.sub === 'alice',
+    bearerToken,
   });
   const web = app.listen(0, '127.0.0.1');
   await new Promise((resolve) => web.once('listening', resolve));
@@ -82,5 +85,64 @@ test('a busy project passes the active check id through and a delete passes 204 
   });
   await withServers('alice', { status: 204 }, async (url) => {
     assert.equal((await fetch(`${url}/api/regression/projects/shop/checks/rc_1`, { method: 'DELETE' })).status, 204);
+  });
+});
+
+test('a candidate replay of a Bearer target fetches the token and forwards only documented fields', async () => {
+  const tokens: string[] = [];
+  const reply = (url: string): Reply => {
+    if (url.endsWith('/replay')) return { status: 200, body: { settings: { candidate_target_id: 't-tok' } } };
+    if (url.includes('/performance/targets/t-tok')) return { status: 200, body: { target: { auth_mode: 'bearer' } } };
+    return { status: 202, body: { run_id: 'r1', state: 'running' } };
+  };
+  await withServers('alice', reply, async (url, received) => {
+    const response = await fetch(`${url}/api/regression/projects/shop/checks/rc_1/replay-runs`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ kind: 'candidate', bearer_token: 'from-browser' }),
+    });
+    assert.equal(response.status, 202);
+    assert.deepEqual(received.map((r) => r.url), ['/projects/shop/regression-checks/rc_1/replay',
+      '/code-quality/projects/shop/performance/targets/t-tok', '/projects/shop/regression-checks/rc_1/replay-runs']);
+    assert.deepEqual(received[2].body, { kind: 'candidate', target_id: 't-tok', bearer_token: 'helper-token' });
+    assert.deepEqual(tokens, ['t-tok']);
+  }, async (targetId) => { tokens.push(targetId); return { status: 200, token: 'helper-token' }; });
+});
+
+test('a replay without a token from the helper is refused before reaching Python', async () => {
+  const reply = (url: string): Reply => url.includes('/performance/targets/')
+    ? { status: 200, body: { target: { auth_mode: 'bearer' } } } : { status: 202, body: {} };
+  await withServers('alice', reply, async (url, received) => {
+    const response = await fetch(`${url}/api/regression/projects/shop/checks/rc_1/replay-runs`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ kind: 'baseline', target_id: 't-tok' }),
+    });
+    assert.equal(response.status, 404);
+    assert.equal((await response.json()).detail, 'No token saved.');
+    assert.equal(received.length, 1);
+  }, async () => ({ status: 404, detail: 'No token saved.' }));
+});
+
+test('viewers read replay state but cannot change probes, settings or start runs', async () => {
+  await withServers('viewer', { status: 200, body: { probes: [] } }, async (url, received) => {
+    assert.equal((await fetch(`${url}/api/regression/projects/shop/checks/rc_1/replay`)).status, 200);
+    for (const [method, path] of [['PUT', 'probes'], ['POST', 'probes/generate'], ['POST', 'probes/import'],
+      ['PUT', 'replay-settings'], ['POST', 'replay-runs']]) {
+      const response = await fetch(`${url}/api/regression/projects/shop/checks/rc_1/${path}`, { method });
+      assert.equal(response.status, 403, path);
+    }
+    assert.equal(received.length, 1);
+  });
+});
+
+test('probe saves and imports forward only their documented fields', async () => {
+  await withServers('alice', { status: 200, body: {} }, async (url, received) => {
+    await fetch(`${url}/api/regression/projects/shop/checks/rc_1/probes`, {
+      method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ probes: [], extra: 1 }),
+    });
+    await fetch(`${url}/api/regression/projects/shop/checks/rc_1/probes/import`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ text: '{}', target_id: 't', mode: 'replace', other: 2 }),
+    });
+    assert.deepEqual(received[0].body, { probes: [] });
+    assert.deepEqual(received[1].body, { text: '{}', target_id: 't', mode: 'replace' });
   });
 });
