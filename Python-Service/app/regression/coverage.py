@@ -61,9 +61,18 @@ def _test_reaches(route: dict[str, Any], tests: list[Any]) -> bool:
     return False
 
 
-def apply_coverage(report: dict[str, Any], *, tests: list[Any] | None = None) -> None:
-    """Clause 6: route verdicts from their changed symbols, and the uncovered list."""
+def apply_coverage(report: dict[str, Any], *, tests: list[Any] | None = None,
+                   replayed: set[str] | None = None) -> None:
+    """Clause 6: route verdicts from their changed symbols, and the uncovered list.
+
+    ``replayed`` holds "METHOD template" keys of routes a replay compared. ``tests`` is None when the
+    static evidence is not read again (a replay merge): each route then keeps its static coverage.
+    """
+    from regression.probes import _method
+
+    recompute = tests is not None
     tests = tests or []
+    replayed = replayed or set()
     symbols = report.get("symbols", [])
     by_fqn = {row["fqn"]: row for row in symbols}
     changed = set(by_fqn)
@@ -76,11 +85,13 @@ def apply_coverage(report: dict[str, Any], *, tests: list[Any] | None = None) ->
         route["depends_on"] = sorted(ends)
         if route.get("verdict") is None:
             route["verdict"] = _worst([by_fqn[fqn].get("verdict") for fqn in ends])
-        dynamic = []
-        if route.get("source") == "runtime":
-            dynamic.append("runtime")
-        if _test_reaches(route, tests) or ends & tested:
-            dynamic.append("test")
+        if recompute or "static_coverage" not in route:
+            static = (["runtime"] if route.get("source") == "runtime" else []) + (
+                ["test"] if _test_reaches(route, tests) or ends & tested else [])
+            route["static_coverage"] = static
+        dynamic = list(route["static_coverage"])
+        if f"{_method(route.get('method'))} {route.get('path', '')}" in replayed:
+            dynamic.append("replay")
         route["coverage"] = dynamic
         if dynamic:
             covered_symbols |= ends

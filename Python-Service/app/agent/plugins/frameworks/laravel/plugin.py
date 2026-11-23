@@ -118,6 +118,7 @@ class LaravelFrameworkPlugin(FrameworkPlugin):
         Capability.TRANSLATIONS,
         Capability.TEMPLATES,
         Capability.RUN_HINTS,
+        Capability.PROBE_HINTS,
         Capability.RUNTIME_INSPECTION,
         Capability.TEST_EXECUTION,
     )
@@ -851,6 +852,10 @@ class LaravelFrameworkPlugin(FrameworkPlugin):
             stub = _Path(__file__).with_name("psalm") / "taint.phpstub"
             return [TaintStubRecord(framework="laravel", analyzer="psalm", name="laravel.phpstub",
                                     content=stub.read_text(encoding="utf-8"))]
+        if capability == Capability.PROBE_HINTS:  # file layout, no PHP facts
+            from agent.plugins.frameworks.laravel.probe_hints import provide_probe_hints
+
+            return provide_probe_hints(context)
         if capability == Capability.RUN_HINTS:  # configuration files, no PHP facts
             from agent.plugins.frameworks.laravel.run_hints import provide_run_hints
 

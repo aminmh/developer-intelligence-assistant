@@ -141,5 +141,21 @@ class RunHintRecord:
     line: int | None = None
 
 
+@dataclass(frozen=True)
+class ParamHintRecord:
+    """Capability ``probe_hints``: a file that tells where request parameter values come from.
+
+    The regression check reads a bounded excerpt of ``file`` and lets the model propose route
+    parameters, query strings and bodies from it; the record itself carries no values.
+    """
+
+    framework: str
+    kind: str                          # "seeder" | "factory" | "fixture" | "validation" | "binding"
+    name: str                          # class or fixture name
+    file: str                          # relative to the revision root
+    line: int | None = None
+    handler: str | None = None         # handler symbol the hint applies to, when known
+
+
 def record_dict(record: Any) -> dict[str, Any]:
     return asdict(record)

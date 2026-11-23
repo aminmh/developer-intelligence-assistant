@@ -36,10 +36,17 @@ def _items(report: dict[str, Any]) -> list[dict[str, Any]]:
                       "change": row.get("change"), "verdict": row.get("verdict"), "coverage": row.get("coverage"),
                       "reasons": reasons})
     for route in report.get("routes", []):
+        replay = route.get("replay") or {}
         items.append({"kind": "route", "route": f"{route.get('method', '')} {route.get('path', '')}".strip(),
                       "path": route.get("handler_path"), "line": route.get("handler_line"),
                       "verdict": route.get("verdict"), "coverage": route.get("coverage"),
-                      "depends_on": route.get("depends_on")})
+                      "depends_on": route.get("depends_on"),
+                      "replay_differences": replay.get("differences", [])[:3] if replay else None,
+                      "span_flags": (route.get("spans") or {}).get("flags")})
+    for other in report.get("replay_other", []):
+        if other.get("equal") is False:  # replayed requests outside the changed routes that still differ
+            items.append({"kind": "request", "route": f"{other['method']} {other['path']}", "path": None, "line": None,
+                          "verdict": other["verdict"], "replay_differences": other.get("differences", [])[:3]})
     return items[:MAX_ITEMS]
 
 
