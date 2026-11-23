@@ -8,6 +8,8 @@ A developer assistant for exploring source code, assessing code quality, and inv
 behavior. Upload a project, index its code, and ask questions in natural language. The application
 retrieves relevant context and uses a locally configured language model to help answer.
 
+Read the [user guide](https://aminmh.github.io/developer-intelligence-assistant/) for a quick walkthrough of installation, indexing, chat, code quality, and runtime.
+
 ## Topics
 
 - [Screenshots](#screenshots)
