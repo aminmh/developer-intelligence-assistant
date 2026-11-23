@@ -16,6 +16,7 @@ import { registerContractRoutes } from './src/server/contractRoutes';
 import { registerIdeApi, registerIdeTokenRoutes, type IdeDependencies } from './src/server/ideRoutes';
 import { registerFrontendRoutes } from './src/server/frontendRoutes';
 import { codeImpactBodyParser, registerCodeImpactRoutes } from './src/server/codeImpactRoutes';
+import { registerRegressionRoutes } from './src/server/regressionRoutes';
 
 dotenv.config();
 
@@ -292,6 +293,13 @@ async function startServer() {
     apiUrl: PYTHON_API_URL,
     getUser: (res) => (res.locals as any).authUser,
     canReadProject: (user, projectId) => Boolean(user && (authIsGlobalAdmin(user) || authRoleFor(user, projectId))),
+  });
+  registerRegressionRoutes(app, {
+    apiUrl: PYTHON_API_URL,
+    internalSecret: INTERNAL_SECRET,
+    getUser: (res) => (res.locals as any).authUser,
+    canReadProject: (user, projectId) => Boolean(user && (authIsGlobalAdmin(user) || authRoleFor(user, projectId))),
+    canOperateProject: (user, projectId) => Boolean(user && (authIsGlobalAdmin(user) || ['operator', 'admin'].includes(authRoleFor(user, projectId) || ''))),
   });
   registerSchemaDraftRoutes(app, {
     apiUrl: PYTHON_API_URL,
