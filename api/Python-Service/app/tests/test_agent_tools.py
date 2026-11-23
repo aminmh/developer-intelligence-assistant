@@ -104,7 +104,7 @@ def test_registry_exposes_builtins_and_valid_rest_tools():
 
     names = [t.name for t in registry.tools_for("search")]
 
-    assert names == ["api_contract_check", "api_contract_generate", "api_contract_operation", "api_contract_operations", "code_outline", "code_read", "code_repo_map",
+    assert names == ["api_contract_check", "api_contract_generate", "api_contract_operation", "api_contract_operations", "code_impact", "code_outline", "code_read", "code_repo_map",
                      "code_stats", "code_structural_search", "code_symbol_lookup",
                      "code_text_search", "evidence_files", "evidence_read", "frontend_ui_map", "get_item", "project_structure"]
     rest = next(t for t in registry.tools_for("search") if t.name == "get_item")

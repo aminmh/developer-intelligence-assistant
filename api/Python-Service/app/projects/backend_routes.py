@@ -56,6 +56,52 @@ _API_PREFIX = re.compile(r"apiPrefix\s*:\s*['\"]([^'\"]*)['\"]")
 
 
 def _laravel_routes(root: Path) -> list[dict[str, Any]]:
+    """Routes from the Laravel plugin's PHP facts; the regex reader only when facts are unavailable.
+
+    Facts come from the PHP parser (decision: framework-knowledge-lives-in-plugins-over-language-facts),
+    so ``use … as Alias`` imports, group files and ``withRouting`` resolve as Laravel loads them.
+    """
+    routes = _laravel_routes_from_facts(root)
+    return routes if routes is not None else _laravel_routes_from_source(root)
+
+
+def _laravel_routes_from_facts(root: Path) -> list[dict[str, Any]] | None:
+    try:
+        from agent.core.facts import facts_for_workspace
+        from agent.core.revision import RevisionContext
+        from agent.plugins.frameworks.laravel.routes_from_facts import provide_routes
+
+        facts = facts_for_workspace(root)
+        if facts is None:
+            return None
+        records = provide_routes(RevisionContext.from_directory(root), facts)
+    except Exception:  # noqa: BLE001 — the source reader below still gives an answer
+        return None
+    routes = []
+    for record in records:
+        if record.handler is None and _is_view_or_redirect(root, record):
+            continue
+        owner, _, method_name = (record.handler or "").partition("::")
+        action = (owner if method_name in ("", "__invoke") else f"{owner}@{method_name}") if record.handler else "closure"
+        for method in record.methods:
+            if method in ("OPTIONS", "HEAD"):
+                continue
+            routes.append({"method": ANY_METHOD if method == "ANY" else method, "path": record.path or "/",
+                           "action": action, "file": record.file, "line": record.line or None,
+                           "api": record.file.endswith("routes/api.php") or "api" in record.middleware})
+    return routes
+
+
+def _is_view_or_redirect(root: Path, record: Any) -> bool:
+    """``Route::view`` / ``Route::redirect`` serve no handler code, as the source reader skips them."""
+    try:
+        line = (root / record.file).read_text(encoding="utf-8", errors="replace").splitlines()[record.line - 1]
+    except (OSError, IndexError, TypeError):
+        return False
+    return bool(re.search(r"Route::(view|redirect|permanentRedirect)\s*\(", line))
+
+
+def _laravel_routes_from_source(root: Path) -> list[dict[str, Any]]:
     from agent.plugins.frameworks.laravel.routes import parse_routes_from_source
 
     api_prefix = "api"  # Laravel's default for routes/api.php

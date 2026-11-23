@@ -90,7 +90,10 @@ def test_laravel_routes_get_the_api_prefix_and_skip_views(tmp_path):
     assert show["file"] == "routes/api.php" and show["api"] is True and show["action"].endswith("OrderController@show")
 
     (tmp_path / "bootstrap").mkdir()
-    (tmp_path / "bootstrap/app.php").write_text("<?php ->withRouting(api: __DIR__.'/../routes/api.php', apiPrefix: 'rest')")
+    # A Laravel 11 bootstrap file: valid PHP, so the facts reader (the PHP parser) can read it.
+    (tmp_path / "bootstrap/app.php").write_text(
+        "<?php\nreturn Application::configure(basePath: dirname(__DIR__))\n"
+        "    ->withRouting(api: __DIR__.'/../routes/api.php', apiPrefix: 'rest')\n    ->create();\n")
     assert any(r["path"] == "/rest/v1/orders" for r in backend_routes(tmp_path)["routes"])
 
 
@@ -282,3 +285,21 @@ def test_a_declared_base_path_is_never_widened_by_a_guessed_prefix():
     report = provider_report(routes, contract("/api/v1"))
     assert report["coverage"]["inferred_prefix"] is None and report["coverage"]["routes_documented"] == 1
     assert sum(1 for f in report["findings"] if f["code"] == "undocumented_route") == 3
+
+
+def test_laravel_routes_resolve_aliased_controller_imports(tmp_path):
+    """`use … as Alias` imports resolve through the PHP parser's facts, not the alias's name."""
+    result = backend_routes(write(tmp_path, {
+        "composer.json": json.dumps({"require": {"laravel/framework": "^11.0"}}),
+        "routes/api.php": """<?php
+use App\\Http\\Controllers\\Api\\Admin\\V1\\AuditLogController as AdminAuditLogController;
+use App\\Http\\Controllers\\Api\\Admin\\V1\\DashboardController as AdminDashboardController;
+Route::prefix('v1/admin')->group(function () {
+    Route::get('/audit-logs', [AdminAuditLogController::class, 'index']);
+    Route::get('/dashboard', AdminDashboardController::class);
+});
+""",
+    }))
+    actions = {(r["method"], r["path"]): r["action"] for r in result["routes"]}
+    assert actions[("GET", "/api/v1/admin/audit-logs")] == "App\\Http\\Controllers\\Api\\Admin\\V1\\AuditLogController@index"
+    assert actions[("GET", "/api/v1/admin/dashboard")] == "App\\Http\\Controllers\\Api\\Admin\\V1\\DashboardController"

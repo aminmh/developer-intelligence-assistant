@@ -135,6 +135,11 @@ class InspectionService:
                 "links": 0,
             }
 
+        # Which precise producers covered this collection, for change impact coverage (F8).
+        producers = payload.get("producers")
+        if isinstance(producers, dict) and producers:
+            self._graph.upsert_coverage(collection, producers)
+
         # Declared relationships (extends/implements/uses_trait) — link only
         # when both endpoints were defined in this project.
         by_fqn = _def_index(defs)
