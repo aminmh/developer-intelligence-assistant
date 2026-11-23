@@ -453,16 +453,6 @@
       "type": "depends_on"
     },
     {
-      "source": "knowledge-layer/implement-framework-knowledge-layer.plan.md",
-      "target": "knowledge-layer/framework-knowledge-layer.spec.md",
-      "type": "implements"
-    },
-    {
-      "source": "knowledge-layer/implement-framework-knowledge-layer.plan.md",
-      "target": "knowledge-layer/gitmcp-is-the-remote-documentation-provider.adr.md",
-      "type": "depends_on"
-    },
-    {
       "source": "regression/regression-check.spec.md",
       "target": "knowledge-layer/framework-knowledge-layer.spec.md",
       "type": "depends_on"
