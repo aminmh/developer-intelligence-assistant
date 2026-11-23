@@ -56,6 +56,22 @@ const judgment = (row: SymbolRow) => row.evidence.find((e) => e.label)?.label;
 const skipped = (row: SymbolRow) => row.evidence.find((e) => e.reason)?.reason;
 const at = (path: string, line: number | null) => (path ? `${path}${line ? `:${line}` : ''}` : '');
 const show = (value: unknown) => (typeof value === 'string' ? value : JSON.stringify(value));
+const downloading = ref(false);
+async function downloadTests() {
+  if (!current.value) return;
+  downloading.value = true; error.value = '';
+  try {
+    const response = await makeRequest(`${root()}/${encodeURIComponent(current.value.check_id)}/tests?format=zip`, { method: 'POST' });
+    if (!response.ok) {
+      const body = await response.json().catch(() => ({}));
+      throw new Error(typeof body.detail === 'string' ? body.detail : 'Tests could not be generated.');
+    }
+    const url = URL.createObjectURL(await response.blob());
+    const link = Object.assign(document.createElement('a'), { href: url, download: `regression-tests-${current.value.check_id}.zip` });
+    link.click();
+    setTimeout(() => URL.revokeObjectURL(url), 1000);
+  } catch (cause: any) { error.value = cause.message; } finally { downloading.value = false; }
+}
 const differingOthers = computed(() => (report.value?.replay_other || []).filter((row) => row.equal === false));
 
 async function request<T>(path: string, init?: RequestInit & { json?: unknown }): Promise<T> {
@@ -227,6 +243,18 @@ onBeforeUnmount(() => { if (timer) clearTimeout(timer); });
           <li v-for="item in report.baseline_checklist" :key="item.kind + item.name"><span class="text-slate-500">{{ item.kind }}</span> <span class="font-mono">{{ item.name }}</span> — {{ item.detail }} <span v-if="item.file" class="text-slate-500">({{ at(item.file, item.line) }})</span></li>
         </ul>
       </details>
+
+      <section class="mt-6 rounded-xl border border-slate-800 p-4" aria-label="Characterization tests">
+        <h4 class="text-sm font-semibold">Characterization tests</h4>
+        <p class="mt-1 text-xs text-slate-500">
+          Tests that pin what the base version returned in the recorded baseline, written for this project's test runner, plus a request
+          file replay can import. Add them to the project, run them on the base version first (they must pass), then on the changed version.
+          Tests for changed code without a route are written by the model and must be reviewed.
+        </p>
+        <button type="button" class="mt-3 min-h-10 rounded-lg border border-slate-700 px-4 text-sm disabled:opacity-50" :disabled="downloading" @click="downloadTests">
+          {{ downloading ? 'Writing tests…' : 'Download tests (ZIP)' }}
+        </button>
+      </section>
 
       <ReplayPanel :project-id="projectId" :check-id="current.check_id" @report-changed="open(current.check_id)" />
     </template>

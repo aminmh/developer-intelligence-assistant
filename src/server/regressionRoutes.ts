@@ -123,6 +123,30 @@ export function registerRegressionRoutes(app: Express, deps: RegressionDependenc
     });
   });
 
+  // Characterization tests (spec clauses 19-21): a ZIP the developer adds to the project; nothing is run here.
+  app.post('/api/regression/projects/:projectId/checks/:checkId/tests', async (req, res) => {
+    const user = access(res, req.params.projectId, true); if (!user) return;
+    const zip = req.query.format === 'zip';
+    if (!zip) return forward(res, user, checkPath(req, '/tests'), 'Tests could not be generated.', { method: 'POST', body: '{}' });
+    try {
+      const upstream = await fetch(`${deps.apiUrl}${checkPath(req, '/tests')}?format=zip`, {
+        method: 'POST',
+        headers: { 'X-Internal-Secret': deps.internalSecret, 'X-User-Id': user.sub, 'Content-Type': 'application/json' },
+        body: '{}',
+        signal: AbortSignal.timeout(180_000),
+      });
+      if (!upstream.ok || upstream.headers.get('content-type') !== 'application/zip') {
+        const data: any = await upstream.json().catch(() => ({}));
+        return res.status(upstream.ok ? 502 : upstream.status).json({ detail: typeof data.detail === 'string' ? data.detail : 'Tests could not be generated.' });
+      }
+      res.setHeader('Content-Type', 'application/zip');
+      res.setHeader('Content-Disposition', `attachment; filename="regression-tests-${encodeURIComponent(req.params.checkId)}.zip"`);
+      return res.status(200).send(Buffer.from(await upstream.arrayBuffer()));
+    } catch {
+      return res.status(502).json({ detail: 'Tests could not be generated.' });
+    }
+  });
+
   app.post('/api/regression/projects/:projectId/checks/:checkId/replay-runs', async (req, res) => {
     const user = access(res, req.params.projectId, true); if (!user) return;
     const fallback = 'The replay could not be started.';

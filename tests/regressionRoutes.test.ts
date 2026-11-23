@@ -17,6 +17,7 @@ async function withServers(user: string, reply: Reply | ((url: string) => Reply)
     req.on('end', () => {
       received.push({ method: req.method, url: req.url, headers: req.headers, body: raw ? JSON.parse(raw) : null });
       const answer = typeof reply === 'function' ? reply(req.url || '') : reply;
+      if (answer.body instanceof Buffer) return res.writeHead(answer.status, { 'Content-Type': 'application/zip' }).end(answer.body);
       if (answer.body === undefined) return res.writeHead(answer.status).end();
       res.writeHead(answer.status, { 'Content-Type': 'application/json' }).end(JSON.stringify(answer.body));
     });
@@ -144,5 +145,26 @@ test('probe saves and imports forward only their documented fields', async () =>
     });
     assert.deepEqual(received[0].body, { probes: [] });
     assert.deepEqual(received[1].body, { text: '{}', target_id: 't', mode: 'replace' });
+  });
+});
+
+test('an operator downloads the test bundle as a ZIP passed through unchanged', async () => {
+  const zip = Buffer.from([0x50, 0x4b, 0x05, 0x06, ...new Array(18).fill(0)]);
+  await withServers('alice', { status: 200, body: zip }, async (url, received) => {
+    const response = await fetch(`${url}/api/regression/projects/shop/checks/rc_1/tests?format=zip`, { method: 'POST' });
+    assert.equal(response.status, 200);
+    assert.equal(response.headers.get('content-type'), 'application/zip');
+    assert.match(response.headers.get('content-disposition') || '', /regression-tests-rc_1\.zip/);
+    assert.deepEqual(Buffer.from(await response.arrayBuffer()), zip);
+    assert.equal(received[0].url, '/projects/shop/regression-checks/rc_1/tests?format=zip');
+  });
+  await withServers('viewer', { status: 200, body: zip }, async (url, received) => {
+    assert.equal((await fetch(`${url}/api/regression/projects/shop/checks/rc_1/tests?format=zip`, { method: 'POST' })).status, 403);
+    assert.equal(received.length, 0);
+  });
+  await withServers('alice', { status: 422, body: { detail: 'Run the static check first' } }, async (url) => {
+    const response = await fetch(`${url}/api/regression/projects/shop/checks/rc_1/tests?format=zip`, { method: 'POST' });
+    assert.equal(response.status, 422);
+    assert.equal((await response.json()).detail, 'Run the static check first');
   });
 });
