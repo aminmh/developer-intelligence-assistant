@@ -1215,7 +1215,11 @@ async function startServer() {
       const pyRes = await fetch(`${PYTHON_API_URL}/health/test/remote`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(req.body ?? {}),
+        // Only the unsaved form values go through; a secret from the browser is never forwarded.
+        body: JSON.stringify({
+          ...(typeof req.body?.base_url === 'string' ? { base_url: req.body.base_url } : {}),
+          ...(typeof req.body?.model === 'string' ? { model: req.body.model } : {}),
+        }),
       });
       if (!pyRes.ok) {
         return res.status(pyRes.status).json({ success: false, error: 'Remote connection test failed.' });
