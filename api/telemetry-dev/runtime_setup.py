@@ -35,6 +35,10 @@ LABELS = {
 }
 SLUG = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$")
 COMMIT = re.compile(r"^(?:[0-9a-f]{40}|[0-9a-f]{64})$")
+REVISION = re.compile(r"^rev_[0-9a-f]{32}$")
+_ENV_REVISION_LINE = re.compile(r"(?m)^(INDEXER_REVISION_ID=)(.*)$")
+_ENV_RESOURCE_LINE = re.compile(r"(?m)^OTEL_RESOURCE_ATTRIBUTES=.*$")
+_RESOURCE_REVISION = re.compile(r"(indexer\.revision_id=)(rev_[0-9a-f]{32})")
 HELPER_HOST = os.environ.get("RUNTIME_HELPER_BIND", "127.0.0.1")
 HELPER_PORT = 47831
 HELPER_COMMAND_TIMEOUT_SECONDS = 600
@@ -261,7 +265,7 @@ def serve_helper() -> None:
                                             "files": project["files"], **details})
                 commit = body.get("commit") or details["commit"]
                 plan = build_setup_plan(project, details["services"], body.get("services"),
-                                        body.get("project_id"), body.get("environment"), commit)
+                                        body.get("project_id"), body.get("environment"), commit, body.get("revision_id"))
             except SetupInputError as exc:
                 return self._json(400, {"detail": str(exc)})
             except (RuntimeError, OSError) as exc:
@@ -275,7 +279,8 @@ def serve_helper() -> None:
                 "compose_project": plan["project"]["name"], "services": plan["services"],
                 "project_id": plan["project_id"], "environment": plan["environment"], "commit": plan["commit"],
                 "certificates": plan["certificates"], "changes": plan["changes"],
-                "approval_items": plan["approval_items"]})
+                "approval_items": plan["approval_items"],
+                "app_env_file": plan["app_env"]["path"] if plan.get("app_env") else None})
 
         def _working_tree_grant(self) -> None:
             """Choose, approve and start syncing a folder for a grant the web app created."""
@@ -1380,7 +1385,58 @@ def compose_project_details(project: dict) -> dict:
     return {"services": services, "commit": detected if COMMIT.fullmatch(detected) else None}
 
 
-def build_setup_plan(project: dict, services: list[str], selected, project_id, environment, commit) -> dict:
+def plan_app_env(project: dict, revision_id: str) -> dict | None:
+    """The revision-ID lines of the app's own ``.env`` rewritten to ``revision_id``; None when nothing changes.
+
+    Only INDEXER_REVISION_ID and the indexer.revision_id part of OTEL_RESOURCE_ATTRIBUTES are touched, and only
+    where they already exist: setup never installs tracing or creates these settings.
+    """
+    path = Path(project["directory"]) / ".env"
+    if not path.is_file():
+        return None
+    original = path.read_text()
+    previous: dict[str, str] = {}
+
+    def swap_line(match: re.Match) -> str:
+        previous["indexer_revision_id"] = match.group(2)
+        return match.group(1) + revision_id
+
+    def swap_resource(match: re.Match) -> str:
+        line = match.group(0)
+        found = _RESOURCE_REVISION.search(line)
+        if found:
+            previous["resource_revision"] = found.group(2)
+        return _RESOURCE_REVISION.sub(lambda hit: hit.group(1) + revision_id, line)
+
+    proposed = _ENV_RESOURCE_LINE.sub(swap_resource, _ENV_REVISION_LINE.sub(swap_line, original))
+    if proposed == original:
+        return None
+    lines = [line for line in proposed.splitlines()
+             if line.startswith(("INDEXER_REVISION_ID=", "OTEL_RESOURCE_ATTRIBUTES=")) and line not in original.splitlines()]
+    return {"path": str(path), "original": original, "proposed": proposed, "previous": previous, "added": lines}
+
+
+def revert_app_env(record: dict) -> str | None:
+    """Put the app's previous revision ID back; None when its ``.env`` is gone or no longer has setup's value."""
+    path = Path(record.get("path", ""))
+    if not path.is_file():
+        return None
+    current, new = path.read_text(), record.get("revision_id", "")
+    previous = record.get("previous") or {}
+    restored = current
+    if previous.get("indexer_revision_id") is not None:
+        restored = _ENV_REVISION_LINE.sub(
+            lambda match: match.group(1) + previous["indexer_revision_id"] if match.group(2) == new else match.group(0), restored)
+    if previous.get("resource_revision"):
+        restored = _ENV_RESOURCE_LINE.sub(
+            lambda match: match.group(0).replace(f"indexer.revision_id={new}", f"indexer.revision_id={previous['resource_revision']}"), restored)
+    if restored == current:
+        return None
+    write_text_atomic(path, restored)
+    return str(path)
+
+
+def build_setup_plan(project: dict, services: list[str], selected, project_id, environment, commit, revision_id=None) -> dict:
     """Compute every change setup would make, without making any of them."""
     if not isinstance(selected, list) or not selected or not all(isinstance(item, str) for item in selected):
         raise SetupInputError("Choose at least one service.")
@@ -1394,6 +1450,10 @@ def build_setup_plan(project: dict, services: list[str], selected, project_id, e
         raise SetupInputError("Environment must be 1–128 letters, numbers, dots, dashes, or underscores.")
     if not isinstance(commit, str) or not COMMIT.fullmatch(commit):
         raise SetupInputError("Commit must be a full lowercase 40-character SHA-1 or 64-character SHA-256.")
+
+    if revision_id not in (None, "") and (not isinstance(revision_id, str) or not REVISION.fullmatch(revision_id)):
+        raise SetupInputError("Revision ID must look like rev_ followed by 32 lowercase hexadecimal characters.")
+    app_env = plan_app_env(project, revision_id) if revision_id else None
 
     files = [Path(path) for path in project["files"]]
     for path in files:
@@ -1425,9 +1485,9 @@ def build_setup_plan(project: dict, services: list[str], selected, project_id, e
             raise RuntimeError(f"Could not safely propose labels for {service} in {path}: {exc}") from exc
         labels[service] = values
     changed = [path for path in files if contents[path] != proposed_texts[path]]
-    if not changed:
+    if not changed and not app_env:
         raise RuntimeError("Selected services already have the requested telemetry labels")
-    changed_paths = ", ".join(str(path) for path in changed)
+    changed_paths = ", ".join([str(path) for path in changed] + ([app_env["path"]] if app_env else []))
     creates_certificates = cert_directory_is_empty_scaffold()
     items = [
         f"Read the selected Compose files and Git commit ({', '.join(str(path) for path in files)})",
@@ -1437,12 +1497,18 @@ def build_setup_plan(project: dict, services: list[str], selected, project_id, e
         f"Recreate selected services in Compose project {project['name']}",
         "Start or refresh the local API ingress and telemetry agent",
     ]
+    if app_env:
+        items.insert(4, f"Set the revision ID to {revision_id} in {app_env['path']} (INDEXER_REVISION_ID and "
+                        "OTEL_RESOURCE_ATTRIBUTES only), so the app's request spans use that revision")
     # Only added lines are previewed (no context), so other settings in the files stay on this computer.
     changes = [{"file": str(path), "added": [line[1:] for line in difflib.unified_diff(
                     contents[path].splitlines(), proposed_texts[path].splitlines(), lineterm="", n=0)
                 if line.startswith("+") and not line.startswith("+++")]} for path in changed]
+    if app_env:
+        changes.append({"file": app_env["path"], "added": app_env["added"]})  # never the rest of the file: it holds secrets
     return {"project": project, "services": selected, "project_id": project_id, "environment": environment,
             "commit": commit, "labels": labels, "certificates": "create" if creates_certificates else "reuse",
+            "revision_id": revision_id or None, "app_env": app_env,
             "originals": {str(path): contents[path] for path in files},
             "proposed": {str(path): proposed_texts[path] for path in changed},
             "approval_items": items, "changes": changes,
@@ -1456,10 +1522,14 @@ def apply_setup_plan(plan: dict, approve=None) -> dict:
         raise RuntimeError(blocker)
     originals = {Path(path): text for path, text in plan["originals"].items()}
 
+    app_env = plan.get("app_env")
+
     def unchanged_since_preview() -> None:
         for path, text in originals.items():
             if not path.is_file() or digest(path.read_text()) != digest(text):
                 raise RuntimeError(f"Compose file changed since the preview: {path}; no edits were applied. Review the changes again.")
+        if app_env and (not Path(app_env["path"]).is_file() or digest(Path(app_env["path"]).read_text()) != digest(app_env["original"])):
+            raise RuntimeError(f"The app's .env changed since the preview: {app_env['path']}; no edits were applied. Review the changes again.")
 
     unchanged_since_preview()
     (approve or required_approval)("Approve Runtime setup", plan["approval_items"], summary=plan["summary"])
@@ -1477,14 +1547,24 @@ def apply_setup_plan(plan: dict, approve=None) -> dict:
     unchanged_since_preview()
     for path in changed:
         write_text_atomic(path, plan["proposed"][str(path)])
+    if app_env:
+        # Only the previous revision values are recorded for cleanup, never the rest of the file (it holds secrets).
+        CURRENT_SETUP["app_env"] = {"path": app_env["path"], "revision_id": plan["revision_id"], "previous": app_env["previous"]}
+        write_state(CURRENT_SETUP)
+        write_text_atomic(Path(app_env["path"]), app_env["proposed"])
     CURRENT_SETUP["phase"] = "compose-labeled"
     write_state(CURRENT_SETUP)
     start_ingress_and_agent()
     run(compose_args(project) + ["up", "-d", "--no-deps", *plan["services"]], cwd=Path(project["directory"]))
+    if app_env and not changed:
+        # Nothing was recreated for labels, so restart the services to make the app read its new .env.
+        run(compose_args(project) + ["restart", *plan["services"]], cwd=Path(project["directory"]))
     CURRENT_SETUP["phase"] = "active"
     write_state(CURRENT_SETUP)
     message = (f"Runtime is active for {plan['project_id']} · {plan['environment']} · {plan['commit'][:12]}. "
                f"Recreated {', '.join(plan['services'])} with telemetry labels.")
+    if app_env:
+        message += f" The app's .env now uses revision {plan['revision_id']}."
     problem = verify_agent_report()
     if problem:
         message += (f" However, the host agent cannot report to the API yet ({problem}); containers will not appear "
@@ -1824,6 +1904,7 @@ def cleanup(approve=None) -> dict:
     actions = [
         "Stop the telemetry agent and Runtime ingress",
         f"Restore every saved Compose file ({', '.join(compose_files) or 'none'})",
+        *([f"Put the app's previous revision ID back in {state['app_env'].get('path')}"] if isinstance(state.get("app_env"), dict) else []),
         f"Recreate selected Compose services without Runtime labels ({', '.join(state.get('services', [])) or 'none'})",
         "Remove the host/project/environment authorization",
         "Refresh python-api when required",
@@ -1841,6 +1922,8 @@ def cleanup(approve=None) -> dict:
         problems = restore_compose(state)
         if problems:
             raise RuntimeError("; ".join(problems))
+        if isinstance(state.get("app_env"), dict):
+            revert_app_env(state["app_env"])  # best effort: a hand-edited .env is left as it is
         run(compose_args(project) + ["up", "-d", "--no-deps", *services], cwd=Path(project["directory"]))
         env = os.environ.copy()
         env.update({"HOST_IDENTITY_DIR": str(CERT_DIR / "agent"), "BACKEND_URL": "https://telemetry-caddy:9443"})

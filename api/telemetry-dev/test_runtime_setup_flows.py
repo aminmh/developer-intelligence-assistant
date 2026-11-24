@@ -338,6 +338,108 @@ class RuntimeSetupFlowTests(unittest.TestCase):
             with self.subTest(message=message), self.assertRaisesRegex(runtime_setup.SetupInputError, message):
                 runtime_setup.build_setup_plan(self.project, ["php", "database"], selected, project_id, environment, commit)
 
+    OLD_REV = "rev_" + "c" * 32
+    NEW_REV = "rev_" + "7" * 32
+
+    def write_app_env(self):
+        self.app_env = self.project_dir / ".env"
+        self.app_env.write_text(
+            "APP_NAME=Pizza\nINDEXER_PROJECT_ID=dash-fixture\n"
+            f"INDEXER_REVISION_ID={self.OLD_REV}\n"
+            f"OTEL_RESOURCE_ATTRIBUTES=service.name=app,indexer.project_id=dash-fixture,indexer.revision_id={self.OLD_REV},indexer.code_dirty=false\n"
+            "INDEXER_OTEL_PROFILE_TOKEN=super-secret-token\n")
+
+    def env_plan(self):
+        self.write_app_env()
+        with patch.object(runtime_setup, "CERT_DIR", self.cert_dir):
+            return runtime_setup.build_setup_plan(self.project, ["php", "database"], ["php"],
+                                                  "dash-fixture", "development", "a" * 40, self.NEW_REV)
+
+    def test_plan_rewrites_only_the_revision_lines_of_the_app_env_and_never_previews_secrets(self):
+        before = None
+        self.write_app_env()
+        before = self.app_env.read_text()
+        plan = self.env_plan()
+        self.assertEqual(self.app_env.read_text(), before, "planning changes nothing")
+        env_change = next(change for change in plan["changes"] if change["file"] == str(self.app_env))
+        self.assertEqual(len(env_change["added"]), 2)
+        self.assertTrue(all(self.NEW_REV in line for line in env_change["added"]))
+        self.assertNotIn("super-secret-token", json.dumps(plan["changes"]) + json.dumps(plan["approval_items"]))
+        self.assertTrue(any("INDEXER_REVISION_ID" in item and self.NEW_REV in item for item in plan["approval_items"]))
+        proposed = plan["app_env"]["proposed"]
+        self.assertIn("APP_NAME=Pizza", proposed)
+        self.assertIn("indexer.code_dirty=false", proposed)
+        self.assertNotIn(self.OLD_REV, proposed)
+
+    def test_plan_leaves_apps_without_revision_settings_alone_and_rejects_bad_ids(self):
+        (self.project_dir / ".env").write_text("APP_NAME=Plain\n")
+        with patch.object(runtime_setup, "CERT_DIR", self.cert_dir):
+            plan = runtime_setup.build_setup_plan(self.project, ["php", "database"], ["php"],
+                                                  "dash-fixture", "development", "a" * 40, self.NEW_REV)
+        self.assertIsNone(plan["app_env"])
+        self.assertEqual(len(plan["approval_items"]), 6)
+        for bad in ("rev_xyz", "7" * 32, "rev_" + "7" * 31, 5):
+            with self.subTest(bad=bad), self.assertRaisesRegex(runtime_setup.SetupInputError, "Revision ID"):
+                runtime_setup.build_setup_plan(self.project, ["php", "database"], ["php"],
+                                               "dash-fixture", "development", "a" * 40, bad)
+
+    def test_apply_writes_the_app_env_and_records_only_the_previous_revision_for_cleanup(self):
+        plan = self.env_plan()
+        with ExitStack() as stack:
+            self.path_patches(stack)
+            stack.enter_context(patch.object(runtime_setup, "run"))
+            stack.enter_context(patch.object(runtime_setup, "start_ingress_and_agent", return_value=(runtime_setup.CURRENT_SETUP, "fingerprint")))
+            result = runtime_setup.apply_setup_plan(plan, approve=lambda *_a, **_k: None)
+            saved_text = self.state_file.read_text()
+        written = self.app_env.read_text()
+        self.assertIn(f"INDEXER_REVISION_ID={self.NEW_REV}", written)
+        self.assertIn(f"indexer.revision_id={self.NEW_REV}", written)
+        self.assertIn("super-secret-token", written, "the rest of the file is kept")
+        self.assertIn(self.NEW_REV, result["message"])
+        self.assertNotIn("super-secret-token", saved_text, "the recovery record never holds the app's secrets")
+        self.assertEqual(json.loads(saved_text)["app_env"]["previous"],
+                         {"indexer_revision_id": self.OLD_REV, "resource_revision": self.OLD_REV})
+
+    def test_apply_refuses_when_the_app_env_changed_since_the_preview(self):
+        plan = self.env_plan()
+        self.app_env.write_text(self.app_env.read_text() + "EXTRA=1\n")
+        approve = unittest.mock.Mock()
+        with ExitStack() as stack:
+            self.path_patches(stack)
+            with self.assertRaisesRegex(RuntimeError, r"app's \.env changed since the preview"):
+                runtime_setup.apply_setup_plan(plan, approve=approve)
+        approve.assert_not_called()
+        self.assertNotIn(self.NEW_REV, self.app_env.read_text())
+
+    def test_env_only_change_restarts_services_when_labels_already_exist(self):
+        with patch.object(runtime_setup, "CERT_DIR", self.cert_dir):
+            labeled = runtime_setup.build_setup_plan(self.project, ["php", "database"], ["php"], "dash-fixture", "development", "a" * 40)
+        self.compose_file.write_text(next(iter(labeled["proposed"].values())))  # labels already in place
+        plan = self.env_plan()
+        self.assertEqual(plan["proposed"], {})
+        calls = []
+        with ExitStack() as stack:
+            self.path_patches(stack)
+            stack.enter_context(patch.object(runtime_setup, "run", side_effect=lambda args, **_k: calls.append(args)))
+            stack.enter_context(patch.object(runtime_setup, "start_ingress_and_agent", return_value=(runtime_setup.CURRENT_SETUP, "fingerprint")))
+            runtime_setup.apply_setup_plan(plan, approve=lambda *_a, **_k: None)
+        self.assertTrue(any("restart" in call and "php" in call for call in calls))
+        self.assertIn(f"INDEXER_REVISION_ID={self.NEW_REV}", self.app_env.read_text())
+
+    def test_revert_app_env_restores_the_previous_revision_but_not_a_hand_edited_value(self):
+        self.write_app_env()
+        record = {"path": str(self.app_env), "revision_id": self.NEW_REV,
+                  "previous": {"indexer_revision_id": self.OLD_REV, "resource_revision": self.OLD_REV}}
+        applied = self.app_env.read_text().replace(self.OLD_REV, self.NEW_REV)
+        self.app_env.write_text(applied)
+        self.assertEqual(runtime_setup.revert_app_env(record), str(self.app_env))
+        self.assertEqual(self.app_env.read_text().count(self.OLD_REV), 2)
+        self.assertNotIn(self.NEW_REV, self.app_env.read_text())
+        custom = "rev_" + "9" * 32
+        self.app_env.write_text(applied.replace(self.NEW_REV, custom))
+        self.assertIsNone(runtime_setup.revert_app_env(record))
+        self.assertIn(custom, self.app_env.read_text())
+
     def test_apply_refuses_when_compose_file_changed_since_preview(self):
         plan = self.fixture_plan()
         self.compose_file.write_text(self.compose_original + "  cache:\n    image: redis:7\n")

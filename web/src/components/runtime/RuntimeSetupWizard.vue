@@ -1,7 +1,7 @@
 <script setup lang="ts">
-import { computed, onMounted, ref } from 'vue';
+import { computed, onMounted, ref, watch } from 'vue';
 import { CheckCircle2, FolderGit2, RefreshCw, ShieldCheck, X } from 'lucide-vue-next';
-import { phpRuntimeSetupCommand, runtimeSetupReadiness } from '../../utils/runtimeProjects';
+import { defaultReusedRevision, phpRuntimeSetupCommand, reusableRevisions, runtimeSetupReadiness } from '../../utils/runtimeProjects';
 import type { RuntimeProjectRecord } from '../../types';
 import { toast } from '../../composables/useToasts';
 
@@ -23,7 +23,7 @@ type ProjectDetails = { name: string; directory: string; files: string[]; servic
 type Plan = {
   plan_id: string; expires_in: number; compose_project: string; services: string[]; project_id: string;
   environment: string; commit: string; certificates: 'create' | 'reuse';
-  changes: { file: string; added: string[] }[]; approval_items: string[];
+  changes: { file: string; added: string[] }[]; approval_items: string[]; app_env_file?: string | null;
 };
 
 const step = ref<'project' | 'services' | 'review'>('project');
@@ -34,6 +34,10 @@ const services = ref<string[]>([]);
 const projectId = ref('');
 const environment = ref('development');
 const commit = ref('');
+const detectedCommit = ref('');
+// Containers report under the commit written to their labels. Using an existing indexed revision's commit
+// shows them under that revision instead of adding a separate Docker-only one.
+const reusedRevisionId = ref('');
 const plan = ref<Plan | null>(null);
 const loading = ref(false);
 const error = ref('');
@@ -69,7 +73,9 @@ const chooseProject = (name: string) => guard(async () => {
   details.value = await helper<ProjectDetails>('/compose-project', { project_name: name });
   services.value = [];
   projectId.value = suggestedProjectId(name);
-  commit.value = details.value.commit || '';
+  detectedCommit.value = details.value.commit || '';
+  commit.value = detectedCommit.value;
+  applyDefaultRevision();
   plan.value = null;
   step.value = 'services';
 });
@@ -84,6 +90,14 @@ const suggestedProjectId = (composeName: string) => {
     .sort((a, b) => b.length - a.length)[0];
   return prefix || (SLUG.test(composeName) ? composeName : '');
 };
+const projectRevisions = computed(() => reusableRevisions(projectId.value, props.indexedRevisions || []));
+const chooseRevision = (revisionId: string) => {
+  reusedRevisionId.value = revisionId;
+  commit.value = projectRevisions.value.find((row) => row.revisionId === revisionId)?.commit || detectedCommit.value;
+};
+const applyDefaultRevision = () => chooseRevision(defaultReusedRevision(projectRevisions.value, detectedCommit.value));
+// Typing another project ID changes which revisions can be reused.
+watch(projectId, () => { if (details.value) applyDefaultRevision(); });
 const isKnownProject = computed(() => (props.knownProjectIds || []).includes(projectId.value));
 const readiness = computed(() => runtimeSetupReadiness(projectId.value, commit.value,
   props.indexedRevisions || [], props.inventoryAvailable === true));
@@ -99,6 +113,8 @@ const review = () => guard(async () => {
   plan.value = await helper<Plan>('/setup/plan', {
     project_name: projectName.value, services: services.value,
     project_id: projectId.value, environment: environment.value, commit: commit.value,
+    // With an existing revision chosen, the helper also points the app's own .env at it (shown in the review).
+    ...(reusedRevisionId.value ? { revision_id: reusedRevisionId.value } : {}),
   });
   step.value = 'review';
 });
@@ -179,8 +195,15 @@ onMounted(loadProjects);
         <label class="text-[11px] text-slate-400">Environment
           <input v-model.trim="environment" required class="mt-1 h-9 w-full rounded-lg border border-slate-700 bg-slate-950 px-2.5 text-xs text-slate-100" />
         </label>
-        <label class="text-[11px] text-slate-400">Git commit {{ details.commit ? '(detected)' : '' }}
-          <input v-model.trim="commit" required class="mt-1 h-9 w-full rounded-lg border border-slate-700 bg-slate-950 px-2.5 font-mono text-[11px] text-slate-100" placeholder="full 40-character SHA" />
+        <label class="text-[11px] text-slate-400">Git commit {{ reusedRevisionId ? '(from the revision)' : details.commit ? '(detected)' : '' }}
+          <input v-model.trim="commit" required :readonly="!!reusedRevisionId" class="mt-1 h-9 w-full rounded-lg border border-slate-700 bg-slate-950 px-2.5 font-mono text-[11px] text-slate-100 read-only:opacity-70" placeholder="full 40-character SHA" />
+        </label>
+        <label v-if="projectRevisions.length" class="text-[11px] text-slate-400 sm:col-span-3">Show the containers under revision
+          <select :value="reusedRevisionId" class="mt-1 h-9 w-full rounded-lg border border-slate-700 bg-slate-950 px-2.5 font-mono text-[11px] text-slate-100" @change="chooseRevision(($event.target as HTMLSelectElement).value)">
+            <option v-for="row in projectRevisions" :key="row.revisionId" :value="row.revisionId">Existing revision · commit {{ row.commit.slice(0, 7) }}{{ row.commit === detectedCommit ? ' (matches this Compose project)' : '' }}</option>
+            <option value="">{{ detectedCommit ? `New: this Compose project's commit ${detectedCommit.slice(0, 7)}` : 'New: enter a commit' }}</option>
+          </select>
+          <span class="mt-1 block text-[10px] leading-4 text-slate-500">Reusing a revision adds no new one. The containers are labeled with that revision's commit, so use it only when the running code is that source. If the app's .env already sets a revision ID, the review step also shows updating it to this one.</span>
         </label>
       </div>
       <p v-if="inputProblem" class="text-[11px] text-amber-300">{{ inputProblem }}</p>
@@ -199,6 +222,7 @@ onMounted(loadProjects);
           <li v-for="item in plan.approval_items" :key="item" class="flex gap-2"><CheckCircle2 class="mt-0.5 h-3 w-3 shrink-0 text-emerald-400" /><span class="break-all">{{ item }}</span></li>
         </ul>
       </div>
+      <p v-if="reusedRevisionId && !plan.app_env_file" class="rounded-lg border border-amber-500/25 bg-amber-500/5 p-2.5 text-[11px] text-amber-200">The app's .env was not changed: it has no INDEXER_REVISION_ID or OTEL_RESOURCE_ATTRIBUTES revision to update, it already uses this revision, or the Runtime helper is out of date (run just up). Spans use the revision ID the app already sets.</p>
       <div v-for="change in plan.changes" :key="change.file">
         <p class="break-all font-mono text-[10px] text-slate-400">{{ change.file }} — lines added</p>
         <pre class="mt-1 max-h-56 overflow-auto rounded-lg border border-slate-800 bg-black/30 p-2 text-[10px] leading-4 text-emerald-200"><code>{{ change.added.map((line) => `+ ${line}`).join('\n') }}</code></pre>
