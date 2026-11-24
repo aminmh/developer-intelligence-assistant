@@ -7,16 +7,19 @@ import dotenv from 'dotenv';
 import { RAGService } from './src/server/rag';
 import { UploadedFile } from './src/types';
 import { openDocument, complete as completeDockerfile, format as formatDockerfile, closeSession as closeDockerfileSession, closeAllSessions, bridgeStatus } from './src/server/dockerfileLanguageBridge';
-import { installOidcAuth, authRoleFor, authIsGlobalAdmin, authCanRunRuntimeSetup,
+import { installOidcAuth, authRoleFor, authIsGlobalAdmin, authCanRunRuntimeSetup, authProjectsFor, authRemoveProjectMemberships,
   authCreateIdeToken, authListIdeTokens, authRevokeIdeToken, authUserForIdeToken } from './src/server/oidcAuth';
+import { registerDataAdminRoutes } from './src/server/dataAdminRoutes';
 import { createCredentialHelper, registerCodeQualityRoutes } from './src/server/codeQualityRoutes';
 import { registerWorkingTreeGrants, registerWorkingTreeUpload, type WorkingTreeDependencies } from './src/server/workingTreeRoutes';
 import { registerSchemaDraftRoutes } from './src/server/schemaDraftRoutes';
+import { registerRuntimeSchemaRoutes } from './src/server/runtimeSchemaRoutes';
 import { registerContractRoutes } from './src/server/contractRoutes';
 import { registerIdeApi, registerIdeTokenRoutes, type IdeDependencies } from './src/server/ideRoutes';
 import { registerFrontendRoutes } from './src/server/frontendRoutes';
 import { codeImpactBodyParser, registerCodeImpactRoutes } from './src/server/codeImpactRoutes';
 import { registerRegressionRoutes } from './src/server/regressionRoutes';
+import { registerBugReporting } from './src/server/bugReportingRoutes';
 
 dotenv.config();
 
@@ -230,6 +233,7 @@ async function startServer() {
   // and extracted plain text handed back by python-api's large-file TUS pipeline)
   // Impact requests carry at most a 200 KB diff, so they get their own cap before the general parser.
   app.use('/api/code/impact', codeImpactBodyParser());
+  app.use('/api/bug-reporting', express.json({ limit: '4kb' }));
   app.use(express.json({ limit: '100mb', verify: (req, _res, buf) => {
     if ((req as any).path === '/api/code-quality/github/webhook') (req as any).rawBody = Buffer.from(buf);
   } }));
@@ -287,7 +291,16 @@ async function startServer() {
   };
   registerIdeApi(app, ide);
   installOidcAuth(app);
+  const bugReporter = registerBugReporting(app, PYTHON_API_URL, INTERNAL_SECRET, res => Boolean(res.locals.authUser && authIsGlobalAdmin(res.locals.authUser)));
+  process.on('uncaughtExceptionMonitor', error => bugReporter.capture(error, 'process'));
   registerIdeTokenRoutes(app, ide);
+  registerRuntimeSchemaRoutes(app, {
+    apiUrl: PYTHON_API_URL,
+    internalSecret: INTERNAL_SECRET,
+    webOrigin: process.env.WEB_ORIGIN || 'http://localhost:3000',
+    getUser: (res) => (res.locals as any).authUser,
+    isGlobalAdmin: (user) => Boolean(user && authIsGlobalAdmin(user)),
+  });
   registerWorkingTreeGrants(app, workingTree);
   registerCodeImpactRoutes(app, {
     apiUrl: PYTHON_API_URL,
@@ -502,6 +515,14 @@ async function startServer() {
     }
   });
 
+  registerDataAdminRoutes(app, {
+    apiUrl: PYTHON_API_URL,
+    internalSecret: INTERNAL_SECRET,
+    getUser: (res) => (res.locals as any).authUser,
+    isGlobalAdmin: (user) => authIsGlobalAdmin(user),
+    projectsFor: (user) => authProjectsFor(user),
+    removeProjectMemberships: (projectId) => authRemoveProjectMemberships(projectId),
+  });
 
   registerFrontendRoutes(app, {
     apiUrl: PYTHON_API_URL,
@@ -593,7 +614,11 @@ async function startServer() {
       if (!['all', 'errors', 'slow'].includes(outcome)) {
         return res.status(422).json({ detail: 'Request outcome filter must be all, errors, or slow.' });
       }
-      const path = `/telemetry/runtime/projects/${encodeURIComponent(req.params.projectId)}/revisions/${encodeURIComponent(req.params.revisionId)}/requests?outcome=${outcome}`;
+      const hideUnmatched404 = req.query.hide_unmatched_404 ?? 'false';
+      if (hideUnmatched404 !== 'true' && hideUnmatched404 !== 'false') {
+        return res.status(422).json({ detail: 'hide_unmatched_404 must be true or false.' });
+      }
+      const path = `/telemetry/runtime/projects/${encodeURIComponent(req.params.projectId)}/revisions/${encodeURIComponent(req.params.revisionId)}/requests?outcome=${outcome}&hide_unmatched_404=${hideUnmatched404}`;
       const pyRes = await fetch(`${PYTHON_API_URL}${path}`, { headers: { 'X-Internal-Secret': INTERNAL_SECRET } });
       const data = await pyRes.json().catch(() => ({ detail: 'Runtime requests are unavailable.' }));
       return res.status(pyRes.status).json(data);
@@ -1194,7 +1219,11 @@ async function startServer() {
       const pyRes = await fetch(`${PYTHON_API_URL}/health/test/remote`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(req.body ?? {}),
+        // Only the unsaved form values go through; a secret from the browser is never forwarded.
+        body: JSON.stringify({
+          ...(typeof req.body?.base_url === 'string' ? { base_url: req.body.base_url } : {}),
+          ...(typeof req.body?.model === 'string' ? { model: req.body.model } : {}),
+        }),
       });
       if (!pyRes.ok) {
         return res.status(pyRes.status).json({ success: false, error: 'Remote connection test failed.' });
@@ -2091,6 +2120,7 @@ async function startServer() {
 
       res.json({ success: true, ...result });
     } catch (error: any) {
+      bugReporter.capture(error, 'request');
       res.status(500).json({ success: false, error: error.message });
     }
   });
@@ -2190,6 +2220,7 @@ async function startServer() {
       res.json(data);
     } catch (error: any) {
       console.error('Evaluation error:', error.message);
+      bugReporter.capture(error, 'request');
       res.status(500).json({ success: false, error: error.message });
     }
   });
@@ -2204,13 +2235,15 @@ async function startServer() {
   } else {
     // Serve production static assets from dist folder
     const distPath = path.join(process.cwd(), 'dist');
-    app.use(express.static(distPath));
+    app.get(/^\/assets\/[\w.-]+\.(?:js|css|woff2?|png|svg|ttf|wasm)$/, express.static(distPath));
+    app.get('/favicon.svg', (_req, res) => res.sendFile(path.join(distPath, 'favicon.svg')));
     app.get('*', (req, res) => {
       res.sendFile(path.join(distPath, 'index.html'));
     });
   }
 
   const listenHost = process.env.WEB_LISTEN_HOST || (process.env.NODE_ENV === 'development' ? '127.0.0.1' : '0.0.0.0');
+  app.use(bugReporter.middleware);
   app.listen(PORT, listenHost, () => {
     console.log(`[RAG Server] Running on http://localhost:${PORT}`);
   });
