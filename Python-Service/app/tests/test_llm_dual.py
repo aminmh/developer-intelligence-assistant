@@ -271,6 +271,15 @@ def test_remote_client_normalises_trailing_v1(monkeypatch):
     assert captured["api_key"] == "sekret"
 
 
+def test_remote_client_cuts_a_pasted_chat_completions_endpoint_back_to_the_base(monkeypatch):
+    for pasted in ("https://api.cloudflare.com/client/v4/accounts/abc/ai/v1/chat/completions",
+                   "https://api.cloudflare.com/client/v4/accounts/abc/ai/v1/chat/completions/",
+                   "https://api.cloudflare.com/client/v4/accounts/abc/ai/v1",
+                   "https://api.cloudflare.com/client/v4/accounts/abc/ai"):
+        _configure_remote(monkeypatch, base_url=pasted)
+        assert llm.remote_endpoint()[0] == "https://api.cloudflare.com/client/v4/accounts/abc/ai/v1", pasted
+
+
 def test_remote_client_normalises_plain_base(monkeypatch):
     _configure_remote(monkeypatch, base_url="http://vllm:8000")
 
@@ -282,6 +291,55 @@ def test_remote_client_normalises_plain_base(monkeypatch):
     llm._get_remote_client()
 
     assert captured["base_url"] == "http://vllm:8000/v1"
+
+
+def test_test_remote_uses_unsaved_base_url_and_model_with_the_saved_key(monkeypatch):
+    _configure_remote(monkeypatch, base_url="http://saved:8000")
+    built = []
+    probes = []
+
+    def fake_client(base_url, api_key):
+        built.append((base_url, api_key))
+        return _FakeClient(content="ok")
+
+    monkeypatch.setattr(llm, "_remote_client_for", fake_client)
+    monkeypatch.setattr(llm, "_get_remote_client", lambda: (_ for _ in ()).throw(AssertionError("saved client used")))
+    import runtime.tool_calling_probe as probe_module
+    monkeypatch.setattr(probe_module, "probe_tool_calling", lambda *_a, **_k: {"supported": True, "detail": "ok"})
+    monkeypatch.setattr(probe_module, "record_probe", lambda url, model, probe, store=None: probes.append((url, model)) or probe)
+
+    result = llm.test_remote(overrides={"base_url": "https://draft.example/v1", "model": " draft-model "})
+
+    assert result["ok"] is True and result["model"] == "draft-model"
+    assert built == [("https://draft.example/v1", "sekret")]  # the saved key, never one from the form
+    assert probes == [("https://draft.example/v1", "draft-model")]
+
+
+def test_test_remote_without_overrides_still_uses_the_saved_endpoint(monkeypatch):
+    _configure_remote(monkeypatch)
+    monkeypatch.setattr(llm, "_get_remote_client", lambda: _FakeClient(content="ok"))
+    assert llm.test_remote(overrides={})["model"] == "qwen2.5-32b"
+    monkeypatch.setattr(llm.settings, "llm_remote_base_url", "")
+    assert llm.test_remote(overrides={"base_url": ""})["detail"] == "No base URL configured"
+
+
+def test_remote_test_route_validates_and_forwards_the_unsaved_values(monkeypatch):
+    from fastapi import FastAPI
+    from fastapi.testclient import TestClient
+    from routers import system
+
+    seen = []
+    monkeypatch.setattr(system.llm_module, "test_remote", lambda overrides=None: seen.append(overrides) or {"ok": True})
+    app = FastAPI()
+    app.include_router(system.router)
+    client = TestClient(app)
+
+    assert client.post("/health/test/remote", json={"base_url": " https://x.example ", "model": "m", "api_key": "leak"}).json() == {"ok": True}
+    assert seen[-1] == {"base_url": "https://x.example", "model": "m"}  # no api_key is ever forwarded
+    assert client.post("/health/test/remote").json() == {"ok": True}
+    assert seen[-1] == {}
+    bad = client.post("/health/test/remote", json={"base_url": "file:///etc/passwd"}).json()
+    assert bad["ok"] is False and len(seen) == 2
 
 
 def test_test_remote_ok(monkeypatch):

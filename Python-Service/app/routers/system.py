@@ -7,7 +7,7 @@ import logging
 import time
 import urllib.request
 
-from fastapi import APIRouter
+from fastapi import APIRouter, Body
 
 import runtime.llm as llm_module
 from infra.settings import settings
@@ -54,8 +54,21 @@ def health_llm():
 
 
 @router.post("/health/test/remote", tags=["LLM Providers"], summary="Test External OpenAI-Compatible Connection")
-def remote_test_connection():
-    return llm_module.test_remote()
+def remote_test_connection(body: dict | None = Body(default=None)):
+    """Test the endpoint. ``base_url`` and ``model`` in the body are the unsaved values from the form."""
+    body = body if isinstance(body, dict) else {}
+    overrides: dict = {}
+    base_url = body.get("base_url")
+    if isinstance(base_url, str):
+        base_url = base_url.strip()
+        if len(base_url) > 2048 or (base_url and not base_url.lower().startswith(("http://", "https://"))):
+            return {"ok": False, "latency_ms": 0.0, "detail": "Base URL must start with http:// or https://",
+                    "model": "", "tool_calling": None}
+        overrides["base_url"] = base_url
+    model = body.get("model")
+    if isinstance(model, str) and len(model) <= 256:
+        overrides["model"] = model
+    return llm_module.test_remote(overrides=overrides)
 
 
 @router.post("/health/test/embedding", tags=["Embedding Providers"], summary="Test Embedding Provider")

@@ -219,6 +219,21 @@ def extract(response_model, prompt: str):
         _schedule_local_model_unload(model)
 
 
+_ENDPOINT_SUFFIXES = ("/chat/completions", "/completions", "/models")
+
+
+def _remote_root(url: str) -> str:
+    """The provider root without ``/v1``: a pasted full endpoint such as ``…/v1/chat/completions`` is cut back."""
+    root = (url or "").strip().rstrip("/")
+    for suffix in _ENDPOINT_SUFFIXES:
+        if root.lower().endswith(suffix):
+            root = root[: -len(suffix)].rstrip("/")
+            break
+    if root.lower().endswith("/v1"):
+        root = root[: -len("/v1")]
+    return root
+
+
 def _get_remote_client() -> OpenAI:
     """Return a lazily-created OpenAI client for the remote OpenAI-compatible server.
 
@@ -229,10 +244,7 @@ def _get_remote_client() -> OpenAI:
     endpoint path is always normalised to ``<base>/v1`` for the OpenAI SDK.
     """
     global _remote_client_state
-    base_url = settings.llm_remote_base_url.rstrip("/")
-    if base_url.endswith("/v1"):
-        base_url = base_url[: -len("/v1")]
-    base_url = f"{base_url}/v1"
+    base_url = f"{_remote_root(settings.llm_remote_base_url)}/v1"
     api_key = settings.llm_remote_api_key or "EMPTY"
     if _remote_client_state is None or (
         _remote_client_state[0] != base_url or _remote_client_state[1] != api_key
@@ -247,10 +259,7 @@ def remote_endpoint() -> tuple[str, str, str]:
     Same normalization as :func:`_get_remote_client`, for clients (such as the
     LangChain agent model) that cannot reuse the raw OpenAI client.
     """
-    base_url = settings.llm_remote_base_url.rstrip("/")
-    if base_url.endswith("/v1"):
-        base_url = base_url[: -len("/v1")]
-    return (f"{base_url}/v1", settings.llm_remote_api_key or "EMPTY",
+    return (f"{_remote_root(settings.llm_remote_base_url)}/v1", settings.llm_remote_api_key or "EMPTY",
             settings.llm_remote_model or settings.ollama_llm_model)
 
 
@@ -259,8 +268,17 @@ def remote_configured() -> bool:
     return bool((settings.llm_remote_base_url or "").strip())
 
 
-def test_remote(timeout: float = 30.0) -> dict:
+def _remote_client_for(base_url: str, api_key: str) -> OpenAI:
+    """A one-off client for a base URL that is not saved yet (same ``/v1`` normalisation, never cached)."""
+    return OpenAI(base_url=f"{_remote_root(base_url)}/v1", api_key=api_key or "EMPTY")
+
+
+def test_remote(timeout: float = 30.0, overrides: Optional[dict] = None) -> dict:
     """Probe the configured remote OpenAI-compatible endpoint.
+
+    ``overrides`` may carry the ``base_url`` and ``model`` currently typed in settings but not yet saved,
+    so a connection can be tried before saving. The API key is always the saved one: secrets are never
+    sent from the browser.
 
     Returns ``{"ok": bool, "latency_ms": float, "detail": str, "model": str,
     "tool_calling": {"supported": bool, "detail": str, "checked_at": str} | None}``.
@@ -268,14 +286,20 @@ def test_remote(timeout: float = 30.0) -> dict:
     tool-call round trip runs and its result is stored for this URL and model.
     Raises nothing — connection/auth/model errors are folded into ``ok``.
     """
-    if not remote_configured():
+    overrides = overrides or {}
+    base_url = overrides["base_url"] if isinstance(overrides.get("base_url"), str) else settings.llm_remote_base_url
+    if not (base_url or "").strip():
         return {"ok": False, "latency_ms": 0.0, "detail": "No base URL configured", "model": "",
                 "tool_calling": None}
-    model = settings.llm_remote_model or settings.ollama_llm_model
+    draft = isinstance(overrides.get("base_url"), str)
+    model = (overrides["model"] if isinstance(overrides.get("model"), str) else settings.llm_remote_model) \
+        or settings.ollama_llm_model
+    model = model.strip()
+    client = _remote_client_for(base_url, settings.llm_remote_api_key) if draft else _get_remote_client()
     started = time.monotonic()
     try:
         _run_chat(
-            _get_remote_client(),
+            client,
             model,
             "Reply with the single word: ok",
             max_tokens=1,
@@ -289,8 +313,8 @@ def test_remote(timeout: float = 30.0) -> dict:
 
     from runtime.tool_calling_probe import probe_tool_calling, record_probe
 
-    probe = probe_tool_calling(_get_remote_client(), model, timeout=timeout)
-    tool_calling = record_probe(settings.llm_remote_base_url, model, probe)
+    probe = probe_tool_calling(client, model, timeout=timeout)
+    tool_calling = record_probe(base_url, model, probe)
     return {"ok": True, "latency_ms": round(latency_ms, 1), "detail": "connected", "model": model,
             "tool_calling": tool_calling}
 
