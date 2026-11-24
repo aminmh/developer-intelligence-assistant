@@ -1,11 +1,17 @@
 <script setup lang="ts">
-import { computed, onMounted, ref } from 'vue';
+import { computed, onMounted, ref, watch } from 'vue';
 import { CheckCircle2, FolderGit2, RefreshCw, ShieldCheck, X } from 'lucide-vue-next';
+import { defaultReusedRevision, phpRuntimeSetupCommand, reusableRevisions, runtimeSetupReadiness } from '../../utils/runtimeProjects';
+import type { RuntimeProjectRecord } from '../../types';
+import { toast } from '../../composables/useToasts';
 
 // Browser wizard for local Runtime setup. Every step talks to the desktop helper on this
 // computer; nothing changes until Apply, and the helper then asks for approval in a native
 // dialog outside the browser before it edits Compose files or recreates services.
-const props = defineProps<{ authorize: () => Promise<string>; knownProjectIds?: string[] }>();
+const props = defineProps<{
+  authorize: () => Promise<string>; knownProjectIds?: string[];
+  indexedRevisions?: RuntimeProjectRecord[]; inventoryAvailable?: boolean;
+}>();
 const emit = defineEmits<{ close: []; apply: [planId: string] }>();
 
 const HELPER = 'http://127.0.0.1:47831';
@@ -17,7 +23,7 @@ type ProjectDetails = { name: string; directory: string; files: string[]; servic
 type Plan = {
   plan_id: string; expires_in: number; compose_project: string; services: string[]; project_id: string;
   environment: string; commit: string; certificates: 'create' | 'reuse';
-  changes: { file: string; added: string[] }[]; approval_items: string[];
+  changes: { file: string; added: string[] }[]; approval_items: string[]; app_env_file?: string | null;
 };
 
 const step = ref<'project' | 'services' | 'review'>('project');
@@ -28,6 +34,10 @@ const services = ref<string[]>([]);
 const projectId = ref('');
 const environment = ref('development');
 const commit = ref('');
+const detectedCommit = ref('');
+// Containers report under the commit written to their labels. Using an existing indexed revision's commit
+// shows them under that revision instead of adding a separate Docker-only one.
+const reusedRevisionId = ref('');
 const plan = ref<Plan | null>(null);
 const loading = ref(false);
 const error = ref('');
@@ -52,7 +62,7 @@ const helper = async <T,>(path: string, body: Record<string, unknown> = {}): Pro
 const guard = async (work: () => Promise<void>) => {
   loading.value = true;
   error.value = '';
-  try { await work(); } catch (cause: any) { error.value = cause?.message || 'Runtime setup failed.'; } finally { loading.value = false; }
+  try { await work(); } catch (cause: any) { error.value = cause?.message || 'Runtime setup failed.'; toast.error(error.value); } finally { loading.value = false; }
 };
 
 const loadProjects = () => guard(async () => {
@@ -63,7 +73,9 @@ const chooseProject = (name: string) => guard(async () => {
   details.value = await helper<ProjectDetails>('/compose-project', { project_name: name });
   services.value = [];
   projectId.value = suggestedProjectId(name);
-  commit.value = details.value.commit || '';
+  detectedCommit.value = details.value.commit || '';
+  commit.value = detectedCommit.value;
+  applyDefaultRevision();
   plan.value = null;
   step.value = 'services';
 });
@@ -78,7 +90,18 @@ const suggestedProjectId = (composeName: string) => {
     .sort((a, b) => b.length - a.length)[0];
   return prefix || (SLUG.test(composeName) ? composeName : '');
 };
+const projectRevisions = computed(() => reusableRevisions(projectId.value, props.indexedRevisions || []));
+const chooseRevision = (revisionId: string) => {
+  reusedRevisionId.value = revisionId;
+  commit.value = projectRevisions.value.find((row) => row.revisionId === revisionId)?.commit || detectedCommit.value;
+};
+const applyDefaultRevision = () => chooseRevision(defaultReusedRevision(projectRevisions.value, detectedCommit.value));
+// Typing another project ID changes which revisions can be reused.
+watch(projectId, () => { if (details.value) applyDefaultRevision(); });
 const isKnownProject = computed(() => (props.knownProjectIds || []).includes(projectId.value));
+const readiness = computed(() => runtimeSetupReadiness(projectId.value, commit.value,
+  props.indexedRevisions || [], props.inventoryAvailable === true));
+const tracingCommand = computed(() => phpRuntimeSetupCommand(details.value?.directory || '/path/to/project', projectId.value));
 const inputProblem = computed(() => {
   if (!services.value.length) return 'Choose at least one service.';
   if (!SLUG.test(projectId.value)) return 'Project ID: 1–128 letters, numbers, dots, dashes or underscores.';
@@ -90,6 +113,8 @@ const review = () => guard(async () => {
   plan.value = await helper<Plan>('/setup/plan', {
     project_name: projectName.value, services: services.value,
     project_id: projectId.value, environment: environment.value, commit: commit.value,
+    // With an existing revision chosen, the helper also points the app's own .env at it (shown in the review).
+    ...(reusedRevisionId.value ? { revision_id: reusedRevisionId.value } : {}),
   });
   step.value = 'review';
 });
@@ -116,7 +141,17 @@ onMounted(loadProjects);
           class="rounded-full border px-2.5 py-1" :class="step === key ? 'border-emerald-400/50 text-emerald-200' : 'border-slate-700 text-slate-500'" :aria-current="step === key ? 'step' : undefined">{{ label }}</li>
     </ol>
 
-    <p v-if="error" role="alert" class="mt-3 rounded-lg border border-rose-500/25 bg-rose-950/20 p-3 text-xs text-rose-300">{{ error }}</p>
+    <aside v-if="details && step !== 'project'" class="mt-4 rounded-lg border border-cyan-500/25 bg-cyan-500/5 p-3 text-xs leading-5 text-slate-300" aria-label="Request tracing readiness">
+      <h5 class="font-semibold text-white">{{ readiness.status === 'ready' ? 'Matching source revision is indexed' : readiness.status === 'unknown' ? 'Source indexing could not be checked' : readiness.status === 'mismatch' ? 'This Git commit is not indexed' : 'Source indexing is needed for request tracing' }}</h5>
+      <p v-if="readiness.status === 'ready'">Source revision <code>{{ readiness.revisionId }}</code> matches this commit. PHP must still export traces with this project ID and revision ID.</p>
+      <p v-else-if="readiness.status === 'mismatch'">This project has indexed source, but no ready revision matches the selected Git commit. A ZIP upload alone does not verify a match to the running commit.</p>
+      <p v-else-if="readiness.status === 'missing'">No ready indexed revision was found for this project ID.</p>
+      <p v-else>Refresh Runtime to check the indexed source before configuring tracing.</p>
+      <p class="mt-1">You can continue to monitor containers now. This wizard adds container labels; it does not install PHP tracing or index source.</p>
+      <p class="mt-2">For PHP request tracing, run this from the Developer Assistant folder:</p>
+      <pre class="mt-1 overflow-x-auto rounded bg-black/30 p-2 text-xs"><code>{{ tracingCommand }}</code></pre>
+      <p class="mt-1">The command indexes committed source, configures the PHP adapter and revision ID, and restarts the PHP service after approval. Then open a page in your app, refresh Runtime and select the matching revision.</p>
+    </aside>
 
     <!-- 1. Compose project -->
     <div v-if="step === 'project'" class="mt-4">
@@ -155,13 +190,20 @@ onMounted(loadProjects);
         <label class="text-[11px] text-slate-400">Runtime project ID
           <input v-model.trim="projectId" required list="runtime-known-project-ids" class="mt-1 h-9 w-full rounded-lg border border-slate-700 bg-slate-950 px-2.5 text-xs text-slate-100" placeholder="billing" />
           <datalist id="runtime-known-project-ids"><option v-for="id in knownProjectIds || []" :key="id" :value="id" /></datalist>
-          <span class="mt-1 block text-[10px] leading-4" :class="isKnownProject ? 'text-emerald-300' : 'text-amber-300'">{{ isKnownProject ? 'Matches an indexed project: containers link to its revisions.' : 'New project ID. Use the ID you index this code under, or containers will not match its revisions.' }}</span>
+          <span class="mt-1 block text-[10px] leading-4" :class="isKnownProject ? 'text-emerald-300' : 'text-amber-300'">{{ isKnownProject ? 'Known project ID. Request tracing also needs the matching indexed commit.' : 'New project ID. Use this same ID when indexing and configuring PHP tracing.' }}</span>
         </label>
         <label class="text-[11px] text-slate-400">Environment
           <input v-model.trim="environment" required class="mt-1 h-9 w-full rounded-lg border border-slate-700 bg-slate-950 px-2.5 text-xs text-slate-100" />
         </label>
-        <label class="text-[11px] text-slate-400">Git commit {{ details.commit ? '(detected)' : '' }}
-          <input v-model.trim="commit" required class="mt-1 h-9 w-full rounded-lg border border-slate-700 bg-slate-950 px-2.5 font-mono text-[11px] text-slate-100" placeholder="full 40-character SHA" />
+        <label class="text-[11px] text-slate-400">Git commit {{ reusedRevisionId ? '(from the revision)' : details.commit ? '(detected)' : '' }}
+          <input v-model.trim="commit" required :readonly="!!reusedRevisionId" class="mt-1 h-9 w-full rounded-lg border border-slate-700 bg-slate-950 px-2.5 font-mono text-[11px] text-slate-100 read-only:opacity-70" placeholder="full 40-character SHA" />
+        </label>
+        <label v-if="projectRevisions.length" class="text-[11px] text-slate-400 sm:col-span-3">Show the containers under revision
+          <select :value="reusedRevisionId" class="mt-1 h-9 w-full rounded-lg border border-slate-700 bg-slate-950 px-2.5 font-mono text-[11px] text-slate-100" @change="chooseRevision(($event.target as HTMLSelectElement).value)">
+            <option v-for="row in projectRevisions" :key="row.revisionId" :value="row.revisionId">Existing revision · commit {{ row.commit.slice(0, 7) }}{{ row.commit === detectedCommit ? ' (matches this Compose project)' : '' }}</option>
+            <option value="">{{ detectedCommit ? `New: this Compose project's commit ${detectedCommit.slice(0, 7)}` : 'New: enter a commit' }}</option>
+          </select>
+          <span class="mt-1 block text-[10px] leading-4 text-slate-500">Reusing a revision adds no new one. The containers are labeled with that revision's commit, so use it only when the running code is that source. If the app's .env already sets a revision ID, the review step also shows updating it to this one.</span>
         </label>
       </div>
       <p v-if="inputProblem" class="text-[11px] text-amber-300">{{ inputProblem }}</p>
@@ -180,6 +222,7 @@ onMounted(loadProjects);
           <li v-for="item in plan.approval_items" :key="item" class="flex gap-2"><CheckCircle2 class="mt-0.5 h-3 w-3 shrink-0 text-emerald-400" /><span class="break-all">{{ item }}</span></li>
         </ul>
       </div>
+      <p v-if="reusedRevisionId && !plan.app_env_file" class="rounded-lg border border-amber-500/25 bg-amber-500/5 p-2.5 text-[11px] text-amber-200">The app's .env was not changed: it has no INDEXER_REVISION_ID or OTEL_RESOURCE_ATTRIBUTES revision to update, it already uses this revision, or the Runtime helper is out of date (run just up). Spans use the revision ID the app already sets.</p>
       <div v-for="change in plan.changes" :key="change.file">
         <p class="break-all font-mono text-[10px] text-slate-400">{{ change.file }} — lines added</p>
         <pre class="mt-1 max-h-56 overflow-auto rounded-lg border border-slate-800 bg-black/30 p-2 text-[10px] leading-4 text-emerald-200"><code>{{ change.added.map((line) => `+ ${line}`).join('\n') }}</code></pre>
