@@ -80,6 +80,11 @@ class SnapshotRegistry:
                 updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
                 PRIMARY KEY(project_id, commit_sha))""")
             job_columns = {row[1] for row in db.execute("PRAGMA table_info(index_jobs)")}
+            for column, ddl in (("stage", "TEXT"), ("percent", "INTEGER NOT NULL DEFAULT 0"), ("detail", "TEXT")):
+                if column not in job_columns:
+                    db.execute(f"ALTER TABLE index_jobs ADD COLUMN {column} {ddl}")
+            if "reindex" not in job_columns:
+                db.execute("ALTER TABLE index_jobs ADD COLUMN reindex INTEGER NOT NULL DEFAULT 0")
             if "source_only" not in job_columns:
                 db.execute("ALTER TABLE index_jobs ADD COLUMN source_only INTEGER NOT NULL DEFAULT 0")
             db.execute("""CREATE TABLE IF NOT EXISTS git_sources (
@@ -90,6 +95,9 @@ class SnapshotRegistry:
                 PRIMARY KEY(user_id, project_id), UNIQUE(repository, project_id))""")
             # Revocable working-tree upload grants: a desktop helper syncs one folder to one
             # project on behalf of the user who granted it (sync plan phase 6).
+            if "remote_url" not in {row[1] for row in db.execute("PRAGMA table_info(git_sources)")}:
+                # NULL means the repository is a github.com HTTPS owner/name, as before this column existed.
+                db.execute("ALTER TABLE git_sources ADD COLUMN remote_url TEXT")
             db.execute("""CREATE TABLE IF NOT EXISTS working_tree_grants (
                 grant_id TEXT PRIMARY KEY, project_id TEXT NOT NULL, user_json TEXT NOT NULL,
                 token_sha256 TEXT NOT NULL, created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
@@ -292,7 +300,7 @@ class SnapshotRegistry:
         return result
 
     def running_deployments(self, project_id: str, commit_sha: str | None = None) -> list[dict]:
-        query = """SELECT d.container_id, d.project_id, d.environment, d.service, d.commit_sha,
+        query = """SELECT d.host_id, d.container_id, d.project_id, d.environment, d.service, d.commit_sha,
             s.revision_id, d.image_id, d.state, d.updated_at FROM deployments d
             LEFT JOIN snapshots s ON s.project_id=d.project_id AND s.commit_sha=d.commit_sha
             WHERE d.project_id=? AND d.state='running'
@@ -408,7 +416,7 @@ class SnapshotRegistry:
                            (project_id, commit_sha))
                 return
             state = 'done' if success else 'failed'
-            db.execute("UPDATE index_jobs SET state=?,updated_at=CURRENT_TIMESTAMP WHERE project_id=? AND commit_sha=?", (state, project_id, commit_sha))
+            db.execute("UPDATE index_jobs SET state=?,reindex=0,stage=NULL,percent=0,detail=NULL,updated_at=CURRENT_TIMESTAMP WHERE project_id=? AND commit_sha=?", (state, project_id, commit_sha))
             db.execute("UPDATE snapshots SET state=?,error_code=?,updated_at=CURRENT_TIMESTAMP WHERE project_id=? AND commit_sha=?",
                        ('ready' if success else 'failed', None if success else 'snapshot_indexing_failed', project_id, commit_sha))
 
@@ -459,22 +467,23 @@ class SnapshotRegistry:
                  datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S.%f")))
 
     def save_git_source(self, user_id: str, project_id: str, repository: str, branch: str,
-                        credential_id: str) -> dict:
+                        credential_id: str, remote_url: str | None = None) -> dict:
         if not user_id or len(user_id) > 512:
             raise ValueError("Invalid user identity")
         validate_project_id(project_id)
         try:
             with self._connect() as db:
-                db.execute("""INSERT INTO git_sources(user_id,project_id,repository,branch,credential_id,status)
-                    VALUES(?,?,?,?,?,'configured') ON CONFLICT(user_id,project_id) DO UPDATE SET
+                db.execute("""INSERT INTO git_sources(user_id,project_id,repository,branch,credential_id,remote_url,status)
+                    VALUES(?,?,?,?,?,?,'configured') ON CONFLICT(user_id,project_id) DO UPDATE SET
                     repository=excluded.repository, branch=excluded.branch, credential_id=excluded.credential_id,
+                    remote_url=excluded.remote_url,
                     status='configured',
-                    last_commit_sha=CASE WHEN git_sources.repository!=excluded.repository OR git_sources.branch!=excluded.branch THEN NULL ELSE git_sources.last_commit_sha END,
-                    last_revision_id=CASE WHEN git_sources.repository!=excluded.repository OR git_sources.branch!=excluded.branch THEN NULL ELSE git_sources.last_revision_id END,
+                    last_commit_sha=CASE WHEN git_sources.repository!=excluded.repository OR git_sources.branch!=excluded.branch OR git_sources.remote_url IS NOT excluded.remote_url THEN NULL ELSE git_sources.last_commit_sha END,
+                    last_revision_id=CASE WHEN git_sources.repository!=excluded.repository OR git_sources.branch!=excluded.branch OR git_sources.remote_url IS NOT excluded.remote_url THEN NULL ELSE git_sources.last_revision_id END,
                     error_code=NULL, updated_at=CURRENT_TIMESTAMP""",
-                    (user_id, project_id, repository, branch, credential_id))
+                    (user_id, project_id, repository, branch, credential_id, remote_url))
         except sqlite3.IntegrityError as exc:
-            raise ValueError("This GitHub repository is already connected to another project.") from exc
+            raise ValueError("This repository is already connected to another project.") from exc
         return self.get_git_source(user_id, project_id)
 
     def get_git_source(self, user_id: str, project_id: str) -> dict | None:
@@ -551,6 +560,56 @@ class SnapshotRegistry:
             db.execute("""UPDATE snapshots SET state='queued',error_code=NULL,updated_at=CURRENT_TIMESTAMP
                 WHERE project_id=? AND commit_sha=? AND state!='ready'""", (project_id, commit_sha))
         return True
+
+    def queue_reindex(self, project_id: str, commit_sha: str) -> str:
+        """Queue a rebuild of a Git revision's index: ``queued``, ``busy`` (already indexing) or ``missing``.
+
+        The snapshot leaves ``ready`` until the rebuild finishes, so nothing assesses a half-rebuilt index.
+        """
+        validate_source_ref(project_id, commit_sha)
+        with self._connect() as db:
+            db.execute("BEGIN IMMEDIATE")
+            row = db.execute("SELECT state,archive_key,source_kind FROM snapshots WHERE project_id=? AND commit_sha=?",
+                             (project_id, commit_sha)).fetchone()
+            if not row or not row["archive_key"] or row["source_kind"] != "git" or row["state"] == "deleting":
+                return "missing"
+            if row["state"] not in ("ready", "failed"):
+                return "busy"
+            db.execute("""INSERT INTO index_jobs(project_id,commit_sha,state,source_only,reindex)
+                VALUES(?,?,'queued',1,1) ON CONFLICT(project_id,commit_sha) DO UPDATE SET
+                state='queued', source_only=1, reindex=1, stage='Queued', percent=0, detail=NULL,
+                updated_at=CURRENT_TIMESTAMP""", (project_id, commit_sha))
+            db.execute("UPDATE snapshots SET state='queued',error_code=NULL,updated_at=CURRENT_TIMESTAMP WHERE project_id=? AND commit_sha=?",
+                       (project_id, commit_sha))
+        return "queued"
+
+    def set_progress(self, project_id: str, commit_sha: str, stage: str, percent: int, detail: str | None = None) -> None:
+        """Where a running index job is, for the progress bar. Best effort: never fails the job."""
+        try:
+            with self._connect() as db:
+                db.execute("UPDATE index_jobs SET stage=?,percent=?,detail=? WHERE project_id=? AND commit_sha=? AND state='running'",
+                           (stage, max(0, min(100, int(percent))), detail, project_id, commit_sha))
+        except sqlite3.Error:
+            pass
+
+    def index_progress(self, project_id: str, commit_sha: str) -> dict:
+        with self._connect() as db:
+            job = db.execute("SELECT state,stage,percent,detail FROM index_jobs WHERE project_id=? AND commit_sha=?",
+                             (project_id, commit_sha)).fetchone()
+            snapshot = db.execute("SELECT state FROM snapshots WHERE project_id=? AND commit_sha=?",
+                                  (project_id, commit_sha)).fetchone()
+        state = snapshot["state"] if snapshot else "missing"
+        if state == "ready":
+            return {"state": state, "stage": "Indexed", "percent": 100, "detail": None}
+        if job and state in ("queued", "indexing"):
+            return {"state": state, "stage": job["stage"] or ("Queued" if state == "queued" else "Starting"),
+                    "percent": job["percent"] or 0, "detail": job["detail"]}
+        return {"state": state, "stage": None, "percent": 0, "detail": None}
+
+    def job_reindex(self, project_id: str, commit_sha: str) -> bool:
+        with self._connect() as db:
+            row = db.execute("SELECT reindex FROM index_jobs WHERE project_id=? AND commit_sha=?", (project_id, commit_sha)).fetchone()
+        return bool(row and row["reindex"])
 
     def is_ready_collection(self, collection: str) -> bool:
         with self._connect() as db:

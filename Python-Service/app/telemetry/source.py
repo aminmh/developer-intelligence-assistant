@@ -1,13 +1,17 @@
 """CI archive ingestion: immutable source and fail-closed ready publication."""
 from __future__ import annotations
 
+import contextlib
 import hashlib
 import fcntl
 import io
 import logging
+import math
 from pathlib import Path
 import stat
 import tempfile
+import threading
+import time
 from typing import Any, Callable
 import zipfile
 
@@ -100,7 +104,28 @@ def _php_exact_index(workspace: str) -> tuple[list, dict]:
     return chunks, cli.inspect_index(workspace)
 
 
-def index_source(workspace: str, snapshot: Snapshot) -> dict:
+@contextlib.contextmanager
+def _heartbeat(report, stage: str, start: int, end: int, interval: float = 5.0):
+    """Keep a long stage that has no inner count visibly alive: elapsed time, and a bar that creeps toward ``end``."""
+    stop = threading.Event()
+    began = time.monotonic()
+
+    def beat() -> None:
+        while not stop.wait(interval):
+            elapsed = time.monotonic() - began
+            percent = start + int((end - start) * (1 - math.exp(-elapsed / 300)))
+            report(stage, percent, f"running for {int(elapsed // 60)}m {int(elapsed % 60):02d}s")
+
+    thread = threading.Thread(target=beat, daemon=True)
+    thread.start()
+    try:
+        yield
+    finally:
+        stop.set()
+        thread.join(timeout=1)
+
+
+def index_source(workspace: str, snapshot: Snapshot, force_reindex: bool = False) -> dict:
     """Index a Git or CI snapshot with the same pipeline as uploads, for every supported language.
 
     PHP keeps the exact parser (no partial parses). Other languages use the shared language
@@ -113,6 +138,12 @@ def index_source(workspace: str, snapshot: Snapshot) -> dict:
     from inspection.service import InspectionService
     from telemetry.snapshot import resolve_registered_revision
 
+    registry = default_registry()
+
+    def report(stage: str, percent: int, detail: str | None = None) -> None:
+        registry.set_progress(snapshot.project_id, snapshot.reference, stage, percent, detail)
+
+    report("Parsing source", 2)
     has_php = any(path.is_file() and path.suffix.lower() == ".php" for path in Path(workspace).rglob("*"))
     if has_php:
         chunks, exported = _php_exact_index(workspace)
@@ -125,36 +156,56 @@ def index_source(workspace: str, snapshot: Snapshot) -> dict:
             return _unavailable_semantic_index(error or "No supported language indexer found source to index.")
     _normalize_exported_paths(exported, workspace)
     registered = resolve_registered_revision(snapshot)
-    progress = None
-    if snapshot.dirty:
-        # Working trees: latest wins. Stop between embedding batches once a newer one arrived.
-        registry = default_registry()
+    # Overall share per stage; the language-server stage has no inner count and is the slowest on large projects.
+    last_percent = -1
 
-        def progress(*_):
-            if registry.is_superseded(snapshot.project_id, snapshot.reference):
-                raise Superseded("A newer working tree replaced this one")
+    def progress(stage: str = "", done: int = 0, total: int = 0, *_):
+        nonlocal last_percent
+        if snapshot.dirty and registry.is_superseded(snapshot.project_id, snapshot.reference):
+            # Working trees: latest wins. Stop between embedding batches once a newer one arrived.
+            raise Superseded("A newer working tree replaced this one")
+        if stage in {"embedding", "upserting"} and total:
+            percent = 70 + int(25 * done / total)
+            if percent != last_percent:
+                last_percent = percent
+                report("Embedding chunks" if stage == "embedding" else "Saving vectors", percent, f"{done}/{total}")
     # SCIP is skipped for working trees: they change every few minutes and SCIP is slow.
     if registered.revision_id and not snapshot.dirty:
         identity = {"project_id": snapshot.project_id, "commit_sha": snapshot.commit_sha,
                     "revision_id": registered.revision_id,
                     "source_archive_sha256": snapshot.source_archive_sha256}
+        report("Reference analysis", 6)
         exported = IndexingService._with_scip(exported, _workspace_archive(workspace), identity)
     if not snapshot.dirty:
         # Language servers (origin `lsp`): the consented worker for registered revisions, else this process.
         from lsp.jobs import enrich_export
 
-        exported = enrich_export(exported, workspace, identity={
-            "project_id": snapshot.project_id, "commit_sha": snapshot.commit_sha,
-            "revision_id": registered.revision_id} if registered.revision_id else None)
+        report("Language servers (the slowest step)", 12)
+        with _heartbeat(report, "Language servers (the slowest step)", 12, 58):
+            exported = enrich_export(exported, workspace, identity={
+                "project_id": snapshot.project_id, "commit_sha": snapshot.commit_sha,
+                "revision_id": registered.revision_id} if registered.revision_id else None)
+    report("Writing the graph", 62)
     IndexingService._store_repo_map(snapshot.source_archive_sha256, chunks)
     IndexingService._store_language_facts(snapshot.source_archive_sha256, workspace)
-    result = CodePropertyGraph().ingest(
+    graph = CodePropertyGraph()
+    if force_reindex:
+        # A rebuild replaces the revision's graph nodes as well as its vectors, so nothing stale survives.
+        from code_quality.revision_deletion import _delete_graph_in_batches
+
+        store = graph._get_graph_store()
+        if store is None:
+            raise RuntimeError("Neo4j is unavailable")
+        _delete_graph_in_batches(store, [snapshot.collection, "sym_" + snapshot.collection],
+                                 snapshot.project_id, registered.revision_id or snapshot.revision_id or "")
+    result = graph.ingest(
         chunks, snapshot.collection, snapshot=snapshot,
         symbol_definitions=exported["definitions"], symbol_references=exported["references"],
-        **({"progress_callback": progress} if progress else {}),
+        progress_callback=progress,
+        **({"force_reindex": True} if force_reindex else {}),
     )
-    if progress:
-        progress()
+    progress()
+    report("Finalizing", 96)
     InspectionService().index(workspace, snapshot.key, exported=exported, snapshot=snapshot)
     return result
 
@@ -245,7 +296,10 @@ class SourceService:
                 data = self.storage.get_snapshot_archive(key)
                 with tempfile.TemporaryDirectory(prefix="source_", dir=self.registry.root) as workspace:
                     extract_zip_safely(data, workspace)
-                    result = self.indexer(workspace, snapshot)
+                    if self.registry.job_reindex(project_id, commit_sha):
+                        result = self.indexer(workspace, snapshot, force_reindex=True)
+                    else:
+                        result = self.indexer(workspace, snapshot)
                 count = result.get("chunk_count", 0)
                 semantic_unavailable = result.get("semantic_index_status") == "unavailable"
                 if (semantic_unavailable and any(result.get(key) for key in (

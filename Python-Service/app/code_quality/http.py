@@ -1120,7 +1120,8 @@ async def performance_run_traces(project_id: str, run_id: str, request: Request)
     result = PerformanceStore().get_run(user_id, project_id, _performance_uuid(run_id, "run"))
     if result is None:
         raise HTTPException(404, "Performance run was not found.")
-    return await run_in_threadpool(benchmark_traces, project_id, result.get("revision_id"), result["run_id"])
+    return await run_in_threadpool(benchmark_traces, project_id, result.get("revision_id"), result["run_id"],
+                                  route_results=result.get("route_results"))
 
 
 @router.post("/projects/{project_id}/performance/compare")
@@ -1170,6 +1171,47 @@ async def delete_revision(project_id: str, revision_id: str, request: Request) -
     except Exception as exc:
         logger.exception("revision_removal_failed project=%s revision=%s", project_id, revision_id)
         raise HTTPException(503, "Revision removal is incomplete. Check storage availability and retry removal.") from exc
+
+
+@router.post("/projects/{project_id}/revisions/{revision_id}/reindex")
+async def reindex_revision(project_id: str, revision_id: str, request: Request) -> dict:
+    """Rebuild a Git revision's vectors and graph from its stored source archive."""
+    from telemetry.registry import default_registry
+
+    _authorize(request)
+    try:
+        validate_project_id(project_id)
+        validate_revision_id(revision_id)
+    except ValueError as exc:
+        raise HTTPException(422, "Invalid project revision identity.") from exc
+    registry = default_registry()
+    item = await run_in_threadpool(registry.get_by_revision_id, project_id, revision_id)
+    if item is None:
+        raise HTTPException(404, "Project revision was not found.")
+    outcome = await run_in_threadpool(registry.queue_reindex, project_id, source_reference(item))
+    if outcome == "missing":
+        raise HTTPException(409, "Only a Git revision with a stored source archive can be re-indexed.")
+    if outcome == "busy":
+        raise HTTPException(409, "This revision is already being indexed.")
+    return {"queued": True, "revision_id": revision_id}
+
+
+@router.get("/projects/{project_id}/revisions/{revision_id}/index-progress")
+async def revision_index_progress(project_id: str, revision_id: str, request: Request) -> dict:
+    """Stage and overall percent of a revision's running index job, for the progress bar."""
+    from telemetry.registry import default_registry
+
+    _authorize(request)
+    try:
+        validate_project_id(project_id)
+        validate_revision_id(revision_id)
+    except ValueError as exc:
+        raise HTTPException(422, "Invalid project revision identity.") from exc
+    registry = default_registry()
+    item = await run_in_threadpool(registry.get_by_revision_id, project_id, revision_id)
+    if item is None:
+        raise HTTPException(404, "Project revision was not found.")
+    return await run_in_threadpool(registry.index_progress, project_id, source_reference(item))
 
 
 def _assess_locked(registry, project_id, revision_id, snapshot, archive, user_id,
