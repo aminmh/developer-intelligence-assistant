@@ -130,7 +130,7 @@ def test_git_snapshots_index_non_php_languages_with_the_shared_pipeline(tmp_path
     ingested, graphed, maps = {}, {}, []
 
     class Graph:
-        def ingest(self, chunks, collection, snapshot=None, symbol_definitions=None, symbol_references=None):
+        def ingest(self, chunks, collection, snapshot=None, symbol_definitions=None, symbol_references=None, progress_callback=None):
             ingested.update(chunks=chunks, definitions=symbol_definitions)
             return {"chunk_count": len(chunks), "ingested": len(chunks), "graph_nodes": len(chunks)}
 

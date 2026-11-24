@@ -68,10 +68,7 @@ def remove_revision(project_id: str, revision_id: str) -> bool:
                     store = graph._get_graph_store()
                     if store is None:
                         raise RuntimeError("Neo4j is unavailable")
-                    store.structured_query(
-                        "MATCH (n) WHERE n.collection IN $collections OR (n.project_id = $project AND n.revision_id = $revision) DETACH DELETE n",
-                        param_map={"collections": [snapshot.collection, "sym_" + snapshot.collection], "project": project_id, "revision": revision_id},
-                    )
+                    _delete_graph_in_batches(store, [snapshot.collection, "sym_" + snapshot.collection], project_id, revision_id)
 
                     try:
                         _remove_runtime(project_id, revision_id)
@@ -128,6 +125,24 @@ def remove_revision(project_id: str, revision_id: str) -> bool:
                     rebuild_lock.release()
     except BlockingIOError as exc:
         raise RevisionBusy("This revision is being indexed or assessed. Retry when it completes.") from exc
+
+
+_GRAPH_DELETE_BATCH = 2000
+
+
+def _delete_graph_in_batches(store, collections: list[str], project_id: str, revision_id: str) -> None:
+    """Delete the revision's graph nodes in small transactions: one transaction over a large
+    revision exhausts the Neo4j heap. Each pass is idempotent, so a retry resumes where it stopped."""
+    query = (
+        "MATCH (n) WHERE n.collection IN $collections OR (n.project_id = $project AND n.revision_id = $revision) "
+        f"WITH n LIMIT {_GRAPH_DELETE_BATCH} DETACH DELETE n RETURN count(*) AS removed"
+    )
+    params = {"collections": collections, "project": project_id, "revision": revision_id}
+    while True:
+        rows = store.structured_query(query, param_map=params)
+        removed = rows[0]["removed"] if rows else 0
+        if removed < _GRAPH_DELETE_BATCH:
+            return
 
 
 def _remove_archive_caches(archive_sha256: str) -> None:

@@ -133,3 +133,53 @@ test('verified push webhook resolves configured branch and asks API to fetch it'
     else process.env.CODE_QUALITY_GITHUB_WEBHOOK_SECRET = originalSecret;
   }
 });
+
+test('repository inspection forwards the URL and a one-use token, and never reads the saved credential', async () => {
+  const { handlers, response } = routeHarness();
+  const originalFetch = globalThis.fetch;
+  const calls: string[] = [];
+  globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
+    const url = String(input); calls.push(url);
+    if (!url.endsWith('/telemetry/git/inspect')) throw new Error(`Unexpected request: ${url}`);
+    assert.deepEqual(JSON.parse(String(init?.body)), { repository: 'git@github.com:o/r.git', token: 'once' });
+    return new Response(JSON.stringify({ default_branch: 'main', branches: [{ name: 'main', commit: 'a'.repeat(40), is_default: true }] }));
+  }) as typeof fetch;
+  try {
+    const handler = handlers.get('POST /api/code-quality/projects/:projectId/git-source/inspect');
+    assert.ok(handler);
+    await handler({ params: { projectId: 'pizza' }, body: { repository: 'git@github.com:o/r.git', token: 'once' } }, response);
+    assert.equal(response.statusCode, 200);
+    assert.equal(response.body.default_branch, 'main');
+    assert.deepEqual(calls, ['http://python-api/telemetry/git/inspect']);
+  } finally { globalThis.fetch = originalFetch; }
+});
+
+test('re-indexing a revision needs project administrator access and forwards to the API', async () => {
+  const handlers = new Map<string, (...args: any[]) => Promise<unknown>>();
+  const app = Object.fromEntries(['get', 'post', 'put', 'delete', 'patch'].map((method) => [method,
+    (path: string, handler: (...args: any[]) => Promise<unknown>) => handlers.set(`${method.toUpperCase()} ${path}`, handler)]));
+  let manage = false;
+  registerCodeQualityRoutes(app as any, {
+    apiUrl: 'http://python-api', internalSecret: 'x'.repeat(40), helperUrl: 'http://127.0.0.1:47831',
+    webOrigin: 'http://localhost:3000', getUser: () => ({ sub: 'alice' }), canAccessProject: () => true,
+    canManageProject: () => manage,
+  } as any);
+  const response = { statusCode: 200, body: undefined as any,
+    status(code: number) { this.statusCode = code; return this; }, json(body: unknown) { this.body = body; return this; } };
+  const handler = handlers.get('POST /api/code-quality/projects/:projectId/revisions/:revisionId/reindex');
+  assert.ok(handler);
+  await handler({ params: { projectId: 'pizza', revisionId: 'rev_1' } }, response);
+  assert.equal(response.statusCode, 403);
+  manage = true;
+  const originalFetch = globalThis.fetch;
+  const calls: Array<{ url: string; method?: string }> = [];
+  globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
+    calls.push({ url: String(input), method: init?.method });
+    return new Response(JSON.stringify({ queued: true }));
+  }) as typeof fetch;
+  try {
+    await handler({ params: { projectId: 'pizza', revisionId: 'rev_1' } }, response);
+    assert.equal(response.statusCode, 200);
+    assert.deepEqual(calls, [{ url: 'http://python-api/code-quality/projects/pizza/revisions/rev_1/reindex', method: 'POST' }]);
+  } finally { globalThis.fetch = originalFetch; }
+});
