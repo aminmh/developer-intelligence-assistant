@@ -393,3 +393,38 @@ def test_completion_retry_override_is_per_call(monkeypatch, provider):
     assert len(bounded.calls) == 1 and bounded.calls[0]['timeout'] == 60
     llm.complete_with_model('hello', provider=provider)
     assert len(base.calls) == 1 and len(options) == 1
+
+
+def test_remote_empty_completion_retries_once_with_low_reasoning_effort_and_remembers_it(monkeypatch):
+    _configure_remote(monkeypatch)
+    monkeypatch.setattr(llm, "_LOW_EFFORT_MODELS", set())
+    calls = []
+
+    def fake_run_chat(client, model, prompt, **kwargs):
+        body = kwargs.get("extra_body") or {}
+        calls.append(body.get("reasoning_effort"))
+        return ("" if "reasoning_effort" not in body else '{"ok": true}'), None
+
+    monkeypatch.setattr(llm, "_run_chat", fake_run_chat)
+    monkeypatch.setattr(llm, "_get_remote_client", lambda: _FakeClient(content="unused"))
+
+    first = llm.complete_with_model("analyze", provider="remote", fallback_to_local=False)
+    assert tuple(first) == ('{"ok": true}', "qwen2.5-32b", "remote")
+    assert calls == [None, "low"]
+
+    second = llm.complete_with_model("analyze again", provider="remote", fallback_to_local=False)
+    assert second[0] == '{"ok": true}'
+    assert calls == [None, "low", "low"], "later calls go straight to low effort"
+
+
+def test_remote_empty_completion_without_a_working_retry_still_fails_or_falls_back(monkeypatch):
+    _configure_remote(monkeypatch)
+    monkeypatch.setattr(llm, "_LOW_EFFORT_MODELS", set())
+    monkeypatch.setattr(llm, "_run_chat", lambda *a, **k: ("", None))
+    monkeypatch.setattr(llm, "_get_remote_client", lambda: _FakeClient(content="unused"))
+    try:
+        llm.complete_with_model("x", provider="remote", fallback_to_local=False)
+        raise AssertionError("expected an empty-completion error")
+    except RuntimeError as exc:
+        assert "empty completion" in str(exc)
+    assert not llm._LOW_EFFORT_MODELS
