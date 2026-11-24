@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { computed, onUnmounted, ref, watch } from 'vue';
-import { Files, FileJson, GitBranch, Scale, UploadCloud, FileArchive, CircleCheck, CircleAlert, Filter, GitCommitHorizontal, TriangleAlert, Check } from 'lucide-vue-next';
+import { Files, FileJson, GitBranch, Scale, UploadCloud, FileArchive, CircleCheck, CircleAlert, Filter, GitCommitHorizontal, TriangleAlert, Check, RefreshCw, LoaderCircle } from 'lucide-vue-next';
 import type { UploadedFile, RAGConfig } from '../types';
 import { useUrlTab } from '../composables/useUrlTab';
 import { makeRequest } from '../ui/makeRequest';
@@ -12,6 +12,7 @@ import { validateUploadIdentity } from '../services/uploadIdentity';
 import { useProjectScope, type ScopeRevision } from '../composables/useProjectScope';
 import { describeRevision, relativeAge } from '../utils/chatRevisions';
 import { fileIndexStatus } from '../utils/fileIndexStatus';
+import { toastMessage } from '../composables/useToasts';
 
 const props = defineProps<{
   files: UploadedFile[];
@@ -58,6 +59,56 @@ const visibleFiles = computed(() => showAllProjects.value || !props.projectId.tr
   : props.files.filter((file) => file.projectId === props.projectId.trim()));
 const projectRevisions = computed(() => scope.currentProject.value?.revisions ?? []);
 const revisionSource = (rev: ScopeRevision) => rev.source_kind === 'git' ? 'Git sync' : rev.source_kind === 'working_tree' ? 'Working tree' : 'ZIP upload';
+// Re-index rebuilds a Git revision's vectors and graph from its stored source. The old index is replaced, so confirm first.
+type IndexProgress = { state: string; stage: string | null; percent: number; detail: string | null };
+const progressByRevision = ref<Record<string, IndexProgress>>({});
+const reindexing = ref(false);
+const reindexNotice = toastMessage('success');
+const reindexError = toastMessage('error');
+const isIndexing = (rev: ScopeRevision) => rev.state === 'queued' || rev.state === 'indexing';
+const progressOf = (rev: ScopeRevision): IndexProgress =>
+  progressByRevision.value[rev.revision_id] ?? { state: rev.state || 'queued', stage: rev.state === 'queued' ? 'Queued' : 'Starting', percent: 0, detail: null };
+const reindexRevision = async (rev: ScopeRevision) => {
+  const project = props.projectId.trim();
+  if (!project || reindexing.value) return;
+  if (!window.confirm('Re-index this revision? Its current index is deleted and rebuilt from the stored source, which re-embeds every chunk. It is unavailable until the rebuild finishes.')) return;
+  reindexing.value = true;
+  try {
+    const response = await makeRequest(`/api/code-quality/projects/${encodeURIComponent(project)}/revisions/${encodeURIComponent(rev.revision_id)}/reindex`, { method: 'POST' });
+    const data = await response.json().catch(() => ({}));
+    if (!response.ok) throw new Error(data.detail || 'The revision could not be re-indexed.');
+    progressByRevision.value = { ...progressByRevision.value, [rev.revision_id]: { state: 'queued', stage: 'Queued', percent: 0, detail: null } };
+    await scope.load();
+  } catch (cause: any) { reindexError.value = cause?.message || 'The revision could not be re-indexed.'; }
+  finally { reindexing.value = false; }
+};
+// While any revision of the project is indexing, poll its progress; refresh the list once it finishes.
+let progressTimer: ReturnType<typeof setInterval> | null = null;
+const pollProgress = async () => {
+  const project = props.projectId.trim();
+  const active = projectRevisions.value.filter(isIndexing);
+  if (!project || !active.length) { stopProgressPolling(); return; }
+  let finished = false;
+  await Promise.all(active.map(async (rev) => {
+    try {
+      const response = await makeRequest(`/api/code-quality/projects/${encodeURIComponent(project)}/revisions/${encodeURIComponent(rev.revision_id)}/index-progress`);
+      if (!response.ok) return;
+      const data: IndexProgress = await response.json();
+      progressByRevision.value = { ...progressByRevision.value, [rev.revision_id]: data };
+      if (data.state !== 'queued' && data.state !== 'indexing') finished = true;
+    } catch { /* keep the last known progress */ }
+  }));
+  if (finished) {
+    await scope.load();
+    reindexNotice.value = 'Indexing finished.';
+  }
+};
+const stopProgressPolling = () => { if (progressTimer) { clearInterval(progressTimer); progressTimer = null; } };
+watch(() => projectRevisions.value.some(isIndexing), (active) => {
+  if (active && !progressTimer) { void pollProgress(); progressTimer = setInterval(() => void pollProgress(), 2500); }
+  if (!active) stopProgressPolling();
+}, { immediate: true });
+onUnmounted(stopProgressPolling);
 const focusUploadIdentity = () => {
   if (uploadValidation.value.projectError) projectInput.value?.focus();
   else commitInput.value?.focus();
@@ -189,8 +240,16 @@ const tabs = computed(() => [
                 <b>{{ describeRevision({ ...rev, created_at: null }) }}</b>
                 <span>{{ revisionSource(rev) }}<template v-if="relativeAge(rev.created_at)"> · {{ relativeAge(rev.created_at) }}</template><template v-if="rev.vectors_missing"> · indexed data missing</template></span>
               </span>
-              <span v-if="rev.indexed" class="kb-tag" data-tone="ok"><Check aria-hidden="true" />Indexed</span>
-              <span v-else class="kb-tag" data-tone="warn"><TriangleAlert aria-hidden="true" />{{ rev.vectors_missing ? 'Data missing' : rev.state === 'failed' ? 'Failed' : 'Not indexed' }}</span>
+              <span class="kb-rev-actions">
+                <button v-if="rev.source_kind === 'git' && !isIndexing(rev) && (rev.indexed || rev.state === 'failed')" type="button" class="kb-btn" :disabled="reindexing" :title="'Delete and rebuild this revision\'s index'" @click="reindexRevision(rev)"><LoaderCircle v-if="reindexing" class="kb-spin" aria-hidden="true" /><RefreshCw v-else aria-hidden="true" />Re-index</button>
+                <span v-if="isIndexing(rev)" class="kb-tag" data-tone="warn"><LoaderCircle class="kb-spin" aria-hidden="true" />{{ progressOf(rev).percent }}%</span>
+                <span v-else-if="rev.indexed" class="kb-tag" data-tone="ok"><Check aria-hidden="true" />Indexed</span>
+                <span v-else class="kb-tag" data-tone="warn"><TriangleAlert aria-hidden="true" />{{ rev.vectors_missing ? 'Data missing' : rev.state === 'failed' ? 'Failed' : 'Not indexed' }}</span>
+              </span>
+              <div v-if="isIndexing(rev)" class="kb-progress-row">
+                <div class="kb-progress" role="progressbar" aria-valuemin="0" aria-valuemax="100" :aria-valuenow="progressOf(rev).percent" :aria-label="`Indexing ${progressOf(rev).percent}%`"><span :style="{ width: progressOf(rev).percent + '%' }"></span></div>
+                <span class="kb-progress-label">{{ progressOf(rev).stage || 'Starting' }}<template v-if="progressOf(rev).detail"> · {{ progressOf(rev).detail }}</template></span>
+              </div>
             </li>
           </ul>
         </section>

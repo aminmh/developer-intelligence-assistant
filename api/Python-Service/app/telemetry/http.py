@@ -105,6 +105,24 @@ async def configure_git_source(project_id: str, request: Request) -> dict:
         raise HTTPException(503, "Git source configuration could not be saved.") from exc
 
 
+@git_router.post("/inspect")
+async def inspect_git_remote(request: Request) -> dict:
+    """Branches and a short summary of a repository URL, so the developer picks a branch before saving."""
+    from telemetry.git_source import GitSourceService, GitSyncError
+    _git_user(request)
+    payload = await _read_git_source_json(request)
+    token = payload.get("token")
+    try:
+        return await run_in_threadpool(GitSourceService().inspect, payload.get("repository"), token if isinstance(token, str) else None)
+    except ValueError as exc:
+        raise HTTPException(422, str(exc)) from exc
+    except GitSyncError as exc:
+        raise HTTPException(422 if exc.code in {"git_host_blocked", "git_host_unresolved", "git_credential_invalid", "git_token_required",
+                                         "git_token_rejected", "git_access_forbidden", "git_repository_not_found",
+                                         "git_ssh_key_rejected", "git_host_key_mismatch"} else 502,
+                            str(exc)) from exc
+
+
 @git_router.post("/projects/{project_id}/sync")
 async def synchronize_git_source(project_id: str, request: Request) -> dict:
     from telemetry.git_source import GitSourceService, GitSyncError

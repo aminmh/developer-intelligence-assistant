@@ -441,19 +441,22 @@ const refresh = async () => { await loadProjects(); await loadDetail(); };
 // Keep reloading the inventory until that project reports running containers, then select it.
 const FIRST_REPORT_TIMEOUT_MS = 120_000;
 const waitingForFirstReport = ref('');
-const waitForFirstReport = async (projectId: string) => {
+const waitForFirstReport = async (projectId: string, commit?: string | null) => {
   waitingForFirstReport.value = projectId;
   try {
     const deadline = Date.now() + FIRST_REPORT_TIMEOUT_MS;
     while (Date.now() < deadline) {
       await loadProjects();
-      const reported = options.value.find((item) => item.project_id === projectId && (item.running_project_containers || 0) > 0);
+      // Containers from before the setup may still be reporting: wait for ones labeled with the applied commit.
+      const reporting = options.value.filter((item) => item.project_id === projectId && (item.running_project_containers || 0) > 0
+        && (!commit || (item.running_commit_shas || []).includes(commit)));
+      const reported = reporting.find((item) => item.commit_sha === commit) || reporting[0];
       if (!error.value && reported) {
         if (selectedKey.value === reported.key) await loadDetail();
         else selectedKey.value = reported.key; // the selectedKey watcher loads its containers
         return true;
       }
-      await new Promise((resolve) => setTimeout(resolve, 3000));
+      await new Promise((resolve) => setTimeout(resolve, 2000));
     }
     await refresh();
     return false;
@@ -619,7 +622,7 @@ const applySetupPlan = async (planId: string) => {
         const projectId = savedSetup.value?.project_id;
         if (projectId) {
           setupMessage.value = `Setup applied. Waiting for the host agent's first report for ${projectId}…`;
-          const reported = await waitForFirstReport(projectId);
+          const reported = await waitForFirstReport(projectId, savedSetup.value?.commit);
           setupMessage.value = reported
             ? `${status.message || 'Runtime setup is complete.'} Containers for ${projectId} are reporting.`
             : `${status.message || 'Runtime setup is complete.'} No containers have reported for ${projectId} yet; select Refresh in a minute, or check docker logs devassistant-telemetry-agent-agent-1.`;

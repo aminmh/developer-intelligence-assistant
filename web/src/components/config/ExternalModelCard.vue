@@ -139,7 +139,8 @@ const testRemoteConnection = async () => {
     const res = await makeRequest('/api/health/test/remote', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({}),
+      // The values currently typed, saved or not. The API key is never sent: the test uses the saved one.
+      body: JSON.stringify({ base_url: config.llmRemoteBaseUrl ?? '', model: config.llmRemoteModel ?? '' }),
     });
     const data = await res.json();
     remoteResult.value = {
@@ -456,7 +457,7 @@ onMounted(() => {
           class="w-full bg-[#11162d] border border-slate-800 rounded-xl px-4 py-2.5 text-xs font-mono focus:outline-none focus:border-sky-500 text-slate-200"
           placeholder="sk-..."
         />
-        <p class="text-[9px] text-slate-600">Optional — local endpoints (LM Studio, vLLM) usually need none.</p>
+        <p class="text-[9px] text-slate-600">Optional — local endpoints (LM Studio, vLLM) usually need none. Test connection uses the saved key; the other fields are tested as typed.</p>
       </div>
 
       <div class="pt-3 border-t border-slate-800 flex items-center justify-between gap-2">
