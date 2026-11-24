@@ -145,3 +145,65 @@ def test_analysis_routes_require_internal_auth_and_an_indexed_revision(tmp_path,
                        json={"provider": "local"}).status_code == 422
     assert client.post(base + "/analysis", headers=headers, json={"provider": "local"}).status_code == 404
     assert client.post(base + "/analysis/diff", headers=headers, json={}).status_code == 404
+
+
+def test_database_calls_are_grouped_by_query_shape_with_counts_and_durations():
+    from telemetry.analysis import _group_database_calls
+
+    calls = [{"duration_ms": ms, "db_system": "mysql", "db_namespace": "shop", "operation": "SELECT",
+              "table_ids": ["table:mysql.cache"], "symbol_id": "Cache::get", "caller_symbol_id": "App::run",
+              "span_status": "Unset", "db.query.text": "SELECT private"} for ms in (1.234, 0.5, 3.0)]
+    calls.append({"duration_ms": 9, "db_system": "mysql", "db_namespace": "shop", "operation": "UPDATE",
+                  "table_ids": ["table:mysql.sessions"], "span_status": "Error"})
+    rows, common = _group_database_calls(calls)
+
+    assert common == {"db_system": "mysql", "db_namespace": "shop"}
+    assert len(rows) == 2
+    select = rows[0]
+    assert (select["n"], select["ms"], select["total_ms"]) == (3, [3.0, 1.23, 0.5], 4.73)
+    assert "span_status" not in select and "db_system" not in select and "db.query.text" not in json.dumps(rows)
+    assert rows[1]["span_status"] == "Error" and rows[1]["n"] == 1
+    mixed, none_common = _group_database_calls([{"duration_ms": 1, "db_system": "mysql"}, {"duration_ms": 2, "db_system": "pgsql"}])
+    assert none_common == {} and all("db_system" in row for row in mixed)
+
+
+def test_source_windows_are_tight_skip_blank_lines_and_do_not_repeat_shared_lines():
+    from telemetry.analysis import _source_context
+
+    code = "\n".join(["<?php"] + [f"// filler {number}" for number in range(2, 41)]
+                     + ["    public function one()", "    {", "", "        return 1;", "    }", "",
+                        "    public function two()", "    {", "        return 2;", "    }"] + ["// tail"] * 10)
+    lines = code.split("\n")
+    first = next(i for i, text in enumerate(lines, 1) if "function one" in text)
+    second = next(i for i, text in enumerate(lines, 1) if "function two" in text)
+    definitions = {
+        "A::one": {"symbol_id": "A::one", "file": "a.php", "line": first, "end_line": first + 4},
+        "A::two": {"symbol_id": "A::two", "file": "a.php", "line": second, "end_line": second + 3},
+    }
+    out = _source_context(_archive("a.php", code), definitions, ["A::one", "A::two"])
+
+    one_numbers = [int(row.split(":", 1)[0]) for row in out["A::one"]["source"].split("\n")]
+    assert one_numbers[0] == first - 4, "four lines above"
+    assert one_numbers[-1] == first + 4, "the line below the method is blank, so it is omitted"
+    assert all(lines[n - 1].strip() for n in one_numbers), "no blank lines are sent"
+    two_numbers = [int(row.split(":", 1)[0]) for row in out["A::two"]["source"].split("\n")]
+    assert not set(one_numbers) & set(two_numbers), "lines already sent with the first symbol are not repeated"
+    assert second in two_numbers and second + 3 in two_numbers
+
+
+def test_analysis_prompt_is_compact_json_and_states_its_layout():
+    prompts = []
+
+    def model(prompt, **_kwargs):
+        prompts.append(prompt)
+        return json.dumps({"findings": [], "coverage_gaps": []}), "m", "local"
+
+    analyze_request("pizza", {"commit_sha": "a" * 40, "revision_id": "rev_" + "b" * 32}, _detail(), "local",
+                    definitions_loader=_definitions, archive_loader=lambda _key: _archive(), model_call=model)
+    body = json.loads(prompts[0])
+    assert '": ' not in prompts[0].replace("\\\": ", ""), "no padding after separators"
+    assert "one row per distinct query shape" in body["task"]
+    evidence = body["evidence"]
+    assert evidence["database"] == {"db_system": "mysql", "db_namespace": "shop"}
+    assert evidence["database_calls"][0]["n"] == 1 and evidence["method_activity_source"] == "hook"
+    assert all("source" not in edge for edge in evidence["method_activity"])
