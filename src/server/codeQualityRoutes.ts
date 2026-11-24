@@ -170,6 +170,18 @@ export function registerCodeQualityRoutes(app: Express, dependencies: RouteDepen
     } catch { return res.status(502).json({ detail: 'Git source settings could not be saved.' }); }
   });
 
+  // List a repository's branches (HTTPS or SSH URL) before saving it. A token typed here is used once for the
+  // request and never stored; the saved credential is not reused, so it cannot be sent to a host the user just typed.
+  app.post('/api/code-quality/projects/:projectId/git-source/inspect', async (req, res) => {
+    try {
+      const user = allowed(res, req.params.projectId); if (!user) return;
+      const token = typeof req.body?.token === 'string' && req.body.token ? req.body.token : undefined;
+      const upstream = await forward('/telemetry/git/inspect', user,
+        { method: 'POST', body: JSON.stringify({ repository: req.body?.repository, ...(token ? { token } : {}) }) });
+      return await reply(res, upstream, 'The repository could not be inspected.');
+    } catch { return res.status(502).json({ detail: 'The repository could not be inspected.' }); }
+  });
+
   app.post('/api/code-quality/projects/:projectId/git-source/credential', async (req, res) => {
     try {
       const user = allowed(res, req.params.projectId); if (!user) return;
@@ -957,6 +969,29 @@ export function registerCodeQualityRoutes(app: Express, dependencies: RouteDepen
     } catch {
       return res.status(502).json({ detail: 'Revision directories are unavailable.' });
     }
+  });
+
+  // Stage and percent of a revision's running index job, polled by the progress bar.
+  app.get('/api/code-quality/projects/:projectId/revisions/:revisionId/index-progress', async (req, res) => {
+    try {
+      const user = allowed(res, req.params.projectId); if (!user) return;
+      const path = `/code-quality/projects/${encodeURIComponent(req.params.projectId)}/revisions/${encodeURIComponent(req.params.revisionId)}/index-progress`;
+      return await reply(res, await forward(path, user), 'Index progress is unavailable.');
+    } catch { return res.status(502).json({ detail: 'Index progress is unavailable.' }); }
+  });
+
+  // Rebuild a Git revision's index (vectors and graph) from its stored source. It re-embeds every chunk,
+  // so it needs the same authority as removing the revision.
+  app.post('/api/code-quality/projects/:projectId/revisions/:revisionId/reindex', async (req, res) => {
+    const user = allowed(res, req.params.projectId);
+    if (!user) return;
+    if (!dependencies.canManageProject?.(user, req.params.projectId)) {
+      return res.status(403).json({ detail: 'Only a project administrator can re-index a revision.' });
+    }
+    try {
+      const path = `/code-quality/projects/${encodeURIComponent(req.params.projectId)}/revisions/${encodeURIComponent(req.params.revisionId)}/reindex`;
+      return await reply(res, await forward(path, user, { method: 'POST' }), 'The revision could not be re-indexed.');
+    } catch { return res.status(502).json({ detail: 'The revision could not be re-indexed. Check API availability and retry.' }); }
   });
 
   app.delete('/api/code-quality/projects/:projectId/revisions/:revisionId', async (req, res) => {
