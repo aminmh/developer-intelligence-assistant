@@ -26,6 +26,16 @@ export function runDrawioRoundtripChecks(): string[] {
   const oversizedExpression = structuredClone(largeRuntime);
   Object.assign(oversizedExpression.tables[0].columns[0], { default_expression: 'x'.repeat(65537) });
   check(rejects(() => schemaFromDrawio(createDrawioDiagram(oversizedExpression), largeRuntime, true)), 'expressions above the API column limit are rejected without truncation');
+  // Edit Data wraps a shape in <object>. With only an id and a label it is the same shape; with real data it is rejected by name.
+  const wrapperMessage = (source: string) => { try { schemaFromDrawio(source, schema, true); return ''; } catch (cause: any) { return String(cause.message); } };
+  const columnXml = /<mxCell id="column-d"[^>]*>.*?<\/mxCell>/s.exec(xml)?.[0] ?? '';
+  const plainWrapped = xml.replace(columnXml, `<object label="other: int" id="column-d">${columnXml.replace(' id="column-d"', '').replace(' value="other: int"', '')}</object>`);
+  check(columnXml !== '' && wrapperMessage(plainWrapped) === '' && JSON.stringify(schemaFromDrawio(plainWrapped, schema, true)) === JSON.stringify(schema), 'A wrapper holding only the id and label is read as the plain column');
+  const renamedWrapped = plainWrapped.replace('label="other: int"', 'label="renamed: bigint"');
+  check((schemaFromDrawio(renamedWrapped, schema, true) as typeof schema).tables[0].columns[1].name === 'renamed', 'A wrapped column keeps its edited label');
+  const withData = xml.replace(columnXml, `<object label="other: int" id="column-d" notes="x" tooltip="y">${columnXml.replace(' id="column-d"', '').replace(' value="other: int"', '')}</object>`);
+  const dataMessage = wrapperMessage(withData);
+  check(/column "other: int" has custom Draw\.io data \(notes, tooltip\)/.test(dataMessage) && /Extras → Add schema column/.test(dataMessage), 'A column with custom data is rejected by name, with the properties listed and the supported way to add columns');
   const unknown = structuredClone(schema);
   Object.assign(unknown.tables[0].columns[0], { auto_increment: null });
   check((schemaFromDrawio(createDrawioDiagram(unknown), unknown, true) as { tables: { columns: { auto_increment: boolean | null }[] }[] }).tables[0].columns[0].auto_increment === null, 'unknown auto-increment survives diagram round trip');
@@ -85,10 +95,11 @@ export function runDrawioRoundtripChecks(): string[] {
     const cell = document.querySelector(`mxCell[id="${id}"]`)!;
     const wrapper = document.createElement('object');
     wrapper.setAttribute('id', id);
+    wrapper.setAttribute('notes', 'custom data');
     cell.removeAttribute('id');
     cell.parentNode!.replaceChild(wrapper, cell);
     wrapper.appendChild(cell);
-    check(rejects(() => schemaFromDrawio(new XMLSerializer().serializeToString(document), schema)), `wrapped ${id} is rejected instead of deleted`);
+    check(rejects(() => schemaFromDrawio(new XMLSerializer().serializeToString(document), schema)), `wrapped ${id} with custom data is rejected instead of deleted`);
   }
   entries.pop();
   entries.push({ table_id: 'new-11111111-1111-4111-8111-111111111111', keys: [], indexes: [] });

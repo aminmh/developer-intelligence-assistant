@@ -67,7 +67,7 @@ export function validLayout(xml: string): boolean {
   return !doc.querySelector('parsererror') && ['mxfile', 'mxGraphModel'].includes(doc.documentElement?.tagName);
 }
 
-export type EditorEvent = { event: 'init' | 'exit' | 'oversize' } | { event: 'save' | 'invalid'; xml: string; exit: boolean };
+export type EditorEvent = { event: 'init' | 'exit' | 'oversize' } | { event: 'save' | 'invalid'; xml: string; exit: boolean } | { event: 'autosave'; xml: string };
 export type SchemaSelection = { kind: 'table' | 'relationship'; id: string };
 export function readEditorSelection(event: Pick<MessageEvent, 'origin' | 'source' | 'data'>, origin: string, popup: Window): SchemaSelection | null {
   if (event.origin !== origin || event.source !== popup || typeof event.data !== 'string' || event.data.length > 2048 || byteLength(event.data) > 2048) return null;
@@ -86,6 +86,12 @@ export function readEditorEvent(event: Pick<MessageEvent, 'origin' | 'source' | 
   if (!data || typeof data !== 'object' || Array.isArray(data)) return null;
   const message = data as Record<string, unknown>;
   if (message.event === 'init' || message.event === 'exit') return { event: message.event };
+  // Draw.io reports every edit while it is open. These only feed the live "Show new changes" view and are never saved, so an
+  // oversized or unreadable one is ignored instead of being reported as a failed save.
+  if (message.event === 'autosave' && typeof message.xml === 'string') {
+    if (message.xml.length > MAX_LAYOUT_BYTES || byteLength(message.xml) > MAX_LAYOUT_BYTES || !validate(message.xml)) return null;
+    return { event: 'autosave', xml: message.xml };
+  }
   if (message.event === 'save' && typeof message.xml === 'string' && (message.exit === undefined || typeof message.exit === 'boolean')) {
     if (message.xml.length > MAX_LAYOUT_BYTES || byteLength(message.xml) > MAX_LAYOUT_BYTES) return { event: 'oversize' };
     return { event: validate(message.xml) ? 'save' : 'invalid', xml: message.xml, exit: message.exit === true };

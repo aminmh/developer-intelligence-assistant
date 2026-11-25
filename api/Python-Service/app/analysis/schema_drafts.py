@@ -119,6 +119,25 @@ class SchemaDraftStore:
                              (draft_id, encoded_provenance))
         return self.get(draft_id)
 
+    def copy(self, draft_id: str, schema: Schema | dict[str, Any], layout: str) -> dict[str, Any]:
+        """A new draft holding ``schema`` and ``layout`` that keeps the baseline and runtime provenance of ``draft_id``.
+
+        The original is untouched. A saved-analysis draft is unique per analysis, so its copy is an import draft;
+        migrations still compare against the same baseline.
+        """
+        encoded = _schema_json(schema)
+        _check_layout(layout)
+        with self._connect() as conn:
+            row = conn.execute(_DRAFT_WITH_PROVENANCE + " WHERE d.id = ?", (draft_id,)).fetchone()
+            if row is None:
+                raise DraftNotFound(draft_id)
+            copy_id = str(uuid.uuid4())
+            conn.execute("INSERT INTO schema_drafts VALUES (?, ?, ?, ?, ?, ?, 1)",
+                         (copy_id, None, "import", row['baseline_json'], encoded, layout))
+            if row['provenance_json'] is not None:
+                conn.execute('INSERT INTO schema_draft_runtime_provenance VALUES (?, ?)', (copy_id, row['provenance_json']))
+        return self.get(copy_id)
+
     def get(self, draft_id: str) -> dict[str, Any]:
         with self._connect() as conn:
             row = conn.execute(_DRAFT_WITH_PROVENANCE + " WHERE d.id = ?", (draft_id,)).fetchone()

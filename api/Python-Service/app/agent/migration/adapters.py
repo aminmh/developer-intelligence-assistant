@@ -11,6 +11,23 @@ _TYPES = {'integer': ('integer', 'INTEGER'), 'int': ('integer', 'INTEGER'),
           'date': ('date', 'DATE')}
 
 
+# Types accepted for NEW columns and new tables only; changing an existing column still uses _TYPES. Both are valid on MySQL
+# and PostgreSQL. A size must be a plain integer so it can never carry other SQL.
+_ADDED_TYPES = {'timestamp': ('timestamp', 'TIMESTAMP')}
+_SIZED_TYPES = re.compile(r'(varchar|char)\((\d{1,5})\)\Z', re.ASCII)
+
+
+def _type_of(kind):
+    if kind in _TYPES:
+        return _TYPES[kind]
+    if kind in _ADDED_TYPES:
+        return _ADDED_TYPES[kind]
+    sized = _SIZED_TYPES.fullmatch(kind)
+    if sized and 1 <= int(sized[2]) <= 65535:
+        return ('string' if sized[1] == 'varchar' else 'char', f"{sized[1].upper()}({int(sized[2])})")
+    return None
+
+
 def _name(value):
     if not isinstance(value, str) or not _IDENTIFIER.fullmatch(value):
         raise UnsupportedMigration('Identifiers must contain only ASCII letters, digits, and underscores and start with a letter or underscore')
@@ -19,14 +36,17 @@ def _name(value):
 
 def _column(column, *, adding=False):
     _name(column['name'])
-    kind = column['type'].lower()
-    if kind not in _TYPES or column['auto_increment'] is not False or column['default'] is not None:
+    kind = column['type'].lower().strip()
+    info = _type_of(kind)
+    if info is None or column['auto_increment'] is not False or column['default'] is not None:
         raise UnsupportedMigration('Unsupported column type, default, or auto-increment; edit the migration manually')
+    if column.get('default_expression') is not None or column.get('identity') is not None:
+        raise UnsupportedMigration('A new column with an expression default or identity requires manual migration')
     if column.get('collation') is not None or column.get('mysql_definition') is not None:
         raise UnsupportedMigration('Adding columns with explicit collation or MySQL definition metadata requires manual migration')
     if adding and not column['nullable']:
         raise UnsupportedMigration('Adding a non-null column without a known default is unsafe')
-    return _TYPES[kind]
+    return info
 
 
 def _mysql_definition(column):
@@ -220,9 +240,10 @@ def _check(operations, database):
 
 
 def _laravel_column(column):
-    method, _ = _column(column)
+    method, sql_type = _column(column)
     nullable = '->nullable()' if column['nullable'] else ''
-    return f"$table->{method}('{column['name']}'){nullable};"
+    length = f", {re.search(r'[(]([0-9]+)[)]', sql_type).group(1)}" if method in ('string', 'char') else ''
+    return f"$table->{method}('{column['name']}'{length}){nullable};"
 
 
 def _php_sql(sql):

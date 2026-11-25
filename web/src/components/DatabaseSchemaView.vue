@@ -1,8 +1,9 @@
 <script setup lang="ts">
-import { computed, onMounted, onUnmounted, ref, watch } from 'vue';
+import { computed, nextTick, onMounted, onUnmounted, ref, watch } from 'vue';
 import {
   Activity, AlertTriangle, Archive, Braces, ChevronDown, ChevronsUpDown, Download, Eraser, FileCode, FileJson, GitMerge, KeyRound,
   Link2, Minus, PanelRightClose, PanelRightOpen, Play, RefreshCw, Search, Sparkles, Table, Table2, Trash2, X,
+  EyeOff, GitCompare, Save, ExternalLink,
 } from 'lucide-vue-next';
 import { makeRequest } from '../ui/makeRequest';
 import { useProjectScope } from '../composables/useProjectScope';
@@ -11,14 +12,16 @@ import { subscribeRuntimeUpdates } from '../ui/runtimeEvents';
 import type { AnalysisSession, ErdRef, ErdTable, NormalizedSchema, RuntimeProjectRecord, RuntimeSnapshotData, SchemaVisualizationResponse } from '../types';
 import { normalizeSavedSchema, parseSchemaInput, schemaToDbml, schemaToJson, type SchemaInputFormat } from '../utils/erdTransformer';
 import ConfirmModal from './ConfirmModal.vue';
-import SchemaDraftPanel from './SchemaDraftPanel.vue';
+import SchemaDraftPanel, { type DraftStatus } from './SchemaDraftPanel.vue';
 import RuntimeSchemaLoader from './runtime/RuntimeSchemaLoader.vue';
 import OpenDrawioButton from './runtime/OpenDrawioButton.vue';
 import type { SavedSchemaDraft } from '../types';
 import RuleLinksPanel from './code-quality/RuleLinksPanel.vue';
 import type { SchemaSelection } from '../utils/drawioBridge';
+import { diffSchemas, relationshipKeys, tableChangeKey, type SchemaChanges, type TableChange } from '../utils/schemaChanges';
 
 const draftPanel = ref<InstanceType<typeof SchemaDraftPanel> | null>(null);
+const draftStatus = ref<DraftStatus>({ hasDraft: false, dirty: false, editorActive: false, busy: false, revision: 0 });
 const acceptRuntimeDraft = (draft: SavedSchemaDraft, popup: Window | null) => draftPanel.value?.acceptRuntimeDraft(draft, popup) || false;
 const canLoadRuntimeDraft = () => draftPanel.value?.canLoadRuntimeDraft() || false;
 const analyses = ref<AnalysisSession[]>([]);
@@ -114,6 +117,89 @@ function selectEditorEntity(selection: SchemaSelection) {
   }
   rightPanelOpen.value = true;
 }
+// ---- Changes made in Draw.io, shown on request -------------------------------
+// The draft panel streams what is in the editor. Nothing here is saved: the button only reveals the differences
+// from the original schema, and a newer edit makes the button appear again.
+const editorState = ref<{ baseline: unknown; schema: unknown } | null>(null);
+const shownChanges = ref<SchemaChanges | null>(null);
+const dismissedSignature = ref<string | null>(null);
+// Compared with the saved draft, so only what changed since it was last saved counts as new, whatever source the explorer shows.
+const pendingChanges = computed(() => (editorState.value ? diffSchemas(editorState.value.baseline as any, editorState.value.schema) : null));
+const pendingSignature = computed(() => pendingChanges.value?.signature ?? '');
+const hasNewChanges = computed(() => pendingSignature.value !== (shownChanges.value?.signature ?? '') && pendingSignature.value !== dismissedSignature.value);
+const onEditorSchema = (next: { baseline: unknown; schema: unknown } | null) => {
+  editorState.value = next;
+  if (next === null) { shownChanges.value = null; dismissedSignature.value = null; }
+};
+// With no analysis or import loaded, the explorer shows the saved draft itself, so there is a Tables section to update.
+const schemaFromDraft = ref(false);
+let draftParseRequest = 0;
+const onDraftSchema = async (next: unknown | null) => {
+  const requestId = ++draftParseRequest;
+  if (next === null) {
+    if (schemaFromDraft.value) { schema.value = null; schemaFromDraft.value = false; }
+    return;
+  }
+  if (schema.value && !schemaFromDraft.value) return;
+  try {
+    const parsed = await parseSchemaInput(next, { format: 'json', source: { kind: 'draft' } });
+    if (requestId === draftParseRequest && (!schema.value || schemaFromDraft.value)) { schema.value = parsed; schemaFromDraft.value = true; }
+  } catch { /* A draft that cannot be shown leaves the explorer as it was. */ }
+};
+// The explorer can be far below the fold, so showing the changes also brings the first one into view.
+const showNewChanges = async () => {
+  shownChanges.value = pendingChanges.value?.total ? pendingChanges.value : null; dismissedSignature.value = null;
+  if (!shownChanges.value) return;
+  const onlyRelationships = !shownChanges.value.tables.length;
+  if (onlyRelationships) relationsOpen.value = true; else tablesOpen.value = true;
+  await nextTick();
+  const first = document.querySelector<HTMLElement>(onlyRelationships ? '.sc-rel[data-change]' : '.sc-table[data-change]');
+  first?.scrollIntoView({ block: 'center', behavior: window.matchMedia('(prefers-reduced-motion: reduce)').matches ? 'auto' : 'smooth' });
+};
+const hideChanges = () => { dismissedSignature.value = pendingSignature.value; shownChanges.value = null; };
+watch(schema, () => { shownChanges.value = null; dismissedSignature.value = null; });
+const changeSummary = computed(() => {
+  const tables = shownChanges.value?.tables ?? [];
+  const count = (status: TableChange['status']) => tables.filter((item) => item.status === status).length;
+  const relations = shownChanges.value?.relationships ?? [];
+  return [
+    count('added') && `${count('added')} new ${count('added') === 1 ? 'table' : 'tables'}`,
+    count('changed') && `${count('changed')} changed`,
+    count('removed') && `${count('removed')} removed`,
+    relations.length && `${relations.length} ${relations.length === 1 ? 'relationship' : 'relationships'}`,
+  ].filter(Boolean).join(' · ');
+});
+const CHANGE_LABEL = { added: 'new', changed: 'changed', removed: 'removed' } as const;
+const COLUMN_MARK = { added: '+', changed: '~', removed: '−' } as const;
+const MAX_CHANGE_ROWS = 4;
+type TableCard = { key: string; table: ErdTable | null; change: TableChange | null; name: string; fields: Array<{ id: string; name: string; type: string; primaryKey: boolean; foreignKey: boolean }> };
+const tableCards = computed<TableCard[]>(() => {
+  const byKey = new Map((shownChanges.value?.tables ?? []).filter((item) => item.status !== 'added').map((item) => [item.key, item]));
+  const cards: TableCard[] = visibleTables.value.map((table) => ({
+    key: table.id, table, change: byKey.get(tableChangeKey(table.schema, table.name)) ?? null, name: `${table.schema ? table.schema + '.' : ''}${table.name}`,
+    fields: table.fields.map((field) => ({ id: field.id, name: field.name, type: field.type, primaryKey: !!field.primaryKey, foreignKey: !!field.foreignKey })),
+  }));
+  const query = search.value.trim().toLowerCase();
+  const shown = new Set((schema.value?.tables ?? []).map((table) => tableChangeKey(table.schema, table.name)));
+  for (const change of shownChanges.value?.tables ?? []) {
+    if (change.status !== 'added' || shown.has(change.key)) continue;
+    const fields = (change.fields ?? []).map((field, index) => ({ id: `${change.key}:${index}`, name: field.name, type: field.type, primaryKey: field.primaryKey, foreignKey: false }));
+    if (query && !`${change.name} ${fields.map((field) => field.name).join(' ')}`.toLowerCase().includes(query)) continue;
+    cards.push({ key: `added:${change.key}`, table: null, change, name: `${change.namespace ? change.namespace + '.' : ''}${change.name}`, fields });
+  }
+  return cards;
+});
+const removedRefIds = computed(() => {
+  const removed = new Set((shownChanges.value?.relationships ?? []).filter((item) => item.status === 'removed').map((item) => item.key));
+  const keys = schema.value ? relationshipKeys(schema.value) : new Map<string, string>();
+  return new Set([...keys].filter(([, key]) => removed.has(key)).map(([id]) => id));
+});
+const addedRelations = computed(() => {
+  const present = new Set(schema.value ? relationshipKeys(schema.value).values() : []);
+  return (shownChanges.value?.relationships ?? []).filter((item) => item.status === 'added' && !present.has(item.key));
+});
+const tablesOpen = ref(true);
+const relationsOpen = ref(false);
 const visibleTables = computed(() => {
   const query = search.value.trim().toLowerCase();
   if (!schema.value || !query) return schema.value?.tables || [];
@@ -138,6 +224,7 @@ const loadAnalyses = async () => {
 };
 
 const loadSaved = async () => {
+  schemaFromDraft.value = false;
   const requestId = ++schemaRequest;
   const analysisId = selectedAnalysisId.value;
   schema.value = null;
@@ -163,6 +250,7 @@ const loadSaved = async () => {
 };
 
 const parseImport = async () => {
+  schemaFromDraft.value = false;
   if (!inputText.value.trim()) {
     error.value = 'Paste SQL, DBML, or normalized JSON before importing.';
     return;
@@ -244,6 +332,7 @@ const deleteAnalysis = async () => {
 watch(selectedAnalysisId, () => { if (sourceType.value === 'saved') void loadSaved(); });
 watch(sourceType, (value) => {
   schemaRequest++;
+  schemaFromDraft.value = false;
   schema.value = null;
   loading.value = false;
   parsing.value = false;
@@ -270,6 +359,39 @@ const importFileName = computed(() => (inputFormat.value === 'dbml' ? 'schema.db
 const PREVIEW_COLUMNS = 4;
 // Relationship ends are table IDs (`table:posts`); show the readable name.
 const tableLabel = (id: string) => id.replace(/^table:/, '');
+// Relationship ends are table IDs (often opaque hashes). Show the table's name, schema-qualified like the Tables list.
+const displayName = (table: ErdTable) => `${table.schema ? table.schema + '.' : ''}${table.name}`;
+const tableByReference = (reference: string) => {
+  const bare = reference.toLowerCase().replace(/^table:/, '');
+  return schema.value?.tables.find((table) => table.id === reference)
+    || schema.value?.tables.find((table) => table.name.toLowerCase() === bare || displayName(table).toLowerCase() === bare);
+};
+const tableName = (reference: string) => { const table = tableByReference(reference); return table ? displayName(table) : tableLabel(reference); };
+type RelationRow = { key: string; ref: ErdRef | null; local: string; other: string; otherColumn: string; cardinality?: string; change?: 'added' | 'removed' };
+type RelationGroup = { key: string; name: string; out: RelationRow[]; in: RelationRow[] };
+// One card per table, listing every relationship it takes part in: the tables it references and the tables that reference it.
+const relationGroups = computed<RelationGroup[]>(() => {
+  const groups = new Map<string, RelationGroup>();
+  const resolve = (reference: string) => { const table = tableByReference(reference); return table ? { label: displayName(table), short: table.name } : { label: tableLabel(reference), short: tableLabel(reference) }; };
+  const groupFor = (label: string, short: string) => {
+    const key = short.toLowerCase();
+    let group = groups.get(key);
+    if (!group) { group = { key, name: label, out: [], in: [] }; groups.set(key, group); }
+    return group;
+  };
+  for (const ref of schema.value?.refs ?? []) {
+    const source = resolve(ref.sourceTable), target = resolve(ref.targetTable);
+    const change = removedRefIds.value.has(ref.id) ? 'removed' as const : undefined;
+    groupFor(source.label, source.short).out.push({ key: `${ref.id}:out`, ref, local: ref.sourceColumn, other: target.label, otherColumn: ref.targetColumn, cardinality: ref.cardinality, change });
+    groupFor(target.label, target.short).in.push({ key: `${ref.id}:in`, ref, local: ref.targetColumn, other: source.label, otherColumn: ref.sourceColumn, cardinality: ref.cardinality, change });
+  }
+  for (const relation of addedRelations.value) {
+    const source = resolve(relation.sourceTable), target = resolve(relation.targetTable);
+    groupFor(source.label, source.short).out.push({ key: `${relation.key}:out`, ref: null, local: relation.sourceColumn, other: target.label, otherColumn: relation.targetColumn, change: 'added' });
+    groupFor(target.label, target.short).in.push({ key: `${relation.key}:in`, ref: null, local: relation.targetColumn, other: source.label, otherColumn: relation.sourceColumn, change: 'added' });
+  }
+  return [...groups.values()].sort((a, b) => a.name.localeCompare(b.name));
+});
 const tableOps = (table: ErdTable) => busyTableCounts.value[table.name.toLowerCase()] || 0;
 const maxTableOps = computed(() => Math.max(1, ...Object.values(busyTableCounts.value).map(Number)));
 const formatOps = (value: number) => (value >= 1000 ? `${(value / 1000).toFixed(value >= 10000 ? 0 : 1)}k` : String(value));
@@ -280,9 +402,15 @@ const tableRuntimeMax = computed(() => Math.max(1, ...tableRuntime.value.map((ro
 <template>
   <section class="sc-page" aria-label="Database schema">
     <div class="sc-wrap">
+      <!-- Pinned to the top so it is seen on returning from Draw.io, however far down the explorer is. -->
+      <div v-if="hasNewChanges" class="sc-newchanges-bar" role="status" aria-live="polite">
+        <GitCompare aria-hidden="true" />
+        <span><b>Draw.io has new changes</b><template v-if="pendingChanges?.total"> · {{ pendingChanges.total }} {{ pendingChanges.total === 1 ? 'difference' : 'differences' }} from the saved draft</template></span>
+        <button type="button" class="sc-btn sc-btn-sm sc-push" data-variant="primary" @click="showNewChanges"><GitCompare aria-hidden="true" />Show new changes</button>
+      </div>
       <!-- Toolbar -->
       <div class="sc-bar">
-        <OpenDrawioButton />
+        <OpenDrawioButton label="Blank Draw.io" hint="Opens an empty Draw.io that is not connected to any draft. To edit a draft, open it below and choose Open in Draw.io." />
         <div class="sc-seg" role="group" aria-label="Schema source">
           <button v-for="option in sourceOptions" :key="option.id" type="button" :aria-pressed="sourceType === option.id" @click="sourceType = option.id">
             <component :is="option.icon" aria-hidden="true" />{{ option.label }}
@@ -334,7 +462,14 @@ const tableRuntimeMax = computed(() => Math.max(1, ...tableRuntime.value.map((ro
 
       <RuntimeSchemaLoader :project-id="scope.projectId.value" :accept-draft="acceptRuntimeDraft" :can-load="canLoadRuntimeDraft" />
 
-      <SchemaDraftPanel ref="draftPanel" :schema="schema" :source-type="sourceType" :analysis-id="selectedAnalysisId" :runtime-counts="busyTableCounts" :selection="selectedEntity" @select-entity="selectEditorEntity" />
+      <SchemaDraftPanel ref="draftPanel" :schema="schema" :schema-is-draft="schemaFromDraft" :source-type="sourceType" :analysis-id="selectedAnalysisId" :runtime-counts="busyTableCounts" :selection="selectedEntity" @select-entity="selectEditorEntity" @editor-schema="onEditorSchema" @draft-schema="onDraftSchema" @status="draftStatus = $event" />
+      <!-- A draft is saved only here or in the panel above: Draw.io never saves it for you. -->
+      <div v-if="draftStatus.hasDraft" class="sc-draft-bar" :data-state="draftStatus.dirty ? 'unsaved' : 'saved'" role="status">
+        <Save aria-hidden="true" />
+        <span><b>Draft revision {{ draftStatus.revision }}</b> · {{ draftStatus.dirty ? 'unsaved changes' : 'saved' }}<template v-if="draftStatus.editorActive"> · Draw.io is open and saves nothing by itself</template></span>
+        <button v-if="!draftStatus.editorActive" type="button" class="sc-btn sc-btn-sm sc-push" data-variant="primary" :disabled="draftStatus.busy" title="Opens this draft in Draw.io in a new tab. Close any older Draw.io tab first: it does not update by itself." @click="draftPanel?.openEditor()"><ExternalLink aria-hidden="true" />Open in Draw.io</button>
+        <button type="button" class="sc-btn sc-btn-sm" :class="{ 'sc-push': draftStatus.editorActive }" :data-variant="draftStatus.dirty ? 'primary' : undefined" :disabled="!draftStatus.dirty || draftStatus.busy" @click="draftPanel?.saveDraft()"><Save aria-hidden="true" />Save draft</button>
+      </div>
 
       <div v-if="runtimeError" class="sc-banner" data-tone="warn"><AlertTriangle aria-hidden="true" /><span>{{ runtimeError }}</span></div>
       <div v-if="loading" class="sc-card sc-loading" role="status"><RefreshCw class="sc-spin" aria-hidden="true" />Loading schema…</div>
@@ -349,7 +484,7 @@ const tableRuntimeMax = computed(() => Math.max(1, ...tableRuntime.value.map((ro
         <!-- Explorer -->
         <section class="sc-card" aria-labelledby="sc-schema-title">
           <div class="sc-sec-head">
-            <h2 id="sc-schema-title" class="sc-sec-title"><Table2 aria-hidden="true" />Original schema</h2>
+            <h2 id="sc-schema-title" class="sc-sec-title"><Table2 aria-hidden="true" />{{ schemaFromDraft ? 'Draft schema' : 'Original schema' }}</h2>
             <span class="sc-tag">{{ schema.tables.length }} tables</span>
             <span class="sc-tag">{{ schema.refs.length }} relationships</span>
             <span v-if="schema.warnings.length" class="sc-tag" data-tone="warn"><AlertTriangle aria-hidden="true" />{{ schema.warnings.length }} {{ schema.warnings.length === 1 ? 'warning' : 'warnings' }}</span>
@@ -358,46 +493,86 @@ const tableRuntimeMax = computed(() => Math.max(1, ...tableRuntime.value.map((ro
               <button type="button" class="sc-btn sc-btn-sm" @click="exportJson"><Download aria-hidden="true" />JSON</button>
             </div>
           </div>
-          <p class="sc-hint">This list shows the original source. Open a draft in Draw.io to see and edit the diagram.</p>
+          <p class="sc-hint">{{ schemaFromDraft ? 'This list shows the saved draft.' : 'This list shows the original source.' }} Edit the draft in Draw.io: your edits can be shown here with Show new changes, and the draft is saved only when you choose Save draft.</p>
+          <div v-if="shownChanges" class="sc-changes-bar" role="status">
+            <GitCompare aria-hidden="true" /><span><b>Changes from Draw.io</b> · {{ changeSummary }}</span>
+            <button type="button" class="sc-btn sc-btn-sm sc-push" @click="hideChanges"><EyeOff aria-hidden="true" />Hide changes</button>
+          </div>
+          <div class="sc-sec-head sc-mt">
+            <button type="button" class="sc-collapse" :aria-expanded="tablesOpen" aria-controls="sc-tables-body" @click="tablesOpen = !tablesOpen"><ChevronDown class="sc-collapse-chev" aria-hidden="true" /><Table aria-hidden="true" /><span>Tables</span><span class="sc-tag">{{ schema.tables.length }}</span></button>
+          </div>
+          <div v-show="tablesOpen" id="sc-tables-body">
           <label class="sc-search"><Search aria-hidden="true" /><span class="sr-only">Search tables and columns</span><input v-model="search" placeholder="Search tables and columns…" /></label>
           <p class="sc-hint">{{ visibleTables.length }} of {{ schema.tables.length }} tables shown</p>
 
           <div class="sc-tables">
             <button
-              v-for="table in visibleTables"
-              :key="table.id"
+              v-for="card in tableCards"
+              :key="card.key"
               type="button"
               class="sc-table"
-              :aria-pressed="selectedTableId === table.id"
-              @click="selectTable(table)"
+              :data-change="card.change?.status"
+              :aria-pressed="!!card.table && selectedTableId === card.table.id"
+              :aria-disabled="!card.table || undefined"
+              :title="card.change?.detail || (card.table ? undefined : 'New in Draw.io, not saved yet')"
+              @click="card.table && selectTable(card.table)"
             >
               <span class="sc-table-head">
                 <Table aria-hidden="true" />
-                <b>{{ table.schema ? table.schema + '.' : '' }}{{ table.name }}</b>
-                <span v-if="tableOps(table)" class="sc-heat" :style="{ opacity: 0.55 + 0.45 * (tableOps(table) / maxTableOps) }" :title="`${tableOps(table).toLocaleString()} observed operations`">{{ formatOps(tableOps(table)) }}</span>
+                <b>{{ card.name }}</b>
+                <span v-if="card.change" class="sc-chg" :data-status="card.change.status">{{ CHANGE_LABEL[card.change.status] }}</span>
+                <span v-if="card.table && tableOps(card.table)" class="sc-heat" :style="{ opacity: 0.55 + 0.45 * (tableOps(card.table) / maxTableOps) }" :title="`${tableOps(card.table).toLocaleString()} observed operations`">{{ formatOps(tableOps(card.table)) }}</span>
               </span>
               <span class="sc-cols">
-                <span v-for="field in table.fields.slice(0, PREVIEW_COLUMNS)" :key="field.id" class="sc-col" :data-key="field.primaryKey ? 'pk' : field.foreignKey ? 'fk' : undefined">
+                <span v-for="field in card.fields.slice(0, PREVIEW_COLUMNS)" :key="field.id" class="sc-col" :data-key="field.primaryKey ? 'pk' : field.foreignKey ? 'fk' : undefined">
                   <KeyRound v-if="field.primaryKey" aria-label="Primary key" />
                   <Link2 v-else-if="field.foreignKey" aria-label="Foreign key" />
                   <Minus v-else aria-hidden="true" />
                   <span class="sc-col-name">{{ field.name }}</span>
-                  <span class="sc-col-type">{{ field.type }}</span>
+                  <span class="sc-col-type" :title="field.type">{{ field.type }}</span>
                 </span>
-                <span v-if="table.fields.length > PREVIEW_COLUMNS" class="sc-col-more">+ {{ table.fields.length - PREVIEW_COLUMNS }} more {{ table.fields.length - PREVIEW_COLUMNS === 1 ? 'column' : 'columns' }}</span>
+                <span v-if="card.fields.length > PREVIEW_COLUMNS" class="sc-col-more">+ {{ card.fields.length - PREVIEW_COLUMNS }} more {{ card.fields.length - PREVIEW_COLUMNS === 1 ? 'column' : 'columns' }}</span>
+              </span>
+              <span v-if="card.change?.detail || card.change?.columns.length" class="sc-chg-list">
+                <span v-if="card.change.detail" class="sc-chg-item" data-status="changed"><span aria-hidden="true">~</span>{{ card.change.detail }}</span>
+                <span v-for="column in card.change.columns.slice(0, MAX_CHANGE_ROWS)" :key="column.status + column.name" class="sc-chg-item" :data-status="column.status"><span aria-hidden="true">{{ COLUMN_MARK[column.status] }}</span><b>{{ column.name }}</b><em v-if="column.detail">{{ column.detail }}</em></span>
+                <span v-if="card.change.columns.length > MAX_CHANGE_ROWS" class="sc-col-more">+ {{ card.change.columns.length - MAX_CHANGE_ROWS }} more {{ card.change.columns.length - MAX_CHANGE_ROWS === 1 ? 'change' : 'changes' }}</span>
               </span>
             </button>
           </div>
-          <p v-if="!visibleTables.length" class="sc-hint">No matching tables.</p>
+          <p v-if="!tableCards.length" class="sc-hint">No matching tables.</p>
+          </div>
 
-          <template v-if="schema.refs.length">
-            <div class="sc-sec-head sc-mt"><h3 class="sc-sec-title sc-sec-title-sm"><GitMerge aria-hidden="true" />Relationships</h3><span class="sc-tag">{{ schema.refs.length }}</span></div>
-            <div class="sc-rels">
-              <button v-for="relation in schema.refs" :key="relation.id" type="button" class="sc-rel" :aria-pressed="selectedRefId === relation.id" @click="selectRef(relation)">
-                <Link2 aria-hidden="true" />
-                <span class="sc-rel-text"><b>{{ tableLabel(relation.sourceTable) }}</b>.{{ relation.sourceColumn }} → <b>{{ tableLabel(relation.targetTable) }}</b>.{{ relation.targetColumn }}</span>
-                <span v-if="relation.cardinality" class="sc-rel-card">{{ relation.cardinality }}</span>
-              </button>
+          <template v-if="schema.refs.length || addedRelations.length">
+            <div class="sc-sec-head sc-mt">
+              <button type="button" class="sc-collapse" :aria-expanded="relationsOpen" aria-controls="sc-relations-body" @click="relationsOpen = !relationsOpen"><ChevronDown class="sc-collapse-chev" aria-hidden="true" /><GitMerge aria-hidden="true" /><span>Relationships</span><span class="sc-tag">{{ schema.refs.length }}</span></button>
+            </div>
+            <div v-show="relationsOpen" id="sc-relations-body" class="sc-relcards">
+              <div v-for="group in relationGroups" :key="group.key" class="sc-relcard">
+                <div class="sc-relcard-head"><Table aria-hidden="true" /><b>{{ group.name }}</b><span class="sc-tag">{{ group.out.length + group.in.length }}</span></div>
+                <template v-for="side in ([{ id: 'out', label: 'References' }, { id: 'in', label: 'Referenced by' }] as const)" :key="side.id">
+                  <template v-if="group[side.id].length">
+                    <p class="sc-relcard-label">{{ side.label }}</p>
+                    <component
+                      :is="row.ref ? 'button' : 'div'"
+                      v-for="row in group[side.id]"
+                      :key="row.key"
+                      :type="row.ref ? 'button' : undefined"
+                      class="sc-rel"
+                      :data-change="row.change"
+                      :aria-pressed="row.ref ? selectedRefId === row.ref.id : undefined"
+                      :title="row.change === 'added' ? 'New in Draw.io, not saved yet' : undefined"
+                      @click="row.ref && selectRef(row.ref)"
+                    >
+                      <Link2 aria-hidden="true" />
+                      <span v-if="side.id === 'out'" class="sc-rel-text"><b>{{ row.local }}</b> → <b>{{ row.other }}</b>.{{ row.otherColumn }}</span>
+                      <span v-else class="sc-rel-text"><b>{{ row.other }}</b>.{{ row.otherColumn }} → <b>{{ row.local }}</b></span>
+                      <span v-if="row.change" class="sc-chg" :data-status="row.change">{{ row.change === 'added' ? 'new' : 'removed' }}</span>
+                      <span v-else-if="row.cardinality" class="sc-rel-card">{{ row.cardinality }}</span>
+                    </component>
+                  </template>
+                </template>
+              </div>
             </div>
           </template>
         </section>
@@ -437,8 +612,8 @@ const tableRuntimeMax = computed(() => Math.max(1, ...tableRuntime.value.map((ro
                   <p class="sc-field-top">
                     <KeyRound v-if="field.primaryKey" class="sc-pk" aria-label="Primary key" />
                     <Link2 v-else-if="field.foreignKey" class="sc-fk" aria-label="Foreign key" />
-                    <span>{{ field.name }}</span>
-                    <span class="sc-push sc-field-type">{{ field.type }}</span>
+                    <span class="sc-field-name">{{ field.name }}</span>
+                    <span class="sc-field-type" :title="field.type">{{ field.type }}</span>
                   </p>
                   <p class="sc-field-tags">
                     <span v-if="field.primaryKey" class="sc-tag">primary key</span>
@@ -453,7 +628,7 @@ const tableRuntimeMax = computed(() => Math.max(1, ...tableRuntime.value.map((ro
 
             <div v-else-if="selectedRef" class="sc-card">
               <div class="sc-detail-head"><Link2 aria-hidden="true" /><b>{{ selectedRef.cardinality }} relationship</b><button type="button" class="sc-btn sc-btn-icon sc-btn-sm sc-push" aria-label="Close relationship details" @click="selectedRefId = ''"><X aria-hidden="true" /></button></div>
-              <p class="sc-ref-text">{{ selectedRef.description || `${tableLabel(selectedRef.sourceTable)}.${selectedRef.sourceColumn} → ${tableLabel(selectedRef.targetTable)}.${selectedRef.targetColumn}` }}</p>
+              <p class="sc-ref-text">{{ selectedRef.description || `${tableName(selectedRef.sourceTable)}.${selectedRef.sourceColumn} → ${tableName(selectedRef.targetTable)}.${selectedRef.targetColumn}` }}</p>
               <p class="sc-hint">Provenance: {{ selectedRef.provenance || 'static' }}</p>
             </div>
             <div v-else class="sc-card sc-hint sc-m0">Select a table or relationship for details.</div>

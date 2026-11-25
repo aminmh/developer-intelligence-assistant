@@ -113,3 +113,51 @@ def test_delete_removes_draft_and_reports_missing(stores, schema):
     with pytest.raises(DraftNotFound):
         drafts.delete(draft["id"])
     assert drafts.list() == []
+
+
+def test_copy_keeps_the_baseline_and_edits_and_leaves_the_original_untouched(stores, schema):
+    _, drafts = stores
+    original = drafts.create(schema, analysis_id="analysis-1", layout="<mxfile/>")
+    edited = deepcopy(schema)
+    edited["tables"][0]["name"] = "accounts"
+    saved = drafts.save(original["id"], edited, "<mxfile>edited</mxfile>", 1)
+    changed_again = deepcopy(edited)
+    changed_again["tables"][0]["columns"].append({"id": "column-new", "name": "nickname", "type": "text", "nullable": True})
+
+    copy = drafts.copy(original["id"], changed_again, "<mxfile>copy</mxfile>")
+
+    assert copy["id"] != original["id"] and copy["revision"] == 1
+    assert copy["schema"]["tables"][0]["name"] == "accounts"
+    assert [c["name"] for c in copy["schema"]["tables"][0]["columns"]] == ["id", "email", "nickname"]
+    assert copy["layout"] == "<mxfile>copy</mxfile>"
+    assert copy["baseline"] == saved["baseline"], "migrations still compare against the same baseline"
+    assert copy["analysis_id"] is None and copy["source_kind"] == "import", "an analysis allows one draft, so its copy is an import draft"
+    untouched = drafts.get(original["id"])
+    assert untouched["schema"]["tables"][0]["name"] == "accounts" and untouched["revision"] == 2
+    assert untouched["schema"]["tables"][0]["columns"][-1]["name"] == "email"
+
+
+def test_copy_validates_the_schema_and_the_source_draft(stores, schema):
+    _, drafts = stores
+    draft = drafts.create(schema)
+    invalid = deepcopy(schema)
+    invalid["relationships"][0]["target_column_ids"] = ["missing"]
+    with pytest.raises(ValueError):
+        drafts.copy(draft["id"], invalid, "")
+    with pytest.raises(ValueError):
+        drafts.copy(draft["id"], schema, "x" * (MAX_LAYOUT_BYTES + 1))
+    with pytest.raises(DraftNotFound):
+        drafts.copy("missing", schema, "")
+    assert len(drafts.list()) == 1, "a rejected copy creates nothing"
+
+
+def test_copy_carries_runtime_provenance(stores, schema):
+    _, drafts = stores
+    provenance = {'project_id': 'shop', 'environment': 'development', 'host_id': 'a' * 64, 'container_id': 'b' * 64,
+                  'image_id': 'sha256:' + 'c' * 64, 'engine': 'postgresql', 'engine_version': '17.1', 'database': 'shop',
+                  'schemas': ['public'], 'extracted_at': '2026-11-14T10:00:00+00:00',
+                  'coverage': {'warnings': ['Check constraints require manual migration'], 'complete': False}}
+    draft = drafts.create(schema, provenance=provenance)
+    copy = drafts.copy(draft["id"], schema, "<mxfile/>")
+    assert copy["provenance"] == draft["provenance"] == provenance
+    assert [item["source_kind"] for item in drafts.list()].count("runtime") == 2

@@ -144,3 +144,35 @@ test('draft deletion forwards DELETE only for administrators from the applicatio
     assert.equal(allowed.statusCode, 200); assert.equal(allowed.body.deleted, true); assert.equal(calls, 1);
   } finally { globalThis.fetch = original; }
 });
+
+test('copying a draft forwards the working schema and layout only for administrators from the application origin', async () => {
+  const routes = new Map<string, (...args: any[]) => Promise<any>>();
+  const app = Object.fromEntries(['get', 'post', 'put', 'delete'].map((method) => [method,
+    (path: string, handler: (...args: any[]) => Promise<any>) => routes.set(`${method.toUpperCase()} ${path}`, handler)]));
+  let admin = false;
+  registerSchemaDraftRoutes(app as any, { apiUrl: 'http://python-api', internalSecret: 's'.repeat(40),
+    webOrigin: 'http://localhost:3000', getUser: () => ({ sub: 'alice' }), isGlobalAdmin: () => admin });
+  const response = () => ({ statusCode: 200, body: undefined as any,
+    status(code: number) { this.statusCode = code; return this; }, json(body: unknown) { this.body = body; return this; } });
+  const req = { method: 'POST', params: { draftId: 'draft/1' }, body: { schema: { version: 1 }, layout: '<mxfile/>' }, get: () => 'http://localhost:3000' };
+  let calls = 0;
+  const original = globalThis.fetch;
+  globalThis.fetch = (async (url, init) => {
+    calls++;
+    assert.equal(url, 'http://python-api/schema-drafts/draft%2F1/copy');
+    assert.equal(init?.method, 'POST');
+    assert.deepEqual(JSON.parse(String(init?.body)), { schema: { version: 1 }, layout: '<mxfile/>' });
+    return new Response(JSON.stringify({ id: 'copy-1', revision: 1 }), { status: 201 });
+  }) as typeof fetch;
+  try {
+    const handler = routes.get('POST /api/schema-drafts/:draftId/copy')!;
+    assert.ok(handler);
+    const denied = response(); await handler(req, denied);
+    assert.equal(denied.statusCode, 403); assert.equal(calls, 0);
+    admin = true;
+    const crossOrigin = response(); await handler({ ...req, get: () => 'http://other' }, crossOrigin);
+    assert.equal(crossOrigin.statusCode, 403); assert.equal(calls, 0);
+    const allowed = response(); await handler(req, allowed);
+    assert.equal(allowed.statusCode, 201); assert.equal(allowed.body.id, 'copy-1'); assert.equal(calls, 1);
+  } finally { globalThis.fetch = original; }
+});

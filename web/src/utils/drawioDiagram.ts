@@ -109,6 +109,34 @@ type Index = { id: string; name: string; unique: boolean; column_ids: string[] }
 type Relationship = { id: string; name: string | null; source_table_id: string; source_column_ids: string[]; target_table_id: string; target_column_ids: string[]; on_delete: 'cascade' | 'restrict' | 'set null' | 'no action' | 'set default' | null; on_update: 'cascade' | 'restrict' | 'set null' | 'no action' | 'set default' | null };
 type Schema = { tables: Array<{ id: string; name: string; namespace: string | null; columns: Column[]; inspection_metadata?: string[]; keys: Key[]; indexes: Index[] }>; relationships: Relationship[] };
 
+const SCHEMA_CELL_ID = /^(?:(?:table|column|relationship)-|schema-metadata$)/;
+
+/** Draw.io wraps a shape in <object> (or <UserObject>) as soon as it gets properties, a link or a tooltip. */
+function customDataError(wrapper: Element, cell: Element): Error {
+  const id = wrapper.getAttribute('id') || cell.getAttribute('id') || '';
+  const kind = id.startsWith('table-') ? 'table' : id.startsWith('column-') ? 'column' : id.startsWith('relationship-') ? 'relationship' : 'schema data shape';
+  const label = (wrapper.getAttribute('label') ?? cell.getAttribute('value') ?? '').replace(/\s+/g, ' ').trim().slice(0, 60);
+  const names = [...wrapper.attributes].map(attribute => attribute.name).filter(name => !['id', 'label'].includes(name));
+  const what = names.length ? `custom Draw.io data (${names.join(', ')})` : 'a Draw.io wrapper it cannot read';
+  return new Error(`The ${kind}${label ? ` "${label}"` : ''} has ${what}, and that cannot be saved. Select it, open Edit Data (Ctrl+M), delete the extra properties and save again. To add a column, select its table and use Extras → Add schema column instead.`);
+}
+
+/**
+ * Replace a wrapper that holds nothing but the shape's id and label with the plain cell it stands for, so
+ * opening and closing Edit Data on a table or column does not block saving. Wrappers carrying real data stay.
+ */
+function unwrapSchemaShapes(document: Document): void {
+  for (const wrapper of [...document.querySelectorAll('object, UserObject')]) {
+    const cell = [...wrapper.children].find(child => child.tagName === 'mxCell');
+    const id = wrapper.getAttribute('id') || '';
+    if (!cell || !SCHEMA_CELL_ID.test(id) || cell.getAttribute('id')) continue;
+    if ([...wrapper.attributes].some(attribute => !['id', 'label'].includes(attribute.name))) continue;
+    cell.setAttribute('id', id);
+    if (wrapper.hasAttribute('label')) cell.setAttribute('value', wrapper.getAttribute('label') ?? '');
+    wrapper.replaceWith(cell);
+  }
+}
+
 /** Read only explicitly identified schema cells; all other shapes are annotations. */
 export function schemaFromDrawio(xml: string, original: unknown, requireMetadata = false): unknown {
   const schema = structuredClone(original) as Schema;
@@ -124,10 +152,11 @@ export function schemaFromDrawio(xml: string, original: unknown, requireMetadata
   const document = new DOMParser().parseFromString(xml, 'application/xml');
   if (document.querySelector('parsererror') || document.querySelectorAll('mxGraphModel').length !== 1) throw new Error('The diagram must contain one uncompressed page.');
   const cells = new Map<string, Element>();
+  unwrapSchemaShapes(document);
   for (const cell of document.querySelectorAll('mxCell')) {
     const wrapper = cell.parentElement;
-    if (wrapper && wrapper.tagName !== 'root' && [wrapper.getAttribute('id'), cell.getAttribute('id')].some(id => /^(?:(table|column|relationship)-|schema-metadata$)/.test(id || ''))) {
-      throw new Error('Schema shapes with custom Draw.io data cannot be saved yet. Remove the custom data and retry; the last valid draft is preserved.');
+    if (wrapper && wrapper.tagName !== 'root' && [wrapper.getAttribute('id'), cell.getAttribute('id')].some(id => SCHEMA_CELL_ID.test(id || ''))) {
+      throw customDataError(wrapper, cell);
     }
     const id = cell.getAttribute('id');
     if (!id) continue;

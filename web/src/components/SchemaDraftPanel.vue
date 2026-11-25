@@ -1,7 +1,7 @@
 <script setup lang="ts">
-import { computed, onMounted, onUnmounted, ref, watch } from 'vue';
+import { computed, nextTick, onMounted, onUnmounted, ref, watch } from 'vue';
 import StructuredSchemaEditor from './StructuredSchemaEditor.vue';
-import { AlertTriangle, Check, ChevronDown, Download, ExternalLink, Eye, FileCode, GitCompare, PencilRuler, Plus, RefreshCw, Save, Unplug } from 'lucide-vue-next';
+import { AlertTriangle, Check, ChevronDown, Download, ExternalLink, Eye, FileCode, GitCompare, PencilRuler, Plus, RefreshCw, Save, Trash2, Unplug } from 'lucide-vue-next';
 import { attachmentFilename } from '../utils/migrationPreview';
 import type { NormalizedSchema, StructuredSchemaDraft, SavedSchemaDraft } from '../types';
 import { makeRequest } from '../ui/makeRequest';
@@ -12,9 +12,15 @@ import { createDrawioDiagram, initializeDrawioMetadata, rebuildDrawioDiagram, sc
 import { readMigrationRequest, readSchemaExportRequest, readInspectionRequest, type DrawioMigrationRequest, type DrawioSchemaExportRequest } from '../utils/drawioMigrationBridge';
 import { trackSchemaIdentities } from '../utils/schemaIdentity';
 import { structuredSchemaToDbml } from '../utils/schemaDbml';
+import { sameStructuredSchema } from '../utils/schemaChanges';
 
-const props = defineProps<{ schema: NormalizedSchema | null; sourceType: string; analysisId: string; runtimeCounts: Record<string, number>; selection: SchemaSelection | null }>();
-const emit = defineEmits<{ selectEntity: [selection: SchemaSelection] }>();
+const props = defineProps<{ schema: NormalizedSchema | null; /** True when the explorer is showing the open draft itself rather than an analysis or import. */ schemaIsDraft?: boolean; sourceType: string; analysisId: string; runtimeCounts: Record<string, number>; selection: SchemaSelection | null }>();
+// `editorSchema` carries what is in Draw.io right now next to the saved draft it started from (null when the editor
+// closes). It is never saved: it only feeds "Show new changes", and a draft is saved only when the developer chooses
+// Save draft. `draftSchema` is the saved draft itself, so the explorer can show it when no other source is loaded.
+const emit = defineEmits<{ selectEntity: [selection: SchemaSelection]; editorSchema: [state: { baseline: unknown; schema: unknown } | null]; draftSchema: [schema: unknown | null]; status: [status: DraftStatus] }>();
+// What the explorer shows next to the schema, so the manual-save state is visible even while this panel is closed.
+export type DraftStatus = { hasDraft: boolean; dirty: boolean; editorActive: boolean; busy: boolean; revision: number };
 type Draft = SavedSchemaDraft;
 type DraftRow = Pick<Draft, 'id' | 'analysis_id' | 'source_kind' | 'revision'>;
 const rows = ref<DraftRow[]>([]);
@@ -33,14 +39,14 @@ let handshakeTimer: ReturnType<typeof setTimeout> | undefined;
 let closedWatcher: ReturnType<typeof setInterval> | undefined;
 let editorReady = false;
 const migrationBusy = ref(false);
-let migrationFinished: Promise<void> = Promise.resolve();
+let liveTimer: ReturnType<typeof setTimeout> | undefined;
+let lastLiveSchema: unknown;
 let editorSaveGeneration = 0;
-let saveQueue: Promise<void> = Promise.resolve();
-const queuedEditorSaves = ref(0);
 let editorPreview: { xml: string; draftId: string; revision: number; request: MigrationRequest; preview: Preview } | null = null;
 const busy = ref(false);
 const message = toastMessage('success');
 const error = toastMessage('error');
+class UnsavedDraftError extends Error {}
 const draftRecoveryWarning = ref('');
 const rejectedRecoveryWarning = ref('');
 const dirty = computed(() => !!current.value && (text.value !== savedText.value || layout.value !== savedLayout.value));
@@ -52,6 +58,7 @@ type MigrationRequest = { framework: string; database: string; revision: number;
 type Preview = { operations: unknown[]; files: { name: string; content: string }[]; warnings: string[]; generation_blocked: boolean; generation_error: string | null; requires_confirmation: boolean; preview_token: string };
 const preview = ref<Preview | null>(null);
 const previewRequest = ref<MigrationRequest | null>(null);
+const previewSection = ref<HTMLElement | null>(null);
 let previewGeneration = 0;
 function clearPreview() { preview.value = null; previewRequest.value = null; confirmation.value = false; previewGeneration++; }
 watch([framework, database, timestamp, text, layout, current], clearPreview, { flush: 'sync' });
@@ -64,7 +71,13 @@ async function previewMigration() {
   busy.value = true;
   try {
     const result = await request(`/api/schema-drafts/${encodeURIComponent(draftId)}/migration-preview`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload) });
-    if (generation === previewGeneration) { preview.value = result; previewRequest.value = payload; }
+    if (generation === previewGeneration) {
+      preview.value = result; previewRequest.value = payload;
+      // The preview (or the reason it was blocked) is rendered far below the Preview button: bring it into view.
+      await nextTick();
+      previewSection.value?.scrollIntoView({ block: 'start', behavior: window.matchMedia('(prefers-reduced-motion: reduce)').matches ? 'auto' : 'smooth' });
+      previewSection.value?.focus({ preventScroll: true });
+    }
   } catch (cause: any) { error.value = cause.message || 'Could not preview migration.'; }
   finally { busy.value = false; }
 }
@@ -117,8 +130,10 @@ function warnBeforeUnload(event: BeforeUnloadEvent) {
 function closeEditor() {
   if (handshakeTimer) clearTimeout(handshakeTimer);
   if (closedWatcher) clearInterval(closedWatcher);
-  closedWatcher = undefined;
+  if (liveTimer) clearTimeout(liveTimer);
+  closedWatcher = undefined; liveTimer = undefined; lastLiveSchema = undefined;
   window.removeEventListener('message', onEditorMessage);
+  emit('editorSchema', null);
   popup = null; editorReady = false; editorActive.value = false; editorPreview = null; editorSchemaBaseline = null; editorIdentities = new Map();
 }
 function sendRuntimeCounts() {
@@ -133,6 +148,22 @@ function revealSelection() {
   popup.focus();
 }
 watch(() => props.runtimeCounts, sendRuntimeCounts);
+// Draw.io reports every edit. Read it after a short pause and hand the schema to the explorer; nothing is saved.
+function publishLiveSchema(xml: string) {
+  if (liveTimer) clearTimeout(liveTimer);
+  liveTimer = setTimeout(() => {
+    if (!popup || !editorReady || !editorSchemaBaseline) return;
+    try { announceLiveSchema(schemaFromDrawio(xml, editorSchemaBaseline, true)); }
+    catch { /* A diagram that is mid-edit cannot be read yet; the last readable state stays. */ }
+  }, 400);
+}
+function announceLiveSchema(schema: unknown) {
+  lastLiveSchema = schema;
+  try { emit('editorSchema', { baseline: JSON.parse(savedText.value), schema }); } catch { /* No saved draft to compare with. */ }
+}
+function closedMessage() {
+  return dirty.value ? 'Draw.io closed. Your Draw.io changes are unsaved here: choose Save draft to keep them.' : 'Draw.io closed.';
+}
 function handleSchemaExport(event: DrawioSchemaExportRequest, editor: Window, origin: string) {
   try {
     if (!current.value) throw new Error('The draft is unavailable.');
@@ -147,13 +178,11 @@ function handleSchemaExport(event: DrawioSchemaExportRequest, editor: Window, or
   }
 }
 async function handleEditorMigration(event: DrawioMigrationRequest, editor: Window, origin: string) {
-  if (!current.value || migrationBusy.value || queuedEditorSaves.value) {
-    editor.postMessage(JSON.stringify({ action: 'schema-migration-result', requestId: event.requestId, ok: false, error: migrationBusy.value || queuedEditorSaves.value ? 'A save or migration request is in progress. Try again shortly.' : 'The draft is unavailable.' }), origin);
+  if (!current.value || migrationBusy.value) {
+    editor.postMessage(JSON.stringify({ action: 'schema-migration-result', requestId: event.requestId, ok: false, error: migrationBusy.value ? 'A migration request is in progress. Try again shortly.' : 'The draft is unavailable.' }), origin);
     return;
   }
   migrationBusy.value = true;
-  let finishMigration!: () => void;
-  migrationFinished = new Promise(resolve => { finishMigration = resolve; });
   const saveGeneration = editorSaveGeneration;
   const startingDraftId = current.value.id;
   const reply = (payload: Record<string, unknown>) => {
@@ -166,19 +195,13 @@ async function handleEditorMigration(event: DrawioMigrationRequest, editor: Wind
       const schema = schemaFromDrawio(event.xml, editorSchemaBaseline, true);
       trackSchemaIdentities(schema, editorIdentities);
       const draftId = current.value.id;
-      const previousText = text.value;
-      const previousLayout = layout.value;
-      const draft = await request(`/api/schema-drafts/${encodeURIComponent(draftId)}`, { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ schema, layout: event.xml, revision: current.value.revision }) });
-      if (!current.value || current.value.id !== draftId) return;
-      if (editorSaveGeneration !== saveGeneration || text.value !== previousText || layout.value !== previousLayout) {
-        current.value = draft;
-        savedText.value = JSON.stringify(draft.schema, null, 2);
-        savedLayout.value = draft.layout;
-        rememberEdits();
-        throw new Error('The diagram was saved again during preview. Your newer changes are preserved; generate a new preview.');
+      // The preview describes the saved draft. Draw.io changes are never saved for the developer, so an unsaved diagram
+      // has to be saved from this page first.
+      if (!sameStructuredSchema(schema, JSON.parse(savedText.value))) {
+        throw new UnsavedDraftError('This diagram has changes that are not saved to the draft. Save in Draw.io, choose Save draft on the page, then preview the migration.');
       }
-      clearRecovery(draftId); adopt(draft); rememberRejectedLayout('');
       if (popup !== editor || !editorReady) return;
+      const draft = current.value;
       const migrationRequest = { framework: event.framework, database: event.database, revision: draft.revision, migration_timestamp: event.timestamp };
       const result = await request(`/api/schema-drafts/${encodeURIComponent(draftId)}/migration-preview`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(migrationRequest) });
       if (popup !== editor || !current.value || current.value.id !== draftId || current.value.revision !== draft.revision) return;
@@ -198,31 +221,12 @@ async function handleEditorMigration(event: DrawioMigrationRequest, editor: Wind
       reply({ ok: true, filename, content });
     }
   } catch (cause: any) {
-    if (event.event === 'schema-migration-preview' && editorSaveGeneration === saveGeneration && popup === editor && current.value?.id === startingDraftId) rememberRejectedLayout(event.xml);
+    if (event.event === 'schema-migration-preview' && !(cause instanceof UnsavedDraftError) && editorSaveGeneration === saveGeneration && popup === editor && current.value?.id === startingDraftId) rememberRejectedLayout(event.xml);
     reply({ ok: false, error: cause.message || 'Migration request failed.' });
-  } finally { migrationBusy.value = false; finishMigration(); }
+  } finally { migrationBusy.value = false; }
 }
 function disconnectEditor() {
   if (window.confirm('Disconnect Draw.io? Changes not yet saved in Draw.io will not reach this draft.')) closeEditor();
-}
-function queueEditorSave(draftId: string, schema: unknown, xml: string, editor: Window, origin: string) {
-  queuedEditorSaves.value++;
-  saveQueue = saveQueue.then(async () => {
-    await migrationFinished;
-    if (!current.value || current.value.id !== draftId) throw new Error('The draft changed before the editor save completed.');
-    const draft = await request(`/api/schema-drafts/${encodeURIComponent(draftId)}`, { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ schema, layout: xml, revision: current.value.revision }) });
-    if (!current.value || current.value.id !== draftId) return;
-    current.value = draft;
-    savedText.value = JSON.stringify(draft.schema, null, 2);
-    savedLayout.value = draft.layout;
-    rememberEdits();
-    message.value = dirty.value ? 'Draft saved; newer edits remain unsaved.' : 'Draw.io changes saved to the draft.';
-  }).catch((cause: any) => {
-    const failure = `${cause.message || 'Could not save the Draw.io draft.'} Your edits remain available for recovery.`;
-    error.value = failure;
-    if (popup === editor && editorReady) editor.postMessage(JSON.stringify({ action: 'schema-draft-save-result', ok: false, error: failure }), origin);
-    rememberEdits();
-  }).finally(() => { queuedEditorSaves.value--; });
 }
 function onEditorMessage(event: MessageEvent) {
   if (!popup) return;
@@ -249,14 +253,15 @@ function onEditorMessage(event: MessageEvent) {
   if (migrationRequest && editorReady) { void handleEditorMigration(migrationRequest, popup, origin); return; }
   const messageData = readEditorEvent(event, origin, popup);
   if (!messageData) return;
+  if (messageData.event === 'autosave') { if (editorReady) publishLiveSchema(messageData.xml); return; }
   if (editorReady && (messageData.event === 'save' || messageData.event === 'invalid' || messageData.event === 'oversize')) editorSaveGeneration++;
   if (messageData.event === 'init' && !editorReady) {
     editorReady = true;
     if (handshakeTimer) clearTimeout(handshakeTimer);
-    popup.postMessage(JSON.stringify({ action: 'load', xml: layout.value, autosave: 0 }), origin);
+    popup.postMessage(JSON.stringify({ action: 'load', xml: layout.value, autosave: 1 }), origin);
     popup.postMessage(JSON.stringify({ action: 'schema-migration-host' }), origin);
     sendRuntimeCounts();
-    message.value = 'Draw.io is open. Save there to update the draft.';
+    message.value = 'Draw.io is open. Your edits appear in the schema view under Show new changes. Nothing is saved until you choose Save draft.';
   } else if (messageData.event === 'oversize' && editorReady) {
     const failure = 'The editor message exceeds the size limit and was not retained. Reduce the diagram size in Draw.io and save again; the last valid draft is preserved.';
     error.value = failure;
@@ -273,7 +278,9 @@ function onEditorMessage(event: MessageEvent) {
       text.value = JSON.stringify(schema, null, 2);
       layout.value = messageData.xml;
       rememberEdits(); error.value = ''; rememberRejectedLayout('');
-      if (current.value) queueEditorSave(current.value.id, schema, messageData.xml, popup, origin);
+      // Saving in Draw.io only brings the diagram into this page. The draft changes when the developer chooses Save draft.
+      message.value = 'Draw.io changes are in the editor but not saved to the draft. Choose Save draft to keep them.';
+      announceLiveSchema(schema);
       if (messageData.exit) { popup.close(); closeEditor(); }
     } catch (cause: any) {
       rememberRejectedLayout(messageData.xml);
@@ -283,11 +290,11 @@ function onEditorMessage(event: MessageEvent) {
     }
   } else if (messageData.event === 'exit' && editorReady) {
     closeEditor();
-    message.value = queuedEditorSaves.value ? 'Draw.io closed. Saving the draft…' : 'Draw.io closed.';
+    message.value = closedMessage();
   }
 }
 function openEditor(reservedWindow: Window | null = null): boolean {
-  if (!current.value || editorActive.value || queuedEditorSaves.value || migrationBusy.value) return false;
+  if (!current.value || editorActive.value || migrationBusy.value) return false;
   error.value = ''; message.value = '';
   try {
     if (text.value !== savedText.value) throw new Error('Save structured schema edits before opening Draw.io.');
@@ -323,7 +330,7 @@ function openEditor(reservedWindow: Window | null = null): boolean {
     closedWatcher = setInterval(() => {
       if (popup !== watched || !watched.closed) return;
       closeEditor();
-      message.value = queuedEditorSaves.value ? 'Draw.io closed. Saving the draft…' : 'Draw.io closed.';
+      message.value = closedMessage();
     }, 500);
     handshakeTimer = setTimeout(() => {
       if (!editorReady) { closeEditor(); error.value = 'Draw.io did not connect. Check the editor service and browser isolation, then retry. The draft is preserved.'; }
@@ -337,7 +344,7 @@ function openEditor(reservedWindow: Window | null = null): boolean {
   }
 }
 function rebuildLayout() {
-  if (!current.value || editorActive.value || queuedEditorSaves.value || migrationBusy.value || text.value !== savedText.value) return;
+  if (!current.value || editorActive.value || migrationBusy.value || text.value !== savedText.value) return;
   error.value = ''; message.value = '';
   try {
     const rebuilt = rebuildDrawioDiagram(layout.value, current.value.schema, () => window.confirm('Rebuild the diagram from the saved schema? Existing positions and annotations will be lost.'));
@@ -349,7 +356,7 @@ function rebuildLayout() {
 }
 
 function canLoadRuntimeDraft(): boolean {
-  if (busy.value || editorActive.value || queuedEditorSaves.value || migrationBusy.value) {
+  if (busy.value || editorActive.value || migrationBusy.value) {
     error.value = 'Finish the current draft operation and close the Draw.io session before loading a Runtime schema.';
     return false;
   }
@@ -367,7 +374,7 @@ function acceptRuntimeDraft(draft: SavedSchemaDraft, reservedWindow: Window | nu
   }
   return openEditor(reservedWindow);
 }
-defineExpose({ acceptRuntimeDraft, canLoadRuntimeDraft });
+defineExpose({ acceptRuntimeDraft, canLoadRuntimeDraft, saveDraft, saveAsNewDraft, openEditor });
 
 async function request(path: string, init?: RequestInit) {
   const response = await makeRequest(path, init);
@@ -416,11 +423,11 @@ function adopt(draft: Draft, recover = false): boolean {
   return recovered;
 }
 function canReplace() {
-  if (queuedEditorSaves.value || migrationBusy.value) { error.value = 'Wait for the current save or migration request to finish.'; return false; }
+  if (migrationBusy.value) { error.value = 'Wait for the current migration request to finish.'; return false; }
   if (editorActive.value) { error.value = 'Close the Draw.io session before switching drafts.'; return false; }
   if (!mayReplaceRejectedLayout(rejectedLayout.value, !rejectedRecoveryWarning.value, () => window.confirm('Local recovery is unavailable. Discard the rejected diagram and switch drafts? Download it first if you want to keep it.'))) return false;
   if (!dirty.value) return true;
-  if (!window.confirm('Discard unsaved draft changes?')) return false;
+  if (!window.confirm('This draft has unsaved changes. They are not copied to the draft you switch to or create next, and they will be lost. Cancel and choose Save draft (or Save as new draft) to keep them. Discard them?')) return false;
   return true;
 }
 async function openDraft(id = selected.value) {
@@ -437,7 +444,7 @@ async function openDraft(id = selected.value) {
 async function deleteDraft(id = selected.value) {
   if (!id || busy.value) return;
   const isCurrent = current.value?.id === id;
-  if (isCurrent && (editorActive.value || queuedEditorSaves.value || migrationBusy.value)) { error.value = 'Close the Draw.io session and wait for saves to finish before deleting this draft.'; return; }
+  if (isCurrent && (editorActive.value || migrationBusy.value)) { error.value = 'Close the Draw.io session before deleting this draft.'; return; }
   const row = rows.value.find(item => item.id === id);
   if (!window.confirm(`Delete draft "${row ? draftLabel(row) : id}" permanently? Its diagram and edits cannot be recovered. The database it was loaded from is not touched.`)) return;
   busy.value = true; error.value = ''; message.value = '';
@@ -453,6 +460,28 @@ async function deleteDraft(id = selected.value) {
   } catch (cause: any) { error.value = cause.message || 'Could not delete draft.'; }
   finally { busy.value = false; }
 }
+async function deleteAllDrafts() {
+  if (!rows.value.length || busy.value) return;
+  if (editorActive.value || migrationBusy.value) { error.value = 'Close the Draw.io session before removing drafts.'; return; }
+  const count = rows.value.length;
+  if (!window.confirm(`Remove all ${count} ${count === 1 ? 'draft' : 'drafts'} permanently? Their diagrams and any unsaved edits cannot be recovered. The databases they were loaded from are not touched.`)) return;
+  busy.value = true; error.value = ''; message.value = '';
+  const failures: string[] = [];
+  try {
+    for (const row of [...rows.value]) {
+      try { await request(`/api/schema-drafts/${encodeURIComponent(row.id)}`, { method: 'DELETE' }); clearRecovery(row.id); }
+      catch (cause: any) { failures.push(cause?.message || 'A draft could not be removed.'); }
+    }
+    await refresh();
+    if (current.value && !rows.value.some(row => row.id === current.value?.id)) {
+      current.value = null;
+      text.value = ''; savedText.value = ''; layout.value = ''; savedLayout.value = ''; rejectedLayout.value = '';
+    }
+    if (!rows.value.some(row => row.id === selected.value)) selected.value = '';
+    if (failures.length) error.value = `Removed ${count - failures.length} of ${count} drafts. ${failures[0]}`;
+    else message.value = count === 1 ? 'Draft removed.' : `All ${count} drafts removed.`;
+  } finally { busy.value = false; }
+}
 const restrictedTables = computed(() => (current.value?.provenance?.coverage.warnings ?? [])
   .map(warning => /for (\S+) before editing/.exec(warning)?.[1] ?? warning).join(', '));
 function draftLabel(row: DraftRow & { provenance?: { database?: string; environment?: string; extracted_at?: string } }) {
@@ -461,22 +490,29 @@ function draftLabel(row: DraftRow & { provenance?: { database?: string; environm
     ? `runtime · ${row.provenance.database} · ${row.provenance.environment} · ${when} · revision ${row.revision}`
     : `${row.source_kind} · ${row.analysis_id || row.id} · revision ${row.revision}`;
 }
+// A draft can only start from a real source: a saved analysis or an import, not from the draft being shown.
+const sourceProblem = computed(() => {
+  if (!props.schema) return 'Load a schema first.';
+  if (props.schemaIsDraft) return 'No original source is loaded. Choose a saved analysis or import a schema to start a draft from it. To copy the open draft with your edits, use Save as new draft.';
+  if (props.sourceType === 'saved' && !props.analysisId) return 'Choose a saved analysis first.';
+  return '';
+});
 async function createDraft() {
+  if (sourceProblem.value) { error.value = sourceProblem.value; return; }
   if (!props.schema || !canReplace()) return;
   busy.value = true; error.value = ''; message.value = '';
   try {
     const saved = props.sourceType === 'saved';
-    if (saved && !props.analysisId) throw new Error('Select an analysis first.');
     const path = saved ? `/api/schema-drafts/analysis/${encodeURIComponent(props.analysisId)}` : '/api/schema-drafts/import';
     const body = saved ? undefined : JSON.stringify({ schema: importDraftSchema(props.schema) });
     const draft = await request(path, { method: 'POST', ...(body ? { headers: { 'Content-Type': 'application/json' }, body } : {}) });
     if (current.value && dirty.value) clearRecovery(current.value.id);
-    adopt(draft); message.value = 'Draft created. Its baseline remains unchanged.'; await refresh();
+    adopt(draft); message.value = 'New draft created from the original source. It does not include edits made in other drafts; use Save as new draft to copy edits.'; await refresh();
   } catch (cause: any) { error.value = cause.message || 'Could not create draft.'; }
   finally { busy.value = false; }
 }
 async function saveDraft() {
-  if (!current.value || editorActive.value || queuedEditorSaves.value || migrationBusy.value) return;
+  if (!current.value || migrationBusy.value) return;
   busy.value = true; error.value = ''; message.value = '';
   try {
     if (layout.value && !validLayout(layout.value)) throw new Error('The diagram layout is invalid or too large.');
@@ -485,15 +521,47 @@ async function saveDraft() {
     const draft = await request(`/api/schema-drafts/${encodeURIComponent(current.value.id)}`, { method: 'PUT',
       headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ schema, layout: layout.value, revision: current.value.revision }) });
     clearRecovery(draft.id); adopt(draft); message.value = 'Draft saved.'; await refresh();
+    if (editorActive.value && lastLiveSchema !== undefined) announceLiveSchema(lastLiveSchema);
   } catch (cause: any) { error.value = `${cause.message || 'Could not save draft.'} Your edits remain in the editor; copy them before reopening a newer revision.`; }
   finally { busy.value = false; }
 }
+// Copies what is in the editor now, unsaved edits included, into a new draft. The open draft stays as it was last saved.
+async function saveAsNewDraft() {
+  if (!current.value || busy.value || migrationBusy.value) return;
+  busy.value = true; error.value = ''; message.value = '';
+  try {
+    if (layout.value && !validLayout(layout.value)) throw new Error('The diagram layout is invalid or too large.');
+    let schema: unknown;
+    try { schema = JSON.parse(text.value); } catch { throw new Error('The draft is not valid JSON. Your edits are still here.'); }
+    const copy = await request(`/api/schema-drafts/${encodeURIComponent(current.value.id)}/copy`, { method: 'POST',
+      headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ schema, layout: layout.value }) });
+    if (dirty.value) clearRecovery(current.value.id);
+    const wasOpenInEditor = editorActive.value;
+    adopt(copy);
+    message.value = wasOpenInEditor
+      ? 'Saved as a new draft. Draw.io is still showing the previous draft: close it and open this draft in Draw.io to keep editing.'
+      : 'Saved as a new draft. The previous draft is unchanged.';
+    await refresh();
+  } catch (cause: any) { error.value = `${cause.message || 'Could not save a new draft.'} Your edits remain in the editor.`; }
+  finally { busy.value = false; }
+}
+// The panel holds Save draft and Remove all drafts, so it opens by itself once there is a draft to work with.
+const panelOpen = ref(false);
+watch(() => rows.value.length > 0 || !!current.value, (has) => { if (has) panelOpen.value = true; });
+watch(savedText, (value) => {
+  let parsed: unknown = null;
+  try { parsed = value ? JSON.parse(value) : null; } catch { parsed = null; }
+  emit('draftSchema', parsed);
+}, { immediate: true });
+watch([() => !!current.value, dirty, editorActive, busy, () => current.value?.revision ?? 0],
+  ([hasDraft, isDirty, active, working, revision]) => emit('status', { hasDraft, dirty: isDirty, editorActive: active, busy: working, revision }),
+  { immediate: true });
 onMounted(() => { window.addEventListener('beforeunload', warnBeforeUnload); void refresh(); });
 onUnmounted(() => { closeEditor(); window.removeEventListener('beforeunload', warnBeforeUnload); });
 </script>
 
 <template>
-  <details class="sc-drafts" :open="!!current || undefined">
+  <details class="sc-drafts" :open="panelOpen" @toggle="panelOpen = ($event.target as HTMLDetailsElement).open">
     <summary>
       <PencilRuler aria-hidden="true" /><b>Drafts and migrations</b>
       <span v-if="rows.length" class="sc-tag">{{ rows.length }} {{ rows.length === 1 ? 'draft' : 'drafts' }}</span>
@@ -503,7 +571,7 @@ onUnmounted(() => { closeEditor(); window.removeEventListener('beforeunload', wa
       <ChevronDown class="sc-chev" aria-hidden="true" />
     </summary>
     <div class="sc-drafts-body">
-      <p class="sc-hint sc-m0">Drafts need a global administrator. The explorer below shows the original source, not draft edits. Schema coverage is unverified; imported indexes and complex constraints may be incomplete.</p>
+      <p class="sc-hint sc-m0">Drafts need a global administrator. The explorer below shows the original source, or the saved draft when no source is loaded; unsaved edits appear there only through Show new changes. Schema coverage is unverified; imported indexes and complex constraints may be incomplete.</p>
 
       <div v-if="current?.provenance" class="sc-banner" :data-tone="current.provenance.coverage.complete ? 'run' : 'warn'">
         <div>
@@ -528,18 +596,21 @@ onUnmounted(() => { closeEditor(); window.removeEventListener('beforeunload', wa
             <button type="button" class="sc-btn sc-btn-sm" :disabled="!selected || busy" @click="openDraft()">Open</button>
             <button type="button" class="sc-btn sc-btn-sm" :disabled="!selected || busy" @click="deleteDraft()">Delete</button>
           </div>
+          <p class="sc-hint sc-m0">{{ sourceProblem || 'New from source starts from the original schema, not from the draft you have open. To keep your edits as a separate draft, use Save as new draft in step 2.' }}</p>
           <div class="sc-row">
-            <button type="button" class="sc-btn sc-btn-sm" :disabled="!schema || busy" @click="createDraft"><Plus aria-hidden="true" />New from current source</button>
+            <button type="button" class="sc-btn sc-btn-sm" :disabled="!!sourceProblem || busy" :title="sourceProblem || 'Builds a draft from the original schema shown below. It does not include edits made in any draft.'" @click="createDraft"><Plus aria-hidden="true" />New from source</button>
             <button type="button" class="sc-btn sc-btn-sm sc-btn-icon" :disabled="busy" title="Refresh drafts" aria-label="Refresh drafts" @click="refresh"><RefreshCw aria-hidden="true" /></button>
+            <button type="button" class="sc-btn sc-btn-sm" data-variant="danger" :disabled="!rows.length || busy || editorActive" title="Permanently delete every saved draft" @click="deleteAllDrafts"><Trash2 aria-hidden="true" />Remove all drafts</button>
           </div>
         </li>
 
         <li class="sc-step" :data-state="current ? 'active' : 'idle'">
           <p class="sc-step-head"><span class="sc-step-n">2</span>Edit the schema</p>
-          <p class="sc-hint sc-m0">Edit in the structured editor below, or open Draw.io in a new tab to edit visually. Saving in Draw.io updates the draft.</p>
+          <p class="sc-hint sc-m0">Edit in the structured editor below, or open Draw.io in a new tab to edit visually. Draw.io edits show up in the schema view as you make them; nothing is saved to a draft until you choose Save draft.</p>
           <div v-if="current" class="sc-row">
-            <button type="button" class="sc-btn sc-btn-sm" data-variant="primary" :disabled="busy || editorActive || queuedEditorSaves > 0 || migrationBusy || !dirty" @click="saveDraft"><Save aria-hidden="true" />Save draft</button>
-            <button type="button" class="sc-btn sc-btn-sm" :disabled="busy || editorActive || queuedEditorSaves > 0 || migrationBusy" @click="openEditor()"><ExternalLink aria-hidden="true" />Open Draw.io editor</button>
+            <button type="button" class="sc-btn sc-btn-sm" data-variant="primary" :disabled="busy || migrationBusy || !dirty" @click="saveDraft"><Save aria-hidden="true" />Save draft</button>
+            <button type="button" class="sc-btn sc-btn-sm" :disabled="busy || migrationBusy" title="Copies the schema and diagram as they are now, unsaved edits included, into a new draft. The open draft is not changed." @click="saveAsNewDraft"><Plus aria-hidden="true" />Save as new draft</button>
+            <button type="button" class="sc-btn sc-btn-sm" :disabled="busy || editorActive || migrationBusy" @click="openEditor()"><ExternalLink aria-hidden="true" />Open in Draw.io</button>
             <button v-if="editorActive" type="button" class="sc-btn sc-btn-sm" :disabled="!editorReady || !selection" @click="revealSelection"><Eye aria-hidden="true" />Show selection in Draw.io</button>
             <button v-if="editorActive" type="button" class="sc-btn sc-btn-sm" @click="disconnectEditor"><Unplug aria-hidden="true" />Disconnect editor</button>
           </div>
@@ -551,14 +622,14 @@ onUnmounted(() => { closeEditor(); window.removeEventListener('beforeunload', wa
           <template v-if="current">
             <div class="sc-row">
               <label class="sr-only" for="sc-migration-framework">Framework</label>
-              <select id="sc-migration-framework" v-model="framework" class="sc-input" :disabled="busy || editorActive || queuedEditorSaves > 0 || migrationBusy"><option value="laravel">Laravel</option><option value="symfony">Symfony / Doctrine</option></select>
+              <select id="sc-migration-framework" v-model="framework" class="sc-input" :disabled="busy || editorActive || migrationBusy"><option value="laravel">Laravel</option><option value="symfony">Symfony / Doctrine</option></select>
               <label class="sr-only" for="sc-migration-database">Database</label>
-              <select id="sc-migration-database" v-model="database" class="sc-input" :disabled="busy || editorActive || queuedEditorSaves > 0 || migrationBusy"><option value="mysql">MySQL</option><option value="postgresql">PostgreSQL</option></select>
+              <select id="sc-migration-database" v-model="database" class="sc-input" :disabled="busy || editorActive || migrationBusy"><option value="mysql">MySQL</option><option value="postgresql">PostgreSQL</option></select>
             </div>
             <div class="sc-row">
               <label class="sr-only" for="sc-migration-timestamp">Migration timestamp (YYYY_MM_DD_HHMMSS)</label>
-              <input id="sc-migration-timestamp" v-model="timestamp" class="sc-input sc-grow" placeholder="2026_11_02_120000" title="Migration timestamp (YYYY_MM_DD_HHMMSS)" :disabled="busy || editorActive || queuedEditorSaves > 0 || migrationBusy" />
-              <button type="button" class="sc-btn sc-btn-sm" :disabled="dirty || !timestamp || busy || editorActive || queuedEditorSaves > 0 || migrationBusy" @click="previewMigration"><GitCompare aria-hidden="true" />Preview</button>
+              <input id="sc-migration-timestamp" v-model="timestamp" class="sc-input sc-grow" placeholder="2026_11_02_120000" title="Migration timestamp (YYYY_MM_DD_HHMMSS)" :disabled="busy || editorActive || migrationBusy" />
+              <button type="button" class="sc-btn sc-btn-sm" :disabled="dirty || !timestamp || busy || editorActive || migrationBusy" @click="previewMigration"><GitCompare aria-hidden="true" />Preview</button>
             </div>
             <p v-if="dirty" class="sc-hint sc-m0" data-tone="warn">Save the draft before generating a preview.</p>
           </template>
@@ -567,11 +638,11 @@ onUnmounted(() => { closeEditor(); window.removeEventListener('beforeunload', wa
       </ol>
 
       <div v-if="current" class="sc-draft-edit">
-        <StructuredSchemaEditor v-model="text" :disabled="busy || editorActive || queuedEditorSaves > 0 || migrationBusy" @update:model-value="rememberEdits" />
+        <StructuredSchemaEditor v-model="text" :disabled="busy || editorActive || migrationBusy" @update:model-value="rememberEdits" />
         <details class="sc-json">
           <summary>Edit schema JSON</summary>
           <label for="schema-draft-json" class="sr-only">Schema JSON</label>
-          <textarea id="schema-draft-json" v-model="text" spellcheck="false" :disabled="busy || editorActive || queuedEditorSaves > 0 || migrationBusy" @input="rememberEdits"></textarea>
+          <textarea id="schema-draft-json" v-model="text" spellcheck="false" :disabled="busy || editorActive || migrationBusy" @input="rememberEdits"></textarea>
         </details>
 
         <button v-if="rejectedLayout" type="button" class="sc-btn sc-btn-sm" data-variant="warn" @click="downloadRejectedLayout"><Download aria-hidden="true" />Download rejected diagram for recovery</button>
@@ -580,12 +651,12 @@ onUnmounted(() => { closeEditor(); window.removeEventListener('beforeunload', wa
           <div>
             <p class="sc-m0">The existing Draw.io layout isn't synchronized with the schema automatically and may be outdated. It may omit new entities or keep removed ones.</p>
             <p class="sc-m0">Rebuilding uses the saved schema and replaces existing positions and annotations. Save schema edits first.</p>
-            <button type="button" class="sc-btn sc-btn-sm sc-mt-sm" data-variant="warn" :disabled="busy || editorActive || queuedEditorSaves > 0 || migrationBusy || text !== savedText" @click="rebuildLayout">Rebuild layout from saved schema</button>
+            <button type="button" class="sc-btn sc-btn-sm sc-mt-sm" data-variant="warn" :disabled="busy || editorActive || migrationBusy || text !== savedText" @click="rebuildLayout">Rebuild layout from saved schema</button>
           </div>
         </div>
-        <p class="sc-hint">In Draw.io, use Extras to edit column properties, table keys and indexes, and relationships, or to preview a migration. Edit table and column labels directly. Save in Draw.io to update the draft. The property editors use JSON and stable IDs. Leaving this view disconnects the editor.</p>
+        <p class="sc-hint">In Draw.io, use Extras to edit column properties, table keys and indexes, and relationships, or to preview a migration. Edit table and column labels directly. Save in Draw.io to bring the diagram into this page, then choose Save draft. The property editors use JSON and stable IDs. Leaving this view disconnects the editor.</p>
 
-        <section v-if="preview" class="sc-migration" aria-label="Migration preview">
+        <section v-if="preview" ref="previewSection" class="sc-migration" aria-label="Migration preview" tabindex="-1">
           <div class="sc-banner" data-tone="warn"><AlertTriangle aria-hidden="true" /><span>The baseline is unverified. Compare it with the target database and review the model-generated code before use. Validation accepts only a narrow set of supported migration operations.</span></div>
           <p v-if="preview.generation_blocked" role="alert" class="sc-banner" data-tone="bad"><AlertTriangle aria-hidden="true" /><span>Generation blocked: {{ preview.generation_error || 'No migration can be generated.' }}</span></p>
           <ul v-if="preview.warnings.length" class="sc-warn-list"><li v-for="warning in preview.warnings" :key="warning">{{ warning }}</li></ul>
@@ -603,7 +674,6 @@ onUnmounted(() => { closeEditor(); window.removeEventListener('beforeunload', wa
         </section>
       </div>
 
-      <p v-if="queuedEditorSaves" role="status" class="sc-hint">Saving the schema and diagram to the draft…</p>
       <p v-if="draftRecoveryWarning" role="alert" class="sc-hint" data-tone="warn">{{ draftRecoveryWarning }}</p>
       <p v-if="rejectedRecoveryWarning" role="alert" class="sc-hint" data-tone="warn">{{ rejectedRecoveryWarning }}</p>
     </div>

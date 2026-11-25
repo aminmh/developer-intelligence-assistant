@@ -19,7 +19,7 @@ export function registerSchemaDraftRoutes(app: Express, dependencies: Dependenci
     if (req.method !== 'GET' && req.get('origin') !== dependencies.webOrigin) {
       return res.status(403).json({ detail: 'Draft changes must come from the application origin.' });
     }
-    const body = req.method === 'PUT' || path === '/import' || path === '/runtime' || path.endsWith('/inspect') || /\/migration-(preview|download)$/.test(path) ? JSON.stringify(req.body ?? {}) : undefined;
+    const body = req.method === 'PUT' || path === '/import' || path === '/runtime' || path.endsWith('/inspect') || path.endsWith('/copy') || /\/migration-(preview|download)$/.test(path) ? JSON.stringify(req.body ?? {}) : undefined;
     if (body && Buffer.byteLength(body, 'utf8') > 9 * 1024 * 1024) {
       return res.status(413).json({ detail: 'Draft request exceeds the size limit.' });
     }
@@ -53,6 +53,7 @@ export function registerSchemaDraftRoutes(app: Express, dependencies: Dependenci
   app.get('/api/schema-drafts/:draftId', (req, res) => forward(req, res, `/${encodeURIComponent(req.params.draftId)}`));
   app.delete('/api/schema-drafts/:draftId', (req, res) => forward(req, res, `/${encodeURIComponent(req.params.draftId)}`));
   app.put('/api/schema-drafts/:draftId', (req, res) => forward(req, res, `/${encodeURIComponent(req.params.draftId)}`));
+  app.post('/api/schema-drafts/:draftId/copy', (req, res) => forward(req, res, `/${encodeURIComponent(req.params.draftId)}/copy`));
   app.post('/api/schema-drafts/:draftId/inspect', (req, res) => forward(req, res, `/${encodeURIComponent(req.params.draftId)}/inspect`));
   app.post('/api/schema-drafts/:draftId/migration-preview', (req, res) => forward(req, res, `/${encodeURIComponent(req.params.draftId)}/migration-preview`));
   app.post('/api/schema-drafts/:draftId/migration-download', (req, res) => forward(req, res, `/${encodeURIComponent(req.params.draftId)}/migration-download`));

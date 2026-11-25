@@ -2,7 +2,7 @@
 import { ExternalLink } from 'lucide-vue-next';
 import { editorUrl } from '../../utils/drawioBridge';
 import { toast } from '../../composables/useToasts';
-defineProps<{ buttonClass?: string }>();
+withDefaults(defineProps<{ buttonClass?: string; label?: string; hint?: string }>(), { label: 'Open Draw.io', hint: '' });
 function open() {
   try {
     const url = editorUrl(import.meta.env.VITE_DRAWIO_ORIGIN || '', window.location.origin);
@@ -15,7 +15,7 @@ function open() {
 </script>
 <template>
   <div class="drawio-launch">
-    <button type="button" :class="buttonClass || 'sc-btn'" @click="open"><ExternalLink aria-hidden="true" />Open Draw.io</button>
+    <button type="button" :class="buttonClass || 'sc-btn'" :title="hint || undefined" @click="open"><ExternalLink aria-hidden="true" />{{ label }}</button>
   </div>
 </template>
 <style scoped>
