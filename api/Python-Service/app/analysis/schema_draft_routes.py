@@ -124,6 +124,20 @@ def get_draft(draft_id: str):
         raise HTTPException(404, "Draft not found") from exc
 
 
+@router.post("/{draft_id}/copy", status_code=201, dependencies=[Depends(_authorize)])
+async def copy_draft(draft_id: str, request: Request):
+    """Save the given schema and layout as a new draft that starts from the same baseline as this one."""
+    payload = await _payload(request)
+    if set(payload) != {"schema", "layout"} or not isinstance(payload.get("layout"), str):
+        raise HTTPException(422, "Supply the schema and layout to copy")
+    try:
+        return _response(_store().copy(draft_id, payload["schema"], payload["layout"]))
+    except DraftNotFound as exc:
+        raise HTTPException(404, "Draft not found") from exc
+    except (ValueError, ValidationError) as exc:
+        raise HTTPException(422, str(exc)[:500]) from exc
+
+
 @router.delete("/{draft_id}", dependencies=[Depends(_authorize)])
 def delete_draft(draft_id: str):
     try:
