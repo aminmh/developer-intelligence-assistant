@@ -65,7 +65,9 @@ class RuntimeSetupFlowTests(unittest.TestCase):
             "directory": str(self.project_dir),
             "files": [str(self.compose_file)],
         }
-        self.state_file = self.root / "state" / "local-setup.json"
+        self.legacy_file = self.root / "state" / "local-setup.json"
+        self.state_file = self.root / "state" / "setups" / "dash-fixture@development.json"
+        self.host_file = self.root / "state" / "host.json"
         self.api_dir = self.root / "api"
         self.api_dir.mkdir()
         self.cert_dir = self.root / "certificates"
@@ -79,7 +81,7 @@ class RuntimeSetupFlowTests(unittest.TestCase):
         self.temp.cleanup()
 
     def path_patches(self, stack: ExitStack):
-        stack.enter_context(patch.object(runtime_setup, "state_path", return_value=self.state_file))
+        stack.enter_context(patch.object(runtime_setup, "state_path", return_value=self.legacy_file))
         stack.enter_context(patch.object(runtime_setup, "API", self.api_dir))
         stack.enter_context(patch.object(runtime_setup, "CERT_DIR", self.cert_dir))
         stack.enter_context(patch.object(runtime_setup, "ENV_FILE", self.env_file))
@@ -123,7 +125,7 @@ class RuntimeSetupFlowTests(unittest.TestCase):
         self.compose_file.write_text(later)
         with ExitStack() as stack:
             self.path_patches(stack)
-            runtime_setup.write_state(state)
+            runtime_setup.write_record(state)
             stack.enter_context(patch.object(runtime_setup, "required_approval"))
             stack.enter_context(patch.object(runtime_setup, "run", return_value=runtime_setup.subprocess.CompletedProcess([], 0, stdout="", stderr="")))
             result = runtime_setup.cleanup()
@@ -152,7 +154,7 @@ class RuntimeSetupFlowTests(unittest.TestCase):
         self.compose_file.write_text(before)
         with ExitStack() as stack:
             self.path_patches(stack)
-            runtime_setup.write_state(state)
+            runtime_setup.write_record(state)
             stack.enter_context(patch.object(runtime_setup, "required_approval"))
             stack.enter_context(patch.object(runtime_setup, "run", return_value=runtime_setup.subprocess.CompletedProcess([], 0, stdout="", stderr="")))
             result = runtime_setup.cleanup()
@@ -213,24 +215,146 @@ class RuntimeSetupFlowTests(unittest.TestCase):
         self.assertEqual(saved["compose_originals"][str(self.compose_file)], self.compose_original)
         self.assertTrue(any("--no-deps" in command for command in run_calls))
 
-    def test_setup_reports_active_record_as_success_without_overwriting_it(self):
+    def test_a_setup_for_the_same_project_and_environment_is_refused_without_changing_its_record(self):
         state = self.initial_cleanup_state()
 
         with ExitStack() as stack:
             self.path_patches(stack)
-            runtime_setup.write_state(state)
+            runtime_setup.write_record(state)
             saved_before = self.state_file.read_text()
-            stack.enter_context(patch.object(runtime_setup, "yaml_module"))
-            discover = stack.enter_context(patch.object(runtime_setup, "discover_projects"))
-            run_command = stack.enter_context(patch.object(runtime_setup, "run"))
 
-            result = runtime_setup.setup("fixture-project")
+            blocker, active = runtime_setup.setup_blocker(self.project, ["php"], "dash-fixture", "development")
 
-        self.assertEqual(result["status"], "complete")
-        self.assertIn("already active", result["message"])
+        self.assertIn("already active", blocker)
+        self.assertTrue(active)
         self.assertEqual(self.state_file.read_text(), saved_before)
-        discover.assert_not_called()
-        run_command.assert_not_called()
+
+    # ── several setups at once ───────────────────────────────────────────────
+
+    def second_state(self, project_name="other-compose", files=None, project_id="orders", environment="staging"):
+        return {"version": 1, "phase": "active", "project_id": project_id, "environment": environment,
+                "project": {"name": project_name, "directory": str(self.root), "files": files or [str(self.root / "other.yml")]},
+                "services": ["web"], "compose_originals": {}, "compose_hashes": {}}
+
+    def test_an_old_single_record_is_moved_unchanged_and_listed_with_a_new_one(self):
+        old = self.initial_cleanup_state()
+        self.legacy_file.parent.mkdir(parents=True)
+        self.legacy_file.write_text(json.dumps(old))
+
+        with ExitStack() as stack:
+            self.path_patches(stack)
+            runtime_setup.write_record(self.second_state())
+            states = runtime_setup.list_states()
+            migrated = json.loads(self.state_file.read_text())
+            host = json.loads(self.host_file.read_text())
+
+        self.assertEqual(sorted(item["project_id"] for item in states), ["dash-fixture", "orders"])
+        self.assertEqual(migrated, old)
+        self.assertFalse(self.legacy_file.exists())
+        self.assertEqual(host, {"certificates_created": True, "fingerprint": "fingerprint"})
+
+    def test_a_second_project_is_accepted_but_the_same_compose_project_or_files_are_not(self):
+        with ExitStack() as stack:
+            self.path_patches(stack)
+            runtime_setup.write_record(self.initial_cleanup_state())
+            other = {"name": "other-compose", "directory": str(self.root), "files": [str(self.root / "other.yml")]}
+
+            accepted = runtime_setup.setup_blocker(other, ["web"], "orders", "staging")
+            same_project = runtime_setup.setup_blocker(self.project, ["database"], "billing", "development")
+            same_file = runtime_setup.setup_blocker({**other, "files": [str(self.compose_file)]}, ["web"], "orders", "staging")
+            same_identity = runtime_setup.setup_blocker(other, ["web"], "dash-fixture", "development")
+
+        self.assertEqual(accepted, (None, False))
+        self.assertIn("same Compose files", same_project[0])
+        self.assertIn("same Compose files", same_file[0])
+        self.assertIn("already active", same_identity[0])
+
+    def test_an_unfinished_record_blocks_every_new_setup_and_is_never_overwritten(self):
+        broken = {**self.initial_cleanup_state(), "phase": "cleanup-incomplete"}
+        with ExitStack() as stack:
+            self.path_patches(stack)
+            runtime_setup.write_record(broken)
+            before = self.state_file.read_text()
+
+            blocker, _ = runtime_setup.setup_blocker()
+
+        self.assertIn("cleanup-incomplete", blocker)
+        self.assertEqual(self.state_file.read_text(), before)
+
+    def test_cleaning_one_setup_keeps_the_other_and_the_shared_host_until_the_last_one(self):
+        approvals, commands = [], []
+        first = self.initial_cleanup_state()
+        second = self.second_state()
+        second.update({"fingerprint": "fingerprint", "scope_original": True})
+        self.env_file.write_text('TELEMETRY_HOST_SCOPES={"fingerprint":{"projects":{"dash-fixture":["development"],"orders":["staging"]}}}\n')
+
+        def run(args, **kwargs):
+            commands.append(args)
+            return runtime_setup.subprocess.CompletedProcess(args, 0, stdout="", stderr="")
+
+        with ExitStack() as stack:
+            self.path_patches(stack)
+            runtime_setup.write_record(first)
+            runtime_setup.write_record(second)
+            runtime_setup.write_host_state({"certificates_created": True, "fingerprint": "fingerprint"})
+            stack.enter_context(patch.object(runtime_setup, "run", side_effect=run))
+            approve = lambda title, items, summary="": approvals.append(items)
+
+            with self.assertRaises(RuntimeError) as several:
+                runtime_setup.cleanup(approve=approve)
+            runtime_setup.cleanup(approve=approve, project_id="orders", environment="staging")
+            after_first = runtime_setup.list_states()
+            agent_stopped_first = any("down" in command for command in commands)
+            certificates_kept = self.cert_dir.exists()
+            scopes_after_first = json.loads(self.env_file.read_text().split("=", 1)[1])
+
+            commands.clear()
+            runtime_setup.cleanup(approve=approve)
+            after_last = runtime_setup.list_states()
+            agent_stopped_last = any("down" in command for command in commands)
+
+        self.assertIn("choose which one", str(several.exception))
+        self.assertEqual([item["project_id"] for item in after_first], ["dash-fixture"])
+        self.assertFalse(agent_stopped_first)
+        self.assertTrue(certificates_kept)
+        self.assertEqual(scopes_after_first, {"fingerprint": {"projects": {"dash-fixture": ["development"]}}})
+        self.assertTrue(any("Keep the telemetry agent" in item for item in approvals[0]))
+        self.assertEqual(after_last, [])
+        self.assertTrue(agent_stopped_last)
+        self.assertFalse(self.cert_dir.exists())
+        self.assertFalse(self.host_file.exists())
+        self.assertEqual(self.compose_file.read_text(), self.compose_original)
+
+    def test_cleanup_of_an_unknown_setup_names_it_and_changes_nothing(self):
+        with ExitStack() as stack:
+            self.path_patches(stack)
+            runtime_setup.write_record(self.initial_cleanup_state())
+            with self.assertRaises(RuntimeError) as raised:
+                runtime_setup.cleanup(approve=lambda *a, **k: None, project_id="nope", environment="x")
+            remaining = len(runtime_setup.list_states())
+
+        self.assertIn("nope · x", str(raised.exception))
+        self.assertEqual(remaining, 1)
+
+    def test_the_agent_starts_when_any_setup_is_active(self):
+        stalled = {**self.second_state(), "phase": "starting"}
+        with ExitStack() as stack:
+            self.path_patches(stack)
+            stack.enter_context(patch.object(runtime_setup, "docker_socket_group_id", return_value="0"))
+            socket = self.root / "docker.sock"
+            socket.write_text("")
+            stack.enter_context(patch.dict(runtime_setup.os.environ, {"DOCKER_SOCK_PATH": str(socket)}))
+            active = self.initial_cleanup_state()
+            runtime_setup.write_record(stalled)
+            for name in ("ca.pem", "host.crt", "host.key"):
+                (self.cert_dir / "agent").mkdir(parents=True, exist_ok=True)
+                (self.cert_dir / "agent" / name).write_text("x")
+            only_stalled = runtime_setup.managed_agent_environment()
+            runtime_setup.write_record(active)
+            with_active = runtime_setup.managed_agent_environment()
+
+        self.assertEqual(only_stalled, (None, None))
+        self.assertIsNotNone(with_active[0])
 
     def test_setup_accepts_one_service_from_gum_multiselect(self):
         run_calls = []
@@ -278,7 +402,7 @@ class RuntimeSetupFlowTests(unittest.TestCase):
 
         with ExitStack() as stack:
             self.path_patches(stack)
-            runtime_setup.write_state(state)
+            runtime_setup.write_record(state)
             stack.enter_context(patch.object(runtime_setup, "required_approval", side_effect=lambda title, items, summary="": approvals.append((title, items, summary))))
             stack.enter_context(patch.object(runtime_setup, "run", return_value=runtime_setup.subprocess.CompletedProcess([], 0, stdout="", stderr="")))
 
@@ -300,7 +424,7 @@ class RuntimeSetupFlowTests(unittest.TestCase):
 
         with ExitStack() as stack:
             self.path_patches(stack)
-            runtime_setup.write_state(state)
+            runtime_setup.write_record(state)
             stack.enter_context(patch.object(runtime_setup, "required_approval"))
             stack.enter_context(patch.object(runtime_setup, "run", side_effect=fail_compose))
 
@@ -504,6 +628,10 @@ class RuntimeSetupFlowTests(unittest.TestCase):
             runtime_setup.run_helper_operation("remove local containers", project_id="pizza")
             runtime_setup.run_helper_operation("setup", plan={"fixture": True})
         cleanup.assert_called_once_with(approve=runtime_setup.helper_approval)
+        cleanup.reset_mock()
+        with patch.object(runtime_setup, "cleanup", return_value={"status": "complete"}) as named:
+            runtime_setup.run_helper_operation("cleanup", cleanup_target=("orders", "staging"))
+        named.assert_called_once_with(approve=runtime_setup.helper_approval, project_id="orders", environment="staging")
         remove.assert_called_once_with("pizza", approve=runtime_setup.helper_approval)
         apply.assert_called_once_with({"fixture": True}, approve=runtime_setup.helper_approval)
         with self.assertRaises(RuntimeError):
