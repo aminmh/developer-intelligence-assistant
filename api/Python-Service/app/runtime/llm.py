@@ -372,6 +372,10 @@ def _run_chat(
     return content or "", normalize_usage(getattr(response, "usage", None))
 
 
+# Remote (base URL, model) pairs known to answer only with reasoning_effort=low; see complete_with_model.
+_LOW_EFFORT_MODELS: set[tuple[str, str]] = set()
+
+
 def complete_with_model(
     prompt: str,
     system: Optional[str] = None,
@@ -400,8 +404,10 @@ def complete_with_model(
             and model.startswith("openai/gpt-oss-")
             else None
         )
-        try:
-            content, usage = _run_chat(
+        effort_key = (settings.llm_remote_base_url, model)
+
+        def remote_chat(body: Optional[dict]):
+            return _run_chat(
                 (_get_remote_client().with_options(max_retries=max_retries)
                  if max_retries is not None else _get_remote_client()),
                 model,
@@ -411,9 +417,22 @@ def complete_with_model(
                 top_p=top_p,
                 max_tokens=max_tokens,
                 response_format=response_format,
-                extra_body=extra_body,
+                extra_body=body,
                 timeout=timeout,
             )
+
+        low_effort = {**(extra_body or {}), "reasoning_effort": "low"}
+        try:
+            content, usage = remote_chat(low_effort if effort_key in _LOW_EFFORT_MODELS else extra_body)
+            if not content and effort_key not in _LOW_EFFORT_MODELS:
+                # A reasoning model can spend the whole output budget thinking and return nothing
+                # (finish_reason=length). Retry once asking for low effort, and remember that it works.
+                try:
+                    content, usage = remote_chat(low_effort)
+                    if content:
+                        _LOW_EFFORT_MODELS.add(effort_key)
+                except Exception as retry_exc:  # noqa: BLE001 — a provider without the parameter falls through
+                    logger.info("Low-effort retry was not accepted (host=%s): %s", remote_host, type(retry_exc).__name__)
             if content:
                 return CompletionResult(content, model, "remote", usage)
             # Empty/falsy content is a remote failure — fall through to local.

@@ -14,6 +14,11 @@ from telemetry.symbols import relative_path
 MAX_SOURCE_FILES = 8
 MAX_SOURCE_FILE_BYTES = 64 * 1024
 MAX_SOURCE_CONTEXT_CHARS = 24_000
+# Lines of a method shown around its definition: its docblock or attributes above, one line below. Wider windows
+# mostly repeated neighbouring methods and made up over half of the prompt.
+SOURCE_LINES_BEFORE = 4
+SOURCE_LINES_AFTER = 1
+MAX_DATABASE_CALL_DURATIONS = 10
 MAX_MODEL_RESPONSE_CHARS = 80_000
 MAX_DIFF_CHARS = 40_000
 MAX_DATABASE_GROUPS = 15
@@ -117,15 +122,21 @@ def _source_context(archive: bytes, definitions: dict[str, dict], symbol_ids: li
     except (zipfile.BadZipFile, OSError) as exc:
         raise AnalysisError("Indexed source is unavailable for this revision.") from exc
     output: dict[str, dict] = {}
+    emitted: dict[str, set[int]] = {}
     budget = MAX_SOURCE_CONTEXT_CHARS
     for symbol_id in symbol_ids:
         definition = definitions.get(symbol_id)
         if not definition or definition["file"] not in extracted or budget <= 0:
             continue
         lines = extracted[definition["file"]].splitlines()
-        start = max(1, definition["line"] - 12)
-        end = min(len(lines), max(definition["line"], definition["end_line"]) + 12)
-        text = "\n".join(f"{number}: {lines[number - 1]}" for number in range(start, end + 1))
+        start = max(1, definition["line"] - SOURCE_LINES_BEFORE)
+        end = min(len(lines), max(definition["line"], definition["end_line"]) + SOURCE_LINES_AFTER)
+        shown = emitted.setdefault(definition["file"], set())
+        # Line numbers stay on every line, so omitting blank lines and lines already sent loses nothing.
+        rows = [f"{number}: {lines[number - 1].rstrip()}" for number in range(start, end + 1)
+                if number not in shown and lines[number - 1].strip()]
+        shown.update(range(start, end + 1))
+        text = "\n".join(rows) or f"(lines {start}-{end} are shown with an earlier symbol)"
         text = text[:budget]
         budget -= len(text)
         output[symbol_id] = {**definition, "source": text}
@@ -173,17 +184,50 @@ def _database_symbols(detail: dict) -> list[str]:
     return symbols
 
 
+def _group_database_calls(raw_calls: list) -> tuple[list[dict], dict]:
+    """One row per distinct query shape with its count and durations, shared fields stated once.
+
+    Per-call rows repeated the same operation, table and method for every execution; the shape plus ``n``
+    and the individual durations carry the same information in a fraction of the size.
+    """
+    shape_keys = ("db_system", "db_namespace", "operation", "table_ids", "symbol_id", "caller_symbol_id", "span_status")
+    rows: dict[str, dict] = {}
+    for call in raw_calls:
+        if not isinstance(call, dict):
+            continue
+        shape = {key: call.get(key) for key in shape_keys if call.get(key) is not None}
+        if shape.get("span_status") == "Unset":
+            shape.pop("span_status")
+        row = rows.setdefault(json.dumps(shape, sort_keys=True), {**shape, "n": 0, "ms": []})
+        row["n"] += 1
+        if isinstance(call.get("duration_ms"), (int, float)):
+            row["ms"].append(round(float(call["duration_ms"]), 2))
+    grouped = list(rows.values())
+    common = {}
+    for key in ("db_system", "db_namespace"):
+        values = {row.get(key) for row in grouped}
+        if len(values) == 1 and None not in values:
+            common[key] = values.pop()
+            for row in grouped:
+                row.pop(key, None)
+    for row in grouped:
+        row["total_ms"] = round(sum(row["ms"]), 2)
+        row["ms"] = sorted(row["ms"], reverse=True)[:MAX_DATABASE_CALL_DURATIONS]
+    return grouped, common
+
+
 def _evidence(detail: dict, source: dict[str, dict]) -> tuple[dict, list[str]]:
     request = detail.get("request") or {}
-    database_calls = []
-    for call in detail.get("database_calls", [])[:100]:
-        database_calls.append({key: call.get(key) for key in (
-            "duration_ms", "db_system", "db_namespace", "operation", "table_ids", "symbol_id", "caller_symbol_id", "span_status",
-        ) if call.get(key) is not None})
+    database_calls, database_common = _group_database_calls(detail.get("database_calls", [])[:100])
     activity = detail.get("method_activity") or {}
     method_edges = []
     for edge in activity.get("edges", [])[:100] if isinstance(activity, dict) else []:
         method_edges.append({key: edge.get(key) for key in ("caller_symbol_id", "symbol_id", "calls", "source") if edge.get(key) is not None})
+    edge_sources = {edge.get("source") for edge in method_edges}
+    edge_source = next(iter(edge_sources)) if len(edge_sources) == 1 and None not in edge_sources else None
+    if edge_source:
+        for edge in method_edges:
+            edge.pop("source", None)
     summary = detail.get("ai_summary") or {}
     profile = [{"symbol_id": item.get("frame"), "sample_percent": item.get("sample_percentage"),
                 "event_type": summary.get("profile_event_type")}
@@ -201,7 +245,9 @@ def _evidence(detail: dict, source: dict[str, dict]) -> tuple[dict, list[str]]:
     payload = {
         "request": {key: request.get(key) for key in ("method", "route", "status_code", "duration_ms", "php_cpu_time_us", "php_peak_memory_bytes") if request.get(key) is not None},
         "database_summary": _database_evidence(detail),
+        **({"database": database_common} if database_common else {}),
         "database_calls": database_calls,
+        **({"method_activity_source": edge_source} if edge_source else {}),
         "method_activity": method_edges,
         "excimer_samples": profile,
         "php_estimates": {key: summary.get(key) for key in ("php_app_time_ms", "php_cpu_time_ms", "php_peak_memory_bytes") if summary.get(key) is not None},
@@ -269,7 +315,10 @@ ANALYSIS_TASK = (
     "come from the framework, not application code; say so rather than suggesting an application change. Groups marked "
     "framework are the framework's own work on its tables (sessions, cache, queues, debugging tools such as Telescope); "
     "mention them only as configuration (for example a debugging tool left on, or the session or cache driver), never as "
-    "an application code change."
+    "an application code change. "
+    "Evidence layout: database_calls has one row per distinct query shape (n executions, ms their longest durations, "
+    "total_ms their sum; database holds shared db_system and namespace; span_status appears only when not Unset). "
+    "Source text lines start with their file line number; blank lines are omitted."
 )
 
 
@@ -321,7 +370,7 @@ def analyze_request(
     if model_call is None:
         from runtime.llm import complete_with_model
         model_call = complete_with_model
-    prompt = json.dumps({"task": ANALYSIS_TASK, "evidence": assembled}, ensure_ascii=False)
+    prompt = json.dumps({"task": ANALYSIS_TASK, "evidence": assembled}, ensure_ascii=False, separators=(",", ":"))
     try:
         content, model, used_provider = model_call(
             prompt, system="You analyze privacy-filtered runtime evidence. Return only valid JSON.",
