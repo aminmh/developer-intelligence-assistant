@@ -38,7 +38,7 @@ For the official Clean Code score, @.archcore/code-quality/deterministic-clean-c
 9b. WHEN an evidence category (process, testing, documentation, localization, accessibility) has no collected findings, the scoring service MUST leave it unassessed with a reason instead of asking the evaluator to score it.
 10. WHEN a user saves category weights, the scoring service MUST require their total to equal 100 percent.
 11. WHEN every category has an assessed score, the scoring service MUST calculate the weighted overall score.
-12. WHEN any category is not assessed, the scoring service MUST omit the overall score.
+12. WHEN any category is not assessed, the scoring service MUST omit the overall score, except Localization and Accessibility: WHEN one has no evidence of its own kind (no translation catalogues, no templates or HTML), the scoring service MUST mark it not applicable, leave it out of the overall score and rescale the remaining weights to 100 percent, and the report MUST list the categories left out (decision @.archcore/code-quality/assessment-scores-ten-categories.adr.md, amended 2026-11-25).
 13. WHEN an assessment completes, the report store MUST persist its revision, timestamp, scores, weights, coverage, and findings.
 14. WHEN a user reruns an assessment, the report store MUST preserve earlier reports for that revision.
 15. WHEN a report completes, the report store MUST keep that report immutable until an authorized user explicitly deletes it.

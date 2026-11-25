@@ -40,7 +40,7 @@ const categories = [
 ] as const;
 type CategoryId = typeof categories[number]['id'];
 type AiOpinion = { assessed: boolean; score: number | null; reason: string; evidence_ids: string[] };
-type CategoryScore = { assessed: boolean; score: number | null; reason: string; evidence_ids: string[]; score_method?: string; metric_schema?: string; rubric_version?: string; assessment_status?: 'scored' | 'provisional' | 'unavailable'; confidence?: 'high' | 'medium' | 'low'; confidence_reasons?: string[]; finding_count?: number; deterministic_evidence_ids?: string[]; ai_opinion?: AiOpinion };
+type CategoryScore = { assessed: boolean; applicable?: boolean; score: number | null; reason: string; evidence_ids: string[]; score_method?: string; metric_schema?: string; rubric_version?: string; assessment_status?: 'scored' | 'provisional' | 'unavailable'; confidence?: 'high' | 'medium' | 'low'; confidence_reasons?: string[]; finding_count?: number; deterministic_evidence_ids?: string[]; ai_opinion?: AiOpinion };
 type FlowTrace = { nodes: Array<{ symbol: string; file: string; start_line: number; end_line: number }>; edges: Array<{ type: string; from: string; to: string; file: string; line: number }> };
 type PhpDesignSignals = { status: 'complete' | 'partial' | 'unavailable'; revision_id: string; analyzer_version: string; languages: string[]; principles_with_static_signals: string[]; principles_requiring_semantic_evidence: string[]; chunk_count: number; class_count: number; method_count: number; signal_count: number; signals_truncated: boolean; limits?: Record<string, number>; reason: string };
 type AssessmentEvidence = { evidence_id: string; kind?: 'finding' | 'coverage' | 'semantic_trace' | 'semantic_context' | 'architectural_signal' | 'runtime_measurement'; category: CategoryId | 'business_rule'; rule: string; file: string | null; line: number | null; message: string; trace?: FlowTrace };
@@ -58,7 +58,7 @@ type BusinessRuleReview = { rule_id: string; version: number; status: 'supported
 type TokenUsage = { prompt_tokens: number | null; completion_tokens: number | null; total_tokens: number; estimated: boolean; source: 'provider' | 'estimate'; batch_count?: number; summarized_evidence_count?: number };
 type Report = {
   report_id: string; project_id: string; revision_id: string; commit_sha: string | null; created_at: string;
-  overall_score: number | null; categories: Record<CategoryId, CategoryScore>; weights: Record<CategoryId, number>; shadow_scoring?: { version: string; status: string; categories: Record<CategoryId, CategoryScore> };
+  overall_score: number | null; overall_basis?: { included: CategoryId[]; not_applicable: CategoryId[] }; categories: Record<CategoryId, CategoryScore>; weights: Record<CategoryId, number>; shadow_scoring?: { version: string; status: string; categories: Record<CategoryId, CategoryScore> };
   coverage: { files: number; scanned_files: number; skipped_files: number; excluded_files?: number; user_excluded_files?: number; user_exclusion_patterns?: string[]; scanned_bytes: number; languages: Record<string, number>; unsupported_extensions: Record<string, number>; analyzer_failures: Array<{ name: string; reason: string }>; categories: Record<CategoryId, { supported: boolean; status?: 'covered' | 'partial' | 'unavailable'; evidence_count: number; reason?: string | null }>; analyzers: Array<{ name: string; version: string; rules_version?: string; languages: string[]; categories: string[]; status?: string; server_version?: string; server_edition?: string; scanned_files?: number; skipped_files?: number; finding_count?: number; reason?: string | null; unresolved?: string[] }>; external_analyzers?: { sonarqube?: { status: string; version?: string; server_version?: string; server_edition?: string; scanned_files?: number; skipped_files?: number; finding_count?: number; reason?: string | null }; joern?: { status: string; version?: string; languages?: string[]; scanned_files?: number; skipped_files?: number; finding_count?: number; reason?: string | null; unresolved?: string[] } }; business_rule_review?: { status: string; reason?: string | null; collection_id?: string | null; document_count?: number; imported_count?: number; omitted_count?: number; oversized_count?: number; limit_exceeded?: boolean; synchronized_at?: string | null }; semantic_context?: { status: 'available' | 'available_no_matches' | 'unavailable'; revision_id: string; retriever_version: string; query_count: number; business_rule_query_count?: number; omitted_business_rule_ids?: string[]; evidence_count: number; failure_code?: string | null; diagnostic_detail?: string | null; searched_collection_count?: number; candidate_count?: number; rejected_revision_count?: number; rejected_source_count?: number; category_search?: Partial<Record<CategoryId, { attempted_queries: number; candidate_count: number; accepted_count: number; rejected_revision_count: number; rejected_source_count: number }>>; reason?: string | null }; category_review_context?: { status: 'available' | 'partial' | 'unavailable' | 'not_needed'; source: string | null; excerpt_count: number; categories: Record<CategoryId, number>; scanned_files: number; scanned_bytes: number; reason: string }; semantic_flow_tracing?: { status: 'complete' | 'partial' | 'unavailable'; revision_id: string; tracer_version: string; languages?: string[]; flow_types: string[]; node_count: number; edge_count: number; trace_count: number; unresolved_edge_count: number; unresolved_edges?: Array<{ source_symbol: string; file: string; line: number; target_symbol: string | null; reason: string; count: number }>; limits_reached?: string[]; reason: string }; php_design_signals?: PhpDesignSignals };
   token_usage?: TokenUsage | null;
   category_reviews?: CategoryReviews;
@@ -172,7 +172,11 @@ const weightsChanged = computed(() => categories.some((item) => Number(weights.v
 const parsedExclusionPatterns = computed(() => [...new Set(exclusionPatterns.value.map((item) => item.trim()).filter(Boolean))].sort());
 const exclusionsChanged = computed(() => JSON.stringify(parsedExclusionPatterns.value) !== JSON.stringify([...savedExclusionPatterns.value].sort()));
 const unassessedCategories = computed(() => categories
-  .filter((item) => currentReport.value?.categories?.[item.id]?.assessed !== true)
+  .filter((item) => currentReport.value?.categories?.[item.id]?.assessed !== true && currentReport.value?.categories?.[item.id]?.applicable !== false)
+  .map((item) => item.label));
+// Categories with nothing to assess (no translations or templates) are left out of the overall score, not failed.
+const notApplicableCategories = computed(() => categories
+  .filter((item) => currentReport.value?.categories?.[item.id]?.applicable === false)
   .map((item) => item.label));
 const compareIsEquivalent = computed(() => {
   const [left, right] = compareReports.value;
@@ -828,7 +832,7 @@ const statusTone = (status?: string) => (status === 'complete' || status === 'av
             <div class="cq-setup-body">
               <div>
                 <h3 class="cq-h4">Category weights</h3>
-                <p class="cq-hint">The weighted total appears only when all ten categories are assessed. Scoring uses a fixed rubric, temperature 0 and top_p 1. Providers can still change behaviour; comparisons flag known differences in model, rubric, analyzers, coverage, weights and scoring settings.</p>
+                <p class="cq-hint">The weighted total covers every category that applies; Localization and Accessibility are left out, and the other weights rescaled, when the project has no translations or templates. Any other unassessed category hides the total. Scoring uses a fixed rubric, temperature 0 and top_p 1. Providers can still change behaviour; comparisons flag known differences in model, rubric, analyzers, coverage, weights and scoring settings.</p>
                 <div class="cq-weights">
                   <label v-for="category in categories" :key="category.id" class="cq-weight" :style="{ '--c': categoryMeta[category.id].color }">
                     <span>{{ category.label }}</span>
@@ -898,6 +902,7 @@ const statusTone = (status?: string) => (status === 'complete' || status === 'av
                 <p class="cq-eyebrow">Assessment report</p>
                 <h2 id="cq-report-title" class="cq-hero-title">{{ currentReport.overall_score == null ? 'Overall score unavailable' : `${currentReport.overall_score} / 100` }}</h2>
                 <p v-if="currentReport.overall_score == null && unassessedCategories.length" class="cq-hint" data-tone="warn">Not assessed: {{ unassessedCategories.join(', ') }}. Each category card explains why.</p>
+                <p v-if="notApplicableCategories.length" class="cq-hint">{{ currentReport.overall_score == null ? 'Not applicable' : `Based on ${categories.length - notApplicableCategories.length} of ${categories.length} categories; not applicable` }}: {{ notApplicableCategories.join(', ') }}.</p>
                 <div class="cq-meta">
                   <span class="cq-tag"><Calendar aria-hidden="true" />{{ formatDate(currentReport.created_at) }}</span>
                   <span class="cq-tag"><GitCommitHorizontal aria-hidden="true" />{{ currentReport.commit_sha?.slice(0, 12) || currentReport.revision_id }}</span>
@@ -921,10 +926,10 @@ const statusTone = (status?: string) => (status === 'complete' || status === 'av
             <div class="cq-cats">
               <article v-for="category in reportCategories" :key="category.id" class="cq-cat" :style="{ '--c': categoryMeta[category.id].color }" :data-assessed="currentReport.categories[category.id].assessed">
                 <div class="cq-cat-top"><component :is="categoryMeta[category.id].icon" aria-hidden="true" />{{ category.label }}</div>
-                <div class="cq-cat-score">{{ formatScore(currentReport.categories[category.id].score) }}<small v-if="currentReport.categories[category.id].assessed"> /100</small></div>
+                <div class="cq-cat-score">{{ currentReport.categories[category.id].applicable === false ? 'Not applicable' : formatScore(currentReport.categories[category.id].score) }}<small v-if="currentReport.categories[category.id].assessed"> /100</small></div>
                 <div class="cq-cat-bar" aria-hidden="true"><i :style="{ transform: `scaleX(${(currentReport.categories[category.id].score ?? 0) / 100})` }"></i></div>
                 <p>{{ currentReport.categories[category.id].reason }}</p>
-                <p class="cq-cat-foot">{{ currentReport.coverage.categories[category.id].status || (currentReport.coverage.categories[category.id].supported ? 'covered' : 'unavailable') }} · {{ currentReport.coverage.categories[category.id].evidence_count }} signals · weight {{ currentReport.weights[category.id] }}%</p>
+                <p class="cq-cat-foot">{{ currentReport.coverage.categories[category.id].status || (currentReport.coverage.categories[category.id].supported ? 'covered' : 'unavailable') }} · {{ currentReport.coverage.categories[category.id].evidence_count }} signals · {{ currentReport.categories[category.id].applicable === false ? 'left out of the overall score' : `weight ${currentReport.weights[category.id]}%` }}</p>
                 <p v-if="currentReport.shadow_scoring" class="cq-cat-foot" data-tone="ai">Experimental: {{ formatScore(currentReport.shadow_scoring.categories[category.id].score) }} · {{ confidenceLabel(currentReport.shadow_scoring.categories[category.id]) }} · {{ currentReport.shadow_scoring.categories[category.id].finding_count ?? 0 }} findings</p>
               </article>
             </div>

@@ -19,12 +19,13 @@ import zipfile
 from infra.settings import settings
 
 from code_quality.categories import (  # noqa: E402 — re-exported for rules, business rules and the API
-    CATEGORIES, DEFAULT_WEIGHTS, EVIDENCE_CATEGORIES, SOURCE_CATEGORIES, label as category_label, migrate_weights,
+    CATEGORIES, DEFAULT_WEIGHTS, EVIDENCE_CATEGORIES, OPTIONAL_CATEGORIES, SOURCE_CATEGORIES, label as category_label,
+    migrate_weights, overall_score,
 )
 POLICY_VERSION = "code-quality-policy-4"
 # Ten categories (decision assessment-scores-ten-categories): reports before this compare as non-equivalent.
-RUBRIC_VERSION = "code-quality-rubric-6"
-BUSINESS_RULE_RUBRIC_VERSION = "code-quality-rubric-7"
+RUBRIC_VERSION = "code-quality-rubric-8"
+BUSINESS_RULE_RUBRIC_VERSION = "code-quality-rubric-9"
 AI_CLEAN_CODE_REVIEW_VERSION = "ai-clean-code-review-2"
 DETERMINISTIC_SCORING_VERSION = "deterministic-category-score-1"
 SCORING_PARAMETERS = {"temperature": 0.0, "top_p": 1.0}
@@ -203,7 +204,7 @@ class ReportStore:
         return [{key: report.get(key) for key in (
             "report_id", "project_id", "revision_id", "commit_sha", "created_at",
             "overall_score", "categories", "weights", "rubric_version", "model", "provider",
-            "scoring_parameters", "token_usage",
+            "scoring_parameters", "token_usage", "overall_basis",
         )} | {"coverage": report.get("coverage", {}).get("files", 0),
             "languages": report.get("coverage", {}).get("languages", {})} for report in reports]
 
@@ -1369,7 +1370,8 @@ def assess_revision(project_id: str, revision_id: str, snapshot: dict, archive_d
         for category in EVIDENCE_CATEGORIES:  # no collected evidence: unassessed with the collector's reason
             reason = (coverage.get(category) or {}).get("reason") or f"No {category_label(category).lower()} evidence was found in this revision."
             categories.setdefault(category, {"assessed": False, "score": None, "reason": reason,
-                                             "evidence_ids": [], "assessment_status": "unavailable"})
+                                             "evidence_ids": [], "assessment_status": "unavailable",
+                                             **({"applicable": False} if category in OPTIONAL_CATEGORIES else {})})
         if set(categories) != set(CATEGORIES) or any(
             not categories[category].get("assessed") for category in SOURCE_CATEGORIES
         ):
@@ -1402,9 +1404,7 @@ def assess_revision(project_id: str, revision_id: str, snapshot: dict, archive_d
         business_rule_reviews = [{"rule_id": item["rule_id"], "version": item["version"],
                                   "status": "unknown", "reason": reason, "evidence_ids": []}
                                  for item in business_rule_snapshots]
-    overall = None
-    if all(categories[key]["assessed"] for key in CATEGORIES):
-        overall = round(sum(categories[key]["score"] * weights[key] for key in CATEGORIES) / 100, 1)
+    overall, overall_included, overall_not_applicable = overall_score(categories, weights)
     analyzers = []
     if languages:
         analyzers.append({"name": "cross-language-source-signals", "version": POLICY_VERSION,
@@ -1547,6 +1547,7 @@ def assess_revision(project_id: str, revision_id: str, snapshot: dict, archive_d
         "source_archive_sha256": snapshot.get("source_archive_sha256"),
         "created_at": datetime.now(timezone.utc).isoformat(),
         "overall_score": overall,
+        "overall_basis": {"included": overall_included, "not_applicable": overall_not_applicable},
         "categories": categories,
         "clean_code_design": design_provenance,
         "category_reviews": category_reviews,

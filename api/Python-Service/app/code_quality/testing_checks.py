@@ -43,12 +43,20 @@ def run(collections: dict[Capability, Any], context: Any) -> tuple[list[dict[str
     routes = [r for r in collections[Capability.ROUTE_ANALYSIS].records if isinstance(r, RouteRecord)]
     rows: list[dict[str, Any]] = []
     methods = sum(len(r.methods) for r in tests)
+    pest = sum(1 for r in tests if r.framework == "pest")
     folders = Counter("/".join(r.file.split("/")[:2]) for r in tests)
     if tests:
         anchor = next((p for p in files_of_kind(context, "config") if "phpunit" in p or "test" in p.lower()), tests[0].file)
         rows.append(finding(anchor, 1, "testing-inventory", CATEGORY, "info",
-                            f"{plural(len(tests), 'test class')} with {plural(methods, 'test method')} "
+                            f"{plural(len(tests), 'test class' if not pest else 'test class or Pest file')} with {plural(methods, 'test method')} "
                             f"({', '.join(f'{folder} {count}' for folder, count in folders.most_common(5))}). {STATIC}"))
+    if tests:
+        # What the tests are about, so the reviewer can judge coverage from names instead of only counts.
+        listing = [f"{r.file} ({len(r.methods)}: {'; '.join(m[:50] for m in r.methods[:3])}{'…' if len(r.methods) > 3 else ''})"
+                   for r in sorted(tests, key=lambda r: -len(r.methods))[:12] if r.methods]
+        if listing:
+            rows.append(finding(rows[0]["file"], 1, "testing-areas", CATEGORY, "info",
+                                f"Largest test files by test count: {'; '.join(listing)}. {STATIC}"[:900]))
     for record in tests:
         if not record.methods:
             rows.append(finding(record.file, 1, "testing-class-without-tests", CATEGORY, "warning",
