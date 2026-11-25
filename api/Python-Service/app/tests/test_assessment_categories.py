@@ -80,3 +80,40 @@ def test_model_scores_only_categories_with_evidence(monkeypatch):
     assert set(result) == {*categories.SOURCE_CATEGORIES, "testing"}
     assert "Score these 6 software quality categories" in prompts[0] and '"testing":{' in prompts[0]
     assert "localization" not in prompts[0].split("Evidence:")[0]
+
+
+def _scored(**scores):
+    return {key: ({"assessed": True, "score": scores[key]} if key in scores
+                  else {"assessed": False, "score": None, "applicable": False} if key in categories.OPTIONAL_CATEGORIES
+                  else {"assessed": False, "score": None})
+            for key in categories.CATEGORIES}
+
+
+def test_overall_rescales_over_categories_that_do_not_apply():
+    scores = {key: 80 for key in categories.CATEGORIES if key not in categories.OPTIONAL_CATEGORIES}
+    overall, included, skipped = categories.overall_score(_scored(**scores), categories.DEFAULT_WEIGHTS)
+    assert overall == 80.0 and skipped == ["localization", "accessibility"] and len(included) == 8
+
+
+def test_overall_uses_weights_of_included_categories_only():
+    scores = {key: 100 for key in categories.CATEGORIES if key not in categories.OPTIONAL_CATEGORIES}
+    scores["security"] = 0
+    weights = {**categories.DEFAULT_WEIGHTS, "security": 30, "localization": 20, "accessibility": 0}
+    overall, _, _ = categories.overall_score(_scored(**scores), weights)
+    assert overall == round(100 * (sum(weights[k] for k in scores) - 30) / sum(weights[k] for k in scores), 1)
+
+
+def test_missing_evidence_in_required_categories_still_blocks_overall():
+    scores = {key: 80 for key in categories.CATEGORIES if key not in categories.OPTIONAL_CATEGORIES and key != "testing"}
+    assert categories.overall_score(_scored(**scores), categories.DEFAULT_WEIGHTS)[0] is None
+
+
+def test_an_optional_category_that_failed_to_score_still_blocks_overall():
+    data = _scored(**{key: 80 for key in categories.CATEGORIES if key not in categories.OPTIONAL_CATEGORIES})
+    data["accessibility"] = {"assessed": False, "score": None}  # evidence existed but no score: not "not applicable"
+    assert categories.overall_score(data, categories.DEFAULT_WEIGHTS)[0] is None
+
+
+def test_all_ten_scored_matches_the_plain_weighted_average():
+    overall, included, skipped = categories.overall_score(_scored(**{key: 70 for key in categories.CATEGORIES}), categories.DEFAULT_WEIGHTS)
+    assert overall == 70.0 and skipped == [] and len(included) == 10

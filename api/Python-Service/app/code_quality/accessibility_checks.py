@@ -23,6 +23,7 @@ CATEGORY = "accessibility"
 MIN_CONTRAST = 4.5
 _HTML_OPEN = re.compile(r"<html\b[^>]*>", re.I)
 _IMG = re.compile(r"<img\b[^>]*>", re.I | re.S)
+_COMPONENT_MARKUP = re.compile(r"<template\b[^>]*>(.*)</template>", re.I | re.S)
 _TABLE = re.compile(r"<table\b([^>]*)>(.*?)</table>", re.I | re.S)
 _STYLE_ATTR = re.compile(r"""\bstyle\s*=\s*(["'])(.*?)\1""", re.I | re.S)
 _STYLE_RULE = re.compile(r"([^{}]+)\{([^{}]*)\}")
@@ -70,7 +71,7 @@ def _template_rows(path: str, text: str, locales: list[str] | None = None) -> li
             rows.append(finding(path, _line(text, match.start()), "accessibility-fixed-lang", CATEGORY, "warning",
                                 f"<html lang=\"{lang.group(1)}\"> is fixed although the project ships {len(locales)} locales "
                                 f"({', '.join(locales[:4])}); screen readers pronounce other locales' text wrongly."))
-    missing_alt = [m for m in _IMG.finditer(text) if not re.search(r"\balt\s*=", m.group(0), re.I)]
+    missing_alt = [m for m in _IMG.finditer(text) if not re.search(r"\balt\s*=|\bv-bind\s*=", m.group(0), re.I)]
     if missing_alt:
         rows.append(finding(path, _line(text, missing_alt[0].start()), "accessibility-image-without-alt", CATEGORY, "error",
                             f"{plural(len(missing_alt), 'image')} in {path} have no alt attribute; screen readers announce the file name or nothing."))
@@ -100,17 +101,24 @@ def run(collections: dict[Capability, Any], context: Any) -> tuple[list[dict[str
     for path in files_of_kind(context, "templates"):
         if path.lower().endswith((".html", ".htm", ".xhtml")):
             templates.setdefault(path, "html")
+        elif "." in path.rsplit("/", 1)[-1]:  # component files: checked only when they hold a <template> block
+            templates.setdefault(path, path.rsplit(".", 1)[-1].lower())
     rows: list[dict[str, Any]] = []
     checked = 0
+    engines: dict[str, int] = {}
+    provided = {r.file for r in collections[Capability.TEMPLATES].records if isinstance(r, TemplateRecord)}
     for path in sorted(templates):
         text = context.read_text(path, 512_000)
         if text is None:
             continue
+        if path not in provided and templates[path] not in ("html", "htm", "xhtml"):
+            block = _COMPONENT_MARKUP.search(text)  # only a component's markup, not its script or styles
+            if block is None:
+                continue
+            text = "\n" * text.count("\n", 0, block.start(1)) + block.group(1)  # keeps line numbers
         checked += 1
+        engines[templates[path]] = engines.get(templates[path], 0) + 1
         rows += _template_rows(path, text, locales)
-    engines: dict[str, int] = {}
-    for engine in templates.values():
-        engines[engine] = engines.get(engine, 0) + 1
     summary = {"templates_checked": checked, "engines": dict(sorted(engines.items()))}
     if not checked:
         summary["reason"] = "No templates or HTML files were found, so accessibility is assessed only from front-end checks if any."

@@ -85,6 +85,7 @@ def test_testing_inventory_and_handlers_no_test_reaches(tmp_path):
         ("testing-handler-without-tests", "src/InvoiceController.php", 20, "warning"),
         ("testing-handler-reach", "phpunit.xml.dist", 1, "info"),
         ("testing-inventory", "phpunit.xml.dist", 1, "info"),
+        ("testing-areas", "phpunit.xml.dist", 1, "info"),
     }
     assert summary == {"test_classes": 2, "test_methods": 2, "handler_classes": 2, "handlers_without_tests": 1}
     assert all("tests were not executed" in f["message"] for f in findings)
@@ -327,3 +328,52 @@ def test_docs_citing_a_path_tail_or_a_doc_in_another_folder_are_not_stale(tmp_pa
                                   "specs/33-order.md": "# Order\n", "composer.json": COMPOSER})
     findings, _ = documentation_checks.run({}, context)
     assert "documentation-missing-path" not in {f["rule"] for f in findings}
+
+
+# ── Pest tests and Vue single-file components ───────────────────────────────
+
+PEST_CART = """<?php
+use App\\Models\\Cart;
+use App\\Http\\Controllers\\CartController as Carts;
+
+it('adds a pizza to the cart', function () {
+    $this->postJson('/api/cart/items', [])->assertOk();
+});
+
+test("removes an item", function () {
+    $this->actingAs(1)->deleteJson('/api/cart/items/{id}');
+    expect(Carts::class)->not->toBeNull();
+});
+"""
+
+
+def test_pest_files_count_as_tests_with_names_routes_and_classes(tmp_path):
+    from agent.plugins.languages.php.testing import provide_pest_tests
+
+    context = _context(tmp_path, {"tests/Feature/Cart/CartTest.php": PEST_CART, "tests/Pest.php": "<?php uses(1);",
+                                  "tests/TestCase.php": "<?php", "tests/Feature/Plain.php": "<?php echo 1;"})
+    records = provide_pest_tests(context, set())
+    assert [(r.framework, r.file, r.methods) for r in records] == [
+        ("pest", "tests/Feature/Cart/CartTest.php", ("adds a pizza to the cart", "removes an item"))]
+    assert {"/api/cart/items", "/api/cart/items/{id}", "App.Http.Controllers.CartController".replace(".", "\\")} <= set(records[0].references)
+    assert provide_pest_tests(context, {"tests/Feature/Cart/CartTest.php"}) == []  # a file PHPUnit already listed
+
+
+def test_testing_inventory_names_pest_files_and_largest_areas(tmp_path):
+    rows, summary = testing_checks.run(
+        {Capability.TEST_CONVENTIONS: _collection(Capability.TEST_CONVENTIONS, [
+            TestRecord("pest", "tests/Feature/Cart/CartTest.php", "tests/Feature/Cart/CartTest.php", ("adds", "removes"))]),
+         Capability.ROUTE_ANALYSIS: _collection(Capability.ROUTE_ANALYSIS)}, _context(tmp_path, {"phpunit.xml.dist": "<phpunit/>"}))
+    messages = " ".join(row["message"] for row in rows)
+    assert "Pest file" in messages and "CartTest.php (2: adds; removes)" in messages and summary["test_methods"] == 2
+
+
+def test_vue_templates_are_checked_for_accessibility(tmp_path):
+    vue = ('<script setup>const a = 1</script>\n<template>\n  <div><img src="a.png"><img :alt="t" src="b.png">'
+           '<img v-bind="p"></div>\n</template>\n<style>.x{color:#777;background:#888}</style>')
+    context = _context(tmp_path, {"resources/js/Card.vue": vue, "resources/js/Script.vue": "<script>export default {}</script>"})
+    rows, summary = accessibility_checks.run({Capability.TEMPLATES: _collection(Capability.TEMPLATES)}, context)
+    found = {(r["rule"], r["file"], r["line"]) for r in rows}
+    assert ("accessibility-image-without-alt", "resources/js/Card.vue", 3) in found
+    assert summary["templates_checked"] == 1 and summary["engines"] == {"vue": 1}
+    assert not any(r["rule"] == "accessibility-low-contrast" for r in rows)  # styles are outside the markup

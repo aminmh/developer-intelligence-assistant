@@ -1,4 +1,4 @@
-"""PHP test conventions: PHPUnit test classes and test configuration (gap-closing plan, task 16).
+"""PHP test conventions: PHPUnit test classes and Pest test files and test configuration (gap-closing plan, task 16).
 
 Capability ``test_conventions`` gives one ``TestRecord`` per PHPUnit test class from PHP facts:
 its test methods and what they reference (classes created, called or named with ``::class``,
@@ -95,6 +95,34 @@ def _references(facts: Any, calls_by_class: dict[str, list[dict[str, Any]]], fqn
     return tuple(dict.fromkeys(found))[:300]
 
 
+_PEST_TEST = re.compile(r"""^[ \t]*(?:it|test)\(\s*(['"])(.+?)\1""", re.M)
+_PEST_CALL = re.compile(r"""->\s*(?:get|post|put|patch|delete|options|getJson|postJson|putJson|patchJson|deleteJson|json)\(\s*(?:['"](?:GET|POST|PUT|PATCH|DELETE)['"]\s*,\s*)?['"](/[^'"?]*)""")
+_PEST_CLASS = re.compile(r"\\?([A-Z][A-Za-z0-9_\\]*)::class")
+_PEST_USE = re.compile(r"^use\s+([A-Za-z0-9_\\]+)(?:\s+as\s+(\w+))?;", re.M)
+MAX_PEST_FILES = 400
+
+
+def provide_pest_tests(context: RevisionContext, known: set[str]) -> list[TestRecord]:
+    """Pest tests are ``it('...')``/``test('...')`` calls in plain PHP files, not classes with methods, so
+    they are read from the file text: test names, route paths the file requests, and classes it names."""
+    records = []
+    candidates = [p for p in sorted(context.files) if p.endswith(".php") and p.startswith(_TEST_DIRS)
+                  and p not in known and PurePosixPath(p).name not in ("Pest.php", "TestCase.php", "bootstrap.php")]
+    for path in candidates[:MAX_PEST_FILES]:
+        text = context.read_text(path, 512_000)
+        if not text:
+            continue
+        names = tuple(match.group(2) for match in _PEST_TEST.finditer(text))
+        if not names:
+            continue
+        imports = {(alias or fqn.rsplit("\\", 1)[-1]): fqn for fqn, alias in _PEST_USE.findall(text)}
+        classes = [imports.get(name, name).lstrip("\\") for name in _PEST_CLASS.findall(text)]
+        paths = [value for value in _PEST_CALL.findall(text) if _path_like(value)]
+        records.append(TestRecord(framework="pest", file=path, test_class=path, methods=names,
+                                  references=tuple(dict.fromkeys([*classes, *paths]))[:300]))
+    return records
+
+
 def provide_tests(context: RevisionContext, facts: Any) -> list[TestRecord]:
     calls_by_class: dict[str, list[dict[str, Any]]] = {}
     for file in facts.files():
@@ -112,7 +140,7 @@ def provide_tests(context: RevisionContext, facts: Any) -> list[TestRecord]:
             methods = tuple(m["name"] for m in cls.get("methods") or [] if _is_test_method(m))
             records.append(TestRecord(framework=LANGUAGE, file=path, test_class=fqn, methods=methods,
                                       references=_references(facts, calls_by_class, fqn)))
-    return records
+    return [*records, *provide_pest_tests(context, {r.file for r in records})]
 
 
 # ── config_risks: PHPUnit configuration against the installed PHPUnit ───────

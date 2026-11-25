@@ -76,7 +76,7 @@ _TRANSLATION_SUFFIXES = (".po", ".pot", ".mo", ".xlf", ".xliff", ".arb", ".resx"
 _CATALOGUE_SUFFIXES = (".yaml", ".yml", ".json", ".php", ".properties", ".ini", ".toml", ".js", ".ts")
 _TEMPLATE_SUFFIXES = (".twig", ".blade.php", ".html", ".htm", ".xhtml", ".hbs", ".handlebars", ".mustache",
                       ".ejs", ".erb", ".haml", ".slim", ".jinja", ".jinja2", ".j2", ".njk", ".liquid", ".tpl",
-                      ".latte", ".phtml", ".cshtml", ".razor", ".jsp", ".gohtml", ".tmpl", ".pug", ".jade")
+                      ".latte", ".phtml", ".vue", ".cshtml", ".razor", ".jsp", ".gohtml", ".tmpl", ".pug", ".jade")
 
 
 def _any(name: str, globs: Iterable[str]) -> bool:
