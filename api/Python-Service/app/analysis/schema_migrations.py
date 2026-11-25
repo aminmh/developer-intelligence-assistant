@@ -96,9 +96,22 @@ def validate_migration_timestamp(value: str) -> str:
     return value
 
 
+def _plain_column_addition(operation: dict) -> bool:
+    """A new column that carries no expression default or identity.
+
+    Adding a column never re-declares the table's other columns, so definitions the tool cannot model (catalog notes,
+    expression defaults, identity columns) are not at risk. Every other change to the table still needs a manual migration.
+    """
+    after = operation['after'] or {}
+    return (operation['kind'] == 'column' and operation['action'] == 'add'
+            and after.get('default_expression') is None and after.get('identity') is None)
+
+
 def _check_inspected_definitions(operations: list[dict], baseline: Schema, schema: Schema) -> None:
     touched: set[str] = set()
     for operation in operations:
+        if _plain_column_addition(operation):
+            continue
         if operation['kind'] == 'relationship':
             for value in (operation['before'], operation['after']):
                 if value:
@@ -162,6 +175,18 @@ def _up_parts(tokens, doctrine):
             statements.append(tuple(tokens[statement_start:i + 1]))
             statement_start = i + 1
     return None
+
+
+_CODE_FENCE = re.compile(r'\A\s*```[A-Za-z]*[ \t]*\r?\n(.*?)\r?\n?```\s*\Z', re.DOTALL)
+
+
+def _without_code_fence(candidate):
+    """Models often wrap code in a Markdown fence despite being told not to. Removing one surrounding fence changes no code."""
+    if isinstance(candidate, str):
+        match = _CODE_FENCE.match(candidate)
+        if match:
+            return match.group(1)
+    return candidate
 
 
 def _matches_supported_php(candidate, expected, operations, doctrine):
@@ -243,8 +268,15 @@ def preview(draft: dict, framework: str, database: str, migration_timestamp: str
                    'doctrine': DoctrineMigrationAdapter}.get(framework)
         if trusted is None or type(adapter) is not trusted:
             raise UnsupportedMigration('Third-party migration adapters are disabled until independent validation is available')
-        if any(op['table_id'] and table_namespaces[op['table_id']] is not None for op in operations):
-            raise UnsupportedMigration('Namespaced tables require manual migration')
+        namespaced = [op for op in operations if op['table_id'] and table_namespaces[op['table_id']] is not None]
+        if namespaced:
+            # On MySQL the namespace is the database itself and a migration runs against the connected database, so a new
+            # column is safe there; every other change, and PostgreSQL schemas, stay manual.
+            if database != 'mysql' or any(not _plain_column_addition(op) for op in namespaced):
+                raise UnsupportedMigration('Namespaced tables require manual migration')
+            databases = sorted({table_namespaces[op['table_id']] for op in namespaced})
+            result['warnings'].append(f"The tables are in the MySQL database {', '.join(databases)}. The migration runs against "
+                                      'the database your application is connected to: confirm that is the same one.')
         if database == 'mysql' and any(op['kind'] == 'column' and op['action'] == 'change' and op['before']['name'] != op['after']['name'] for op in operations):
             result['warnings'].append('Column renames require MySQL 8.0 or newer; verify the server version before use.')
         files = adapter.generate(deepcopy(operations), database)
@@ -278,7 +310,7 @@ def preview(draft: dict, framework: str, database: str, migration_timestamp: str
                                  'Migration class with up(): void and down(): void; import Migration, Blueprint '
                                  'and Schema, in that order; each operation uses its own Schema::create, Schema::drop, '
                                  'or Schema::table call. Make down throw a fully qualified RuntimeException with '
-                                 'message Manual rollback required. For Doctrine use namespace DoctrineMigrations, '
+                                 'exactly the message Manual rollback required, with no trailing period. For Doctrine use namespace DoctrineMigrations, '
                                  'the supplied final class name extending AbstractMigration; import the appropriate '
                                  'MySQLPlatform or PostgreSQLPlatform first, then Schema and AbstractMigration. '
                                  'Use a platform abortIf guard; '
@@ -287,9 +319,9 @@ def preview(draft: dict, framework: str, database: str, migration_timestamp: str
                                  'Wrong database platform. For SQL quote identifiers with backticks on MySQL '
                                  'or double quotes on PostgreSQL; use ALTER TABLE ... ADD COLUMN for additions and '
                                  'ALTER TABLE ... DROP COLUMN for removals; do not append SQL semicolons. Use INTEGER, BIGINT, '
-                                 'TEXT, BOOLEAN, and DATE types, with NOT NULL only for non-nullable columns. '
-                                 'For Laravel use integer, bigInteger, text, boolean, and date, and nullable() '
-                                 'where required. For named keys and indexes use the supplied resolved column names. '
+                                 'TEXT, BOOLEAN, DATE, TIMESTAMP, VARCHAR(n) and CHAR(n) types, with NOT NULL only for non-nullable columns. '
+                                 'For Laravel use integer, bigInteger, text, boolean, date, timestamp, string(name, n) for VARCHAR(n) and '
+                                 'char(name, n) for CHAR(n), and nullable() where required. For named keys and indexes use the supplied resolved column names. '
                                  'For a new table, resolve each key column ID from that table\'s columns; '
                                  'include its named primary and unique keys inside Schema::create or CREATE TABLE. '
                                  'Create each new table index afterwards using CREATE INDEX or CREATE UNIQUE INDEX, '
@@ -315,7 +347,7 @@ def preview(draft: dict, framework: str, database: str, migration_timestamp: str
                 temperature=0, max_tokens=8192, timeout=60,
                 provider="remote" if llm.remote_configured() else "local",
                 fallback_to_local=False, max_retries=0)
-            candidate = completion[0]
+            candidate = _without_code_fence(completion[0])
         except Exception as exc:
             raise UnsupportedMigration('Migration model unavailable; check the configured provider and retry') from exc
         try:

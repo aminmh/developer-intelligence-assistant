@@ -45,20 +45,54 @@ def draft(before, after):
     return {'id': 'draft', 'revision': 2, 'baseline': before, 'schema': after}
 
 
-@pytest.mark.parametrize('metadata', ['inspection_metadata', 'default_expression', 'identity'])
-@pytest.mark.parametrize('framework', ['laravel', 'symfony'])
-def test_inspected_definitions_block_any_change_to_the_affected_table(metadata, framework):
+def _with_inspected_definition(metadata):
     before = schema([column('a', 'age')])
     if metadata == 'inspection_metadata':
         before['tables'][0][metadata] = ['CHECK (age > 0)']
     else:
         before['tables'][0]['columns'][0][metadata] = 'always' if metadata == 'identity' else 'CURRENT_TIMESTAMP'
+    return before
+
+
+@pytest.mark.parametrize('metadata', ['inspection_metadata', 'default_expression', 'identity'])
+@pytest.mark.parametrize('framework', ['laravel', 'symfony'])
+def test_inspected_definitions_block_changes_to_existing_columns_of_the_affected_table(metadata, framework):
+    before = _with_inspected_definition(metadata)
     after = json.loads(json.dumps(before))
-    after['tables'][0]['columns'].append(column('b', 'other'))
+    after['tables'][0]['columns'][0]['nullable'] = False
     result = preview(draft(before, after), framework, 'postgresql')
     assert result['generation_blocked']
     assert 'manual migration' in result['generation_error']
     assert result['files'] == []
+
+
+@pytest.mark.parametrize('metadata', ['inspection_metadata', 'default_expression', 'identity'])
+@pytest.mark.parametrize('framework', ['laravel', 'symfony'])
+def test_a_plain_new_column_is_allowed_on_a_table_with_inspected_definitions(metadata, framework):
+    before = _with_inspected_definition(metadata)
+    after = json.loads(json.dumps(before))
+    after['tables'][0]['columns'].append(column('b', 'other'))
+    result = preview(draft(before, after), framework, 'postgresql')
+    assert not result['generation_blocked'], result['generation_error']
+    assert len(result['files']) == 1
+
+
+@pytest.mark.parametrize('attribute', ['default_expression', 'identity'])
+def test_a_new_column_with_its_own_expression_default_or_identity_still_needs_a_manual_migration(attribute):
+    before = _with_inspected_definition('inspection_metadata')
+    after = json.loads(json.dumps(before))
+    after['tables'][0]['columns'].append(column('b', 'stamp', **{attribute: 'CURRENT_TIMESTAMP' if attribute == 'default_expression' else 'always'}))
+    result = preview(draft(before, after), 'laravel', 'postgresql')
+    assert result['generation_blocked'] and 'manual migration' in result['generation_error']
+
+
+def test_a_new_column_together_with_an_index_on_an_inspected_table_is_still_blocked():
+    before = _with_inspected_definition('inspection_metadata')
+    after = json.loads(json.dumps(before))
+    after['tables'][0]['columns'].append(column('b', 'other'))
+    after['tables'][0]['indexes'] = [{'id': 'i', 'name': 'other_idx', 'column_ids': ['b'], 'unique': False}]
+    result = preview(draft(before, after), 'laravel', 'postgresql')
+    assert result['generation_blocked'] and 'inspected definitions' in result['generation_error']
 
 
 def test_removing_inspection_metadata_cannot_bypass_migration_protection():
@@ -1002,3 +1036,78 @@ def test_add_unique_key_and_index_reject_duplicate_names():
     posts['keys'] = [{'id': 'key', 'name': 'same', 'kind': 'unique', 'column_ids': ['pid']}]
     posts['indexes'] = [{'id': 'index', 'name': 'SAME', 'column_ids': ['pid']}]
     assert preview(draft(before, after), 'laravel', 'mysql')['generation_blocked']
+
+
+@pytest.mark.parametrize('framework', ['laravel', 'symfony'])
+@pytest.mark.parametrize('database', ['mysql', 'postgresql'])
+@pytest.mark.parametrize('type_name, laravel, sql', [
+    ('timestamp', "$table->timestamp('added')->nullable();", 'TIMESTAMP'),
+    ('varchar(255)', "$table->string('added', 255)->nullable();", 'VARCHAR(255)'),
+    ('char(26)', "$table->char('added', 26)->nullable();", 'CHAR(26)'),
+])
+def test_timestamp_varchar_and_char_are_supported_for_new_columns(framework, database, type_name, laravel, sql):
+    before = schema([column('a', 'age')])
+    after = json.loads(json.dumps(before))
+    after['tables'][0]['columns'].append(column('b', 'added', type=type_name))
+    result = preview(draft(before, after), framework, database)
+    assert not result['generation_blocked'], result['generation_error']
+    content = result['files'][0]['content']
+    assert (laravel if framework == 'laravel' else sql) in content
+
+
+@pytest.mark.parametrize('type_name', ['varchar(0)', 'varchar(70000)', 'varchar(255); DROP TABLE users', 'varchar()', 'timestamp(6)', 'char(-1)'])
+def test_unsafe_or_unknown_sized_types_stay_unsupported(type_name):
+    before = schema([column('a', 'age')])
+    after = json.loads(json.dumps(before))
+    after['tables'][0]['columns'].append(column('b', 'added', type=type_name))
+    result = preview(draft(before, after), 'laravel', 'mysql')
+    assert result['generation_blocked'] and 'Unsupported column type' in result['generation_error']
+
+
+def test_changing_an_existing_column_to_a_new_type_still_uses_the_narrow_type_list():
+    before = schema([column('a', 'age')])
+    after = json.loads(json.dumps(before))
+    after['tables'][0]['columns'][0]['type'] = 'varchar(255)'
+    result = preview(draft(before, after), 'laravel', 'postgresql')
+    assert result['generation_blocked']
+
+
+def _namespaced(columns, namespace='shop_db'):
+    return {'tables': [{'id': 't', 'name': 'users', 'namespace': namespace, 'columns': columns}]}
+
+
+def test_a_new_column_on_a_namespaced_mysql_table_is_allowed_with_a_database_warning():
+    before = _namespaced([column('a', 'age')])
+    after = json.loads(json.dumps(before))
+    after['tables'][0]['columns'].append(column('b', 'deleted_at', type='timestamp'))
+    result = preview(draft(before, after), 'laravel', 'mysql')
+    assert not result['generation_blocked'], result['generation_error']
+    assert any('MySQL database shop_db' in warning for warning in result['warnings'])
+
+
+def test_namespaced_tables_stay_manual_for_postgresql_and_for_anything_but_new_columns():
+    before = _namespaced([column('a', 'age')])
+    added = json.loads(json.dumps(before))
+    added['tables'][0]['columns'].append(column('b', 'extra'))
+    postgres = preview(draft(before, added), 'laravel', 'postgresql')
+    assert postgres['generation_blocked'] and 'Namespaced tables' in postgres['generation_error']
+    dropped = json.loads(json.dumps(before)); dropped['tables'][0]['columns'] = []
+    assert 'Namespaced tables' in preview(draft(before, dropped), 'laravel', 'mysql')['generation_error']
+    required = json.loads(json.dumps(before)); required['tables'][0]['columns'][0]['nullable'] = False
+    assert preview(draft(before, required), 'laravel', 'mysql')['generation_blocked']
+
+
+@pytest.mark.parametrize('fence', ['```php\n{code}\n```', '```\n{code}\n```', '\n```php\r\n{code}\r\n```\n'])
+def test_a_markdown_code_fence_around_the_candidate_is_removed_but_nothing_else_is_forgiven(monkeypatch, fence):
+    from runtime import llm
+    before = schema([column('a', 'age')])
+    after = json.loads(json.dumps(before))
+    after['tables'][0]['columns'].append(column('b', 'deleted_at', type='timestamp'))
+    monkeypatch.setattr(llm, 'complete_with_model', lambda prompt, **kw: (fence.format(code=model_response(prompt)), 'test', 'local'))
+    result = preview(draft(before, after), 'laravel', 'mysql')
+    assert not result['generation_blocked'], result['generation_error']
+    assert not result['files'][0]['content'].lstrip().startswith('```')
+
+    monkeypatch.setattr(llm, 'complete_with_model', lambda prompt, **kw: (fence.format(code=model_response(prompt).replace("Manual rollback required'", "Manual rollback required.'")), 'test', 'local'))
+    altered = preview(draft(before, after), 'laravel', 'mysql')
+    assert altered['generation_blocked'] and 'does not match' in altered['generation_error']
