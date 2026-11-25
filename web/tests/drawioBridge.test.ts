@@ -123,3 +123,16 @@ test('rebuilding a diagram preserves the old layout on cancellation and uses the
   assert.match(rebuilt, /saved_table/);
   assert.doesNotMatch(rebuilt, /hand-placed annotations/);
 });
+
+test('autosave events feed the live view only when they are valid and bounded', () => {
+  const popup = {} as Window, origin = 'https://drawio.example';
+  const event = (data: string, source: Window = popup, sender = origin) => ({ data, source, origin: sender });
+  const xml = '<mxfile/>';
+  const validate = (value: string) => value === xml;
+  assert.deepEqual(readEditorEvent(event(JSON.stringify({ event: 'autosave', xml })), origin, popup, validate), { event: 'autosave', xml });
+  assert.equal(readEditorEvent(event(JSON.stringify({ event: 'autosave', xml: '<bad/>' })), origin, popup, validate), null, 'an unreadable autosave is ignored, not reported as a failed save');
+  assert.equal(readEditorEvent(event(JSON.stringify({ event: 'autosave', xml: 'x'.repeat(MAX_LAYOUT_BYTES + 1) })), origin, popup, validate), null);
+  assert.equal(readEditorEvent(event(JSON.stringify({ event: 'autosave', xml }), {} as Window), origin, popup, validate), null);
+  assert.equal(readEditorEvent(event(JSON.stringify({ event: 'autosave', xml }), popup, 'https://evil.example'), origin, popup, validate), null);
+  assert.equal(readEditorEvent(event(JSON.stringify({ event: 'autosave' })), origin, popup, validate), null);
+});
