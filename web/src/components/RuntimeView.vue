@@ -70,7 +70,7 @@ const loadingDetail = ref(false);
 const error = ref('');
 const setupState = ref<'idle' | 'starting' | 'running' | 'complete' | 'cancelled' | 'error'>('idle');
 const setupMessage = ref('');
-const activeOperation = ref<'setup' | 'cleanup' | 'remove' | ''>('');
+const activeOperation = ref<'setup' | 'cleanup' | 'remove' | 'install' | ''>('');
 type SavedSetup = { phase: string; project_id: string; environment: string; commit?: string | null; compose_project?: string | null; services?: string[] };
 const savedSetups = ref<SavedSetup[]>([]);
 const setupKey = (item: Pick<SavedSetup, 'project_id' | 'environment'>) => `${item.project_id}@${item.environment}`;
@@ -662,6 +662,41 @@ const applySetupPlan = async (planId: string) => {
     setupMessage.value = cause?.message || 'Runtime setup failed.';
   }
 };
+// Install the Indexr library in the app with the helper; it asks for approval in a dialog on this computer.
+const installIndexrLibrary = async (request: { project_name: string; project_id: string }) => {
+  showSetupWizard.value = false;
+  activeOperation.value = 'install';
+  setupState.value = 'starting';
+  setupMessage.value = 'Authorizing the library install…';
+  try {
+    let token = await getRuntimeHelperAuth();
+    const helperUrl = 'http://127.0.0.1:47831';
+    let authorizationAt = Date.now();
+    const headers = () => ({ Authorization: `Bearer ${token}` });
+    const startResponse = await fetch(`${helperUrl}/instrumentation/install`, {
+      method: 'POST', cache: 'no-store', headers: { ...headers(), 'Content-Type': 'application/json' },
+      body: JSON.stringify(request),
+    });
+    const started = await startResponse.json().catch(() => ({}));
+    if (startResponse.status === 404) throw new Error('The local Runtime helper is out of date. Run just up to restart it, then reload this page.');
+    if (!startResponse.ok) throw new Error(started.detail || 'Could not start the library install.');
+    setupState.value = 'running';
+    while (true) {
+      if (Date.now() - authorizationAt > 120_000) { token = await getRuntimeHelperAuth(); authorizationAt = Date.now(); }
+      const statusResponse = await fetch(`${helperUrl}/status`, { headers: headers(), cache: 'no-store' });
+      const status = await statusResponse.json().catch(() => ({}));
+      if (!statusResponse.ok) throw new Error(status.detail || 'Could not read the install progress.');
+      setupMessage.value = status.message || 'Installing the Indexr library…';
+      if (status.status === 'complete') { setupState.value = 'complete'; await refreshWhenApiIsBack(); break; }
+      if (status.status === 'cancelled') { setupState.value = 'cancelled'; break; }
+      if (status.status === 'error') { setupState.value = 'error'; break; }
+      await new Promise((resolve) => setTimeout(resolve, 2000));
+    }
+  } catch (cause: any) {
+    setupState.value = 'error';
+    setupMessage.value = cause?.message || 'The library install failed.';
+  }
+};
 const cleanupRuntime = async (target?: Pick<SavedSetup, 'project_id' | 'environment'>) => {
   // With one setup there is nothing to choose; with several, each has its own button.
   const chosen = target ?? (savedSetups.value.length === 1 ? savedSetups.value[0] : undefined);
@@ -885,7 +920,8 @@ const setupBannerTone = computed(() => (setupState.value === 'error' ? 'bad' : s
         <AlertTriangle v-else-if="setupState === 'error' || setupState === 'cancelled'" aria-hidden="true" />
         <RefreshCw v-else class="rt-spin" aria-hidden="true" />
         <div class="rt-banner-text">
-          <b>{{ setupState === 'complete' ? (activeOperation === 'cleanup' ? 'Cleanup complete' : activeOperation === 'remove' ? 'Local container removal complete' : activeOperation === 'setup' ? 'Setup complete' : savedSetup ? 'Existing setup record' : 'Setup complete') : setupState === 'cancelled' ? (activeOperation === 'cleanup' ? 'Cleanup cancelled' : activeOperation === 'remove' ? 'Local container removal cancelled' : 'Setup cancelled') : setupState === 'error' ? (activeOperation === 'cleanup' ? 'Cleanup needs attention' : activeOperation === 'remove' ? 'Local container removal needs attention' : 'Setup failed') : activeOperation === 'cleanup' ? 'Runtime cleanup' : activeOperation === 'remove' ? 'Local container removal' : 'Runtime setup' }}</b>
+          <b v-if="activeOperation === 'install'">{{ setupState === 'complete' ? 'Indexr library installed' : setupState === 'cancelled' ? 'Install cancelled' : setupState === 'error' ? 'Library install needs attention' : 'Installing the Indexr library' }}</b>
+          <b v-else>{{ setupState === 'complete' ? (activeOperation === 'cleanup' ? 'Cleanup complete' : activeOperation === 'remove' ? 'Local container removal complete' : activeOperation === 'setup' ? 'Setup complete' : savedSetup ? 'Existing setup record' : 'Setup complete') : setupState === 'cancelled' ? (activeOperation === 'cleanup' ? 'Cleanup cancelled' : activeOperation === 'remove' ? 'Local container removal cancelled' : 'Setup cancelled') : setupState === 'error' ? (activeOperation === 'cleanup' ? 'Cleanup needs attention' : activeOperation === 'remove' ? 'Local container removal needs attention' : 'Setup failed') : activeOperation === 'cleanup' ? 'Runtime cleanup' : activeOperation === 'remove' ? 'Local container removal' : 'Runtime setup' }}</b>
           <span class="rt-block">{{ setupMessage }}</span>
           <span v-for="item in savedSetups" :key="setupKey(item)" class="rt-block">{{ setupLabel(item) }} — Compose project: {{ item.compose_project || 'unknown' }} · Services: {{ (item.services || []).join(', ') || 'none recorded' }}.</span>
           <span v-if="savedSetups.length" class="rt-block">Available containers are listed below.</span>
@@ -894,7 +930,7 @@ const setupBannerTone = computed(() => (setupState.value === 'error' ? 'bad' : s
 
       <RemoteHostMonitor />
 
-      <RuntimeSetupWizard v-if="showSetupWizard" :authorize="getRuntimeHelperAuth" :known-project-ids="knownProjectIds" :indexed-revisions="projects" :inventory-available="!loadingProjects && !error" @close="showSetupWizard = false" @apply="applySetupPlan" />
+      <RuntimeSetupWizard v-if="showSetupWizard" :authorize="getRuntimeHelperAuth" :known-project-ids="knownProjectIds" :indexed-revisions="projects" :inventory-available="!loadingProjects && !error" @close="showSetupWizard = false" @apply="applySetupPlan" @install="installIndexrLibrary" />
 
       <div v-if="!error && !options.length && !loadingProjects && !waitingForFirstReport" class="rt-empty">
         <span class="rt-empty-icon"><Server aria-hidden="true" /></span>
