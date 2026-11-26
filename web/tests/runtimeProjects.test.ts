@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { defaultReusedRevision, phpRuntimeSetupCommand, reusableRevisions, runtimeProjectOptions, runtimeSetupReadiness } from '../src/utils/runtimeProjects';
+import { defaultReusedRevision, phpRuntimeSetupCommand, reusableRevisions, runsNow, runtimeOptionLabel, runtimeProjectOptions, runtimeSetupReadiness } from '../src/utils/runtimeProjects';
 import type { RuntimeProjectRecord } from '../src/types';
 
 const uploaded: RuntimeProjectRecord = {
@@ -65,4 +65,38 @@ test('setup reuses an existing ready revision instead of adding a Docker-only on
   // Containers labeled with the reused revision's commit add no Docker-only option.
   const options = runtimeProjectOptions([{ ...records[1], running_commit_shas: [sha('b')] }]);
   assert.deepEqual(options.map((option) => option.key), ['pizza:rev_new']);
+});
+
+const skiplanner = (revision: string, commit: string): RuntimeProjectRecord => ({
+  project_id: 'skiplanner', revision_id: `rev_${revision}`, commit_sha: commit, state: 'ready',
+  containers: [], running_containers: 2, running_project_containers: 2,
+  running_commit_shas: ['0'.repeat(40), 'b'.repeat(40)], deployment_mismatch: false,
+});
+
+test('only the revision whose commit the running containers report is marked running now', () => {
+  const labels = runtimeProjectOptions([
+    skiplanner('3d98b9e3aaaa', 'b'.repeat(40)), skiplanner('72b67763bbbb', 'a'.repeat(40)), skiplanner('b1178db6cccc', 'c'.repeat(40)),
+  ]).map(runtimeOptionLabel);
+  assert.deepEqual(labels, [
+    'skiplanner · Revision 3d98b9e3 · ● running now',
+    'skiplanner · Revision 72b67763',
+    'skiplanner · Revision b1178db6',
+  ]);
+});
+
+test('the all-zero commit that databases report never marks a revision, and stopped projects mark nothing', () => {
+  assert.equal(runsNow({ commit_sha: '0'.repeat(40), running_commit_shas: ['0'.repeat(40)] }), false);
+  assert.equal(runsNow({ commit_sha: null, running_commit_shas: ['abc'] }), false);
+  assert.equal(runsNow({ commit_sha: 'abc', running_commit_shas: [] }), false);
+  assert.equal(runtimeOptionLabel(runtimeProjectOptions([{ ...skiplanner('72b67763bbbb', 'a'.repeat(40)), running_commit_shas: [], running_project_containers: 0 }])[0]), 'skiplanner · Revision 72b67763');
+});
+
+test('containers running code that has no indexed revision are marked on the Docker-only option', () => {
+  const labels = runtimeProjectOptions([{ ...uploaded, revision_id: null }]).map(runtimeOptionLabel);
+  assert.deepEqual(labels, ['pizza · Docker only · no indexed revision · ● running now']);
+});
+
+test('a running commit that an indexed revision covers, or the databases\' placeholder, adds no Docker-only option', () => {
+  const options = runtimeProjectOptions([skiplanner('3d98b9e3aaaa', 'b'.repeat(40)), skiplanner('72b67763bbbb', 'a'.repeat(40))]);
+  assert.deepEqual(options.map((option) => option.key), ['skiplanner:rev_3d98b9e3aaaa', 'skiplanner:rev_72b67763bbbb']);
 });

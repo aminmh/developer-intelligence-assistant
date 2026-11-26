@@ -38,16 +38,38 @@ export function phpRuntimeSetupCommand(directory: string, projectId: string): st
   return `just php-otel-setup ${quote(directory)} --project-id ${quote(projectId)}`;
 }
 
+const PLACEHOLDER_COMMIT = /^0+$/; // databases are labelled with an all-zero commit, which is not a running revision
+
+/** Whether containers of this commit are running now: the option's commit is one a running container reports. */
+export function runsNow(option: Pick<RuntimeProjectRecord, 'commit_sha' | 'running_commit_shas'>): boolean {
+  const commit = option.commit_sha;
+  return !!commit && !PLACEHOLDER_COMMIT.test(commit) && (option.running_commit_shas || []).includes(commit);
+}
+
+/** The text of a project / revision option in the selector, marking the revision whose containers are running. */
+export function runtimeOptionLabel(option: RuntimeProjectOption): string {
+  const revision = option.revision_id ? `Revision ${option.revision_id.slice(4, 12)}` : 'Docker only · no indexed revision';
+  return `${option.project_id} · ${revision}${runsNow(option) ? ' · ● running now' : ''}`;
+}
+
 // Source revisions have their own identity; ZIP uploads need no Git commit.
 export function runtimeProjectOptions(projects: RuntimeProjectRecord[]): RuntimeProjectOption[] {
   const options = new Map<string, RuntimeProjectOption>();
+  // A running commit that some revision of the same project covers needs no "Docker only" option of its own.
+  const indexedCommits = new Map<string, Set<string>>();
+  for (const project of projects) {
+    if (project.revision_id && project.commit_sha) {
+      indexedCommits.set(project.project_id, (indexedCommits.get(project.project_id) || new Set()).add(project.commit_sha));
+    }
+  }
   for (const project of projects) {
     if (project.revision_id) {
       const key = `${project.project_id}:${project.revision_id}`;
       options.set(key, { ...project, key });
     }
     for (const commit of [project.commit_sha, ...(project.running_commit_shas || [])]) {
-      if (!commit || (project.revision_id && commit === project.commit_sha)) continue;
+      if (!commit || PLACEHOLDER_COMMIT.test(commit) || indexedCommits.get(project.project_id)?.has(commit)
+          || (project.revision_id && commit === project.commit_sha)) continue;
       const key = `${project.project_id}:docker-only`;
       if (!options.has(key)) options.set(key, {
         ...project, key, commit_sha: commit, revision_id: null, state: 'awaiting_source',

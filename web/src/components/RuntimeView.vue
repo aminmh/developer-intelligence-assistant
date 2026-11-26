@@ -9,7 +9,7 @@ import RemoteHostMonitor from './RemoteHostMonitor.vue';
 import RuntimeSetupWizard from './runtime/RuntimeSetupWizard.vue';
 import ToggleCard from './ToggleCard.vue';
 import { makeRequest } from '../ui/makeRequest';
-import { runtimeProjectOptions } from '../utils/runtimeProjects';
+import { runtimeOptionLabel, runtimeProjectOptions } from '../utils/runtimeProjects';
 import { subscribeRuntimeUpdates } from '../ui/runtimeEvents';
 import { useUrlTab } from '../composables/useUrlTab';
 import { useProjectScope } from '../composables/useProjectScope';
@@ -883,7 +883,7 @@ const setupBannerTone = computed(() => (setupState.value === 'error' ? 'bad' : s
           <span class="sr-only">Project and indexed revision</span>
           <select v-model="selectedKey" :disabled="setupBusy">
             <option value="">{{ scope.projectId.value && !scopedOptions.length ? `No runtime data for ${scope.projectId.value}` : 'Select project / indexed revision' }}</option>
-            <option v-for="item in scopedOptions" :key="item.key" :value="item.key">{{ item.project_id }} · {{ item.revision_id ? `Revision ${item.revision_id.slice(4, 12)}` : 'Docker only · no indexed revision' }}</option>
+            <option v-for="item in scopedOptions" :key="item.key" :value="item.key">{{ runtimeOptionLabel(item) }}</option>
           </select>
           <ChevronsUpDown aria-hidden="true" />
         </label>
