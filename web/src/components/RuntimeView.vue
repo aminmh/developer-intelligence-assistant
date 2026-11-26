@@ -9,7 +9,7 @@ import RemoteHostMonitor from './RemoteHostMonitor.vue';
 import RuntimeSetupWizard from './runtime/RuntimeSetupWizard.vue';
 import ToggleCard from './ToggleCard.vue';
 import { makeRequest } from '../ui/makeRequest';
-import { runtimeProjectOptions } from '../utils/runtimeProjects';
+import { runtimeOptionLabel, runtimeProjectOptions } from '../utils/runtimeProjects';
 import { subscribeRuntimeUpdates } from '../ui/runtimeEvents';
 import { useUrlTab } from '../composables/useUrlTab';
 import { useProjectScope } from '../composables/useProjectScope';
@@ -70,8 +70,14 @@ const loadingDetail = ref(false);
 const error = ref('');
 const setupState = ref<'idle' | 'starting' | 'running' | 'complete' | 'cancelled' | 'error'>('idle');
 const setupMessage = ref('');
-const activeOperation = ref<'setup' | 'cleanup' | 'remove' | ''>('');
-const savedSetup = ref<any>(null);
+const activeOperation = ref<'setup' | 'cleanup' | 'remove' | 'install' | 'extension' | ''>('');
+type SavedSetup = { phase: string; project_id: string; environment: string; commit?: string | null; compose_project?: string | null; services?: string[] };
+const savedSetups = ref<SavedSetup[]>([]);
+const setupKey = (item: Pick<SavedSetup, 'project_id' | 'environment'>) => `${item.project_id}@${item.environment}`;
+const setupLabel = (item: Pick<SavedSetup, 'project_id' | 'environment'>) => `${item.project_id} · ${item.environment}`;
+// The first setup, for the banner that describes the most relevant one.
+const savedSetup = computed(() => savedSetups.value[0] ?? null);
+const unfinishedSetup = computed(() => savedSetups.value.find((item) => (item.phase || 'incomplete') !== 'active') ?? null);
 const loadingSetup = ref(true);
 const showSetupWizard = ref(false);
 const showGuide = ref(false);
@@ -155,7 +161,7 @@ const deleteTargetMessage = computed(() => {
   const count = deleteTarget.value?.traceIds.length || 0;
   return `Delete telemetry for ${count} loaded request trace${count === 1 ? '' : 's'}? This removes all stored spans for these traces in the selected project and revision, including database-call spans. Runtime aggregate metrics for those spans will decrease. This cannot be undone.`;
 });
-const loadProjects = async () => {
+const loadProjects = async (quiet = false) => {
   loadingProjects.value = true;
   try {
     const response = await makeRequest('/api/runtime/projects');
@@ -166,7 +172,7 @@ const loadProjects = async () => {
     applyScope(false);
   } catch (cause: any) {
     error.value = cause?.message || 'Could not load runtime project inventory.';
-    toast.error(error.value);
+    if (!quiet) toast.error(error.value);
   } finally {
     loadingProjects.value = false;
   }
@@ -437,6 +443,16 @@ const handleRequestDetailTabKeydown = (event: KeyboardEvent, index: number) => {
 };
 
 const refresh = async () => { await loadProjects(); await loadDetail(); };
+// Setup and cleanup recreate python-api, so the inventory is briefly unavailable. Retry quietly until it answers.
+const refreshWhenApiIsBack = async (timeoutMs = 60_000) => {
+  const deadline = Date.now() + timeoutMs;
+  while (true) {
+    await loadProjects(true);
+    if (!error.value) return loadDetail();
+    if (Date.now() >= deadline) { toast.error(error.value); return; }
+    await new Promise((resolve) => setTimeout(resolve, 2000));
+  }
+};
 // Setup restarts python-api, and the host agent's first report arrives some seconds later.
 // Keep reloading the inventory until that project reports running containers, then select it.
 const FIRST_REPORT_TIMEOUT_MS = 120_000;
@@ -563,10 +579,14 @@ const loadSavedSetup = async (showExistingNotice = true) => {
     });
     const data = await response.json().catch(() => ({}));
     if (response.ok) {
-      savedSetup.value = data.configured ? data : null;
-      if (data.configured && showExistingNotice && !setupBusy.value) {
-        setupState.value = data.phase === 'active' ? 'complete' : 'error';
-        setupMessage.value = `Existing setup: ${data.project_id} · ${data.environment} (${data.phase}).`;
+      // Older helpers return one setup at the top level; newer ones return `setups`.
+      savedSetups.value = Array.isArray(data.setups) ? data.setups : data.configured ? [data] : [];
+      if (savedSetups.value.length && showExistingNotice && !setupBusy.value) {
+        const unfinished = unfinishedSetup.value;
+        setupState.value = unfinished ? 'error' : 'complete';
+        setupMessage.value = unfinished
+          ? `Setup needs attention: ${setupLabel(unfinished)} (${unfinished.phase}). Clean it up before starting another setup.`
+          : `Existing setups: ${savedSetups.value.map(setupLabel).join(', ')}.`;
       }
     }
   } catch {
@@ -576,12 +596,10 @@ const loadSavedSetup = async (showExistingNotice = true) => {
   }
 };
 const startRuntimeSetup = async () => {
-  if (savedSetup.value) {
-    const phase = savedSetup.value.phase || 'incomplete';
-    setupState.value = phase === 'active' ? 'complete' : 'error';
-    setupMessage.value = phase === 'active'
-      ? `Runtime is already active for ${savedSetup.value.project_id} · ${savedSetup.value.environment}. Clean it up before setting up a different project.`
-      : `Runtime recovery is in phase '${phase}'. Run just runtime-status, then Clean up Runtime before starting another setup.`;
+  // Several setups can be active together; only an unfinished one (it may have left files half changed) must be cleaned up first.
+  if (unfinishedSetup.value) {
+    setupState.value = 'error';
+    setupMessage.value = `Runtime recovery for ${setupLabel(unfinishedSetup.value)} is in phase '${unfinishedSetup.value.phase || 'incomplete'}'. Run just runtime-status, then clean it up before starting another setup.`;
     return;
   }
   setupState.value = 'idle';
@@ -594,6 +612,7 @@ const applySetupPlan = async (planId: string) => {
   activeOperation.value = 'setup';
   setupState.value = 'starting';
   setupMessage.value = 'Authorizing local Runtime setup…';
+  const knownSetups = new Set(savedSetups.value.map(setupKey));
   try {
     let token = await getRuntimeHelperAuth();
     const helperUrl = 'http://127.0.0.1:47831';
@@ -619,10 +638,11 @@ const applySetupPlan = async (planId: string) => {
       setupMessage.value = status.message || 'Runtime setup is running…';
       if (status.status === 'complete') {
         await loadSavedSetup(false);
-        const projectId = savedSetup.value?.project_id;
+        const created = savedSetups.value.find((item) => !knownSetups.has(setupKey(item))) ?? savedSetups.value[savedSetups.value.length - 1];
+        const projectId = created?.project_id;
         if (projectId) {
           setupMessage.value = `Setup applied. Waiting for the host agent's first report for ${projectId}…`;
-          const reported = await waitForFirstReport(projectId, savedSetup.value?.commit);
+          const reported = await waitForFirstReport(projectId, created?.commit);
           setupMessage.value = reported
             ? `${status.message || 'Runtime setup is complete.'} Containers for ${projectId} are reporting.`
             : `${status.message || 'Runtime setup is complete.'} No containers have reported for ${projectId} yet; select Refresh in a minute, or check docker logs devassistant-telemetry-agent-agent-1.`;
@@ -642,16 +662,92 @@ const applySetupPlan = async (planId: string) => {
     setupMessage.value = cause?.message || 'Runtime setup failed.';
   }
 };
-const cleanupRuntime = async () => {
-  activeOperation.value = 'cleanup';
+// Install the Indexr library in the app with the helper; it asks for approval in a dialog on this computer.
+const installIndexrLibrary = async (request: { project_name: string; project_id: string }) => {
+  showSetupWizard.value = false;
+  activeOperation.value = 'install';
   setupState.value = 'starting';
-  setupMessage.value = 'Authorizing local Runtime cleanup…';
+  setupMessage.value = 'Authorizing the library install…';
   try {
     let token = await getRuntimeHelperAuth();
     const helperUrl = 'http://127.0.0.1:47831';
     let authorizationAt = Date.now();
     const headers = () => ({ Authorization: `Bearer ${token}` });
-    const startResponse = await fetch(`${helperUrl}/cleanup`, { method: 'POST', headers: headers(), cache: 'no-store' });
+    const startResponse = await fetch(`${helperUrl}/instrumentation/install`, {
+      method: 'POST', cache: 'no-store', headers: { ...headers(), 'Content-Type': 'application/json' },
+      body: JSON.stringify(request),
+    });
+    const started = await startResponse.json().catch(() => ({}));
+    if (startResponse.status === 404) throw new Error('The local Runtime helper is out of date. Run just up to restart it, then reload this page.');
+    if (!startResponse.ok) throw new Error(started.detail || 'Could not start the library install.');
+    setupState.value = 'running';
+    while (true) {
+      if (Date.now() - authorizationAt > 120_000) { token = await getRuntimeHelperAuth(); authorizationAt = Date.now(); }
+      const statusResponse = await fetch(`${helperUrl}/status`, { headers: headers(), cache: 'no-store' });
+      const status = await statusResponse.json().catch(() => ({}));
+      if (!statusResponse.ok) throw new Error(status.detail || 'Could not read the install progress.');
+      setupMessage.value = status.message || 'Installing the Indexr library…';
+      if (status.status === 'complete') { setupState.value = 'complete'; await refreshWhenApiIsBack(); break; }
+      if (status.status === 'cancelled') { setupState.value = 'cancelled'; break; }
+      if (status.status === 'error') { setupState.value = 'error'; break; }
+      await new Promise((resolve) => setTimeout(resolve, 2000));
+    }
+  } catch (cause: any) {
+    setupState.value = 'error';
+    setupMessage.value = cause?.message || 'The library install failed.';
+  }
+};
+// Add ext-opentelemetry to the app's PHP service without rebuilding its image; the helper asks for approval on this computer.
+const installPhpExtension = async (request: { project_name: string }) => {
+  showSetupWizard.value = false;
+  activeOperation.value = 'extension';
+  setupState.value = 'starting';
+  setupMessage.value = 'Authorizing the PHP extension install…';
+  try {
+    let token = await getRuntimeHelperAuth();
+    const helperUrl = 'http://127.0.0.1:47831';
+    let authorizationAt = Date.now();
+    const headers = () => ({ Authorization: `Bearer ${token}` });
+    const startResponse = await fetch(`${helperUrl}/instrumentation/install-extension`, {
+      method: 'POST', cache: 'no-store', headers: { ...headers(), 'Content-Type': 'application/json' },
+      body: JSON.stringify(request),
+    });
+    const started = await startResponse.json().catch(() => ({}));
+    if (startResponse.status === 404) throw new Error('The local Runtime helper is out of date. Run just up to restart it, then reload this page.');
+    if (!startResponse.ok) throw new Error(started.detail || 'Could not start the PHP extension install.');
+    setupState.value = 'running';
+    while (true) {
+      if (Date.now() - authorizationAt > 120_000) { token = await getRuntimeHelperAuth(); authorizationAt = Date.now(); }
+      const statusResponse = await fetch(`${helperUrl}/status`, { headers: headers(), cache: 'no-store' });
+      const status = await statusResponse.json().catch(() => ({}));
+      if (!statusResponse.ok) throw new Error(status.detail || 'Could not read the install progress.');
+      setupMessage.value = status.message || 'Adding ext-opentelemetry…';
+      if (status.status === 'complete') { setupState.value = 'complete'; await refreshWhenApiIsBack(); break; }
+      if (status.status === 'cancelled') { setupState.value = 'cancelled'; break; }
+      if (status.status === 'error') { setupState.value = 'error'; break; }
+      await new Promise((resolve) => setTimeout(resolve, 3000));
+    }
+  } catch (cause: any) {
+    setupState.value = 'error';
+    setupMessage.value = cause?.message || 'The PHP extension install failed.';
+  }
+};
+const cleanupRuntime = async (target?: Pick<SavedSetup, 'project_id' | 'environment'>) => {
+  // With one setup there is nothing to choose; with several, each has its own button.
+  const chosen = target ?? (savedSetups.value.length === 1 ? savedSetups.value[0] : undefined);
+  activeOperation.value = 'cleanup';
+  setupState.value = 'starting';
+  setupMessage.value = chosen ? `Authorizing local Runtime cleanup for ${setupLabel(chosen)}…` : 'Authorizing local Runtime cleanup…';
+  try {
+    let token = await getRuntimeHelperAuth();
+    const helperUrl = 'http://127.0.0.1:47831';
+    let authorizationAt = Date.now();
+    const headers = () => ({ Authorization: `Bearer ${token}` });
+    const startResponse = await fetch(`${helperUrl}/cleanup`, {
+      method: 'POST', cache: 'no-store',
+      headers: { ...headers(), 'Content-Type': 'application/json' },
+      body: JSON.stringify(chosen ? { project_id: chosen.project_id, environment: chosen.environment } : {}),
+    });
     const started = await startResponse.json().catch(() => ({}));
     if (startResponse.status === 404) throw new Error('The local Runtime helper is out of date. Run just up to restart it, then reload this page.');
     if (!startResponse.ok) throw new Error(started.detail || 'Could not start local Runtime cleanup.');
@@ -671,7 +767,7 @@ const cleanupRuntime = async () => {
         // Cleanup recreates selected services before stopping the host reporter;
         // give its event reconciliation a moment to close the old deployment rows.
         if (activeOperation.value === 'cleanup') await new Promise((resolve) => setTimeout(resolve, 1500));
-        await refresh();
+        await refreshWhenApiIsBack();
         break;
       }
       if (status.status === 'cancelled') { setupState.value = 'cancelled'; await loadSavedSetup(false); break; }
@@ -822,7 +918,7 @@ const setupBannerTone = computed(() => (setupState.value === 'error' ? 'bad' : s
           <span class="sr-only">Project and indexed revision</span>
           <select v-model="selectedKey" :disabled="setupBusy">
             <option value="">{{ scope.projectId.value && !scopedOptions.length ? `No runtime data for ${scope.projectId.value}` : 'Select project / indexed revision' }}</option>
-            <option v-for="item in scopedOptions" :key="item.key" :value="item.key">{{ item.project_id }} · {{ item.revision_id ? `Revision ${item.revision_id.slice(4, 12)}` : 'Docker only · no indexed revision' }}</option>
+            <option v-for="item in scopedOptions" :key="item.key" :value="item.key">{{ runtimeOptionLabel(item) }}</option>
           </select>
           <ChevronsUpDown aria-hidden="true" />
         </label>
@@ -833,13 +929,18 @@ const setupBannerTone = computed(() => (setupState.value === 'error' ? 'bad' : s
 
         <div class="rt-bar-end">
           <div class="rt-group" role="group" aria-label="Runtime setup">
-            <button type="button" class="rt-btn" :disabled="loadingSetup || !!savedSetup || showSetupWizard || setupBusy" @click="startRuntimeSetup">
+            <button type="button" class="rt-btn" :disabled="loadingSetup || showSetupWizard || setupBusy" @click="startRuntimeSetup">
               <RefreshCw v-if="loadingSetup || (setupBusy && activeOperation === 'setup')" class="rt-spin" aria-hidden="true" /><WandSparkles v-else aria-hidden="true" />{{ loadingSetup ? 'Checking setup…' : setupBusy && activeOperation === 'setup' ? 'Setting up…' : 'Set up Runtime' }}
             </button>
             <button type="button" class="rt-btn" :aria-expanded="showGuide" @click="showGuide = !showGuide">
               <BookOpen aria-hidden="true" />{{ showGuide ? 'Hide guide' : 'Get started' }}
             </button>
-            <button type="button" class="rt-btn" :disabled="setupBusy" title="Restores your Compose files and stops the local agent after you allow it in a dialog on this computer. Cancel keeps the recovery record." @click="cleanupRuntime">
+            <template v-if="savedSetups.length > 1">
+              <button v-for="item in savedSetups" :key="setupKey(item)" type="button" class="rt-btn" :disabled="setupBusy" :title="`Restores the Compose files of ${setupLabel(item)} after you allow it in a dialog on this computer. The other setups keep running. Cancel keeps the recovery record.`" @click="cleanupRuntime(item)">
+                <Eraser :class="{ 'rt-pulse': setupBusy && activeOperation === 'cleanup' }" aria-hidden="true" />{{ setupBusy && activeOperation === 'cleanup' ? 'Cleaning up…' : `Clean up ${setupLabel(item)}` }}
+              </button>
+            </template>
+            <button v-else type="button" class="rt-btn" :disabled="setupBusy" title="Restores your Compose files and stops the local agent after you allow it in a dialog on this computer. Cancel keeps the recovery record." @click="cleanupRuntime()">
               <Eraser :class="{ 'rt-pulse': setupBusy && activeOperation === 'cleanup' }" aria-hidden="true" />{{ setupBusy && activeOperation === 'cleanup' ? 'Cleaning up…' : 'Clean up Runtime' }}
             </button>
           </div>
@@ -854,22 +955,25 @@ const setupBannerTone = computed(() => (setupState.value === 'error' ? 'bad' : s
         <AlertTriangle v-else-if="setupState === 'error' || setupState === 'cancelled'" aria-hidden="true" />
         <RefreshCw v-else class="rt-spin" aria-hidden="true" />
         <div class="rt-banner-text">
-          <b>{{ setupState === 'complete' ? (activeOperation === 'cleanup' ? 'Cleanup complete' : activeOperation === 'remove' ? 'Local container removal complete' : activeOperation === 'setup' ? 'Setup complete' : savedSetup ? 'Existing setup record' : 'Setup complete') : setupState === 'cancelled' ? (activeOperation === 'cleanup' ? 'Cleanup cancelled' : activeOperation === 'remove' ? 'Local container removal cancelled' : 'Setup cancelled') : setupState === 'error' ? (activeOperation === 'cleanup' ? 'Cleanup needs attention' : activeOperation === 'remove' ? 'Local container removal needs attention' : 'Setup failed') : activeOperation === 'cleanup' ? 'Runtime cleanup' : activeOperation === 'remove' ? 'Local container removal' : 'Runtime setup' }}</b>
+          <b v-if="activeOperation === 'extension'">{{ setupState === 'complete' ? 'ext-opentelemetry added' : setupState === 'cancelled' ? 'Install cancelled' : setupState === 'error' ? 'PHP extension install needs attention' : 'Adding ext-opentelemetry' }}</b>
+          <b v-else-if="activeOperation === 'install'">{{ setupState === 'complete' ? 'Indexr library installed' : setupState === 'cancelled' ? 'Install cancelled' : setupState === 'error' ? 'Library install needs attention' : 'Installing the Indexr library' }}</b>
+          <b v-else>{{ setupState === 'complete' ? (activeOperation === 'cleanup' ? 'Cleanup complete' : activeOperation === 'remove' ? 'Local container removal complete' : activeOperation === 'setup' ? 'Setup complete' : savedSetup ? 'Existing setup record' : 'Setup complete') : setupState === 'cancelled' ? (activeOperation === 'cleanup' ? 'Cleanup cancelled' : activeOperation === 'remove' ? 'Local container removal cancelled' : 'Setup cancelled') : setupState === 'error' ? (activeOperation === 'cleanup' ? 'Cleanup needs attention' : activeOperation === 'remove' ? 'Local container removal needs attention' : 'Setup failed') : activeOperation === 'cleanup' ? 'Runtime cleanup' : activeOperation === 'remove' ? 'Local container removal' : 'Runtime setup' }}</b>
           <span class="rt-block">{{ setupMessage }}</span>
-          <span v-if="savedSetup" class="rt-block">Compose project: {{ savedSetup.compose_project || 'unknown' }} · Services: {{ (savedSetup.services || []).join(', ') || 'none recorded' }}. Available containers are listed below.</span>
+          <span v-for="item in savedSetups" :key="setupKey(item)" class="rt-block">{{ setupLabel(item) }} — Compose project: {{ item.compose_project || 'unknown' }} · Services: {{ (item.services || []).join(', ') || 'none recorded' }}.</span>
+          <span v-if="savedSetups.length" class="rt-block">Available containers are listed below.</span>
         </div>
       </div>
 
       <RemoteHostMonitor />
 
-      <RuntimeSetupWizard v-if="showSetupWizard" :authorize="getRuntimeHelperAuth" :known-project-ids="knownProjectIds" :indexed-revisions="projects" :inventory-available="!loadingProjects && !error" @close="showSetupWizard = false" @apply="applySetupPlan" />
+      <RuntimeSetupWizard v-if="showSetupWizard" :authorize="getRuntimeHelperAuth" :known-project-ids="knownProjectIds" :indexed-revisions="projects" :inventory-available="!loadingProjects && !error" @close="showSetupWizard = false" @apply="applySetupPlan" @install="installIndexrLibrary" @install-extension="installPhpExtension" />
 
       <div v-if="!error && !options.length && !loadingProjects && !waitingForFirstReport" class="rt-empty">
         <span class="rt-empty-icon"><Server aria-hidden="true" /></span>
         <h2>No Docker containers are reporting yet</h2>
         <p>Start the local host agent and opt in your Compose services. You don't need to upload source code to see containers.</p>
         <div class="rt-empty-actions">
-          <button type="button" class="rt-btn" data-variant="primary" :disabled="loadingSetup || !!savedSetup || showSetupWizard || setupBusy" @click="startRuntimeSetup"><WandSparkles aria-hidden="true" />Set up Runtime</button>
+          <button type="button" class="rt-btn" data-variant="primary" :disabled="loadingSetup || showSetupWizard || setupBusy" @click="startRuntimeSetup"><WandSparkles aria-hidden="true" />Set up Runtime</button>
           <button v-if="!showGuide" type="button" class="rt-btn" @click="showGuide = true"><BookOpen aria-hidden="true" />Open the guide</button>
         </div>
       </div>

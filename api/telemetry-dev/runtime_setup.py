@@ -8,6 +8,7 @@ import json
 import os
 import re
 import secrets
+import shlex
 import shutil
 import signal
 import subprocess
@@ -49,7 +50,7 @@ HELPER_STATE: dict = {"status": "idle", "message": "Ready", "updated": time.time
 HELPER_LOCK = threading.Lock()
 HELPER_USED_TOKENS: set[str] = set()
 # Bumped whenever helper endpoints change; the root justfile restarts an older helper.
-HELPER_API_VERSION = 29
+HELPER_API_VERSION = 43
 APPROVAL_TIMEOUT_SECONDS = 300
 SETUP_PLAN_TTL_SECONDS = 600
 # Previews created by the browser wizard, keyed by a single-use plan ID (only the latest is kept).
@@ -73,18 +74,90 @@ class SetupInputError(ValueError):
 
 
 def state_path() -> Path:
+    """The single recovery file older versions wrote; it is migrated into ``setups/`` on first use."""
     base = Path(os.environ.get("XDG_STATE_HOME", Path.home() / ".local" / "state"))
     return base / "devassistant" / "runtime" / "local-setup.json"
 
 
-def read_state() -> dict | None:
-    path = state_path()
-    if not path.exists():
-        return None
+def setups_dir() -> Path:
+    return state_path().parent / "setups"
+
+
+def host_state_path() -> Path:
+    return state_path().parent / "host.json"
+
+
+def record_key(project_id: object, environment: object) -> str:
+    """A setup's identity. ``@`` cannot appear in a project ID or environment, so two setups never collide."""
+    return f"{project_id}@{environment}"
+
+
+def state_key(state: dict) -> str:
+    return record_key(state.get("project_id") or "unknown", state.get("environment") or "unknown")
+
+
+def record_path(key: str) -> Path:
+    return setups_dir() / f"{key}.json"
+
+
+def _load_json(path: Path) -> dict:
     try:
-        return json.loads(path.read_text())
+        value = json.loads(path.read_text())
     except (OSError, ValueError) as exc:
         raise RuntimeError(f"Cannot read setup state at {path}: {exc}") from exc
+    if not isinstance(value, dict):
+        raise RuntimeError(f"Cannot read setup state at {path}: not a JSON object")
+    return value
+
+
+def _write_json_atomic(path: Path, value: dict) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+    fd, temp_name = tempfile.mkstemp(prefix="setup-", dir=path.parent)
+    try:
+        os.fchmod(fd, 0o600)
+        with os.fdopen(fd, "w") as stream:
+            json.dump(value, stream, indent=2)
+            stream.write("\n")
+        os.replace(temp_name, path)
+    finally:
+        if os.path.exists(temp_name):
+            os.unlink(temp_name)
+
+
+def migrate_legacy_state() -> None:
+    """Move an old single ``local-setup.json`` into ``setups/`` unchanged, and keep its shared host facts."""
+    legacy = state_path()
+    if not legacy.exists():
+        return
+    state = _load_json(legacy)
+    target = record_path(state_key(state))
+    if target.exists():
+        raise RuntimeError(f"Cannot migrate {legacy}: {target} already exists. Keep the one you need and delete the other.")
+    _write_json_atomic(target, state)
+    if not host_state_path().exists() and (state.get("fingerprint") or state.get("certificates_created")):
+        _write_json_atomic(host_state_path(), {"certificates_created": bool(state.get("certificates_created")),
+                                               "fingerprint": state.get("fingerprint")})
+    legacy.unlink()
+
+
+def list_states() -> list[dict]:
+    """Every recorded setup, oldest name first."""
+    migrate_legacy_state()
+    folder = setups_dir()
+    return [_load_json(path) for path in sorted(folder.glob("*.json"))] if folder.is_dir() else []
+
+
+def read_state(project_id: str | None = None, environment: str | None = None) -> dict | None:
+    """One setup by project and environment; with neither, the only setup (None when there are none or several)."""
+    states = list_states()
+    if project_id is None and environment is None:
+        return states[0] if len(states) == 1 else None
+    return next((item for item in states if state_key(item) == record_key(project_id, environment)), None)
+
+
+def read_host_state() -> dict:
+    path = host_state_path()
+    return _load_json(path) if path.exists() else {}
 
 
 def shared_secret() -> bytes:
@@ -279,7 +352,7 @@ def serve_helper() -> None:
                 "compose_project": plan["project"]["name"], "services": plan["services"],
                 "project_id": plan["project_id"], "environment": plan["environment"], "commit": plan["commit"],
                 "certificates": plan["certificates"], "changes": plan["changes"],
-                "approval_items": plan["approval_items"],
+                "approval_items": plan["approval_items"], "instrumentation": plan["instrumentation"],
                 "app_env_file": plan["app_env"]["path"] if plan.get("app_env") else None})
 
         def _working_tree_grant(self) -> None:
@@ -520,13 +593,39 @@ def serve_helper() -> None:
                     return self._json(503, {"detail": "The SSH credential could not be saved. Unlock the OS keyring and retry."})
             if self.path in {"/compose-projects", "/compose-project", "/setup/plan"}:
                 return self._setup_wizard_step()
-            if self.path not in {"/setup/apply", "/cleanup", "/remove-project-containers"}:
+            if self.path not in {"/setup/apply", "/cleanup", "/remove-project-containers", "/instrumentation/install", "/instrumentation/install-extension"}:
                 return self._json(404, {"detail": "Not found."})
             if not self._authorized(): return self._json(403, {"detail": "Runtime setup authorization is invalid or expired."})
-            if self.path in {"/setup/apply", "/cleanup"} and not self._authorized(unscoped=True):
+            if self.path in {"/setup/apply", "/cleanup", "/instrumentation/install", "/instrumentation/install-extension"} and not self._authorized(unscoped=True):
                 return self._json(403, {"detail": "This authorization is not valid for Runtime setup or cleanup."})
             project_id = None
             plan_id = None
+            cleanup_target: tuple[str, str] | None = None
+            install_request: dict | None = None
+            if self.path == "/instrumentation/install-extension":
+                body = self._read_json(4096)
+                if body is None or not isinstance(body.get("project_name"), str) or not SLUG.fullmatch(body["project_name"]):
+                    return self._json(400, {"detail": "Choose a Compose project."})
+                install_request = {"project_name": body["project_name"]}
+            if self.path == "/instrumentation/install":
+                body = self._read_json(4096)
+                if body is None:
+                    return self._json(400, {"detail": "Invalid Runtime operation request."})
+                install_request = {"project_name": body.get("project_name"), "project_id": body.get("project_id"),
+                                   "version": body.get("version") or DEFAULT_INDEXR_VERSION}
+                if not (isinstance(install_request["project_name"], str) and SLUG.fullmatch(install_request["project_name"])
+                        and isinstance(install_request["project_id"], str) and SLUG.fullmatch(install_request["project_id"])
+                        and isinstance(install_request["version"], str) and PACKAGE_VERSION.fullmatch(install_request["version"])):
+                    return self._json(400, {"detail": "Choose a Compose project, a project ID and a version such as ^0.1.1."})
+            if self.path == "/cleanup":
+                body = self._read_json(4096)
+                if body is None:
+                    return self._json(400, {"detail": "Invalid Runtime operation request."})
+                chosen = (body.get("project_id"), body.get("environment"))
+                if chosen != (None, None):
+                    if not all(isinstance(item, str) and SLUG.fullmatch(item) for item in chosen):
+                        return self._json(400, {"detail": "Invalid Runtime project or environment."})
+                    cleanup_target = chosen  # the setup to clean up; the status stays unscoped, unlike container removal
             if self.path in {"/setup/apply", "/remove-project-containers"}:
                 body = self._read_json(4096)
                 if body is None:
@@ -555,23 +654,25 @@ def serve_helper() -> None:
                     plan = entry["plan"]
                 HELPER_USED_TOKENS.add(token_id)
                 action = ("cleanup" if self.path == "/cleanup" else
+                          "install extension" if self.path == "/instrumentation/install-extension" else
+                          "install library" if self.path == "/instrumentation/install" else
                           "remove local containers" if self.path == "/remove-project-containers" else "setup")
                 HELPER_STATE.update(status="starting", message=f"Starting Runtime {action}", updated=time.time())
-                for key in ("project_id", "removed_count", "target_count", "already_absent", "failed_containers", "awaiting_approval"):
+                for key in ("project_id", "removed_count", "target_count", "already_absent", "failed_containers", "awaiting_approval", "code", "registry"):
                     HELPER_STATE.pop(key, None)
                 if project_id is not None:
                     HELPER_STATE["project_id"] = project_id
             def execute() -> None:
                 with HELPER_LOCK: HELPER_STATE.update(status="running", message=f"Runtime {action} is running", updated=time.time())
                 try:
-                    result = run_helper_operation(action, project_id=project_id, plan=plan)
+                    result = run_helper_operation(action, project_id=project_id, plan=plan, cleanup_target=cleanup_target, install=install_request)
                     outcome = result.get("status", "complete") if isinstance(result, dict) else "complete"
                     message = result.get("message", f"Runtime {action} completed") if isinstance(result, dict) else f"Runtime {action} completed"
                     with HELPER_LOCK:
                         HELPER_STATE.update(status=outcome, message=message, updated=time.time())
                         if isinstance(result, dict):
                             HELPER_STATE.update({key: result[key] for key in
-                                ("project_id", "removed_count", "target_count", "already_absent", "failed_containers")
+                                ("project_id", "removed_count", "target_count", "already_absent", "failed_containers", "code", "registry")
                                 if key in result})
                 except Exception as exc:
                     with HELPER_LOCK:
@@ -594,13 +695,13 @@ def serve_helper() -> None:
                 if not self._authorized(unscoped=True):
                     return self._json(403, {"detail": "Runtime setup authorization is invalid or expired."})
                 try:
-                    saved = read_state()
-                    if not saved: return self._json(200, {"configured": False})
-                    project = saved.get("project") if isinstance(saved.get("project"), dict) else {}
-                    return self._json(200, {"configured": True, "phase": saved.get("phase", "incomplete"),
-                        "project_id": saved.get("project_id"), "environment": saved.get("environment"),
-                        "commit": saved.get("commit"), "compose_project": project.get("name"),
-                        "services": saved.get("services", [])})
+                    setups = [{"phase": saved.get("phase", "incomplete"), "project_id": saved.get("project_id"),
+                               "environment": saved.get("environment"), "commit": saved.get("commit"),
+                               "compose_project": (saved.get("project") or {}).get("name") if isinstance(saved.get("project"), dict) else None,
+                               "services": saved.get("services", [])} for saved in list_states()]
+                    if not setups: return self._json(200, {"configured": False, "setups": []})
+                    # The first setup's fields stay at the top level for pages that show only one.
+                    return self._json(200, {"configured": True, "setups": setups, **setups[0]})
                 except RuntimeError as exc:
                     return self._json(500, {"detail": str(exc)})
             with HELPER_LOCK: state = dict(HELPER_STATE)
@@ -732,22 +833,19 @@ def serve_helper() -> None:
     server.server_close()
 
 
-def write_state(value: dict | None) -> None:
-    path = state_path()
+def write_record(state: dict) -> None:
+    _write_json_atomic(record_path(state_key(state)), state)
+
+
+def delete_record(state: dict) -> None:
+    record_path(state_key(state)).unlink(missing_ok=True)
+
+
+def write_host_state(value: dict | None) -> None:
     if value is None:
-        path.unlink(missing_ok=True)
-        return
-    path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
-    fd, temp_name = tempfile.mkstemp(prefix="setup-", dir=path.parent)
-    try:
-        os.fchmod(fd, 0o600)
-        with os.fdopen(fd, "w") as stream:
-            json.dump(value, stream, indent=2)
-            stream.write("\n")
-        os.replace(temp_name, path)
-    finally:
-        if os.path.exists(temp_name):
-            os.unlink(temp_name)
+        host_state_path().unlink(missing_ok=True)
+    else:
+        _write_json_atomic(host_state_path(), value)
 
 
 def gum_executable() -> str:
@@ -1317,17 +1415,26 @@ def start_ingress_and_agent() -> tuple[dict, str]:
     if not all(path.is_file() for path in needed):
         raise RuntimeError(f"Local identity directory is incomplete: {CERT_DIR}")
     fingerprint = cert_fingerprint()
+    # Certificates are shared by every setup: remember once whether setup created them, so only the last cleanup removes them.
+    write_host_state({"certificates_created": bool(created_certs or read_host_state().get("certificates_created")),
+                      "fingerprint": fingerprint})
     CURRENT_SETUP.update({"fingerprint": fingerprint, "certificates_created": created_certs,
                           "scope_added": False, "scope_original": False})
-    write_state(CURRENT_SETUP)
+    write_record(CURRENT_SETUP)
     before, after = update_env_scope(fingerprint, CURRENT_SETUP["project_id"], CURRENT_SETUP["environment"])
     if before != after:
         CURRENT_SETUP.update({"scope_added": True, "scope_original": True,
                               "scope_file_before": before, "scope_file_after_hash": digest(after)})
-        write_state(CURRENT_SETUP)
+        write_record(CURRENT_SETUP)
         write_text_atomic(ENV_FILE, after)
     CURRENT_SETUP.update({"scope_added": before != after, "scope_original": before != after})
-    write_state(CURRENT_SETUP)
+    write_record(CURRENT_SETUP)
+    start_host_containers()
+    return CURRENT_SETUP, fingerprint
+
+
+def start_host_containers() -> None:
+    """Start the local API ingress and the host telemetry agent (the certificates must exist)."""
     print("\nStarting local API ingress and host agent…")
     run(["docker", "compose", "--profile", "runtime-host", "up", "-d", "python-api", "telemetry-caddy"], cwd=API)
     socket_path = Path(os.environ.get("DOCKER_SOCK_PATH", "/var/run/docker.sock"))
@@ -1340,29 +1447,64 @@ def start_ingress_and_agent() -> tuple[dict, str]:
                 "DOCKER_SOCK_GID": docker_socket_group_id(socket_path)})
     run(["docker", "compose", "-f", "telemetry-agent/docker-compose.yml", "-f",
          "telemetry-agent/docker-compose.local.yml", "up", "-d", "--build"], cwd=API, env=env)
-    return CURRENT_SETUP, fingerprint
+
+
+def host_agent_exists() -> bool:
+    return (CERT_DIR / "agent" / "host.crt").is_file()
+
+
+def ensure_host_agent() -> bool:
+    """Create the local host identity and start the agent and ingress when there is none; True when it did.
+
+    The library install needs the agent to authorize and report the project, and must not depend on an earlier
+    Runtime setup (which edits the app's Compose files and would leave the checkout dirty). The certificates are
+    recorded in host.json like those of a Runtime setup, so a later cleanup of the last setup removes them too.
+    """
+    if host_agent_exists():
+        return False
+    if not cert_directory_is_empty_scaffold():
+        raise RuntimeError(f"Local identity directory is incomplete: {CERT_DIR}")
+    run([str(API / "telemetry-dev" / "host" / "bootstrap-dev-certs.sh"), str(CERT_DIR)])
+    needed = [CERT_DIR / "ingress" / name for name in ("ca.pem", "server.crt", "server.key")]
+    needed += [CERT_DIR / "agent" / name for name in ("ca.pem", "host.crt", "host.key")]
+    if not all(path.is_file() for path in needed):
+        raise RuntimeError(f"Local identity directory is incomplete: {CERT_DIR}")
+    write_host_state({"certificates_created": True, "fingerprint": cert_fingerprint()})
+    start_host_containers()
+    return True
 
 
 CURRENT_SETUP: dict = {}
 
 
-def setup_blocker() -> tuple[str | None, bool]:
-    """Why a new setup cannot start, and whether that is because setup is already active.
+def setup_blocker(project: dict | None = None, services: list[str] | None = None,
+                  project_id: str | None = None, environment: str | None = None) -> tuple[str | None, bool]:
+    """Why a new setup cannot start, and whether that is because the same setup is already active.
 
-    The recovery record is never overwritten: it holds the Compose originals cleanup restores.
+    Recovery records are never overwritten: each holds the Compose originals its cleanup restores.
+    Several setups can be active together. A new one is refused when a record is not active (it may have
+    left the host half changed), or when it would label the same Compose project or files as another
+    setup, whose saved originals would then conflict. Without a project, only unfinished records block.
     """
-    saved = read_state()
-    if not saved:
+    states = list_states()
+    for saved in states:
+        phase = saved.get("phase", "incomplete")
+        if phase != "active":
+            return (f"A local Runtime recovery record for {saved.get('project_id')} · {saved.get('environment')} is in phase "
+                    f"'{phase}' at {record_path(state_key(saved))}. Clean it up (or run just runtime-status, then "
+                    "just runtime-cleanup) before starting a new setup; the recovery record was preserved."), False
+    if project is None:
         return None, False
-    phase = saved.get("phase", "incomplete")
-    project = saved.get("project") if isinstance(saved.get("project"), dict) else {}
-    if phase == "active":
-        return (f"Runtime is already active for {saved.get('project_id')} · {saved.get('environment')} "
-                f"(Compose project {project.get('name', 'unknown')}). No changes were made. "
-                "Clean up Runtime (or run just runtime-cleanup) before setting up a different project."), True
-    return (f"A local Runtime recovery record is in phase '{phase}' at {state_path()}. "
-            "Clean up Runtime (or run just runtime-status, then just runtime-cleanup) before starting a new setup; "
-            "the recovery record was preserved."), False
+    files = {str(path) for path in project.get("files", [])}
+    for saved in states:
+        name = (saved.get("project") or {}).get("name") if isinstance(saved.get("project"), dict) else None
+        who = f"{saved.get('project_id')} · {saved.get('environment')}"
+        if project_id is not None and state_key(saved) == record_key(project_id, environment):
+            return f"Runtime is already active for {who}. No changes were made. Clean it up before setting it up again.", True
+        if name == project.get("name") or files & set((saved.get("compose_originals") or {}).keys()):
+            return (f"Compose project {project.get('name')} is already set up for {who}, and a second setup would edit the "
+                    "same Compose files. No changes were made. Clean up that setup first."), False
+    return None, False
 
 
 def find_compose_project(name) -> dict:
@@ -1374,6 +1516,347 @@ def find_compose_project(name) -> dict:
     return project
 
 
+# The published packages (Packagist) and the names the monorepo uses for a local checkout.
+INDEXR_PUBLISHED_PREFIX = "aminmh/developer-assistant-otel-"
+INDEXR_PACKAGE_PREFIXES = (INDEXR_PUBLISHED_PREFIX, "indexr/indexer-otel-")
+# The oldest framework version each published adapter (0.1.1 and later) supports, as (locked package, minimum (major, minor), label).
+INDEXR_ADAPTER_FRAMEWORKS = {"symfony": ("symfony/http-kernel", (6, 3), "Symfony 6.3"),
+                             "laravel": ("illuminate/support", (10, 0), "Laravel 10")}
+
+
+def _composer_requirements(path: Path) -> set[str]:
+    try:
+        data = json.loads(path.read_text()) if path.is_file() else {}
+    except (OSError, ValueError):
+        return set()
+    names: set[str] = set()
+    for group in ("require", "require-dev"):
+        if isinstance(data, dict) and isinstance(data.get(group), dict):
+            names.update(key for key in data[group] if isinstance(key, str))
+    return names
+
+
+def _locked_version(lock_path: Path, package: str) -> tuple[int, int, int] | None:
+    """A package's locked version as (major, minor, patch), from composer.lock, or None."""
+    try:
+        data = json.loads(lock_path.read_text()) if lock_path.is_file() else {}
+    except (OSError, ValueError):
+        return None
+    rows = [*(data.get("packages") or []), *(data.get("packages-dev") or [])] if isinstance(data, dict) else []
+    version = next((row.get("version") for row in rows if isinstance(row, dict) and row.get("name") == package), None)
+    match = re.match(r"v?(\d+)\.(\d+)(?:\.(\d+))?", version or "")
+    return (int(match.group(1)), int(match.group(2)), int(match.group(3) or 0)) if match else None
+
+
+def _adapter_compatibility(lock_path: Path, adapter: str) -> str | None:
+    """A warning when the app's locked framework is older than the published adapter supports, else None."""
+    needs = INDEXR_ADAPTER_FRAMEWORKS.get(adapter)
+    if needs is None:
+        return None
+    package, minimum, label = needs
+    try:
+        data = json.loads(lock_path.read_text()) if lock_path.is_file() else {}
+    except (OSError, ValueError):
+        return None
+    rows = [*(data.get("packages") or []), *(data.get("packages-dev") or [])] if isinstance(data, dict) else []
+    version = next((row.get("version") for row in rows if isinstance(row, dict) and row.get("name") == package), None)
+    match = re.match(r"v?(\d+)\.(\d+)", version or "")
+    if not match or (int(match.group(1)), int(match.group(2))) >= minimum:
+        return None
+    return (f"This app locks {package} {version}, but the published {adapter} adapter needs {label} or newer. "
+            "Composer will refuse to install it until the framework is upgraded or the adapter supports this version.")
+
+
+def instrumentation_status(project: dict) -> dict:
+    """Whether the app in the Compose project's folder includes the Indexr OpenTelemetry library.
+
+    Runtime setup only labels containers. Request spans exist only when the PHP app itself has the library
+    (``aminmh/developer-assistant-otel-core``, ``-laravel`` or ``-symfony``, or the monorepo's ``indexr/indexer-otel-*``), so the wizard says so before containers appear
+    without spans. Read from ``composer.json`` and ``composer.lock``; nothing is run or changed.
+    """
+    root = Path(project.get("directory") or "")
+
+    def packages(name: str, groups: tuple[str, ...]) -> list[str] | None:
+        path = root / name
+        try:
+            data = json.loads(path.read_text()) if path.is_file() else None
+        except (OSError, ValueError):
+            return None
+        if not isinstance(data, dict):
+            return None
+        found: set[str] = set()
+        for group in groups:
+            entries = data.get(group)
+            if isinstance(entries, dict):
+                found.update(key for key in entries if isinstance(key, str))
+            elif isinstance(entries, list):
+                found.update(item["name"] for item in entries if isinstance(item, dict) and isinstance(item.get("name"), str))
+        return sorted(item for item in found if item.startswith(INDEXR_PACKAGE_PREFIXES))
+
+    declared = packages("composer.json", ("require", "require-dev"))
+    required = _composer_requirements(root / "composer.json")
+    # The adapter for the app's framework; it pulls in the core package itself.
+    adapter = ("laravel" if "laravel/framework" in required
+               else "symfony" if {"symfony/framework-bundle", "symfony/symfony"} & required else "core")
+    install = f"composer require {INDEXR_PUBLISHED_PREFIX}{adapter}"
+    compatibility = _adapter_compatibility(root / "composer.lock", adapter)
+    if declared is None:
+        return {"status": "unknown", "packages": [], "adapter": adapter, "install_command": install, "compatibility": compatibility,
+                "message": f"No readable composer.json was found in {root}, so the Indexr library could not be checked."}
+    locked = packages("composer.lock", ("packages", "packages-dev")) or []
+    if locked:
+        core_version = _locked_version(root / "composer.lock", INDEXR_PUBLISHED_PREFIX + "core")
+        needs_update = core_version is not None and core_version < INDEXR_MINIMUM_SAFE
+        env_text = (root / ".env").read_text(errors="ignore") if (root / ".env").is_file() else ""
+        configured = bool(re.search(r"(?m)^\s*INDEXER_(?:PROJECT|REVISION)_ID\s*=", env_text))
+        # A Symfony app only loads the bundle that config/bundles.php lists (the package has no Flex recipe).
+        bundles = root / "config" / "bundles.php"
+        bundle_missing = adapter == "symfony" and bundles.is_file() and "IndexerOtelBundle" not in bundles.read_text(errors="ignore")
+        configured = configured and not bundle_missing
+        configured = configured and not needs_update
+        return {"status": "installed", "packages": locked, "adapter": adapter, "install_command": install, "compatibility": compatibility,
+                "configured": configured, "needs_update": needs_update,
+                "update_command": f"composer update {INDEXR_PUBLISHED_PREFIX}core {INDEXR_PUBLISHED_PREFIX}{adapter}",
+                "message": (f"The installed library {'.'.join(map(str, core_version))} can crash `cache:clear` in debug mode once tracing is on. "
+                            "Update it to 0.1.2 or newer first." if needs_update else
+                            f"The app includes {', '.join(locked)}. It can export request spans once it runs at an indexed commit."
+                            if configured else
+                            f"The app includes {', '.join(locked)}, but setup was not finished: "
+                            + ("IndexerOtelBundle is not registered in config/bundles.php, so no spans are produced."
+                               if bundle_missing else
+                               "its .env has no INDEXER_PROJECT_ID or INDEXER_REVISION_ID.")
+                            + " The telemetry settings, bundle, indexing and restart are still to do.")}
+    if declared:
+        return {"status": "declared", "packages": declared, "adapter": adapter, "install_command": "composer install", "compatibility": compatibility,
+                "message": f"composer.json requires {', '.join(declared)}, but composer.lock does not include it, so it is not installed yet. "
+                           "Run composer install, then restart the PHP service."}
+    return {"status": "missing", "packages": [], "adapter": adapter, "install_command": install, "compatibility": compatibility,
+            "message": "The app does not include the Indexr OpenTelemetry library (indexr/indexer-otel-*). "
+                       "Containers will be listed, but no request spans will arrive until it is installed."}
+
+
+PACKAGE_VERSION = re.compile(r"^[\^~]?\d{1,3}(?:\.\d{1,3}){0,2}$")
+DEFAULT_INDEXR_VERSION = "^0.1.2"
+# 0.1.1 added Symfony 6.3 and Doctrine DBAL 3 support. Before 0.1.2 a span left open when a command rebuilt the container
+# (cache:clear) leaked its scope, which is a fatal error in debug mode, so a container that runs cache:clear at start crash-looped.
+INDEXR_MINIMUM_SAFE = (0, 1, 2)
+INSTALL_TIMEOUT_SECONDS = 1800
+_AUTH_REQUIRED = re.compile(r"https?://([A-Za-z0-9.-]+)[^\s'\"]*[^\n]*required authentication", re.I)
+
+
+def composer_auth_problem(output: str, directory: str) -> dict | None:
+    """The private registry that refused Composer, when its output shows an HTTP 401, else None."""
+    if "required authentication" not in output and "HTTP 401" not in output:
+        return None
+    match = _AUTH_REQUIRED.search(output) or re.search(r"https?://([A-Za-z0-9.-]+)/", output)
+    host = match.group(1) if match else "the private registry"
+    return {"code": "composer_auth", "registry": host,
+            "message": (f"Composer cannot read packages from {host}, a private registry listed in {directory}/composer.json (HTTP 401). "
+                        "Composer asks every registry about the library's own dependencies, so this happens even though the library is on "
+                        "Packagist, and a local copy of the library would not avoid it. Nothing was committed. "
+                        f"Give Composer a token for {host} on this computer, then install again. For GitLab, create a personal access token "
+                        f"with the read_api scope and run: composer config --global gitlab-token.{host} <your-token>. "
+                        "The same token lets you run composer install for this project on your machine.")}
+
+
+def install_indexr_library(project_name: str, project_id: str, version: str, approve=None) -> dict:
+    """Install the Indexr library in a Compose project's app with the one-step setup script, after approval.
+
+    The script installs it with Composer, commits composer.json and composer.lock, writes the telemetry settings into
+    the app's .env, labels and restarts the services, and waits for indexing. It refuses a dirty checkout and changes
+    nothing in that case. A Composer HTTP 401 from a private registry is reported with what to do about it.
+    """
+    if not isinstance(project_id, str) or not SLUG.fullmatch(project_id):
+        raise SetupInputError("Project ID must be 1–128 letters, numbers, dots, dashes, or underscores.")
+    if not isinstance(version, str) or not PACKAGE_VERSION.fullmatch(version):
+        raise SetupInputError("Version must look like ^0.1.1.")
+    project = find_compose_project(project_name)
+    directory = project["directory"]
+    status = instrumentation_status(project)
+    if status["status"] == "installed" and status.get("configured"):
+        return {"status": "complete", "message": status["message"], "already_installed": True}
+    if status.get("needs_update"):
+        raise SetupInputError(f"{status['message']} Run {status['update_command']}, commit composer.json and composer.lock, then try again.")
+    # An installed but unconfigured library means an earlier run stopped part way: the script resumes from there.
+    if status["status"] not in ("missing", "installed"):
+        raise SetupInputError(status["message"] if status["status"] == "unknown"
+                              else f"{status['message']} Install it with {status['install_command']} instead.")
+    # The script restarts the whole Compose project after committing, so an unresolved image would stop it halfway.
+    problem = unresolved_image_problem(project, compose_project_details(project)["services"])
+    if problem:
+        raise RuntimeError(problem)
+    package = f"{INDEXR_PUBLISHED_PREFIX}{status['adapter']}"
+    creates_agent = not host_agent_exists()
+    command = ["bash", str(ROOT / "scripts" / "setup-php-telemetry.sh"), directory, "--project-id", project_id,
+               "--version", version, "--yes", "--non-interactive"]
+    (approve or required_approval)("Approve installing the Indexr library", [
+        f"Run Composer in {directory} to install {package} {version}",
+        "Commit composer.json and composer.lock on the branch that is checked out there"
+        + (" and register the bundle in config/bundles.php" if status["adapter"] == "symfony" else ""),
+        f"Write the telemetry settings into {directory}/.env",
+        f"Label the PHP and database services and restart Compose project {project['name']} (they are recreated)",
+        f"Index the committed source as Runtime project {project_id}",
+        *([f"Create local development certificates under {CERT_DIR} and start the telemetry agent and Runtime ingress"] if creates_agent else []),
+    ], summary=f"Project: {project_id} · {project['name']}\nPackage: {package} {version}")
+    ensure_host_agent()
+    # Composer runs on the host, whose PHP and extensions can differ from the app's container: skip platform checks there.
+    env = {**os.environ, "COMPOSER_NO_INTERACTION": "1", "COMPOSER_BIN": str(ROOT / "scripts" / "composer-host.sh")}
+    result = run(command, cwd=ROOT, env=env, capture=True, check=False, timeout=INSTALL_TIMEOUT_SECONDS)
+    output = "\n".join(part for part in (result.stdout, result.stderr) if part).strip()
+    if result.returncode == 0:
+        return {"status": "complete", "message": f"The Indexr library is installed in {directory}. {status['adapter'].capitalize()} adapter {version}; "
+                f"Runtime project {project_id}. Open a page in the app, then refresh Runtime.", "output": output[-2000:]}
+    problem = composer_auth_problem(output, directory)
+    if problem:
+        return {"status": "error", **problem}
+    lines = [line for line in output.splitlines() if line.strip() and not line.startswith("== ")]
+    detail = "\n".join(lines[-12:]) or ("The script printed no message. Run it in a terminal to see why: "
+                                         + " ".join(shlex.quote(part) for part in command[1:] if part != "--non-interactive"))
+    return {"status": "error", "code": "install_failed", "message": f"The install stopped (exit {result.returncode}). {detail}"}
+
+
+def method_activity_status(project: dict) -> dict:
+    """Whether the app's PHP container has ext-opentelemetry, which the Indexr library's method hooks need.
+
+    Without it the hook manifest is written but never registered, so Method activity stays empty for every request
+    while request and database spans are unaffected. Asked of the running container, since that is where PHP runs.
+    """
+    directory = project["directory"]
+    try:
+        found = run([sys.executable, str(ROOT / "scripts" / "php-compose-telemetry.py"), "detect", directory],
+                    capture=True, check=False, timeout=60)
+        service = json.loads(found.stdout or "{}").get("service")
+    except (RuntimeError, ValueError):
+        service = None
+    if not isinstance(service, str) or not SLUG.fullmatch(service):
+        return {"status": "unknown", "service": None, "message": "The PHP service could not be detected, so ext-opentelemetry was not checked."}
+    probe = ('php -r \'echo extension_loaded("opentelemetry") ? "yes" : "no";\'; echo; '
+             'command -v install-php-extensions >/dev/null 2>&1 && echo installer || echo no-installer')
+    try:
+        result = run(compose_args(project) + ["exec", "-T", service, "sh", "-c", probe], cwd=Path(directory),
+                     capture=True, check=False, timeout=30)
+    except RuntimeError:
+        result = None
+    lines = (result.stdout or "").split() if result is not None and result.returncode == 0 else []
+    if not lines or lines[0] not in ("yes", "no"):
+        return {"status": "unknown", "service": service,
+                "message": f"Service {service} is not running, so ext-opentelemetry was not checked. Start the project and check again."}
+    if lines[0] == "yes":
+        return {"status": "loaded", "service": service, "message": f"ext-opentelemetry is loaded in service {service}, so Method activity can record calls."}
+    installer = len(lines) > 1 and lines[1] == "installer"
+    return {"status": "missing", "service": service, "installer": installer,
+            "message": (f"ext-opentelemetry is not installed in service {service}. Request and database spans are unaffected, but "
+                        "Method activity will stay empty (\"No method-call data was captured\") for every request."),
+            "image_fix": "install-php-extensions opentelemetry" if installer else "pecl install opentelemetry && docker-php-ext-enable opentelemetry",
+            "quick_fix": (f"docker compose exec {service} install-php-extensions opentelemetry" if installer else
+                          f"docker compose exec {service} sh -c 'pecl install opentelemetry && docker-php-ext-enable opentelemetry'")}
+
+
+EXTENSION_BUILD_SCRIPT = r'''set -e
+if command -v install-php-extensions >/dev/null 2>&1; then
+  install-php-extensions opentelemetry >/tmp/build.log 2>&1 || { tail -15 /tmp/build.log; exit 1; }
+elif command -v apk >/dev/null 2>&1; then
+  { apk add --no-cache $PHPIZE_DEPS && printf '\n' | pecl install opentelemetry; } >/tmp/build.log 2>&1 || { tail -15 /tmp/build.log; exit 1; }
+else
+  echo "This image has neither install-php-extensions nor apk, so the extension cannot be built automatically."; exit 2
+fi
+dir=$(php -r 'echo ini_get("extension_dir");')
+cp "$dir/opentelemetry.so" /out/opentelemetry.so
+echo "extension=opentelemetry.so" > /out/opentelemetry.ini
+'''
+
+
+def _service_image(project: dict, service: str) -> tuple[str, str]:
+    """The image the service runs (its running container's, else the configured one) and its platform."""
+    directory = Path(project["directory"])
+    ps = run(compose_args(project) + ["ps", "-q", service], cwd=directory, capture=True, check=False, timeout=30)
+    container = (ps.stdout or "").strip().splitlines()[:1]
+    image = ""
+    if container:
+        inspected = run(["docker", "inspect", "--format", "{{.Image}}", container[0]], capture=True, check=False, timeout=30)
+        image = (inspected.stdout or "").strip()
+    if not image:
+        config = run(compose_args(project) + ["config", "--format", "json"], cwd=directory, capture=True, check=False, timeout=60)
+        try:
+            image = str(((json.loads(config.stdout or "{}").get("services") or {}).get(service) or {}).get("image") or "")
+        except ValueError:
+            image = ""
+    if not image:
+        raise SetupInputError(f"Could not tell which image service {service} runs. Build or start the project first.")
+    platform = run(["docker", "image", "inspect", "--format", "{{.Os}}/{{.Architecture}}", image], capture=True, check=False, timeout=30)
+    return image, (platform.stdout or "").strip()
+
+
+def php_extension_dir(project_id_hint: str = "") -> Path:
+    return state_path().parent / "php-extensions"
+
+
+def install_php_extension(project_name: str, approve=None) -> dict:
+    """Make ext-opentelemetry available to the app's PHP service without rebuilding its image.
+
+    The extension is built once in a throwaway container from the service's own image (so PHP version, thread
+    safety and operating system match), saved on this computer, and mounted read-only into the service through an
+    uncommitted Compose file. The image is checked first and left alone when it already has the extension.
+    """
+    project = find_compose_project(project_name)
+    status = method_activity_status(project)
+    if status["status"] == "loaded":
+        return {"status": "complete", "message": status["message"], "already_installed": True}
+    service = status.get("service")
+    if not service:
+        raise SetupInputError(status["message"])
+    image, platform = _service_image(project, service)
+    platform_args = ["--platform", platform] if re.fullmatch(r"[a-z]+/[a-z0-9]+", platform) else []
+    probe = run(["docker", "run", "--rm", *platform_args, "--entrypoint", "php", image, "-r",
+                 'echo extension_loaded("opentelemetry") ? "yes" : "no", "\n", ini_get("extension_dir"), "\n", PHP_CONFIG_FILE_SCAN_DIR, "\n";'],
+                capture=True, check=False, timeout=300)
+    lines = (probe.stdout or "").split()
+    if probe.returncode != 0 or len(lines) < 3:
+        raise RuntimeError(f"Could not inspect PHP in image {image}: {(probe.stderr or probe.stdout or '').strip()[-300:]}")
+    if lines[0] == "yes":
+        raise SetupInputError(f"The image of service {service} already contains ext-opentelemetry, but the running container does not load it. "
+                              "Check whether a php.ini file disables it; nothing was changed.")
+    extension_dir, ini_dir = lines[1], lines[2]
+    digest = hashlib.sha256(f"{image}|{platform}".encode()).hexdigest()[:12]
+    out_dir = php_extension_dir() / digest
+    so_path, ini_path = out_dir / "opentelemetry.so", out_dir / "opentelemetry.ini"
+    reuse = so_path.is_file() and ini_path.is_file()
+    items = [
+        *([] if reuse else [f"Start a temporary container from the image of service {service} ({platform or 'default platform'}) and build "
+                            "ext-opentelemetry in it with install-php-extensions or PECL; the container is removed afterwards"]),
+        f"Keep the built extension on this computer under {out_dir}",
+        f"Write {project['directory']}/{'compose.indexr-ext.yaml'} (not committed) with two read-only mounts and add it to COMPOSE_FILE in .env",
+        f"Recreate service {service} so it loads the extension. Other services are not touched",
+    ]
+    (approve or required_approval)("Approve installing ext-opentelemetry without rebuilding", items,
+                                   summary=f"Project: {project['name']}\nService: {service}\nImage: {image[:19]}")
+    if not reuse:
+        out_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
+        built = run(["docker", "run", "--rm", *platform_args, "--entrypoint", "sh", "-v", f"{out_dir}:/out", image, "-c", EXTENSION_BUILD_SCRIPT],
+                    capture=True, check=False, timeout=INSTALL_TIMEOUT_SECONDS)
+        if built.returncode != 0 or not so_path.is_file():
+            detail = "\n".join(line for line in ((built.stdout or "") + (built.stderr or "")).splitlines() if line.strip())[-600:]
+            return {"status": "error", "code": "extension_build_failed",
+                    "message": f"The extension could not be built in a temporary container. Nothing was changed in the project. {detail}".strip()}
+    mounted = run([sys.executable, str(ROOT / "scripts" / "php-compose-telemetry.py"), "extension-mounts", project["directory"],
+                   "--service", service, "--so", str(so_path), "--ini", str(ini_path), "--extension-dir", extension_dir, "--ini-dir", ini_dir],
+                  capture=True, check=False, timeout=120)
+    if mounted.returncode != 0:
+        return {"status": "error", "code": "extension_mount_failed",
+                "message": f"The Compose mount file could not be written: {(mounted.stderr or mounted.stdout or '').strip()[-400:]}"}
+    head = run(["git", "rev-parse", "HEAD"], cwd=Path(project["directory"]), capture=True, check=False, timeout=30)
+    env = {**os.environ, "GIT_COMMIT_SHA": (head.stdout or "").strip() or "unknown"}
+    run(["docker", "compose", "up", "-d", service], cwd=Path(project["directory"]), env=env, timeout=HELPER_COMMAND_TIMEOUT_SECONDS)
+    for _ in range(20):
+        after = method_activity_status(project)
+        if after["status"] == "loaded":
+            return {"status": "complete", "message": f"ext-opentelemetry is loaded in service {service}. Method activity records calls from the next request. "
+                    f"To remove it, delete {project['directory']}/compose.indexr-ext.yaml and its entry in COMPOSE_FILE (.env), then recreate the service."}
+        time.sleep(3)
+    return {"status": "error", "code": "extension_not_loaded",
+            "message": f"The mounts are in place and service {service} was recreated, but PHP does not report the extension yet. Check docker compose logs {service}."}
+
+
 def compose_project_details(project: dict) -> dict:
     """Services of a Compose project and the commit checked out in its directory."""
     result = run(compose_args(project) + ["config", "--services"], cwd=Path(project["directory"]), capture=True)
@@ -1382,7 +1865,8 @@ def compose_project_details(project: dict) -> dict:
         raise RuntimeError("The selected Compose project has no services")
     commit_result = run(["git", "rev-parse", "HEAD"], cwd=Path(project["directory"]), capture=True, check=False)
     detected = commit_result.stdout.strip().lower() if commit_result.returncode == 0 else ""
-    return {"services": services, "commit": detected if COMMIT.fullmatch(detected) else None}
+    return {"services": services, "commit": detected if COMMIT.fullmatch(detected) else None,
+            "instrumentation": instrumentation_status(project), "method_activity": method_activity_status(project)}
 
 
 def plan_app_env(project: dict, revision_id: str) -> dict | None:
@@ -1436,6 +1920,34 @@ def revert_app_env(record: dict) -> str | None:
     return str(path)
 
 
+_UNSET_VARIABLE = re.compile(r'The \\?"([A-Za-z_][A-Za-z0-9_]*)\\?" variable is not set')  # Compose escapes the quotes in its log lines
+
+
+def unresolved_image_problem(project: dict, selected: list[str]) -> str | None:
+    """Why Compose could not recreate the selected services as configured, or None.
+
+    Setup recreates services with the host's environment, which can lack variables the project normally gets from
+    a shell or an .env file (for example ``image: mariadb:${MARIA_VERSION}``). Recreating then fails after the
+    Compose files were already edited, so this is checked while previewing, before anything changes.
+    """
+    try:
+        result = run(compose_args(project) + ["config", "--format", "json"], cwd=Path(project["directory"]),
+                     capture=True, check=False, timeout=LOCAL_DOCKER_COMMAND_TIMEOUT_SECONDS)
+        services = (json.loads(result.stdout or "{}").get("services") or {}) if result.returncode == 0 else {}
+    except (RuntimeError, ValueError):
+        return None  # a Compose failure unrelated to this check surfaces when the services are recreated
+    broken = [name for name in selected if isinstance(services.get(name, {}).get("image"), str)
+              and (services[name]["image"].endswith(":") or services[name]["image"].startswith(":"))]
+    if not broken:
+        return None
+    unset = sorted(set(_UNSET_VARIABLE.findall(result.stderr or "")))
+    names = ", ".join(unset) or "variables"
+    return (f"Compose cannot resolve the image of {', '.join(broken)} in {project['name']}: {names} "
+            f"{'is' if len(unset) == 1 else 'are'} not set where Runtime setup runs. Put "
+            f"{'it' if len(unset) == 1 else 'them'} in {project['directory']}/.env (or export "
+            f"{'it' if len(unset) == 1 else 'them'} before just up) and preview again. No changes were made.")
+
+
 def build_setup_plan(project: dict, services: list[str], selected, project_id, environment, commit, revision_id=None) -> dict:
     """Compute every change setup would make, without making any of them."""
     if not isinstance(selected, list) or not selected or not all(isinstance(item, str) for item in selected):
@@ -1453,6 +1965,12 @@ def build_setup_plan(project: dict, services: list[str], selected, project_id, e
 
     if revision_id not in (None, "") and (not isinstance(revision_id, str) or not REVISION.fullmatch(revision_id)):
         raise SetupInputError("Revision ID must look like rev_ followed by 32 lowercase hexadecimal characters.")
+    blocker, _ = setup_blocker(project, selected, project_id, environment)
+    if blocker:
+        raise SetupInputError(blocker)
+    problem = unresolved_image_problem(project, selected)
+    if problem:
+        raise RuntimeError(problem)
     app_env = plan_app_env(project, revision_id) if revision_id else None
 
     files = [Path(path) for path in project["files"]]
@@ -1508,7 +2026,7 @@ def build_setup_plan(project: dict, services: list[str], selected, project_id, e
         changes.append({"file": app_env["path"], "added": app_env["added"]})  # never the rest of the file: it holds secrets
     return {"project": project, "services": selected, "project_id": project_id, "environment": environment,
             "commit": commit, "labels": labels, "certificates": "create" if creates_certificates else "reuse",
-            "revision_id": revision_id or None, "app_env": app_env,
+            "revision_id": revision_id or None, "app_env": app_env, "instrumentation": instrumentation_status(project),
             "originals": {str(path): contents[path] for path in files},
             "proposed": {str(path): proposed_texts[path] for path in changed},
             "approval_items": items, "changes": changes,
@@ -1517,7 +2035,7 @@ def build_setup_plan(project: dict, services: list[str], selected, project_id, e
 
 def apply_setup_plan(plan: dict, approve=None) -> dict:
     """Ask for approval, then label the Compose files, start the agent and recreate services."""
-    blocker, _ = setup_blocker()
+    blocker, _ = setup_blocker(plan["project"], plan["services"], plan["project_id"], plan["environment"])
     if blocker:
         raise RuntimeError(blocker)
     originals = {Path(path): text for path, text in plan["originals"].items()}
@@ -1543,24 +2061,24 @@ def apply_setup_plan(plan: dict, approve=None) -> dict:
     for path in changed:
         CURRENT_SETUP["compose_originals"][str(path)] = originals[path]
         CURRENT_SETUP["compose_hashes"][str(path)] = digest(plan["proposed"][str(path)])
-    write_state(CURRENT_SETUP)
+    write_record(CURRENT_SETUP)
     unchanged_since_preview()
     for path in changed:
         write_text_atomic(path, plan["proposed"][str(path)])
     if app_env:
         # Only the previous revision values are recorded for cleanup, never the rest of the file (it holds secrets).
         CURRENT_SETUP["app_env"] = {"path": app_env["path"], "revision_id": plan["revision_id"], "previous": app_env["previous"]}
-        write_state(CURRENT_SETUP)
+        write_record(CURRENT_SETUP)
         write_text_atomic(Path(app_env["path"]), app_env["proposed"])
     CURRENT_SETUP["phase"] = "compose-labeled"
-    write_state(CURRENT_SETUP)
+    write_record(CURRENT_SETUP)
     start_ingress_and_agent()
     run(compose_args(project) + ["up", "-d", "--no-deps", *plan["services"]], cwd=Path(project["directory"]))
     if app_env and not changed:
         # Nothing was recreated for labels, so restart the services to make the app read its new .env.
         run(compose_args(project) + ["restart", *plan["services"]], cwd=Path(project["directory"]))
     CURRENT_SETUP["phase"] = "active"
-    write_state(CURRENT_SETUP)
+    write_record(CURRENT_SETUP)
     message = (f"Runtime is active for {plan['project_id']} · {plan['environment']} · {plan['commit'][:12]}. "
                f"Recreated {', '.join(plan['services'])} with telemetry labels.")
     if app_env:
@@ -1600,11 +2118,8 @@ def verify_agent_report(attempts: int = 6, delay: float = 5) -> str | None:
 def setup(project_name: str | None = None) -> dict | None:
     """Terminal setup with Gum prompts; the browser wizard uses the same plan and apply steps."""
     require_terminal()
-    blocker, active = setup_blocker()
+    blocker, _ = setup_blocker()
     if blocker:
-        if active:
-            print(blocker)
-            return {"status": "complete", "message": blocker}
         raise RuntimeError(blocker)
     yaml_module()
     print("Runtime setup runs in this terminal. The browser cannot access your Docker daemon or project files.")
@@ -1652,8 +2167,8 @@ def setup(project_name: str | None = None) -> dict | None:
     try:
         result = apply_setup_plan(plan)
     except Exception:
-        if read_state():
-            print(f"\nSetup stopped. Recovery copies and progress are recorded at {state_path()}.")
+        if list_states():
+            print(f"\nSetup stopped. Recovery copies and progress are recorded under {setups_dir()}.")
             print("Run just runtime-status for the current setup state.")
         raise
     print("\nSetup complete.")
@@ -1735,12 +2250,19 @@ def helper_approval(title: str, items: list[str], summary: str = "") -> None:
             HELPER_STATE.update(message="Applying the approved changes…", updated=time.time())
 
 
-def run_helper_operation(action: str, *, project_id: str | None = None, plan: dict | None = None) -> dict:
+def run_helper_operation(action: str, *, project_id: str | None = None, plan: dict | None = None,
+                         cleanup_target: tuple[str, str] | None = None, install: dict | None = None) -> dict:
     """Run a browser-started operation in the helper; every change waits for helper_approval."""
     if action == "setup" and plan is not None:
         return apply_setup_plan(plan, approve=helper_approval)
     if action == "cleanup":
+        if cleanup_target is not None:
+            return cleanup(approve=helper_approval, project_id=cleanup_target[0], environment=cleanup_target[1])
         return cleanup(approve=helper_approval)
+    if action == "install extension" and install is not None:
+        return install_php_extension(install["project_name"], approve=helper_approval)
+    if action == "install library" and install is not None:
+        return install_indexr_library(install["project_name"], install["project_id"], install["version"], approve=helper_approval)
     if action == "remove local containers" and project_id is not None:
         return remove_project_containers(project_id, approve=helper_approval)
     raise RuntimeError(f"Unknown Runtime helper operation: {action}")
@@ -1748,16 +2270,17 @@ def run_helper_operation(action: str, *, project_id: str | None = None, plan: di
 
 def status() -> None:
     require_terminal()
-    state = read_state()
-    if not state:
+    states = list_states()
+    if not states:
         print("No local Runtime tracking setup is recorded.")
         return
-    print(f"Runtime setup: {state.get('phase', 'incomplete')}")
-    print(f"Project: {state.get('project_id')} · {state.get('environment')} · {state.get('commit')}")
-    print(f"Compose project: {state.get('project', {}).get('name')}")
-    print(f"Services: {', '.join(state.get('services', []))}")
-    print(f"Host certificate: {state.get('fingerprint', 'not provisioned')}")
-    print(f"Recovery state: {state_path()}")
+    for state in states:
+        print(f"Runtime setup: {state.get('phase', 'incomplete')}")
+        print(f"Project: {state.get('project_id')} · {state.get('environment')} · {state.get('commit')}")
+        print(f"Compose project: {state.get('project', {}).get('name')}")
+        print(f"Services: {', '.join(state.get('services', []))}")
+        print(f"Recovery state: {record_path(state_key(state))}\n")
+    print(f"Host certificate: {read_host_state().get('fingerprint', 'not provisioned')}")
     if confirm("Allow Docker status inspection for the local API ingress and host agent?"):
         run(["docker", "compose", "--profile", "runtime-host", "ps", "python-api", "telemetry-caddy"], cwd=API, check=False)
         env = os.environ.copy()
@@ -1767,11 +2290,14 @@ def status() -> None:
 
 
 def managed_agent_environment(*, require_active: bool = True) -> tuple[dict, dict] | tuple[None, None]:
-    state = read_state()
-    if not state:
+    states = list_states()
+    if not states and not read_host_state().get("fingerprint"):
         return None, None
-    if require_active and state.get("phase") not in {"active", "labels-applied-services-not-recreated"}:
-        print(f"Local Runtime setup is {state.get('phase', 'incomplete')}; recover it with runtime status/cleanup before starting services.")
+    # The shared agent serves every setup, so it starts when any setup is usable. An agent created by the library
+    # install has no setup record, only the host record.
+    if require_active and states and not any(item.get("phase") in {"active", "labels-applied-services-not-recreated"} for item in states):
+        phase = states[0].get("phase", "incomplete")
+        print(f"Local Runtime setup is {phase}; recover it with runtime status/cleanup before starting services.")
         return None, None
     required = [CERT_DIR / "agent" / name for name in ("ca.pem", "host.crt", "host.key")]
     if not all(path.is_file() for path in required):
@@ -1796,7 +2322,7 @@ def ensure_host_services() -> None:
     if command is None:
         # Clean up a Caddy container left behind by older default-profile startup.
         run(["docker", "compose", "--profile", "runtime-host", "stop", "telemetry-caddy"], cwd=API, check=False)
-        if not read_state():
+        if not list_states() and not read_host_state().get("fingerprint"):
             print("No configured local Runtime agent to start.")
         return
     print("==> Starting local Runtime ingress and host agent")
@@ -1809,7 +2335,7 @@ def stop_host_services() -> None:
     run(["docker", "compose", "--profile", "runtime-host", "stop", "telemetry-caddy"], cwd=API, check=False)
     command, compose = managed_agent_environment(require_active=False)
     if command is None:
-        if not read_state():
+        if not list_states() and not read_host_state().get("fingerprint"):
             print("No configured local Runtime agent to stop.")
         return
     print("==> Stopping local Runtime host agent")
@@ -1892,17 +2418,39 @@ def restore_compose(state: dict) -> list[str]:
             write_text_atomic(path, reverted)
     return problems
 
-def cleanup(approve=None) -> dict:
+def pick_cleanup_target(states: list[dict], project_id: str | None, environment: str | None, interactive: bool) -> dict:
+    """The setup to clean up: the named one, the only one, or one chosen in the terminal."""
+    if project_id is not None:
+        found = next((item for item in states if state_key(item) == record_key(project_id, environment)), None)
+        if found is None:
+            raise RuntimeError(f"No Runtime setup is recorded for {project_id} · {environment}.")
+        return found
+    if len(states) == 1:
+        return states[0]
+    labels = {f"{item.get('project_id')} · {item.get('environment')}": item for item in states}
+    if interactive:
+        return labels[gum_choose(list(labels), title="Choose the Runtime setup to clean up")[0]]
+    raise RuntimeError("Several Runtime setups are recorded; choose which one to clean up: " + ", ".join(labels))
+
+
+def cleanup(approve=None, project_id: str | None = None, environment: str | None = None) -> dict:
+    """Clean up one setup. The shared host agent, ingress and certificates go only with the last one."""
     if approve is None:
         require_terminal()
-    state = read_state()
-    if not state:
+    states = list_states()
+    if not states:
         print("No local Runtime tracking setup is recorded.")
         return {"status": "complete", "message": "No local Runtime setup record was present."}
+    state = pick_cleanup_target(states, project_id, environment, interactive=approve is None)
+    key = state_key(state)
+    others = [item for item in states if state_key(item) != key]
     compose_files = list(state.get("compose_originals", {}).keys())
-    certs_applicable = bool(state.get("certificates_created") and CERT_DIR.exists())
+    # Certificates are shared: the host record says whether setup created them; a record from before it existed says so itself.
+    created_certs = read_host_state().get("certificates_created", state.get("certificates_created"))
+    certs_applicable = bool(not others and created_certs and CERT_DIR.exists())
     actions = [
-        "Stop the telemetry agent and Runtime ingress",
+        *(["Stop the telemetry agent and Runtime ingress"] if not others else
+          [f"Keep the telemetry agent and Runtime ingress running for {len(others)} other setup{'s' if len(others) != 1 else ''}"]),
         f"Restore every saved Compose file ({', '.join(compose_files) or 'none'})",
         *([f"Put the app's previous revision ID back in {state['app_env'].get('path')}"] if isinstance(state.get("app_env"), dict) else []),
         f"Recreate selected Compose services without Runtime labels ({', '.join(state.get('services', [])) or 'none'})",
@@ -1925,11 +2473,12 @@ def cleanup(approve=None) -> dict:
         if isinstance(state.get("app_env"), dict):
             revert_app_env(state["app_env"])  # best effort: a hand-edited .env is left as it is
         run(compose_args(project) + ["up", "-d", "--no-deps", *services], cwd=Path(project["directory"]))
-        env = os.environ.copy()
-        env.update({"HOST_IDENTITY_DIR": str(CERT_DIR / "agent"), "BACKEND_URL": "https://telemetry-caddy:9443"})
-        run(["docker", "compose", "-f", "telemetry-agent/docker-compose.yml", "-f",
-             "telemetry-agent/docker-compose.local.yml", "down"], cwd=API, env=env, check=False)
-        run(["docker", "compose", "--profile", "runtime-host", "stop", "telemetry-caddy"], cwd=API, check=False)
+        if not others:
+            env = os.environ.copy()
+            env.update({"HOST_IDENTITY_DIR": str(CERT_DIR / "agent"), "BACKEND_URL": "https://telemetry-caddy:9443"})
+            run(["docker", "compose", "-f", "telemetry-agent/docker-compose.yml", "-f",
+                 "telemetry-agent/docker-compose.local.yml", "down"], cwd=API, env=env, check=False)
+            run(["docker", "compose", "--profile", "runtime-host", "stop", "telemetry-caddy"], cwd=API, check=False)
         fingerprint = state.get("fingerprint")
         if fingerprint and state.get("scope_original"):
             before, after = update_env_scope(fingerprint, state["project_id"], state["environment"], remove=True)
@@ -1941,9 +2490,11 @@ def cleanup(approve=None) -> dict:
     except Exception as exc:
         state["phase"] = "cleanup-incomplete"
         state["cleanup_error"] = str(exc)
-        write_state(state)
+        write_record(state)
         return {"status": "error", "message": f"Cleanup is incomplete; recovery state was retained: {exc}"}
-    write_state(None)
+    delete_record(state)
+    if not others:
+        write_host_state(None)
     return {"status": "complete", "message": "Local Runtime setup cleaned up."}
 
 

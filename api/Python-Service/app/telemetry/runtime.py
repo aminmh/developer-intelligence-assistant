@@ -51,7 +51,10 @@ def _method_activity(raw) -> dict:
     if raw in (None, ""):
         return {
             "available": False,
-            "reason": "No method-call data was captured for this request.",
+            "reason": (
+                "No method-call data was captured for this request. If this is true for every request, the app's PHP "
+                "container probably lacks the ext-opentelemetry extension, which method activity needs."
+            ),
             "edges": [],
         }
     try:
