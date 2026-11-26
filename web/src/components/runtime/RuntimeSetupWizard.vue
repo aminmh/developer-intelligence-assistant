@@ -12,7 +12,7 @@ const props = defineProps<{
   authorize: () => Promise<string>; knownProjectIds?: string[];
   indexedRevisions?: RuntimeProjectRecord[]; inventoryAvailable?: boolean;
 }>();
-const emit = defineEmits<{ close: []; apply: [planId: string]; install: [request: { project_name: string; project_id: string }] }>();
+const emit = defineEmits<{ close: []; apply: [planId: string]; install: [request: { project_name: string; project_id: string }]; 'install-extension': [request: { project_name: string }] }>();
 
 const HELPER = 'http://127.0.0.1:47831';
 const SLUG = /^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$/;
@@ -20,7 +20,8 @@ const COMMIT = /^(?:[0-9a-f]{40}|[0-9a-f]{64})$/;
 
 type ComposeProject = { name: string; status: string; directory: string; files: string[] };
 type Instrumentation = { status: 'installed' | 'declared' | 'missing' | 'unknown'; packages: string[]; message: string; adapter?: string; install_command?: string; compatibility?: string | null; configured?: boolean; needs_update?: boolean; update_command?: string };
-type ProjectDetails = { name: string; directory: string; files: string[]; services: string[]; commit: string | null; instrumentation?: Instrumentation };
+type MethodActivity = { status: 'loaded' | 'missing' | 'unknown'; service: string | null; message: string; installer?: boolean; image_fix?: string; quick_fix?: string };
+type ProjectDetails = { name: string; directory: string; files: string[]; services: string[]; commit: string | null; instrumentation?: Instrumentation; method_activity?: MethodActivity };
 type Plan = {
   plan_id: string; expires_in: number; compose_project: string; services: string[]; project_id: string;
   environment: string; commit: string; certificates: 'create' | 'reuse';
@@ -121,6 +122,7 @@ const review = () => guard(async () => {
 });
 const apply = () => { if (plan.value) emit('apply', plan.value.plan_id); };
 // Installing the library needs a project ID so the revision and settings line up with this Runtime project.
+const installExtension = () => { if (details.value) emit('install-extension', { project_name: details.value.name }); };
 const installLibrary = () => { if (details.value && projectId.value) emit('install', { project_name: details.value.name, project_id: projectId.value }); };
 const toggleService = (service: string) => {
   services.value = services.value.includes(service) ? services.value.filter((item) => item !== service) : [...services.value, service];
@@ -169,6 +171,23 @@ onMounted(loadProjects);
             <pre class="mt-1 overflow-x-auto rounded bg-black/30 p-2 text-xs"><code>{{ tracingCommand }}</code></pre>
           </li>
         </ol>
+      </template>
+    </aside>
+
+    <aside v-if="details?.method_activity && details.method_activity.status !== 'loaded' && step !== 'project'" class="mt-4 rounded-lg border p-3 text-xs leading-5" :class="details.method_activity.status === 'missing' ? 'border-amber-500/30 bg-amber-500/5 text-amber-100' : 'border-slate-700 bg-slate-950/40 text-slate-300'" aria-label="PHP extension check" data-testid="method-activity-check">
+      <h5 class="font-semibold text-white">{{ details.method_activity.status === 'missing' ? 'Method activity needs the PHP extension ext-opentelemetry' : 'The PHP extension could not be checked' }}</h5>
+      <p>{{ details.method_activity.message }}</p>
+      <template v-if="details.method_activity.status === 'missing'">
+        <p class="mt-1">Permanent fix: add it to the PHP image and rebuild, for example in the Dockerfile:</p>
+        <pre class="mt-1 overflow-x-auto rounded bg-black/30 p-2 text-xs"><code>RUN {{ details.method_activity.image_fix }}</code></pre>
+        <p class="mt-1">Without rebuilding, install it into the running container now (it is lost when the container is recreated, for example by a Compose restart):</p>
+        <pre class="mt-1 overflow-x-auto rounded bg-black/30 p-2 text-xs"><code>{{ details.method_activity.quick_fix }}</code></pre>
+        <p class="mt-1">Then restart PHP-FPM, or the container, so web requests load it.</p>
+        <div class="mt-2 rounded border border-emerald-500/25 bg-emerald-500/5 p-2 text-emerald-100">
+          <p class="font-medium text-white">Or let Developer Assistant add it without rebuilding the image</p>
+          <p class="mt-0.5">It checks the image first. If the image lacks the extension, it builds it once in a temporary container from the same image, keeps the file on this computer, and mounts it into <code>{{ details.method_activity.service }}</code> through an uncommitted Compose file. Only that service is recreated, and the mounts survive restarts. A dialog on this computer lists the steps before anything runs.</p>
+          <button type="button" class="mt-2 rounded-lg bg-emerald-500 px-3 py-1.5 text-xs font-semibold text-slate-950" data-testid="install-extension" @click="installExtension">Add ext-opentelemetry without rebuilding</button>
+        </div>
       </template>
     </aside>
 

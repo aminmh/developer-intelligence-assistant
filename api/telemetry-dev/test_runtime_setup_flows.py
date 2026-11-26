@@ -643,6 +643,140 @@ class RuntimeSetupFlowTests(unittest.TestCase):
         self.assertIn("composer update aminmh/developer-assistant-otel-core aminmh/developer-assistant-otel-symfony", str(refused.exception))
         self.assertFalse(new["needs_update"])
 
+    def test_method_activity_check_asks_the_running_php_container_for_ext_opentelemetry(self):
+        def fake_run(args, **kwargs):
+            if "detect" in args:
+                return runtime_setup.subprocess.CompletedProcess(args, 0, stdout=json.dumps({"service": "php"}), stderr="")
+            return runtime_setup.subprocess.CompletedProcess(args, 0, stdout=self.probe_output, stderr="")
+
+        with ExitStack() as stack:
+            stack.enter_context(patch.object(runtime_setup, "run", side_effect=fake_run))
+            stack.enter_context(patch.object(runtime_setup, "compose_args", return_value=["docker", "compose"]))
+            self.probe_output = "no\ninstaller\n"
+            missing = runtime_setup.method_activity_status(self.project)
+            self.probe_output = "no\nno-installer\n"
+            no_installer = runtime_setup.method_activity_status(self.project)
+            self.probe_output = "yes\ninstaller\n"
+            loaded = runtime_setup.method_activity_status(self.project)
+            self.probe_output = ""
+            stopped = runtime_setup.method_activity_status(self.project)
+
+        self.assertEqual((missing["status"], missing["service"]), ("missing", "php"))
+        self.assertEqual(missing["image_fix"], "install-php-extensions opentelemetry")
+        self.assertEqual(missing["quick_fix"], "docker compose exec php install-php-extensions opentelemetry")
+        self.assertIn("pecl install opentelemetry", no_installer["image_fix"])
+        self.assertIn("pecl install opentelemetry", no_installer["quick_fix"])
+        self.assertEqual(loaded["status"], "loaded")
+        self.assertEqual(stopped["status"], "unknown")
+        self.assertIn("is not running", stopped["message"])
+
+    # ── ext-opentelemetry without rebuilding the image ───────────────────────
+
+    def extension_patches(self, stack: ExitStack, *, image_has_it=False, build_ok=True, after="loaded"):
+        calls = []
+        stack.enter_context(patch.object(runtime_setup, "find_compose_project", return_value=self.project))
+        statuses = iter([{"status": "missing", "service": "php", "message": "missing"}, {"status": after, "service": "php", "message": "now loaded"}])
+        stack.enter_context(patch.object(runtime_setup, "method_activity_status", side_effect=lambda project: next(statuses)))
+        stack.enter_context(patch.object(runtime_setup, "_service_image", return_value=("sha256:abc123", "linux/amd64")))
+        stack.enter_context(patch.object(runtime_setup, "php_extension_dir", return_value=self.root / "extensions"))
+        stack.enter_context(patch.object(runtime_setup.time, "sleep"))
+        stack.enter_context(patch.object(runtime_setup, "compose_args", return_value=["docker", "compose"]))
+
+        def fake_run(args, **kwargs):
+            calls.append(args)
+            ok = lambda out="": runtime_setup.subprocess.CompletedProcess(args, 0, stdout=out, stderr="")
+            if args[:2] == ["docker", "run"] and "--entrypoint" in args and args[args.index("--entrypoint") + 1] == "php":
+                return ok(("yes" if image_has_it else "no") + "\n/usr/local/lib/php/extensions/no-debug-non-zts-20220829\n/usr/local/etc/php/conf.d\n")
+            if args[:2] == ["docker", "run"]:  # the throwaway build
+                if build_ok:
+                    out = Path(args[args.index("-v") + 1].split(":")[0])
+                    (out / "opentelemetry.so").write_text("so")
+                    (out / "opentelemetry.ini").write_text("extension=opentelemetry.so\n")
+                    return ok()
+                return runtime_setup.subprocess.CompletedProcess(args, 1, stdout="", stderr="E: compiler missing")
+            if args[:1] == ["git"]:
+                return ok("c" * 40 + "\n")
+            return ok("{}")
+
+        stack.enter_context(patch.object(runtime_setup, "run", side_effect=fake_run))
+        return calls
+
+    def test_extension_is_built_once_in_a_throwaway_container_mounted_and_the_service_recreated(self):
+        approvals = []
+        with ExitStack() as stack:
+            calls = self.extension_patches(stack)
+            result = runtime_setup.install_php_extension(
+                "fixture-project", approve=lambda title, items, summary="": approvals.append((title, items)))
+
+        self.assertEqual(result["status"], "complete")
+        build = next(call for call in calls if call[:2] == ["docker", "run"] and call[call.index("--entrypoint") + 1] == "sh")
+        self.assertIn("--platform", build)
+        self.assertIn("linux/amd64", build)
+        self.assertIn("sha256:abc123", build)
+        self.assertIn("install-php-extensions opentelemetry", build[-1])
+        mounts = next(call for call in calls if "extension-mounts" in call)
+        self.assertEqual(mounts[mounts.index("--service") + 1], "php")
+        self.assertEqual(mounts[mounts.index("--extension-dir") + 1], "/usr/local/lib/php/extensions/no-debug-non-zts-20220829")
+        self.assertEqual(mounts[mounts.index("--ini-dir") + 1], "/usr/local/etc/php/conf.d")
+        up = [call for call in calls if call[:4] == ["docker", "compose", "up", "-d"]]
+        self.assertEqual(up, [["docker", "compose", "up", "-d", "php"]])
+        self.assertEqual(len(approvals), 1)
+        self.assertTrue(any("temporary container" in item for item in approvals[0][1]))
+        self.assertTrue(any("compose.indexr-ext.yaml" in item for item in approvals[0][1]))
+
+    def test_extension_install_leaves_everything_alone_when_the_image_already_has_it_or_the_build_fails(self):
+        with ExitStack() as stack:
+            calls = self.extension_patches(stack, image_has_it=True)
+            with self.assertRaises(runtime_setup.SetupInputError) as present:
+                runtime_setup.install_php_extension("fixture-project", approve=lambda *a, **k: self.fail("no approval needed"))
+            self.assertFalse(any(call[:4] == ["docker", "compose", "up", "-d"] for call in calls))
+        with ExitStack() as stack:
+            calls = self.extension_patches(stack, build_ok=False)
+            failed = runtime_setup.install_php_extension("fixture-project", approve=lambda *a, **k: None)
+            self.assertFalse(any("extension-mounts" in call for call in calls))
+
+        self.assertIn("already contains ext-opentelemetry", str(present.exception))
+        self.assertEqual(failed["code"], "extension_build_failed")
+        self.assertIn("Nothing was changed in the project", failed["message"])
+        self.assertIn("compiler missing", failed["message"])
+
+    def test_a_previous_build_for_the_same_image_is_reused_without_building_again(self):
+        approvals = []
+        with ExitStack() as stack:
+            calls = self.extension_patches(stack)
+            digest = runtime_setup.hashlib.sha256(b"sha256:abc123|linux/amd64").hexdigest()[:12]
+            built = self.root / "extensions" / digest
+            built.mkdir(parents=True)
+            (built / "opentelemetry.so").write_text("so")
+            (built / "opentelemetry.ini").write_text("extension=opentelemetry.so\n")
+            runtime_setup.install_php_extension("fixture-project", approve=lambda title, items, summary="": approvals.append(items))
+
+        self.assertFalse(any(call[:2] == ["docker", "run"] and call[call.index("--entrypoint") + 1] == "sh" for call in calls))
+        self.assertFalse(any("temporary container" in item for item in approvals[0]))
+
+    def test_extension_mounts_are_written_to_their_own_uncommitted_file_and_added_to_compose_file(self):
+        script = Path(__file__).resolve().parents[2] / "scripts" / "php-compose-telemetry.py"
+        (self.project_dir / ".env").write_text("APP_ENV=dev\n")  # compose.yml (services php and database) comes from setUp
+        runtime_setup.subprocess.run(["git", "init", "-q", str(self.project_dir)], check=True)
+        done = runtime_setup.subprocess.run(
+            [sys.executable, str(script), "extension-mounts", str(self.project_dir), "--service", "php", "--so", "/tmp/o.so", "--ini", "/tmp/o.ini",
+             "--extension-dir", "/usr/local/lib/php/extensions/x", "--ini-dir", "/usr/local/etc/php/conf.d"],
+            capture_output=True, text=True)
+        text = (self.project_dir / "compose.indexr-ext.yaml").read_text()
+        again = runtime_setup.subprocess.run(
+            [sys.executable, str(script), "extension-mounts", str(self.project_dir), "--service", "php", "--so", "/tmp/o.so", "--ini", "/tmp/o.ini",
+             "--extension-dir", "/usr/local/lib/php/extensions/x", "--ini-dir", "/usr/local/etc/php/conf.d"],
+            capture_output=True, text=True)
+        env = (self.project_dir / ".env").read_text()
+        exclude = (self.project_dir / ".git" / "info" / "exclude").read_text()
+
+        self.assertEqual((done.returncode, again.returncode), (0, 0), done.stderr + again.stderr)
+        self.assertIn('"/tmp/o.so:/usr/local/lib/php/extensions/x/opentelemetry.so:ro"', text)
+        self.assertIn('"/tmp/o.ini:/usr/local/etc/php/conf.d/docker-php-ext-opentelemetry.ini:ro"', text)
+        self.assertEqual(env.count("compose.indexr-ext.yaml"), 1)
+        self.assertIn("COMPOSE_FILE=compose.yml:compose.indexr-ext.yaml", env)
+        self.assertIn("/compose.indexr-ext.yaml", exclude)
+
     def test_install_validates_its_inputs_and_only_runs_for_a_missing_library(self):
         with ExitStack() as stack:
             run = self.install_patches(stack, composer=self.SYMFONY_APP)

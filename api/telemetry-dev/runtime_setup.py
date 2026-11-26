@@ -50,7 +50,7 @@ HELPER_STATE: dict = {"status": "idle", "message": "Ready", "updated": time.time
 HELPER_LOCK = threading.Lock()
 HELPER_USED_TOKENS: set[str] = set()
 # Bumped whenever helper endpoints change; the root justfile restarts an older helper.
-HELPER_API_VERSION = 41
+HELPER_API_VERSION = 43
 APPROVAL_TIMEOUT_SECONDS = 300
 SETUP_PLAN_TTL_SECONDS = 600
 # Previews created by the browser wizard, keyed by a single-use plan ID (only the latest is kept).
@@ -593,15 +593,20 @@ def serve_helper() -> None:
                     return self._json(503, {"detail": "The SSH credential could not be saved. Unlock the OS keyring and retry."})
             if self.path in {"/compose-projects", "/compose-project", "/setup/plan"}:
                 return self._setup_wizard_step()
-            if self.path not in {"/setup/apply", "/cleanup", "/remove-project-containers", "/instrumentation/install"}:
+            if self.path not in {"/setup/apply", "/cleanup", "/remove-project-containers", "/instrumentation/install", "/instrumentation/install-extension"}:
                 return self._json(404, {"detail": "Not found."})
             if not self._authorized(): return self._json(403, {"detail": "Runtime setup authorization is invalid or expired."})
-            if self.path in {"/setup/apply", "/cleanup", "/instrumentation/install"} and not self._authorized(unscoped=True):
+            if self.path in {"/setup/apply", "/cleanup", "/instrumentation/install", "/instrumentation/install-extension"} and not self._authorized(unscoped=True):
                 return self._json(403, {"detail": "This authorization is not valid for Runtime setup or cleanup."})
             project_id = None
             plan_id = None
             cleanup_target: tuple[str, str] | None = None
             install_request: dict | None = None
+            if self.path == "/instrumentation/install-extension":
+                body = self._read_json(4096)
+                if body is None or not isinstance(body.get("project_name"), str) or not SLUG.fullmatch(body["project_name"]):
+                    return self._json(400, {"detail": "Choose a Compose project."})
+                install_request = {"project_name": body["project_name"]}
             if self.path == "/instrumentation/install":
                 body = self._read_json(4096)
                 if body is None:
@@ -649,6 +654,7 @@ def serve_helper() -> None:
                     plan = entry["plan"]
                 HELPER_USED_TOKENS.add(token_id)
                 action = ("cleanup" if self.path == "/cleanup" else
+                          "install extension" if self.path == "/instrumentation/install-extension" else
                           "install library" if self.path == "/instrumentation/install" else
                           "remove local containers" if self.path == "/remove-project-containers" else "setup")
                 HELPER_STATE.update(status="starting", message=f"Starting Runtime {action}", updated=time.time())
@@ -1709,6 +1715,148 @@ def install_indexr_library(project_name: str, project_id: str, version: str, app
     return {"status": "error", "code": "install_failed", "message": f"The install stopped (exit {result.returncode}). {detail}"}
 
 
+def method_activity_status(project: dict) -> dict:
+    """Whether the app's PHP container has ext-opentelemetry, which the Indexr library's method hooks need.
+
+    Without it the hook manifest is written but never registered, so Method activity stays empty for every request
+    while request and database spans are unaffected. Asked of the running container, since that is where PHP runs.
+    """
+    directory = project["directory"]
+    try:
+        found = run([sys.executable, str(ROOT / "scripts" / "php-compose-telemetry.py"), "detect", directory],
+                    capture=True, check=False, timeout=60)
+        service = json.loads(found.stdout or "{}").get("service")
+    except (RuntimeError, ValueError):
+        service = None
+    if not isinstance(service, str) or not SLUG.fullmatch(service):
+        return {"status": "unknown", "service": None, "message": "The PHP service could not be detected, so ext-opentelemetry was not checked."}
+    probe = ('php -r \'echo extension_loaded("opentelemetry") ? "yes" : "no";\'; echo; '
+             'command -v install-php-extensions >/dev/null 2>&1 && echo installer || echo no-installer')
+    try:
+        result = run(compose_args(project) + ["exec", "-T", service, "sh", "-c", probe], cwd=Path(directory),
+                     capture=True, check=False, timeout=30)
+    except RuntimeError:
+        result = None
+    lines = (result.stdout or "").split() if result is not None and result.returncode == 0 else []
+    if not lines or lines[0] not in ("yes", "no"):
+        return {"status": "unknown", "service": service,
+                "message": f"Service {service} is not running, so ext-opentelemetry was not checked. Start the project and check again."}
+    if lines[0] == "yes":
+        return {"status": "loaded", "service": service, "message": f"ext-opentelemetry is loaded in service {service}, so Method activity can record calls."}
+    installer = len(lines) > 1 and lines[1] == "installer"
+    return {"status": "missing", "service": service, "installer": installer,
+            "message": (f"ext-opentelemetry is not installed in service {service}. Request and database spans are unaffected, but "
+                        "Method activity will stay empty (\"No method-call data was captured\") for every request."),
+            "image_fix": "install-php-extensions opentelemetry" if installer else "pecl install opentelemetry && docker-php-ext-enable opentelemetry",
+            "quick_fix": (f"docker compose exec {service} install-php-extensions opentelemetry" if installer else
+                          f"docker compose exec {service} sh -c 'pecl install opentelemetry && docker-php-ext-enable opentelemetry'")}
+
+
+EXTENSION_BUILD_SCRIPT = r'''set -e
+if command -v install-php-extensions >/dev/null 2>&1; then
+  install-php-extensions opentelemetry >/tmp/build.log 2>&1 || { tail -15 /tmp/build.log; exit 1; }
+elif command -v apk >/dev/null 2>&1; then
+  { apk add --no-cache $PHPIZE_DEPS && printf '\n' | pecl install opentelemetry; } >/tmp/build.log 2>&1 || { tail -15 /tmp/build.log; exit 1; }
+else
+  echo "This image has neither install-php-extensions nor apk, so the extension cannot be built automatically."; exit 2
+fi
+dir=$(php -r 'echo ini_get("extension_dir");')
+cp "$dir/opentelemetry.so" /out/opentelemetry.so
+echo "extension=opentelemetry.so" > /out/opentelemetry.ini
+'''
+
+
+def _service_image(project: dict, service: str) -> tuple[str, str]:
+    """The image the service runs (its running container's, else the configured one) and its platform."""
+    directory = Path(project["directory"])
+    ps = run(compose_args(project) + ["ps", "-q", service], cwd=directory, capture=True, check=False, timeout=30)
+    container = (ps.stdout or "").strip().splitlines()[:1]
+    image = ""
+    if container:
+        inspected = run(["docker", "inspect", "--format", "{{.Image}}", container[0]], capture=True, check=False, timeout=30)
+        image = (inspected.stdout or "").strip()
+    if not image:
+        config = run(compose_args(project) + ["config", "--format", "json"], cwd=directory, capture=True, check=False, timeout=60)
+        try:
+            image = str(((json.loads(config.stdout or "{}").get("services") or {}).get(service) or {}).get("image") or "")
+        except ValueError:
+            image = ""
+    if not image:
+        raise SetupInputError(f"Could not tell which image service {service} runs. Build or start the project first.")
+    platform = run(["docker", "image", "inspect", "--format", "{{.Os}}/{{.Architecture}}", image], capture=True, check=False, timeout=30)
+    return image, (platform.stdout or "").strip()
+
+
+def php_extension_dir(project_id_hint: str = "") -> Path:
+    return state_path().parent / "php-extensions"
+
+
+def install_php_extension(project_name: str, approve=None) -> dict:
+    """Make ext-opentelemetry available to the app's PHP service without rebuilding its image.
+
+    The extension is built once in a throwaway container from the service's own image (so PHP version, thread
+    safety and operating system match), saved on this computer, and mounted read-only into the service through an
+    uncommitted Compose file. The image is checked first and left alone when it already has the extension.
+    """
+    project = find_compose_project(project_name)
+    status = method_activity_status(project)
+    if status["status"] == "loaded":
+        return {"status": "complete", "message": status["message"], "already_installed": True}
+    service = status.get("service")
+    if not service:
+        raise SetupInputError(status["message"])
+    image, platform = _service_image(project, service)
+    platform_args = ["--platform", platform] if re.fullmatch(r"[a-z]+/[a-z0-9]+", platform) else []
+    probe = run(["docker", "run", "--rm", *platform_args, "--entrypoint", "php", image, "-r",
+                 'echo extension_loaded("opentelemetry") ? "yes" : "no", "\n", ini_get("extension_dir"), "\n", PHP_CONFIG_FILE_SCAN_DIR, "\n";'],
+                capture=True, check=False, timeout=300)
+    lines = (probe.stdout or "").split()
+    if probe.returncode != 0 or len(lines) < 3:
+        raise RuntimeError(f"Could not inspect PHP in image {image}: {(probe.stderr or probe.stdout or '').strip()[-300:]}")
+    if lines[0] == "yes":
+        raise SetupInputError(f"The image of service {service} already contains ext-opentelemetry, but the running container does not load it. "
+                              "Check whether a php.ini file disables it; nothing was changed.")
+    extension_dir, ini_dir = lines[1], lines[2]
+    digest = hashlib.sha256(f"{image}|{platform}".encode()).hexdigest()[:12]
+    out_dir = php_extension_dir() / digest
+    so_path, ini_path = out_dir / "opentelemetry.so", out_dir / "opentelemetry.ini"
+    reuse = so_path.is_file() and ini_path.is_file()
+    items = [
+        *([] if reuse else [f"Start a temporary container from the image of service {service} ({platform or 'default platform'}) and build "
+                            "ext-opentelemetry in it with install-php-extensions or PECL; the container is removed afterwards"]),
+        f"Keep the built extension on this computer under {out_dir}",
+        f"Write {project['directory']}/{'compose.indexr-ext.yaml'} (not committed) with two read-only mounts and add it to COMPOSE_FILE in .env",
+        f"Recreate service {service} so it loads the extension. Other services are not touched",
+    ]
+    (approve or required_approval)("Approve installing ext-opentelemetry without rebuilding", items,
+                                   summary=f"Project: {project['name']}\nService: {service}\nImage: {image[:19]}")
+    if not reuse:
+        out_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
+        built = run(["docker", "run", "--rm", *platform_args, "--entrypoint", "sh", "-v", f"{out_dir}:/out", image, "-c", EXTENSION_BUILD_SCRIPT],
+                    capture=True, check=False, timeout=INSTALL_TIMEOUT_SECONDS)
+        if built.returncode != 0 or not so_path.is_file():
+            detail = "\n".join(line for line in ((built.stdout or "") + (built.stderr or "")).splitlines() if line.strip())[-600:]
+            return {"status": "error", "code": "extension_build_failed",
+                    "message": f"The extension could not be built in a temporary container. Nothing was changed in the project. {detail}".strip()}
+    mounted = run([sys.executable, str(ROOT / "scripts" / "php-compose-telemetry.py"), "extension-mounts", project["directory"],
+                   "--service", service, "--so", str(so_path), "--ini", str(ini_path), "--extension-dir", extension_dir, "--ini-dir", ini_dir],
+                  capture=True, check=False, timeout=120)
+    if mounted.returncode != 0:
+        return {"status": "error", "code": "extension_mount_failed",
+                "message": f"The Compose mount file could not be written: {(mounted.stderr or mounted.stdout or '').strip()[-400:]}"}
+    head = run(["git", "rev-parse", "HEAD"], cwd=Path(project["directory"]), capture=True, check=False, timeout=30)
+    env = {**os.environ, "GIT_COMMIT_SHA": (head.stdout or "").strip() or "unknown"}
+    run(["docker", "compose", "up", "-d", service], cwd=Path(project["directory"]), env=env, timeout=HELPER_COMMAND_TIMEOUT_SECONDS)
+    for _ in range(20):
+        after = method_activity_status(project)
+        if after["status"] == "loaded":
+            return {"status": "complete", "message": f"ext-opentelemetry is loaded in service {service}. Method activity records calls from the next request. "
+                    f"To remove it, delete {project['directory']}/compose.indexr-ext.yaml and its entry in COMPOSE_FILE (.env), then recreate the service."}
+        time.sleep(3)
+    return {"status": "error", "code": "extension_not_loaded",
+            "message": f"The mounts are in place and service {service} was recreated, but PHP does not report the extension yet. Check docker compose logs {service}."}
+
+
 def compose_project_details(project: dict) -> dict:
     """Services of a Compose project and the commit checked out in its directory."""
     result = run(compose_args(project) + ["config", "--services"], cwd=Path(project["directory"]), capture=True)
@@ -1718,7 +1866,7 @@ def compose_project_details(project: dict) -> dict:
     commit_result = run(["git", "rev-parse", "HEAD"], cwd=Path(project["directory"]), capture=True, check=False)
     detected = commit_result.stdout.strip().lower() if commit_result.returncode == 0 else ""
     return {"services": services, "commit": detected if COMMIT.fullmatch(detected) else None,
-            "instrumentation": instrumentation_status(project)}
+            "instrumentation": instrumentation_status(project), "method_activity": method_activity_status(project)}
 
 
 def plan_app_env(project: dict, revision_id: str) -> dict | None:
@@ -2111,6 +2259,8 @@ def run_helper_operation(action: str, *, project_id: str | None = None, plan: di
         if cleanup_target is not None:
             return cleanup(approve=helper_approval, project_id=cleanup_target[0], environment=cleanup_target[1])
         return cleanup(approve=helper_approval)
+    if action == "install extension" and install is not None:
+        return install_php_extension(install["project_name"], approve=helper_approval)
     if action == "install library" and install is not None:
         return install_indexr_library(install["project_name"], install["project_id"], install["version"], approve=helper_approval)
     if action == "remove local containers" and project_id is not None:

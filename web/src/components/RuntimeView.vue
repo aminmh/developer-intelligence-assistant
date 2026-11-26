@@ -70,7 +70,7 @@ const loadingDetail = ref(false);
 const error = ref('');
 const setupState = ref<'idle' | 'starting' | 'running' | 'complete' | 'cancelled' | 'error'>('idle');
 const setupMessage = ref('');
-const activeOperation = ref<'setup' | 'cleanup' | 'remove' | 'install' | ''>('');
+const activeOperation = ref<'setup' | 'cleanup' | 'remove' | 'install' | 'extension' | ''>('');
 type SavedSetup = { phase: string; project_id: string; environment: string; commit?: string | null; compose_project?: string | null; services?: string[] };
 const savedSetups = ref<SavedSetup[]>([]);
 const setupKey = (item: Pick<SavedSetup, 'project_id' | 'environment'>) => `${item.project_id}@${item.environment}`;
@@ -697,6 +697,41 @@ const installIndexrLibrary = async (request: { project_name: string; project_id:
     setupMessage.value = cause?.message || 'The library install failed.';
   }
 };
+// Add ext-opentelemetry to the app's PHP service without rebuilding its image; the helper asks for approval on this computer.
+const installPhpExtension = async (request: { project_name: string }) => {
+  showSetupWizard.value = false;
+  activeOperation.value = 'extension';
+  setupState.value = 'starting';
+  setupMessage.value = 'Authorizing the PHP extension install…';
+  try {
+    let token = await getRuntimeHelperAuth();
+    const helperUrl = 'http://127.0.0.1:47831';
+    let authorizationAt = Date.now();
+    const headers = () => ({ Authorization: `Bearer ${token}` });
+    const startResponse = await fetch(`${helperUrl}/instrumentation/install-extension`, {
+      method: 'POST', cache: 'no-store', headers: { ...headers(), 'Content-Type': 'application/json' },
+      body: JSON.stringify(request),
+    });
+    const started = await startResponse.json().catch(() => ({}));
+    if (startResponse.status === 404) throw new Error('The local Runtime helper is out of date. Run just up to restart it, then reload this page.');
+    if (!startResponse.ok) throw new Error(started.detail || 'Could not start the PHP extension install.');
+    setupState.value = 'running';
+    while (true) {
+      if (Date.now() - authorizationAt > 120_000) { token = await getRuntimeHelperAuth(); authorizationAt = Date.now(); }
+      const statusResponse = await fetch(`${helperUrl}/status`, { headers: headers(), cache: 'no-store' });
+      const status = await statusResponse.json().catch(() => ({}));
+      if (!statusResponse.ok) throw new Error(status.detail || 'Could not read the install progress.');
+      setupMessage.value = status.message || 'Adding ext-opentelemetry…';
+      if (status.status === 'complete') { setupState.value = 'complete'; await refreshWhenApiIsBack(); break; }
+      if (status.status === 'cancelled') { setupState.value = 'cancelled'; break; }
+      if (status.status === 'error') { setupState.value = 'error'; break; }
+      await new Promise((resolve) => setTimeout(resolve, 3000));
+    }
+  } catch (cause: any) {
+    setupState.value = 'error';
+    setupMessage.value = cause?.message || 'The PHP extension install failed.';
+  }
+};
 const cleanupRuntime = async (target?: Pick<SavedSetup, 'project_id' | 'environment'>) => {
   // With one setup there is nothing to choose; with several, each has its own button.
   const chosen = target ?? (savedSetups.value.length === 1 ? savedSetups.value[0] : undefined);
@@ -920,7 +955,8 @@ const setupBannerTone = computed(() => (setupState.value === 'error' ? 'bad' : s
         <AlertTriangle v-else-if="setupState === 'error' || setupState === 'cancelled'" aria-hidden="true" />
         <RefreshCw v-else class="rt-spin" aria-hidden="true" />
         <div class="rt-banner-text">
-          <b v-if="activeOperation === 'install'">{{ setupState === 'complete' ? 'Indexr library installed' : setupState === 'cancelled' ? 'Install cancelled' : setupState === 'error' ? 'Library install needs attention' : 'Installing the Indexr library' }}</b>
+          <b v-if="activeOperation === 'extension'">{{ setupState === 'complete' ? 'ext-opentelemetry added' : setupState === 'cancelled' ? 'Install cancelled' : setupState === 'error' ? 'PHP extension install needs attention' : 'Adding ext-opentelemetry' }}</b>
+          <b v-else-if="activeOperation === 'install'">{{ setupState === 'complete' ? 'Indexr library installed' : setupState === 'cancelled' ? 'Install cancelled' : setupState === 'error' ? 'Library install needs attention' : 'Installing the Indexr library' }}</b>
           <b v-else>{{ setupState === 'complete' ? (activeOperation === 'cleanup' ? 'Cleanup complete' : activeOperation === 'remove' ? 'Local container removal complete' : activeOperation === 'setup' ? 'Setup complete' : savedSetup ? 'Existing setup record' : 'Setup complete') : setupState === 'cancelled' ? (activeOperation === 'cleanup' ? 'Cleanup cancelled' : activeOperation === 'remove' ? 'Local container removal cancelled' : 'Setup cancelled') : setupState === 'error' ? (activeOperation === 'cleanup' ? 'Cleanup needs attention' : activeOperation === 'remove' ? 'Local container removal needs attention' : 'Setup failed') : activeOperation === 'cleanup' ? 'Runtime cleanup' : activeOperation === 'remove' ? 'Local container removal' : 'Runtime setup' }}</b>
           <span class="rt-block">{{ setupMessage }}</span>
           <span v-for="item in savedSetups" :key="setupKey(item)" class="rt-block">{{ setupLabel(item) }} — Compose project: {{ item.compose_project || 'unknown' }} · Services: {{ (item.services || []).join(', ') || 'none recorded' }}.</span>
@@ -930,7 +966,7 @@ const setupBannerTone = computed(() => (setupState.value === 'error' ? 'bad' : s
 
       <RemoteHostMonitor />
 
-      <RuntimeSetupWizard v-if="showSetupWizard" :authorize="getRuntimeHelperAuth" :known-project-ids="knownProjectIds" :indexed-revisions="projects" :inventory-available="!loadingProjects && !error" @close="showSetupWizard = false" @apply="applySetupPlan" @install="installIndexrLibrary" />
+      <RuntimeSetupWizard v-if="showSetupWizard" :authorize="getRuntimeHelperAuth" :known-project-ids="knownProjectIds" :indexed-revisions="projects" :inventory-available="!loadingProjects && !error" @close="showSetupWizard = false" @apply="applySetupPlan" @install="installIndexrLibrary" @install-extension="installPhpExtension" />
 
       <div v-if="!error && !options.length && !loadingProjects && !waitingForFirstReport" class="rt-empty">
         <span class="rt-empty-icon"><Server aria-hidden="true" /></span>
