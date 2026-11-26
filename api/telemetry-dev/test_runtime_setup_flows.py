@@ -619,11 +619,9 @@ class RuntimeSetupFlowTests(unittest.TestCase):
 
         self.assertFalse(missing["configured"])
         self.assertIn("IndexerOtelBundle is not registered", missing["message"])
-        # Registered, but the container gets no OpenTelemetry environment: Symfony's Dotenv runs after the SDK autoloads.
-        self.assertFalse(registered["configured"])
-        self.assertIn("environment variables", registered["message"])
-        (self.project_dir / "compose.indexr.yaml").write_text('services:\n  php:\n    environment:\n      OTEL_PHP_AUTOLOAD_ENABLED: "${OTEL_PHP_AUTOLOAD_ENABLED:-true}"\n')
-        self.assertTrue(runtime_setup.instrumentation_status(self.project)["configured"])
+        # The library sets up its own SDK from .env; exporting OTEL_PHP_AUTOLOAD_ENABLED to the container would start the
+        # SDK's autoloader first and bypass that, so nothing else is required of the container.
+        self.assertTrue(registered["configured"])
 
     def test_a_library_older_than_0_1_2_must_be_updated_before_tracing_is_turned_on(self):
         (self.project_dir / "composer.json").write_text(json.dumps({"require": {"symfony/framework-bundle": "6.3.*", "aminmh/developer-assistant-otel-symfony": "^0.1.1"}}))

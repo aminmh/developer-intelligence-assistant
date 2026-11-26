@@ -149,7 +149,6 @@ if [[ "$is_compose" == true ]]; then
     exit 2
   fi
   labelled="$(json_field labelled)"
-  env_forwarded="$(json_field env_forwarded)"
   # The host agent reports this environment (an existing label's value, else the project's own setting).
   environment="$(json_field environment)"
   [[ -n "$environment" ]] || environment=development
@@ -170,7 +169,6 @@ if [[ "$is_compose" == true ]]; then
   otlp_endpoint='http://telemetry-collector-runtime:4318'
 else
   labelled=false
-  env_forwarded=true
   environment=development
   otlp_endpoint='http://127.0.0.1:24318'
 fi
@@ -203,7 +201,7 @@ Restart: $([[ "$allow_restart" == 1 ]] && echo 'docker compose up -d at the comm
 fi
 plan+="
 Commits: composer.json and composer.lock (plus config/bundles.php for Symfony), only the files this setup changes
-Files written: .env, the method hook manifest$([[ "$is_compose" == true && ( "$labelled" != true || ${#pending_databases[@]} -gt 0 || ( "$adapter" == symfony && "$env_forwarded" != true ) ) ]] && echo ', compose.indexr.yaml (not committed)' || true)"
+Files written: .env, the method hook manifest$([[ "$is_compose" == true && ( "$labelled" != true || ${#pending_databases[@]} -gt 0 ) ]] && echo ', compose.indexr.yaml (not committed)' || true)"
 ui_box "$plan"
 if ! ui_confirm 'Set up Runtime telemetry with this plan?' 'Set up' 'Cancel'; then
   echo 'Setup cancelled; nothing was changed.'; exit 0
@@ -323,7 +321,7 @@ write_hook_manifest() {
 # ---- 5. Deploy ------------------------------------------------------------------------------
 restart_command="GIT_COMMIT_SHA=\$(git rev-parse HEAD) docker compose up -d"
 if [[ "$is_compose" == true ]]; then
-  if [[ "$labelled" != true || ${#pending_databases[@]} -gt 0 || ( "$adapter" == symfony && "$env_forwarded" != true ) ]]; then
+  if [[ "$labelled" != true || ${#pending_databases[@]} -gt 0 ]]; then
     step "Labelling Compose service '$compose_service' and databases (${pending_databases[*]:-none}) for the host agent"
     write_args=(write "$target_dir" --service "$compose_service" --project-id "$project_id")
     [[ -n "$library_dir" ]] && write_args+=(--library-path "$library_dir")

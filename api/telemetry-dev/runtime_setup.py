@@ -50,7 +50,7 @@ HELPER_STATE: dict = {"status": "idle", "message": "Ready", "updated": time.time
 HELPER_LOCK = threading.Lock()
 HELPER_USED_TOKENS: set[str] = set()
 # Bumped whenever helper endpoints change; the root justfile restarts an older helper.
-HELPER_API_VERSION = 40
+HELPER_API_VERSION = 41
 APPROVAL_TIMEOUT_SECONDS = 300
 SETUP_PLAN_TTL_SECONDS = 600
 # Previews created by the browser wizard, keyed by a single-use plan ID (only the latest is kept).
@@ -1602,19 +1602,12 @@ def instrumentation_status(project: dict) -> dict:
         core_version = _locked_version(root / "composer.lock", INDEXR_PUBLISHED_PREFIX + "core")
         needs_update = core_version is not None and core_version < INDEXR_MINIMUM_SAFE
         env_text = (root / ".env").read_text(errors="ignore") if (root / ".env").is_file() else ""
-        configured = configured_ids = bool(re.search(r"(?m)^\s*INDEXER_(?:PROJECT|REVISION)_ID\s*=", env_text))
+        configured = bool(re.search(r"(?m)^\s*INDEXER_(?:PROJECT|REVISION)_ID\s*=", env_text))
         # A Symfony app only loads the bundle that config/bundles.php lists (the package has no Flex recipe).
         bundles = root / "config" / "bundles.php"
         bundle_missing = adapter == "symfony" and bundles.is_file() and "IndexerOtelBundle" not in bundles.read_text(errors="ignore")
         configured = configured and not bundle_missing
-        # The OpenTelemetry SDK reads real environment variables when Composer's autoloader loads. Laravel exports .env
-        # early enough; Symfony's Dotenv runs later and does not, so the container must get the settings from Compose.
-        compose_texts = "".join((root / name).read_text(errors="ignore") for name in
-                                ("compose.indexr.yaml", "compose.yaml", "compose.yml", "docker-compose.yml",
-                                 "docker-compose.yaml", "docker-compose.override.yml", "docker-compose.override.yaml")
-                                if (root / name).is_file())
-        env_missing = adapter == "symfony" and "OTEL_PHP_AUTOLOAD_ENABLED" not in compose_texts
-        configured = configured and not env_missing and not needs_update
+        configured = configured and not needs_update
         return {"status": "installed", "packages": locked, "adapter": adapter, "install_command": install, "compatibility": compatibility,
                 "configured": configured, "needs_update": needs_update,
                 "update_command": f"composer update {INDEXR_PUBLISHED_PREFIX}core {INDEXR_PUBLISHED_PREFIX}{adapter}",
@@ -1625,9 +1618,6 @@ def instrumentation_status(project: dict) -> dict:
                             f"The app includes {', '.join(locked)}, but setup was not finished: "
                             + ("IndexerOtelBundle is not registered in config/bundles.php, so no spans are produced."
                                if bundle_missing else
-                               "the PHP container does not receive the OpenTelemetry settings as environment variables "
-                               "(Symfony reads .env too late for the OpenTelemetry SDK), so no spans are produced."
-                               if env_missing and configured_ids else
                                "its .env has no INDEXER_PROJECT_ID or INDEXER_REVISION_ID.")
                             + " The telemetry settings, bundle, indexing and restart are still to do.")}
     if declared:
