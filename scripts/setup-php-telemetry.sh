@@ -112,6 +112,8 @@ PY
 )"
 fi
 package="indexr/indexer-otel-$adapter"
+# A published install (--version) uses the Packagist names; a local checkout keeps the monorepo's names.
+[[ -n "$version_constraint" ]] && package="aminmh/developer-assistant-otel-$adapter"
 
 library_dir=''
 if [[ -z "$version_constraint" ]]; then
@@ -124,10 +126,11 @@ if [[ -z "$version_constraint" ]]; then
   fi
 fi
 
-installed="$(python3 - "$target_dir/composer.json" "$package" <<'PY'
+installed="$(python3 - "$target_dir/composer.json" "$adapter" <<'PY'
 import json, sys
 package = json.load(open(sys.argv[1], encoding="utf-8"))
-print("yes" if sys.argv[2] in package.get("require", {}) else "no")
+names = (f"indexr/indexer-otel-{sys.argv[2]}", f"aminmh/developer-assistant-otel-{sys.argv[2]}")
+print("yes" if any(name in package.get("require", {}) for name in names) else "no")
 PY
 )"
 

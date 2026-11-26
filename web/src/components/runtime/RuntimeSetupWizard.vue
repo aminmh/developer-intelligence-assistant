@@ -19,7 +19,8 @@ const SLUG = /^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$/;
 const COMMIT = /^(?:[0-9a-f]{40}|[0-9a-f]{64})$/;
 
 type ComposeProject = { name: string; status: string; directory: string; files: string[] };
-type ProjectDetails = { name: string; directory: string; files: string[]; services: string[]; commit: string | null };
+type Instrumentation = { status: 'installed' | 'declared' | 'missing' | 'unknown'; packages: string[]; message: string; adapter?: string; install_command?: string; compatibility?: string | null };
+type ProjectDetails = { name: string; directory: string; files: string[]; services: string[]; commit: string | null; instrumentation?: Instrumentation };
 type Plan = {
   plan_id: string; expires_in: number; compose_project: string; services: string[]; project_id: string;
   environment: string; commit: string; certificates: 'create' | 'reuse';
@@ -140,6 +141,24 @@ onMounted(loadProjects);
       <li v-for="(label, key) in { project: '1. Project', services: '2. Services', review: '3. Review' }" :key="key"
           class="rounded-full border px-2.5 py-1" :class="step === key ? 'border-emerald-400/50 text-emerald-200' : 'border-slate-700 text-slate-500'" :aria-current="step === key ? 'step' : undefined">{{ label }}</li>
     </ol>
+
+    <aside v-if="details?.instrumentation && step !== 'project'" class="mt-4 rounded-lg border p-3 text-xs leading-5" :class="details.instrumentation.status === 'installed' ? 'border-emerald-500/25 bg-emerald-500/5 text-emerald-100' : details.instrumentation.status === 'unknown' ? 'border-slate-700 bg-slate-950/40 text-slate-300' : 'border-amber-500/30 bg-amber-500/5 text-amber-100'" aria-label="Indexr library check" data-testid="instrumentation-check">
+      <h5 class="font-semibold text-white">{{ details.instrumentation.status === 'installed' ? 'Indexr OpenTelemetry library is installed' : details.instrumentation.status === 'declared' ? 'Indexr OpenTelemetry library is declared but not installed' : details.instrumentation.status === 'missing' ? 'Indexr OpenTelemetry library is not installed' : 'Indexr library could not be checked' }}</h5>
+      <p>{{ details.instrumentation.message }}</p>
+      <p v-if="details.instrumentation.compatibility" class="mt-1 rounded border border-red-500/30 bg-red-500/10 p-2 text-red-100" role="alert">{{ details.instrumentation.compatibility }}</p>
+      <template v-if="details.instrumentation.status === 'missing' || details.instrumentation.status === 'declared'">
+        <p class="mt-1">You can still continue: containers will be monitored. To receive request spans, install the library with Composer, then configure it:</p>
+        <ol class="mt-1 list-decimal space-y-1 pl-5">
+          <li>In the app's folder{{ details.instrumentation.status === 'missing' ? ` (the ${details.instrumentation.adapter} adapter fits this app; it brings in the core package)` : '' }}:
+            <pre class="mt-1 overflow-x-auto rounded bg-black/30 p-2 text-xs"><code>{{ details.instrumentation.install_command }}</code></pre>
+            <span class="text-[11px] opacity-80">If Composer runs inside Docker, run it in the PHP container, for example <code>docker compose exec &lt;php-service&gt; {{ details.instrumentation.install_command }}</code>. Commit <code>composer.json</code> and <code>composer.lock</code>.</span>
+          </li>
+          <li>From the Developer Assistant folder, once the checkout is clean (it detects the installed library and only configures it: project ID, revision ID, indexing and restart):
+            <pre class="mt-1 overflow-x-auto rounded bg-black/30 p-2 text-xs"><code>{{ tracingCommand }}</code></pre>
+          </li>
+        </ol>
+      </template>
+    </aside>
 
     <aside v-if="details && step !== 'project'" class="mt-4 rounded-lg border border-cyan-500/25 bg-cyan-500/5 p-3 text-xs leading-5 text-slate-300" aria-label="Request tracing readiness">
       <h5 class="font-semibold text-white">{{ readiness.status === 'ready' ? 'Matching source revision is indexed' : readiness.status === 'unknown' ? 'Source indexing could not be checked' : readiness.status === 'mismatch' ? 'This Git commit is not indexed' : 'Source indexing is needed for request tracing' }}</h5>

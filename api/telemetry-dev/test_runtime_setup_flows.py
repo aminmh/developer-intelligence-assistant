@@ -74,6 +74,15 @@ class RuntimeSetupFlowTests(unittest.TestCase):
         self.env_file = self.root / "api.env"
         self.old_current_setup = dict(runtime_setup.CURRENT_SETUP)
         runtime_setup.CURRENT_SETUP.clear()
+        # Never read the developer's real recovery records, even in tests that do not call path_patches.
+        isolate = patch.object(runtime_setup, "state_path", return_value=self.legacy_file)
+        isolate.start()
+        self.addCleanup(isolate.stop)
+        # Plans in these tests must not run the developer's Docker; the image check has its own test.
+        self.real_image_check = runtime_setup.unresolved_image_problem
+        no_docker = patch.object(runtime_setup, "unresolved_image_problem", return_value=None)
+        no_docker.start()
+        self.addCleanup(no_docker.stop)
 
     def tearDown(self):
         runtime_setup.CURRENT_SETUP.clear()
@@ -355,6 +364,63 @@ class RuntimeSetupFlowTests(unittest.TestCase):
 
         self.assertEqual(only_stalled, (None, None))
         self.assertIsNotNone(with_active[0])
+
+    def test_preview_stops_when_compose_cannot_resolve_an_image_variable(self):
+        config = json.dumps({"services": {"database": {"image": "mariadb:"}, "php": {"image": "php:8"}}})
+        stderr = 'time=1 level=warning msg="The \\"MARIA_VERSION\\" variable is not set. Defaulting to a blank string."'
+        done = runtime_setup.subprocess.CompletedProcess([], 0, stdout=config, stderr=stderr)
+        with patch.object(runtime_setup, "run", return_value=done), \
+                patch.object(runtime_setup, "compose_args", return_value=["docker", "compose"]):
+            problem = self.real_image_check(self.project, ["database", "php"])
+            fine = self.real_image_check(self.project, ["php"])
+
+        self.assertIn("database", problem)
+        self.assertIn("MARIA_VERSION", problem)
+        self.assertIn("No changes were made", problem)
+        self.assertIsNone(fine)
+
+    def test_instrumentation_check_reads_composer_files_and_reports_missing_declared_installed_and_unknown(self):
+        check = lambda: runtime_setup.instrumentation_status(self.project)
+        self.assertEqual(check()["status"], "unknown")  # no composer.json yet
+
+        composer = self.project_dir / "composer.json"
+        lock = self.project_dir / "composer.lock"
+        composer.write_text(json.dumps({"require": {"php": ">=8.2", "symfony/framework-bundle": "^6.3"}}))
+        missing = check()
+        self.assertEqual(missing["status"], "missing")
+        self.assertIn("no request spans", missing["message"])
+        self.assertEqual((missing["adapter"], missing["install_command"]),
+                         ("symfony", "composer require aminmh/developer-assistant-otel-symfony"))
+        composer.write_text(json.dumps({"require": {"laravel/framework": "^11"}}))
+        self.assertEqual(check()["install_command"], "composer require aminmh/developer-assistant-otel-laravel")
+        composer.write_text(json.dumps({"require": {"php": ">=8.2"}}))
+        self.assertEqual(check()["install_command"], "composer require aminmh/developer-assistant-otel-core")
+
+        composer.write_text(json.dumps({"require": {"aminmh/developer-assistant-otel-symfony": "^0.1"}}))
+        lock.write_text(json.dumps({"packages": [{"name": "symfony/console"}]}))
+        self.assertEqual(check()["status"], "declared")
+        self.assertEqual(check()["install_command"], "composer install")
+
+        lock.write_text(json.dumps({"packages": [{"name": "aminmh/developer-assistant-otel-core"}, {"name": "aminmh/developer-assistant-otel-symfony"}]}))
+        installed = check()
+        self.assertEqual((installed["status"], installed["packages"]), ("installed", ["aminmh/developer-assistant-otel-core", "aminmh/developer-assistant-otel-symfony"]))
+
+        composer.write_text("{not json")
+        self.assertEqual(check()["status"], "unknown")
+
+    def test_instrumentation_check_warns_when_the_locked_framework_is_older_than_the_adapter_supports(self):
+        (self.project_dir / "composer.json").write_text(json.dumps({"require": {"symfony/framework-bundle": "6.3.*"}}))
+        lock = self.project_dir / "composer.lock"
+        lock.write_text(json.dumps({"packages": [{"name": "symfony/http-kernel", "version": "v6.3.12"}]}))
+        warning = runtime_setup.instrumentation_status(self.project)["compatibility"]
+        self.assertIn("symfony/http-kernel v6.3.12", warning)
+        self.assertIn("Symfony 6.4", warning)
+
+        lock.write_text(json.dumps({"packages": [{"name": "symfony/http-kernel", "version": "v7.1.0"}]}))
+        self.assertIsNone(runtime_setup.instrumentation_status(self.project)["compatibility"])
+        (self.project_dir / "composer.json").write_text(json.dumps({"require": {"aminmh/developer-assistant-otel-core": "^0.1"}}))
+        lock.write_text(json.dumps({"packages": [{"name": "aminmh/developer-assistant-otel-core"}]}))
+        self.assertEqual(runtime_setup.instrumentation_status(self.project)["status"], "installed")
 
     def test_setup_accepts_one_service_from_gum_multiselect(self):
         run_calls = []

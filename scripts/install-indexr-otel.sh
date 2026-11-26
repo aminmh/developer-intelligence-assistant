@@ -237,6 +237,7 @@ PY
   fi
 else
   package_source='Published Composer package'
+  adapter="aminmh/developer-assistant-otel-$adapter_option"  # the Packagist names differ from the monorepo's
   ui_require "$version_constraint" '--version (Composer constraint for the published package)'
   if [[ -z "$version_constraint" ]]; then
     if ! version_constraint="$(gum input --header 'Published Composer version constraint (for example ^1.0 or dev-main)' --placeholder '^1.0')"; then

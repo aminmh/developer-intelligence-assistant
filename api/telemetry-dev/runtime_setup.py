@@ -49,7 +49,7 @@ HELPER_STATE: dict = {"status": "idle", "message": "Ready", "updated": time.time
 HELPER_LOCK = threading.Lock()
 HELPER_USED_TOKENS: set[str] = set()
 # Bumped whenever helper endpoints change; the root justfile restarts an older helper.
-HELPER_API_VERSION = 30
+HELPER_API_VERSION = 31
 APPROVAL_TIMEOUT_SECONDS = 300
 SETUP_PLAN_TTL_SECONDS = 600
 # Previews created by the browser wizard, keyed by a single-use plan ID (only the latest is kept).
@@ -351,7 +351,7 @@ def serve_helper() -> None:
                 "compose_project": plan["project"]["name"], "services": plan["services"],
                 "project_id": plan["project_id"], "environment": plan["environment"], "commit": plan["commit"],
                 "certificates": plan["certificates"], "changes": plan["changes"],
-                "approval_items": plan["approval_items"],
+                "approval_items": plan["approval_items"], "instrumentation": plan["instrumentation"],
                 "app_env_file": plan["app_env"]["path"] if plan.get("app_env") else None})
 
         def _working_tree_grant(self) -> None:
@@ -1467,6 +1467,94 @@ def find_compose_project(name) -> dict:
     return project
 
 
+# The published packages (Packagist) and the names the monorepo uses for a local checkout.
+INDEXR_PUBLISHED_PREFIX = "aminmh/developer-assistant-otel-"
+INDEXR_PACKAGE_PREFIXES = (INDEXR_PUBLISHED_PREFIX, "indexr/indexer-otel-")
+# The oldest framework version each published adapter (0.1.x) supports, as (locked package, minimum (major, minor), label).
+INDEXR_ADAPTER_FRAMEWORKS = {"symfony": ("symfony/http-kernel", (6, 4), "Symfony 6.4"),
+                             "laravel": ("illuminate/support", (10, 0), "Laravel 10")}
+
+
+def _composer_requirements(path: Path) -> set[str]:
+    try:
+        data = json.loads(path.read_text()) if path.is_file() else {}
+    except (OSError, ValueError):
+        return set()
+    names: set[str] = set()
+    for group in ("require", "require-dev"):
+        if isinstance(data, dict) and isinstance(data.get(group), dict):
+            names.update(key for key in data[group] if isinstance(key, str))
+    return names
+
+
+def _adapter_compatibility(lock_path: Path, adapter: str) -> str | None:
+    """A warning when the app's locked framework is older than the published adapter supports, else None."""
+    needs = INDEXR_ADAPTER_FRAMEWORKS.get(adapter)
+    if needs is None:
+        return None
+    package, minimum, label = needs
+    try:
+        data = json.loads(lock_path.read_text()) if lock_path.is_file() else {}
+    except (OSError, ValueError):
+        return None
+    rows = [*(data.get("packages") or []), *(data.get("packages-dev") or [])] if isinstance(data, dict) else []
+    version = next((row.get("version") for row in rows if isinstance(row, dict) and row.get("name") == package), None)
+    match = re.match(r"v?(\d+)\.(\d+)", version or "")
+    if not match or (int(match.group(1)), int(match.group(2))) >= minimum:
+        return None
+    return (f"This app locks {package} {version}, but the published {adapter} adapter needs {label} or newer. "
+            "Composer will refuse to install it until the framework is upgraded or the adapter supports this version.")
+
+
+def instrumentation_status(project: dict) -> dict:
+    """Whether the app in the Compose project's folder includes the Indexr OpenTelemetry library.
+
+    Runtime setup only labels containers. Request spans exist only when the PHP app itself has the library
+    (``aminmh/developer-assistant-otel-core``, ``-laravel`` or ``-symfony``, or the monorepo's ``indexr/indexer-otel-*``), so the wizard says so before containers appear
+    without spans. Read from ``composer.json`` and ``composer.lock``; nothing is run or changed.
+    """
+    root = Path(project.get("directory") or "")
+
+    def packages(name: str, groups: tuple[str, ...]) -> list[str] | None:
+        path = root / name
+        try:
+            data = json.loads(path.read_text()) if path.is_file() else None
+        except (OSError, ValueError):
+            return None
+        if not isinstance(data, dict):
+            return None
+        found: set[str] = set()
+        for group in groups:
+            entries = data.get(group)
+            if isinstance(entries, dict):
+                found.update(key for key in entries if isinstance(key, str))
+            elif isinstance(entries, list):
+                found.update(item["name"] for item in entries if isinstance(item, dict) and isinstance(item.get("name"), str))
+        return sorted(item for item in found if item.startswith(INDEXR_PACKAGE_PREFIXES))
+
+    declared = packages("composer.json", ("require", "require-dev"))
+    required = _composer_requirements(root / "composer.json")
+    # The adapter for the app's framework; it pulls in the core package itself.
+    adapter = ("laravel" if "laravel/framework" in required
+               else "symfony" if {"symfony/framework-bundle", "symfony/symfony"} & required else "core")
+    install = f"composer require {INDEXR_PUBLISHED_PREFIX}{adapter}"
+    compatibility = _adapter_compatibility(root / "composer.lock", adapter)
+    if declared is None:
+        return {"status": "unknown", "packages": [], "adapter": adapter, "install_command": install, "compatibility": compatibility,
+                "message": f"No readable composer.json was found in {root}, so the Indexr library could not be checked."}
+    locked = packages("composer.lock", ("packages", "packages-dev")) or []
+    if locked:
+        return {"status": "installed", "packages": locked, "adapter": adapter, "install_command": install, "compatibility": compatibility,
+                "message": f"The app includes {', '.join(locked)}. It can export request spans once it runs at an indexed commit."}
+    if declared:
+        return {"status": "declared", "packages": declared, "adapter": adapter, "install_command": "composer install", "compatibility": compatibility,
+                "message": f"composer.json requires {', '.join(declared)}, but composer.lock does not include it, so it is not installed yet. "
+                           "Run composer install, then restart the PHP service."}
+    return {"status": "missing", "packages": [], "adapter": adapter, "install_command": install, "compatibility": compatibility,
+            "message": "The app does not include the Indexr OpenTelemetry library (indexr/indexer-otel-*). "
+                       "Containers will be listed, but no request spans will arrive until it is installed."}
+
+
 def compose_project_details(project: dict) -> dict:
     """Services of a Compose project and the commit checked out in its directory."""
     result = run(compose_args(project) + ["config", "--services"], cwd=Path(project["directory"]), capture=True)
@@ -1475,7 +1563,8 @@ def compose_project_details(project: dict) -> dict:
         raise RuntimeError("The selected Compose project has no services")
     commit_result = run(["git", "rev-parse", "HEAD"], cwd=Path(project["directory"]), capture=True, check=False)
     detected = commit_result.stdout.strip().lower() if commit_result.returncode == 0 else ""
-    return {"services": services, "commit": detected if COMMIT.fullmatch(detected) else None}
+    return {"services": services, "commit": detected if COMMIT.fullmatch(detected) else None,
+            "instrumentation": instrumentation_status(project)}
 
 
 def plan_app_env(project: dict, revision_id: str) -> dict | None:
@@ -1529,6 +1618,34 @@ def revert_app_env(record: dict) -> str | None:
     return str(path)
 
 
+_UNSET_VARIABLE = re.compile(r'The \\?"([A-Za-z_][A-Za-z0-9_]*)\\?" variable is not set')  # Compose escapes the quotes in its log lines
+
+
+def unresolved_image_problem(project: dict, selected: list[str]) -> str | None:
+    """Why Compose could not recreate the selected services as configured, or None.
+
+    Setup recreates services with the host's environment, which can lack variables the project normally gets from
+    a shell or an .env file (for example ``image: mariadb:${MARIA_VERSION}``). Recreating then fails after the
+    Compose files were already edited, so this is checked while previewing, before anything changes.
+    """
+    try:
+        result = run(compose_args(project) + ["config", "--format", "json"], cwd=Path(project["directory"]),
+                     capture=True, check=False, timeout=LOCAL_DOCKER_COMMAND_TIMEOUT_SECONDS)
+        services = (json.loads(result.stdout or "{}").get("services") or {}) if result.returncode == 0 else {}
+    except (RuntimeError, ValueError):
+        return None  # a Compose failure unrelated to this check surfaces when the services are recreated
+    broken = [name for name in selected if isinstance(services.get(name, {}).get("image"), str)
+              and (services[name]["image"].endswith(":") or services[name]["image"].startswith(":"))]
+    if not broken:
+        return None
+    unset = sorted(set(_UNSET_VARIABLE.findall(result.stderr or "")))
+    names = ", ".join(unset) or "variables"
+    return (f"Compose cannot resolve the image of {', '.join(broken)} in {project['name']}: {names} "
+            f"{'is' if len(unset) == 1 else 'are'} not set where Runtime setup runs. Put "
+            f"{'it' if len(unset) == 1 else 'them'} in {project['directory']}/.env (or export "
+            f"{'it' if len(unset) == 1 else 'them'} before just up) and preview again. No changes were made.")
+
+
 def build_setup_plan(project: dict, services: list[str], selected, project_id, environment, commit, revision_id=None) -> dict:
     """Compute every change setup would make, without making any of them."""
     if not isinstance(selected, list) or not selected or not all(isinstance(item, str) for item in selected):
@@ -1549,6 +1666,9 @@ def build_setup_plan(project: dict, services: list[str], selected, project_id, e
     blocker, _ = setup_blocker(project, selected, project_id, environment)
     if blocker:
         raise SetupInputError(blocker)
+    problem = unresolved_image_problem(project, selected)
+    if problem:
+        raise RuntimeError(problem)
     app_env = plan_app_env(project, revision_id) if revision_id else None
 
     files = [Path(path) for path in project["files"]]
@@ -1604,7 +1724,7 @@ def build_setup_plan(project: dict, services: list[str], selected, project_id, e
         changes.append({"file": app_env["path"], "added": app_env["added"]})  # never the rest of the file: it holds secrets
     return {"project": project, "services": selected, "project_id": project_id, "environment": environment,
             "commit": commit, "labels": labels, "certificates": "create" if creates_certificates else "reuse",
-            "revision_id": revision_id or None, "app_env": app_env,
+            "revision_id": revision_id or None, "app_env": app_env, "instrumentation": instrumentation_status(project),
             "originals": {str(path): contents[path] for path in files},
             "proposed": {str(path): proposed_texts[path] for path in changed},
             "approval_items": items, "changes": changes,
