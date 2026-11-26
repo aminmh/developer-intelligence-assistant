@@ -119,6 +119,7 @@ def detect(project: Path, requested: str | None) -> dict:
                  for name, spec in sorted(services.items()) if (engine := database_engine(name, spec))]
     return {"compose": True, "services": names, "service": chosen, "labelled": labelled, "reason": reason,
             "environment": environment, "label_project": labels.get(LABEL_PREFIX + "project") if labelled else None,
+            "env_forwarded": FORWARDED_ENV_MARKER in ((services.get(chosen, {}).get("environment") or {}) if chosen else {}),
             "databases": databases}
 
 
@@ -176,6 +177,18 @@ def quote(value: str) -> str:
     return json.dumps(value)
 
 
+FORWARDED_ENV_MARKER = "OTEL_PHP_AUTOLOAD_ENABLED"
+# Settings scripts/write-php-otel-env.py writes into .env; the defaults only apply if a key is missing there.
+FORWARDED_ENV = [
+    ("INDEXER_OTEL_ENABLED", "true"), ("INDEXER_PROJECT_ID", ""), ("INDEXER_REVISION_ID", ""),
+    ("OTEL_PHP_AUTOLOAD_ENABLED", "true"), ("OTEL_SERVICE_NAME", ""), ("OTEL_TRACES_EXPORTER", "otlp"),
+    ("OTEL_EXPORTER_OTLP_PROTOCOL", "http/protobuf"), ("OTEL_EXPORTER_OTLP_ENDPOINT", ""),
+    ("OTEL_TRACES_SAMPLER", "parentbased_traceidratio"), ("OTEL_TRACES_SAMPLER_ARG", "1.0"),
+    ("OTEL_METRICS_EXPORTER", "none"), ("OTEL_LOGS_EXPORTER", "none"), ("OTEL_RESOURCE_ATTRIBUTES", ""),
+    ("INDEXER_OTEL_HOOKS_FILE", ""),
+]
+
+
 def write(project: Path, service: str, project_id: str, library: str | None, databases: list[str] | None = None) -> dict:
     env_path = project / ".env"
     base = compose_files(project)
@@ -191,9 +204,11 @@ def write(project: Path, service: str, project_id: str, library: str | None, dat
         "# Loaded through COMPOSE_FILE in .env. Delete this file and that entry to remove the wiring.",
         "services:",
     ]
+    forward_env = FORWARDED_ENV_MARKER not in (spec.get("environment") or {})
+    if not is_labelled(spec) or forward_env:
+        lines.append(f"  {service}:")
     if not is_labelled(spec):
         lines += [
-            f"  {service}:",
             "    labels:",
             f'      {LABEL_PREFIX}enabled: "true"',
             f"      {LABEL_PREFIX}project: {quote(project_id)}",
@@ -209,6 +224,12 @@ def write(project: Path, service: str, project_id: str, library: str | None, dat
         if library:
             # Composer's path repository symlinks vendor/indexr/* to this host path; mount it at the same path.
             lines += ["    volumes:", f"      - {quote(library + ':' + library + ':ro')}"]
+    if forward_env:
+        # The OpenTelemetry SDK reads real environment variables when Composer's autoloader loads, before a framework
+        # reads .env (Symfony's Dotenv runs later and does not export them). Compose substitutes these from the
+        # project's .env, so only these keys reach the container and the values stay in one place.
+        lines.append("    environment:")
+        lines += [f'      {key}: "${{{key}:-{default}}}"' for key, default in FORWARDED_ENV]
     for database in databases or []:
         db_spec = config["services"].get(database)
         if db_spec is None or not database_engine(database, db_spec):

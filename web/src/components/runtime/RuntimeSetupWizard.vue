@@ -12,14 +12,14 @@ const props = defineProps<{
   authorize: () => Promise<string>; knownProjectIds?: string[];
   indexedRevisions?: RuntimeProjectRecord[]; inventoryAvailable?: boolean;
 }>();
-const emit = defineEmits<{ close: []; apply: [planId: string] }>();
+const emit = defineEmits<{ close: []; apply: [planId: string]; install: [request: { project_name: string; project_id: string }] }>();
 
 const HELPER = 'http://127.0.0.1:47831';
 const SLUG = /^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$/;
 const COMMIT = /^(?:[0-9a-f]{40}|[0-9a-f]{64})$/;
 
 type ComposeProject = { name: string; status: string; directory: string; files: string[] };
-type Instrumentation = { status: 'installed' | 'declared' | 'missing' | 'unknown'; packages: string[]; message: string; adapter?: string; install_command?: string; compatibility?: string | null };
+type Instrumentation = { status: 'installed' | 'declared' | 'missing' | 'unknown'; packages: string[]; message: string; adapter?: string; install_command?: string; compatibility?: string | null; configured?: boolean; needs_update?: boolean; update_command?: string };
 type ProjectDetails = { name: string; directory: string; files: string[]; services: string[]; commit: string | null; instrumentation?: Instrumentation };
 type Plan = {
   plan_id: string; expires_in: number; compose_project: string; services: string[]; project_id: string;
@@ -120,6 +120,8 @@ const review = () => guard(async () => {
   step.value = 'review';
 });
 const apply = () => { if (plan.value) emit('apply', plan.value.plan_id); };
+// Installing the library needs a project ID so the revision and settings line up with this Runtime project.
+const installLibrary = () => { if (details.value && projectId.value) emit('install', { project_name: details.value.name, project_id: projectId.value }); };
 const toggleService = (service: string) => {
   services.value = services.value.includes(service) ? services.value.filter((item) => item !== service) : [...services.value, service];
 };
@@ -142,12 +144,22 @@ onMounted(loadProjects);
           class="rounded-full border px-2.5 py-1" :class="step === key ? 'border-emerald-400/50 text-emerald-200' : 'border-slate-700 text-slate-500'" :aria-current="step === key ? 'step' : undefined">{{ label }}</li>
     </ol>
 
-    <aside v-if="details?.instrumentation && step !== 'project'" class="mt-4 rounded-lg border p-3 text-xs leading-5" :class="details.instrumentation.status === 'installed' ? 'border-emerald-500/25 bg-emerald-500/5 text-emerald-100' : details.instrumentation.status === 'unknown' ? 'border-slate-700 bg-slate-950/40 text-slate-300' : 'border-amber-500/30 bg-amber-500/5 text-amber-100'" aria-label="Indexr library check" data-testid="instrumentation-check">
-      <h5 class="font-semibold text-white">{{ details.instrumentation.status === 'installed' ? 'Indexr OpenTelemetry library is installed' : details.instrumentation.status === 'declared' ? 'Indexr OpenTelemetry library is declared but not installed' : details.instrumentation.status === 'missing' ? 'Indexr OpenTelemetry library is not installed' : 'Indexr library could not be checked' }}</h5>
+    <aside v-if="details?.instrumentation && step !== 'project'" class="mt-4 rounded-lg border p-3 text-xs leading-5" :class="details.instrumentation.status === 'installed' && details.instrumentation.configured !== false ? 'border-emerald-500/25 bg-emerald-500/5 text-emerald-100' : details.instrumentation.status === 'unknown' ? 'border-slate-700 bg-slate-950/40 text-slate-300' : 'border-amber-500/30 bg-amber-500/5 text-amber-100'" aria-label="Indexr library check" data-testid="instrumentation-check">
+      <h5 class="font-semibold text-white">{{ details.instrumentation.status === 'installed' ? (details.instrumentation.configured === false ? 'Indexr library is installed but setup is not finished' : 'Indexr OpenTelemetry library is installed') : details.instrumentation.status === 'declared' ? 'Indexr OpenTelemetry library is declared but not installed' : details.instrumentation.status === 'missing' ? 'Indexr OpenTelemetry library is not installed' : 'Indexr library could not be checked' }}</h5>
       <p>{{ details.instrumentation.message }}</p>
       <p v-if="details.instrumentation.compatibility" class="mt-1 rounded border border-red-500/30 bg-red-500/10 p-2 text-red-100" role="alert">{{ details.instrumentation.compatibility }}</p>
-      <template v-if="details.instrumentation.status === 'missing' || details.instrumentation.status === 'declared'">
+      <div v-if="details.instrumentation.needs_update" class="mt-1 rounded border border-red-500/30 bg-red-500/10 p-2 text-red-100" role="alert">
+        <p>Update it before turning tracing on, from the app's folder (the container may need Composer there too), then commit <code>composer.json</code> and <code>composer.lock</code>:</p>
+        <pre class="mt-1 overflow-x-auto rounded bg-black/30 p-2 text-xs"><code>{{ details.instrumentation.update_command }}</code></pre>
+      </div>
+      <template v-if="details.instrumentation.status === 'missing' || details.instrumentation.status === 'declared' || (details.instrumentation.status === 'installed' && details.instrumentation.configured === false)">
         <p class="mt-1">You can still continue: containers will be monitored. To receive request spans, install the library with Composer, then configure it:</p>
+        <div v-if="(details.instrumentation.status === 'missing' || details.instrumentation.status === 'installed') && !details.instrumentation.needs_update" class="mt-2 rounded border border-emerald-500/25 bg-emerald-500/5 p-2 text-emerald-100">
+          <p class="font-medium text-white">Or let Developer Assistant install it</p>
+          <p class="mt-0.5">A dialog on this computer will list the steps and ask you to allow them: run Composer in the app's folder, <strong>commit composer.json and composer.lock</strong> on the checked-out branch, write the telemetry settings into <code>.env</code>, then restart the PHP and database services. The checkout must have no other uncommitted changes. If Composer is refused by a private package registry (HTTP 401), you will get the exact fix.</p>
+          <button type="button" class="mt-2 rounded-lg bg-emerald-500 px-3 py-1.5 text-xs font-semibold text-slate-950 disabled:opacity-50" :disabled="!projectId" data-testid="install-library" @click="installLibrary">{{ details.instrumentation.status === 'installed' ? 'Finish setting it up for me' : 'Install the Indexr library for me' }}</button>
+          <span v-if="!projectId" class="ml-2 text-[11px] opacity-80">Enter a Runtime project ID first.</span>
+        </div>
         <ol class="mt-1 list-decimal space-y-1 pl-5">
           <li>In the app's folder{{ details.instrumentation.status === 'missing' ? ` (the ${details.instrumentation.adapter} adapter fits this app; it brings in the core package)` : '' }}:
             <pre class="mt-1 overflow-x-auto rounded bg-black/30 p-2 text-xs"><code>{{ details.instrumentation.install_command }}</code></pre>

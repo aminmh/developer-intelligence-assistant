@@ -328,7 +328,7 @@ _ensure-runtime-helper:
     helper_state="$(curl -fsS -m 1 "$helper_url" 2>/dev/null || true)"
     api_version="$(printf '%s' "$helper_state" | python3 -c 'import json,sys; print(json.load(sys.stdin).get("api_version", 0))' 2>/dev/null || true)"
     helper_bind="$(printf '%s' "$helper_state" | python3 -c 'import json,sys; print(json.load(sys.stdin).get("helper_bind", ""))' 2>/dev/null || true)"
-    if [[ "$api_version" == "31" && "$helper_bind" == "0.0.0.0" ]]; then
+    if [[ "$api_version" == "40" && "$helper_bind" == "0.0.0.0" ]]; then
       echo "runtime setup helper already running (API v${api_version})"
       exit 0
     fi

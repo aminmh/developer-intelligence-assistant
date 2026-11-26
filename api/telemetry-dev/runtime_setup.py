@@ -8,6 +8,7 @@ import json
 import os
 import re
 import secrets
+import shlex
 import shutil
 import signal
 import subprocess
@@ -49,7 +50,7 @@ HELPER_STATE: dict = {"status": "idle", "message": "Ready", "updated": time.time
 HELPER_LOCK = threading.Lock()
 HELPER_USED_TOKENS: set[str] = set()
 # Bumped whenever helper endpoints change; the root justfile restarts an older helper.
-HELPER_API_VERSION = 31
+HELPER_API_VERSION = 40
 APPROVAL_TIMEOUT_SECONDS = 300
 SETUP_PLAN_TTL_SECONDS = 600
 # Previews created by the browser wizard, keyed by a single-use plan ID (only the latest is kept).
@@ -592,14 +593,25 @@ def serve_helper() -> None:
                     return self._json(503, {"detail": "The SSH credential could not be saved. Unlock the OS keyring and retry."})
             if self.path in {"/compose-projects", "/compose-project", "/setup/plan"}:
                 return self._setup_wizard_step()
-            if self.path not in {"/setup/apply", "/cleanup", "/remove-project-containers"}:
+            if self.path not in {"/setup/apply", "/cleanup", "/remove-project-containers", "/instrumentation/install"}:
                 return self._json(404, {"detail": "Not found."})
             if not self._authorized(): return self._json(403, {"detail": "Runtime setup authorization is invalid or expired."})
-            if self.path in {"/setup/apply", "/cleanup"} and not self._authorized(unscoped=True):
+            if self.path in {"/setup/apply", "/cleanup", "/instrumentation/install"} and not self._authorized(unscoped=True):
                 return self._json(403, {"detail": "This authorization is not valid for Runtime setup or cleanup."})
             project_id = None
             plan_id = None
             cleanup_target: tuple[str, str] | None = None
+            install_request: dict | None = None
+            if self.path == "/instrumentation/install":
+                body = self._read_json(4096)
+                if body is None:
+                    return self._json(400, {"detail": "Invalid Runtime operation request."})
+                install_request = {"project_name": body.get("project_name"), "project_id": body.get("project_id"),
+                                   "version": body.get("version") or DEFAULT_INDEXR_VERSION}
+                if not (isinstance(install_request["project_name"], str) and SLUG.fullmatch(install_request["project_name"])
+                        and isinstance(install_request["project_id"], str) and SLUG.fullmatch(install_request["project_id"])
+                        and isinstance(install_request["version"], str) and PACKAGE_VERSION.fullmatch(install_request["version"])):
+                    return self._json(400, {"detail": "Choose a Compose project, a project ID and a version such as ^0.1.1."})
             if self.path == "/cleanup":
                 body = self._read_json(4096)
                 if body is None:
@@ -637,23 +649,24 @@ def serve_helper() -> None:
                     plan = entry["plan"]
                 HELPER_USED_TOKENS.add(token_id)
                 action = ("cleanup" if self.path == "/cleanup" else
+                          "install library" if self.path == "/instrumentation/install" else
                           "remove local containers" if self.path == "/remove-project-containers" else "setup")
                 HELPER_STATE.update(status="starting", message=f"Starting Runtime {action}", updated=time.time())
-                for key in ("project_id", "removed_count", "target_count", "already_absent", "failed_containers", "awaiting_approval"):
+                for key in ("project_id", "removed_count", "target_count", "already_absent", "failed_containers", "awaiting_approval", "code", "registry"):
                     HELPER_STATE.pop(key, None)
                 if project_id is not None:
                     HELPER_STATE["project_id"] = project_id
             def execute() -> None:
                 with HELPER_LOCK: HELPER_STATE.update(status="running", message=f"Runtime {action} is running", updated=time.time())
                 try:
-                    result = run_helper_operation(action, project_id=project_id, plan=plan, cleanup_target=cleanup_target)
+                    result = run_helper_operation(action, project_id=project_id, plan=plan, cleanup_target=cleanup_target, install=install_request)
                     outcome = result.get("status", "complete") if isinstance(result, dict) else "complete"
                     message = result.get("message", f"Runtime {action} completed") if isinstance(result, dict) else f"Runtime {action} completed"
                     with HELPER_LOCK:
                         HELPER_STATE.update(status=outcome, message=message, updated=time.time())
                         if isinstance(result, dict):
                             HELPER_STATE.update({key: result[key] for key in
-                                ("project_id", "removed_count", "target_count", "already_absent", "failed_containers")
+                                ("project_id", "removed_count", "target_count", "already_absent", "failed_containers", "code", "registry")
                                 if key in result})
                 except Exception as exc:
                     with HELPER_LOCK:
@@ -1410,6 +1423,12 @@ def start_ingress_and_agent() -> tuple[dict, str]:
         write_text_atomic(ENV_FILE, after)
     CURRENT_SETUP.update({"scope_added": before != after, "scope_original": before != after})
     write_record(CURRENT_SETUP)
+    start_host_containers()
+    return CURRENT_SETUP, fingerprint
+
+
+def start_host_containers() -> None:
+    """Start the local API ingress and the host telemetry agent (the certificates must exist)."""
     print("\nStarting local API ingress and host agent…")
     run(["docker", "compose", "--profile", "runtime-host", "up", "-d", "python-api", "telemetry-caddy"], cwd=API)
     socket_path = Path(os.environ.get("DOCKER_SOCK_PATH", "/var/run/docker.sock"))
@@ -1422,7 +1441,31 @@ def start_ingress_and_agent() -> tuple[dict, str]:
                 "DOCKER_SOCK_GID": docker_socket_group_id(socket_path)})
     run(["docker", "compose", "-f", "telemetry-agent/docker-compose.yml", "-f",
          "telemetry-agent/docker-compose.local.yml", "up", "-d", "--build"], cwd=API, env=env)
-    return CURRENT_SETUP, fingerprint
+
+
+def host_agent_exists() -> bool:
+    return (CERT_DIR / "agent" / "host.crt").is_file()
+
+
+def ensure_host_agent() -> bool:
+    """Create the local host identity and start the agent and ingress when there is none; True when it did.
+
+    The library install needs the agent to authorize and report the project, and must not depend on an earlier
+    Runtime setup (which edits the app's Compose files and would leave the checkout dirty). The certificates are
+    recorded in host.json like those of a Runtime setup, so a later cleanup of the last setup removes them too.
+    """
+    if host_agent_exists():
+        return False
+    if not cert_directory_is_empty_scaffold():
+        raise RuntimeError(f"Local identity directory is incomplete: {CERT_DIR}")
+    run([str(API / "telemetry-dev" / "host" / "bootstrap-dev-certs.sh"), str(CERT_DIR)])
+    needed = [CERT_DIR / "ingress" / name for name in ("ca.pem", "server.crt", "server.key")]
+    needed += [CERT_DIR / "agent" / name for name in ("ca.pem", "host.crt", "host.key")]
+    if not all(path.is_file() for path in needed):
+        raise RuntimeError(f"Local identity directory is incomplete: {CERT_DIR}")
+    write_host_state({"certificates_created": True, "fingerprint": cert_fingerprint()})
+    start_host_containers()
+    return True
 
 
 CURRENT_SETUP: dict = {}
@@ -1470,8 +1513,8 @@ def find_compose_project(name) -> dict:
 # The published packages (Packagist) and the names the monorepo uses for a local checkout.
 INDEXR_PUBLISHED_PREFIX = "aminmh/developer-assistant-otel-"
 INDEXR_PACKAGE_PREFIXES = (INDEXR_PUBLISHED_PREFIX, "indexr/indexer-otel-")
-# The oldest framework version each published adapter (0.1.x) supports, as (locked package, minimum (major, minor), label).
-INDEXR_ADAPTER_FRAMEWORKS = {"symfony": ("symfony/http-kernel", (6, 4), "Symfony 6.4"),
+# The oldest framework version each published adapter (0.1.1 and later) supports, as (locked package, minimum (major, minor), label).
+INDEXR_ADAPTER_FRAMEWORKS = {"symfony": ("symfony/http-kernel", (6, 3), "Symfony 6.3"),
                              "laravel": ("illuminate/support", (10, 0), "Laravel 10")}
 
 
@@ -1485,6 +1528,18 @@ def _composer_requirements(path: Path) -> set[str]:
         if isinstance(data, dict) and isinstance(data.get(group), dict):
             names.update(key for key in data[group] if isinstance(key, str))
     return names
+
+
+def _locked_version(lock_path: Path, package: str) -> tuple[int, int, int] | None:
+    """A package's locked version as (major, minor, patch), from composer.lock, or None."""
+    try:
+        data = json.loads(lock_path.read_text()) if lock_path.is_file() else {}
+    except (OSError, ValueError):
+        return None
+    rows = [*(data.get("packages") or []), *(data.get("packages-dev") or [])] if isinstance(data, dict) else []
+    version = next((row.get("version") for row in rows if isinstance(row, dict) and row.get("name") == package), None)
+    match = re.match(r"v?(\d+)\.(\d+)(?:\.(\d+))?", version or "")
+    return (int(match.group(1)), int(match.group(2)), int(match.group(3) or 0)) if match else None
 
 
 def _adapter_compatibility(lock_path: Path, adapter: str) -> str | None:
@@ -1544,8 +1599,37 @@ def instrumentation_status(project: dict) -> dict:
                 "message": f"No readable composer.json was found in {root}, so the Indexr library could not be checked."}
     locked = packages("composer.lock", ("packages", "packages-dev")) or []
     if locked:
+        core_version = _locked_version(root / "composer.lock", INDEXR_PUBLISHED_PREFIX + "core")
+        needs_update = core_version is not None and core_version < INDEXR_MINIMUM_SAFE
+        env_text = (root / ".env").read_text(errors="ignore") if (root / ".env").is_file() else ""
+        configured = configured_ids = bool(re.search(r"(?m)^\s*INDEXER_(?:PROJECT|REVISION)_ID\s*=", env_text))
+        # A Symfony app only loads the bundle that config/bundles.php lists (the package has no Flex recipe).
+        bundles = root / "config" / "bundles.php"
+        bundle_missing = adapter == "symfony" and bundles.is_file() and "IndexerOtelBundle" not in bundles.read_text(errors="ignore")
+        configured = configured and not bundle_missing
+        # The OpenTelemetry SDK reads real environment variables when Composer's autoloader loads. Laravel exports .env
+        # early enough; Symfony's Dotenv runs later and does not, so the container must get the settings from Compose.
+        compose_texts = "".join((root / name).read_text(errors="ignore") for name in
+                                ("compose.indexr.yaml", "compose.yaml", "compose.yml", "docker-compose.yml",
+                                 "docker-compose.yaml", "docker-compose.override.yml", "docker-compose.override.yaml")
+                                if (root / name).is_file())
+        env_missing = adapter == "symfony" and "OTEL_PHP_AUTOLOAD_ENABLED" not in compose_texts
+        configured = configured and not env_missing and not needs_update
         return {"status": "installed", "packages": locked, "adapter": adapter, "install_command": install, "compatibility": compatibility,
-                "message": f"The app includes {', '.join(locked)}. It can export request spans once it runs at an indexed commit."}
+                "configured": configured, "needs_update": needs_update,
+                "update_command": f"composer update {INDEXR_PUBLISHED_PREFIX}core {INDEXR_PUBLISHED_PREFIX}{adapter}",
+                "message": (f"The installed library {'.'.join(map(str, core_version))} can crash `cache:clear` in debug mode once tracing is on. "
+                            "Update it to 0.1.2 or newer first." if needs_update else
+                            f"The app includes {', '.join(locked)}. It can export request spans once it runs at an indexed commit."
+                            if configured else
+                            f"The app includes {', '.join(locked)}, but setup was not finished: "
+                            + ("IndexerOtelBundle is not registered in config/bundles.php, so no spans are produced."
+                               if bundle_missing else
+                               "the PHP container does not receive the OpenTelemetry settings as environment variables "
+                               "(Symfony reads .env too late for the OpenTelemetry SDK), so no spans are produced."
+                               if env_missing and configured_ids else
+                               "its .env has no INDEXER_PROJECT_ID or INDEXER_REVISION_ID.")
+                            + " The telemetry settings, bundle, indexing and restart are still to do.")}
     if declared:
         return {"status": "declared", "packages": declared, "adapter": adapter, "install_command": "composer install", "compatibility": compatibility,
                 "message": f"composer.json requires {', '.join(declared)}, but composer.lock does not include it, so it is not installed yet. "
@@ -1553,6 +1637,86 @@ def instrumentation_status(project: dict) -> dict:
     return {"status": "missing", "packages": [], "adapter": adapter, "install_command": install, "compatibility": compatibility,
             "message": "The app does not include the Indexr OpenTelemetry library (indexr/indexer-otel-*). "
                        "Containers will be listed, but no request spans will arrive until it is installed."}
+
+
+PACKAGE_VERSION = re.compile(r"^[\^~]?\d{1,3}(?:\.\d{1,3}){0,2}$")
+DEFAULT_INDEXR_VERSION = "^0.1.2"
+# 0.1.1 added Symfony 6.3 and Doctrine DBAL 3 support. Before 0.1.2 a span left open when a command rebuilt the container
+# (cache:clear) leaked its scope, which is a fatal error in debug mode, so a container that runs cache:clear at start crash-looped.
+INDEXR_MINIMUM_SAFE = (0, 1, 2)
+INSTALL_TIMEOUT_SECONDS = 1800
+_AUTH_REQUIRED = re.compile(r"https?://([A-Za-z0-9.-]+)[^\s'\"]*[^\n]*required authentication", re.I)
+
+
+def composer_auth_problem(output: str, directory: str) -> dict | None:
+    """The private registry that refused Composer, when its output shows an HTTP 401, else None."""
+    if "required authentication" not in output and "HTTP 401" not in output:
+        return None
+    match = _AUTH_REQUIRED.search(output) or re.search(r"https?://([A-Za-z0-9.-]+)/", output)
+    host = match.group(1) if match else "the private registry"
+    return {"code": "composer_auth", "registry": host,
+            "message": (f"Composer cannot read packages from {host}, a private registry listed in {directory}/composer.json (HTTP 401). "
+                        "Composer asks every registry about the library's own dependencies, so this happens even though the library is on "
+                        "Packagist, and a local copy of the library would not avoid it. Nothing was committed. "
+                        f"Give Composer a token for {host} on this computer, then install again. For GitLab, create a personal access token "
+                        f"with the read_api scope and run: composer config --global gitlab-token.{host} <your-token>. "
+                        "The same token lets you run composer install for this project on your machine.")}
+
+
+def install_indexr_library(project_name: str, project_id: str, version: str, approve=None) -> dict:
+    """Install the Indexr library in a Compose project's app with the one-step setup script, after approval.
+
+    The script installs it with Composer, commits composer.json and composer.lock, writes the telemetry settings into
+    the app's .env, labels and restarts the services, and waits for indexing. It refuses a dirty checkout and changes
+    nothing in that case. A Composer HTTP 401 from a private registry is reported with what to do about it.
+    """
+    if not isinstance(project_id, str) or not SLUG.fullmatch(project_id):
+        raise SetupInputError("Project ID must be 1–128 letters, numbers, dots, dashes, or underscores.")
+    if not isinstance(version, str) or not PACKAGE_VERSION.fullmatch(version):
+        raise SetupInputError("Version must look like ^0.1.1.")
+    project = find_compose_project(project_name)
+    directory = project["directory"]
+    status = instrumentation_status(project)
+    if status["status"] == "installed" and status.get("configured"):
+        return {"status": "complete", "message": status["message"], "already_installed": True}
+    if status.get("needs_update"):
+        raise SetupInputError(f"{status['message']} Run {status['update_command']}, commit composer.json and composer.lock, then try again.")
+    # An installed but unconfigured library means an earlier run stopped part way: the script resumes from there.
+    if status["status"] not in ("missing", "installed"):
+        raise SetupInputError(status["message"] if status["status"] == "unknown"
+                              else f"{status['message']} Install it with {status['install_command']} instead.")
+    # The script restarts the whole Compose project after committing, so an unresolved image would stop it halfway.
+    problem = unresolved_image_problem(project, compose_project_details(project)["services"])
+    if problem:
+        raise RuntimeError(problem)
+    package = f"{INDEXR_PUBLISHED_PREFIX}{status['adapter']}"
+    creates_agent = not host_agent_exists()
+    command = ["bash", str(ROOT / "scripts" / "setup-php-telemetry.sh"), directory, "--project-id", project_id,
+               "--version", version, "--yes", "--non-interactive"]
+    (approve or required_approval)("Approve installing the Indexr library", [
+        f"Run Composer in {directory} to install {package} {version}",
+        "Commit composer.json and composer.lock on the branch that is checked out there"
+        + (" and register the bundle in config/bundles.php" if status["adapter"] == "symfony" else ""),
+        f"Write the telemetry settings into {directory}/.env",
+        f"Label the PHP and database services and restart Compose project {project['name']} (they are recreated)",
+        f"Index the committed source as Runtime project {project_id}",
+        *([f"Create local development certificates under {CERT_DIR} and start the telemetry agent and Runtime ingress"] if creates_agent else []),
+    ], summary=f"Project: {project_id} · {project['name']}\nPackage: {package} {version}")
+    ensure_host_agent()
+    # Composer runs on the host, whose PHP and extensions can differ from the app's container: skip platform checks there.
+    env = {**os.environ, "COMPOSER_NO_INTERACTION": "1", "COMPOSER_BIN": str(ROOT / "scripts" / "composer-host.sh")}
+    result = run(command, cwd=ROOT, env=env, capture=True, check=False, timeout=INSTALL_TIMEOUT_SECONDS)
+    output = "\n".join(part for part in (result.stdout, result.stderr) if part).strip()
+    if result.returncode == 0:
+        return {"status": "complete", "message": f"The Indexr library is installed in {directory}. {status['adapter'].capitalize()} adapter {version}; "
+                f"Runtime project {project_id}. Open a page in the app, then refresh Runtime.", "output": output[-2000:]}
+    problem = composer_auth_problem(output, directory)
+    if problem:
+        return {"status": "error", **problem}
+    lines = [line for line in output.splitlines() if line.strip() and not line.startswith("== ")]
+    detail = "\n".join(lines[-12:]) or ("The script printed no message. Run it in a terminal to see why: "
+                                         + " ".join(shlex.quote(part) for part in command[1:] if part != "--non-interactive"))
+    return {"status": "error", "code": "install_failed", "message": f"The install stopped (exit {result.returncode}). {detail}"}
 
 
 def compose_project_details(project: dict) -> dict:
@@ -1949,7 +2113,7 @@ def helper_approval(title: str, items: list[str], summary: str = "") -> None:
 
 
 def run_helper_operation(action: str, *, project_id: str | None = None, plan: dict | None = None,
-                         cleanup_target: tuple[str, str] | None = None) -> dict:
+                         cleanup_target: tuple[str, str] | None = None, install: dict | None = None) -> dict:
     """Run a browser-started operation in the helper; every change waits for helper_approval."""
     if action == "setup" and plan is not None:
         return apply_setup_plan(plan, approve=helper_approval)
@@ -1957,6 +2121,8 @@ def run_helper_operation(action: str, *, project_id: str | None = None, plan: di
         if cleanup_target is not None:
             return cleanup(approve=helper_approval, project_id=cleanup_target[0], environment=cleanup_target[1])
         return cleanup(approve=helper_approval)
+    if action == "install library" and install is not None:
+        return install_indexr_library(install["project_name"], install["project_id"], install["version"], approve=helper_approval)
     if action == "remove local containers" and project_id is not None:
         return remove_project_containers(project_id, approve=helper_approval)
     raise RuntimeError(f"Unknown Runtime helper operation: {action}")
@@ -1985,10 +2151,11 @@ def status() -> None:
 
 def managed_agent_environment(*, require_active: bool = True) -> tuple[dict, dict] | tuple[None, None]:
     states = list_states()
-    if not states:
+    if not states and not read_host_state().get("fingerprint"):
         return None, None
-    # The shared agent serves every setup, so it starts when any setup is usable.
-    if require_active and not any(item.get("phase") in {"active", "labels-applied-services-not-recreated"} for item in states):
+    # The shared agent serves every setup, so it starts when any setup is usable. An agent created by the library
+    # install has no setup record, only the host record.
+    if require_active and states and not any(item.get("phase") in {"active", "labels-applied-services-not-recreated"} for item in states):
         phase = states[0].get("phase", "incomplete")
         print(f"Local Runtime setup is {phase}; recover it with runtime status/cleanup before starting services.")
         return None, None
@@ -2015,7 +2182,7 @@ def ensure_host_services() -> None:
     if command is None:
         # Clean up a Caddy container left behind by older default-profile startup.
         run(["docker", "compose", "--profile", "runtime-host", "stop", "telemetry-caddy"], cwd=API, check=False)
-        if not list_states():
+        if not list_states() and not read_host_state().get("fingerprint"):
             print("No configured local Runtime agent to start.")
         return
     print("==> Starting local Runtime ingress and host agent")
@@ -2028,7 +2195,7 @@ def stop_host_services() -> None:
     run(["docker", "compose", "--profile", "runtime-host", "stop", "telemetry-caddy"], cwd=API, check=False)
     command, compose = managed_agent_environment(require_active=False)
     if command is None:
-        if not list_states():
+        if not list_states() and not read_host_state().get("fingerprint"):
             print("No configured local Runtime agent to stop.")
         return
     print("==> Stopping local Runtime host agent")
