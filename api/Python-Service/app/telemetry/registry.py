@@ -596,7 +596,7 @@ class SnapshotRegistry:
         with self._connect() as db:
             job = db.execute("SELECT state,stage,percent,detail FROM index_jobs WHERE project_id=? AND commit_sha=?",
                              (project_id, commit_sha)).fetchone()
-            snapshot = db.execute("SELECT state FROM snapshots WHERE project_id=? AND commit_sha=?",
+            snapshot = db.execute("SELECT state, snapshot_key FROM snapshots WHERE project_id=? AND commit_sha=?",
                                   (project_id, commit_sha)).fetchone()
         state = snapshot["state"] if snapshot else "missing"
         if state == "ready":
@@ -604,6 +604,18 @@ class SnapshotRegistry:
         if job and state in ("queued", "indexing"):
             return {"state": state, "stage": job["stage"] or ("Queued" if state == "queued" else "Starting"),
                     "percent": job["percent"] or 0, "detail": job["detail"]}
+        if snapshot and state in ("queued", "indexing"):
+            # An uploaded archive is indexed by the parse-code thread, which has no job row; its status file has the progress.
+            from index.job_status import latest_for_collection
+            upload = latest_for_collection(f"snapshot_{snapshot['snapshot_key']}")
+            if upload:
+                total = int(upload.get("total") or 0)
+                indexed = int(upload.get("indexed") or 0)
+                percent = min(99, round(indexed * 100 / total)) if total else 0
+                if upload.get("status") == "error":
+                    return {"state": state, "stage": "Interrupted", "percent": percent, "detail": upload.get("error")}
+                return {"state": state, "stage": "Embedding chunks", "percent": percent,
+                        "detail": f"{indexed:,} / {total:,}" if total else None}
         return {"state": state, "stage": None, "percent": 0, "detail": None}
 
     def job_reindex(self, project_id: str, commit_sha: str) -> bool:

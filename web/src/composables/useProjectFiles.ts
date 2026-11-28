@@ -63,6 +63,7 @@ export function useProjectFiles({ triggerToast, getUploadIdentity }: UseProjectF
       if (data.success || data.files) {
         files.value = data.files || [];
       }
+      void resumeIndexJobs();
     } catch (err: any) {
       console.error('Failed to load files:', err);
     }
@@ -185,6 +186,83 @@ export function useProjectFiles({ triggerToast, getUploadIdentity }: UseProjectF
     }
   };
 
+  // An indexing job that makes no progress for this long is reported as stuck. Embedding a large project legitimately
+  // takes many minutes, so the limit is on silence, not on total time.
+  const INDEX_STALL_MS = 10 * 60_000;
+  const indexJobChecked = new Set<string>();
+
+  // Poll Python indexing progress directly, preserving the existing browser-to-Python path and cadence.
+  const watchIndexJob = (id: string, name: string, downloadId: string) => {
+    indexJobChecked.add(id);
+    let lastKey = '';
+    let lastChange = Date.now();
+    const poll = setInterval(async () => {
+      try {
+        const sRes = await makeRequest(`/api/download-jobs/${encodeURIComponent(downloadId)}/status`);
+        const status = await sRes.json();
+        indexingProgress.value = status;
+        const key = `${status.status}|${status.stage ?? ''}|${status.indexed}|${status.total}`;
+        if (key !== lastKey) { lastKey = key; lastChange = Date.now(); }
+        if (status.status === 'done') {
+          clearInterval(poll);
+          if (status.graph_index_complete !== true) {
+            const graphNodes = Number(status.graph_nodes) || 0;
+            const expectedNodes = Number(status.total) || 0;
+            const error = status.error || `The Neo4j graph could not be verified complete (${graphNodes}/${expectedNodes} source chunks). Retry after checking Neo4j readiness.`;
+            indexingProgress.value = { ...status, status: 'error', stage: 'error', graph_status: 'unverified', error };
+            triggerToast(`Indexing stopped: ${error}`, false);
+            parsingFileId.value = null;
+            return;
+          }
+          triggerToast(`Code indexed — ${status.indexed}/${status.total} chunks; Neo4j graph complete with ${status.graph_nodes ?? 0} symbols and ${status.graph_relations ?? 0} relationships.`, true);
+          indexedFileIds.value = new Set(indexedFileIds.value).add(id);
+          await fetchFiles();
+          parsingFileId.value = null;
+          indexingProgress.value = { total: 0, indexed: 0, status: '' };
+        } else if (status.status === 'error') {
+          clearInterval(poll);
+          triggerToast(status.error || 'Embedding failed. Check the API service and retry.', false);
+          parsingFileId.value = null;
+        } else if (Date.now() - lastChange > INDEX_STALL_MS) {
+          clearInterval(poll);
+          triggerToast(`Indexing of "${name}" has made no progress for ${INDEX_STALL_MS / 60_000} minutes — check the Python service.`, false);
+          parsingFileId.value = null;
+          indexingProgress.value = { total: 0, indexed: 0, status: '' };
+        }
+      } catch {
+        // Python unreachable — keep polling until it has been silent for the stall limit.
+        if (Date.now() - lastChange > INDEX_STALL_MS) {
+          clearInterval(poll);
+          parsingFileId.value = null;
+        }
+      }
+    }, 800);
+  };
+
+  // After a page reload the browser has forgotten a running job, but the server still has it: look it up once per
+  // file and pick the progress up again instead of showing nothing while the revision says "Indexing".
+  const resumeIndexJobs = async () => {
+    for (const file of files.value) {
+      if (parsingFileId.value || indexJobChecked.has(file.id) || !file.projectId || !file.uploadSessionId) continue;
+      indexJobChecked.add(file.id);
+      try {
+        const query = new URLSearchParams({ filename: file.name, upload_session_id: file.uploadSessionId });
+        const res = await makeRequest(`/api/rag/index-job?${query}`);
+        if (!res.ok) continue;
+        const job = await res.json();
+        if (job.download_id && !['done', 'error', 'unknown', 'none'].includes(job.status)) {
+          parsingFileId.value = file.id;
+          activeFileName.value = file.name;
+          indexingProgress.value = job;
+          watchIndexJob(file.id, file.name, job.download_id);
+          return;
+        }
+      } catch {
+        indexJobChecked.delete(file.id); // try again on the next refresh of the list
+      }
+    }
+  };
+
   const parseFile = async (id: string, name: string) => {
     parsingFileId.value = id;
     activeFileName.value = name;
@@ -214,49 +292,7 @@ export function useProjectFiles({ triggerToast, getUploadIdentity }: UseProjectF
         return;
       }
 
-      // Poll Python indexing progress directly, preserving the existing
-      // browser-to-Python path and cadence.
-      const downloadId = data.download_id;
-      const poll = setInterval(async () => {
-        try {
-          const sRes = await makeRequest(`/api/download-jobs/${encodeURIComponent(downloadId)}/status`);
-          const status = await sRes.json();
-          indexingProgress.value = status;
-          if (status.status === 'done') {
-            clearInterval(poll);
-            if (status.graph_index_complete !== true) {
-              const graphNodes = Number(status.graph_nodes) || 0;
-              const expectedNodes = Number(status.total) || 0;
-              const error = status.error || `The Neo4j graph could not be verified complete (${graphNodes}/${expectedNodes} source chunks). Retry after checking Neo4j readiness.`;
-              indexingProgress.value = { ...status, status: 'error', stage: 'error', graph_status: 'unverified', error };
-              triggerToast(`Indexing stopped: ${error}`, false);
-              parsingFileId.value = null;
-              return;
-            }
-            triggerToast(`Code indexed — ${status.indexed}/${status.total} chunks; Neo4j graph complete with ${status.graph_nodes ?? 0} symbols and ${status.graph_relations ?? 0} relationships.`, true);
-            indexedFileIds.value = new Set(indexedFileIds.value).add(id);
-            await fetchFiles();
-            parsingFileId.value = null;
-            indexingProgress.value = { total: 0, indexed: 0, status: '' };
-          } else if (status.status === 'error') {
-            clearInterval(poll);
-            triggerToast(status.error || 'Embedding failed. Check the API service and retry.', false);
-            parsingFileId.value = null;
-          }
-        } catch {
-          // Python unreachable — keep polling until timeout.
-        }
-      }, 800);
-
-      // Safety: stop polling after 5 minutes.
-      setTimeout(() => {
-        clearInterval(poll);
-        if (parsingFileId.value) {
-          triggerToast('Indexing timed out — check Python service.', false);
-          parsingFileId.value = null;
-          indexingProgress.value = { total: 0, indexed: 0, status: '' };
-        }
-      }, 300_000);
+      watchIndexJob(id, name, data.download_id);
     } catch (err: any) {
       triggerToast(`Parse error: ${err.message}`, false);
       parsingFileId.value = null;

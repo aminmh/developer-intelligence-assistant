@@ -7,7 +7,7 @@ import json
 import re
 from typing import Any
 
-from telemetry.symbols import from_chunk, relative_path
+from telemetry.symbols import from_chunk, may_lack_php_identity, relative_path
 
 SCHEMA_VERSION = "indexer-telemetry-v2"
 
@@ -154,18 +154,19 @@ def prepare_chunks(chunks: list[dict[str, Any]], snapshot: Snapshot) -> list[dic
             chunk.get("start_line"), chunk.get("end_line"),
         ], ensure_ascii=False, separators=(",", ":"))
         identity = canonical or ast_identity
-        if identity in seen and canonical and canonical.startswith("closure@"):
-            # Closures are identified by file and start line, so closures nested on one
-            # line share a runtime ID. The first keeps it; a later one with a different
-            # span is indexed without a runtime ID, and one with the same span is the
-            # same source text and adds nothing.
+        # Closures are identified by file and start line, so closures nested on one line share a runtime ID. Outside PHP a
+        # name can also repeat legitimately (a getter and a setter, overload signatures, a class declared twice in a file).
+        shares_id = bool(canonical) and (canonical.startswith("closure@") or may_lack_php_identity(chunk))
+        if identity in seen and shares_id:
+            # The first keeps the ID; a later one with a different span is indexed without a runtime ID, and one with the
+            # same span is the same source text and adds nothing.
             if ast_identity in seen:
                 continue
             canonical, identity = None, ast_identity
         if identity in seen:
             raise ValueError(f"Ambiguous duplicate identity: {identity}")
         seen.add(identity)
-        if canonical and canonical.startswith("closure@"):
+        if shares_id:
             seen.add(ast_identity)
         chunk.update(snapshot.metadata())
         chunk.update(symbol_id=canonical, file_path=path, file=path,
