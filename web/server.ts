@@ -1349,6 +1349,27 @@ async function startServer() {
     }
   });
 
+  // After a page reload the browser no longer knows its indexing job; look it up from the upload and re-register ownership.
+  app.get('/api/rag/index-job', async (req, res) => {
+    try {
+      const user = (res.locals as any).authUser;
+      const filename = String(req.query.filename || '');
+      const uploadSessionId = String(req.query.upload_session_id || '');
+      if (!filename || !uploadSessionId) return res.status(400).json({ error: 'filename and upload_session_id are required.' });
+      const file = await findStoredUpload(filename, uploadSessionId);
+      if (!file?.project_id || !authRoleFor(user, file.project_id)) {
+        return res.status(403).json({ error: 'Project access denied.' });
+      }
+      const query = new URLSearchParams({ filename, upload_session_id: uploadSessionId });
+      const response = await fetch(`${PYTHON_API_URL}/api/rag/index-job?${query}`, { headers: { 'X-Internal-Secret': INTERNAL_SECRET } });
+      const job = await response.json() as any;
+      if (job?.download_id) downloadToOwner.set(job.download_id, user.sub);
+      res.status(response.status).json(job);
+    } catch (error: any) {
+      res.status(502).json({ error: error?.message || 'Python service is unavailable.' });
+    }
+  });
+
   app.get('/api/download-jobs/:downloadId/status', async (req, res) => {
     try {
       if (downloadToOwner.get(req.params.downloadId) !== (res.locals as any).authUser.sub) {

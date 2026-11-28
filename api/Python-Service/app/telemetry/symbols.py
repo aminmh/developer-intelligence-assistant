@@ -77,7 +77,31 @@ def normalize(value: dict[str, Any]) -> str:
     raise ValueError("Unsupported symbol kind")
 
 
+_PHP_SUFFIXES = (".php", ".phtml", ".inc")
+
+
+def may_lack_php_identity(chunk: dict[str, Any]) -> bool:
+    """Whether the chunk is from a file in another language, where a valid name need not be a PHP identifier."""
+    path = str(chunk.get("file_path") or chunk.get("file") or "").lower()
+    return bool(path) and "." in path.rsplit("/", 1)[-1] and not path.endswith(_PHP_SUFFIXES)
+
+
 def from_chunk(chunk: dict[str, Any]) -> str | None:
+    """The chunk's canonical symbol ID, or None when it has none.
+
+    Symbol IDs are PHP identities. A name from another language can be valid there and still not be a PHP identifier
+    (an RxJS observable `visitorSchoolName$`, a `#private` member), so such a chunk gets no ID instead of failing the
+    index. An invalid identity in a PHP file, or in a chunk with no file, still raises: that points at a broken parse.
+    """
+    try:
+        return _from_chunk(chunk)
+    except ValueError:
+        if may_lack_php_identity(chunk):
+            return None
+        raise
+
+
+def _from_chunk(chunk: dict[str, Any]) -> str | None:
     kind = chunk.get("node_type") or chunk.get("type")
     if kind == "method":
         class_name = chunk.get("class_fqn") or chunk.get("parent_symbol") or chunk.get("class")

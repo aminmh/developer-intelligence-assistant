@@ -133,3 +133,34 @@ def test_invalid_snapshot_metadata_rejected(kwargs):
     with pytest.raises(ValueError):
         Snapshot(**({"project_id": "one", "commit_sha": "a" * 40,
                      "source_archive_sha256": "b" * 64} | kwargs))
+
+
+def test_a_name_without_a_php_identity_in_another_language_gets_no_symbol_id_instead_of_failing():
+    rxjs = {"node_type": "function", "name": "visitorSchoolName$", "namespace": "js_libs_auth_visitor",
+            "file_path": "libs/auth/components/visitor-school.ts"}
+    assert from_chunk(rxjs) is None
+    assert from_chunk({"node_type": "function", "name": "load", "namespace": "", "file_path": "libs/auth/load.ts"}) == "\\load"
+
+
+def test_an_invalid_identity_in_a_php_file_or_a_chunk_without_a_file_still_fails():
+    import pytest
+
+    for chunk in ({"node_type": "function", "name": "bad$name", "namespace": "App", "file_path": "app/Helpers.php"},
+                  {"node_type": "function", "name": "bad$name", "namespace": "App"}):
+        with pytest.raises(ValueError):
+            from_chunk(chunk)
+
+
+def test_a_repeated_name_outside_php_keeps_the_first_id_and_a_repeat_in_php_still_fails():
+    import pytest
+    from telemetry.snapshot import Snapshot, prepare_chunks
+
+    snapshot = Snapshot("web", "a" * 40, "b" * 64)
+    getter = {"node_type": "method", "class_fqn": "ui\\Palette", "method_name": "color", "file_path": "src/palette.ts", "start_line": 3, "end_line": 5}
+    setter = {**getter, "start_line": 7, "end_line": 9}
+    prepared = prepare_chunks([getter, setter, dict(setter)], snapshot)
+
+    assert [chunk["symbol_id"] for chunk in prepared] == ["ui\\Palette::color", None]  # the repeat of the same span adds nothing
+    php = {**getter, "file_path": "src/Palette.php"}
+    with pytest.raises(ValueError, match="Ambiguous duplicate identity"):
+        prepare_chunks([php, {**php, "start_line": 7, "end_line": 9}], snapshot)

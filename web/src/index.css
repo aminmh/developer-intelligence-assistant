@@ -1361,7 +1361,8 @@ select.kb-input { padding-right: 2.25rem; }
 .kb-rev-note[data-tone="ok"] { color: #34d399; }
 .kb-rev-note[data-tone="warn"] { color: #fcd34d; }
 .kb-rev-note[data-tone="bad"] { color: #fb7185; }
-.kb-progress { margin-top: 0.625rem; }
+/* The indexing block of an uploaded file (text line + track). Not .kb-progress: that class is the 6px track of the revision list, which clipped this block. */
+.kb-indexing { margin-top: 0.625rem; }
 .kb-graph { margin: 0.375rem 0 0; font-family: var(--font-mono); font-size: 0.6875rem; color: var(--shell-text-3); }
 .kb-actions { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 0.375rem; }
 @media (max-width: 640px) {

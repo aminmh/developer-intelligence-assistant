@@ -698,7 +698,31 @@ def indexing_status(download_id: str):
     status_path = Path(settings.download_dir) / f"{download_id}.status.json"
     if not status_path.is_file():
         return {"status": "unknown", "total": 0, "indexed": 0}
-    return json.loads(status_path.read_text())
+    from index.job_status import flag_interrupted
+    return flag_interrupted(json.loads(status_path.read_text()), status_path)
+
+
+
+@app.get(
+    "/api/rag/index-job",
+    tags=["Upload & TUS"],
+    summary="Find the running indexing job of an upload",
+    description=(
+        "Returns the newest indexing status (with its download_id) for an uploaded project ZIP, so a page that was "
+        "reloaded can pick the progress up again. Returns status \"none\" when no job has been started."
+    ),
+)
+def rag_index_job(filename: str, upload_session_id: str | None = None):
+    from index.storage import storage
+    from telemetry.snapshot import Snapshot
+
+    match = storage.find_rag_file(filename, upload_session_id)
+    if not match or not (match.get("project_id") and match.get("archive_sha256")):
+        return {"status": "none", "total": 0, "indexed": 0}
+    collection = Snapshot(match["project_id"], match.get("commit_sha"), match["archive_sha256"]).collection
+    from index.job_status import latest_for_collection
+    newest = latest_for_collection(collection)
+    return newest or {"status": "none", "total": 0, "indexed": 0}
 
 
 # ─── Workspace + RAG upload pipeline (replaces php-ast) ────────────────────────

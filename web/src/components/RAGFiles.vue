@@ -221,7 +221,7 @@ const handleDeleteCancel = () => {
             <TriangleAlert aria-hidden="true" />{{ file.error || 'Indexing failed.' }}
           </p>
 
-          <div v-if="parsingFileId === file.id" class="kb-progress">
+          <div v-if="parsingFileId === file.id" class="kb-indexing">
             <div class="kb-progress-top" aria-live="polite">
               <span>{{ indexingLabel }}</span>
               <span v-if="indexingProgress.total > 0">{{ indexingPercent }}%</span>
